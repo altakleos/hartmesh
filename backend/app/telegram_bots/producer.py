@@ -178,6 +178,7 @@ class OutboxItem:
     instance_id: str | None = None
     work_id: str | None = None
     request_id: str | None = None
+    event_id: str | None = None
 
 
 _TURN_OUTCOME_KEYS = frozenset(

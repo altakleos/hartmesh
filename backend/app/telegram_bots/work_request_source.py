@@ -15,6 +15,7 @@ from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
 from app.telegram_bots.notifications import aware, preference_skip
 from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryRetry, PermanentDeliveryError, ProductSourceRetired
 from app.telegram_bots.settings import SettingsRepository, _snapshot
+from app.telegram_bots.work_event_source import require_event_source, unsolicited_event
 from app.telegram_bots.work_requests import WorkRequestRead, present_request, seen_basis
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
@@ -167,14 +168,23 @@ def frozen(captured, *, acknowledged=False):
                 raise ValueError()
             if (
                 type(routing) is not dict
-                or set(routing) != {"recipients", "after_wrong", "public_base_url"}
+                or set(routing) != {"recipients", "after_wrong", "public_base_url"} | ({"response_id"} if "response_id" in routing else set())
                 or type(routing["after_wrong"]) is not bool
                 or type(routing["recipients"]) is not list
                 or (routing["public_base_url"] is not None and type(routing["public_base_url"]) is not str)
             ):
                 raise ValueError()
+            if "response_id" in routing:
+                intent = captured.item.payload.get("work_event_intent", {})
+                if type(routing["response_id"]) is not str or not routing["response_id"] or intent.get("key") != "request.unrouted" or routing["response_id"] != intent.get("response_id"):
+                    raise ValueError()
             presentation = present_routing(
-                RoutingRead(source, tuple(routing["recipients"]), routing["after_wrong"]), locale=basis["locale"], link=captured.link, public_base_url=routing["public_base_url"], concealed=basis["concealed"], outbox_id=captured.item.id
+                RoutingRead(source, tuple(routing["recipients"]), routing["after_wrong"], routing.get("response_id")),
+                locale=basis["locale"],
+                link=captured.link,
+                public_base_url=routing["public_base_url"],
+                concealed=basis["concealed"],
+                outbox_id=captured.item.id,
             )
         else:
             presentation = present_request(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id)
@@ -291,6 +301,8 @@ class WorkRequestSources:
         if basis["version"] in {5, 6}:
             raise ProductSourceRetired()
         current = await self.reader.read_request(captured.link, source.request["id"])
+        if unsolicited_event(captured.item, basis):
+            require_event_source(captured.item, current)
         if current.request["state"] != "pending" or current.request["needs_routing"]:
             raise ProductSourceRetired()
         if not (current.request["can_respond"] if current.request["purpose"] == "information" else current.request["can_manage"]):
@@ -352,6 +364,7 @@ class _RequestProjection:
         # The last part owns markup, but its complete control group must remain
         # usable before *any* chunk of this presentation reaches Telegram.
         self.controls_part = next((part for part in captured.item.parts if part["presentation_version"] == captured.item.payload["presentation_version"] and part.get("stored_keyboard")), None)
+        self.event_column = None
 
     def extend(self, query):
         bot, delivery, settings = TelegramBotLinkRow, TelegramOutboxRow, TelegramPersonSettingsRow
@@ -409,6 +422,13 @@ class _RequestProjection:
                 result = result.add_columns(RecoveryGroupProof(origin, sqlite=sqlite).expression())
             else:
                 result = result.add_columns(mark).outerjoin(mark, and_(mark.link_id == identity["link_id"], mark.chat_id == identity["chat_id"], mark.message_id == identity["message_id"]))
+        if unsolicited_event(self.captured.item, self.basis):
+            from deerflow.persistence.agent_instances.human_input import HumanInputEventRow
+            from deerflow.persistence.agent_instances.work import AgentWorkEventRow
+
+            self.event_column = len(result.column_descriptions)
+            event, receipt = aliased(AgentWorkEventRow), aliased(HumanInputEventRow)
+            result = result.add_columns(event, receipt).outerjoin(event, event.id == delivery.event_id).outerjoin(receipt, and_(receipt.instance_id == event.instance_id, receipt.operation_id == event.operation_id))
         return result
 
     @staticmethod
@@ -425,6 +445,9 @@ class _RequestProjection:
     def check(self, rows):
         current, target, permissions, policy = rows[0][:4]
         work, request, delivery, saved_settings = rows[0][8:12]
+        if self.event_column is not None:
+            event, receipt = rows[0][self.event_column : self.event_column + 2]
+            require_event_source(self.captured.item, self.source, event=event, receipt=receipt, final=True)
         latest = self.host.outbox._sending(current, delivery, link_id=current.id, part_id=self.captured.part["part_id"], claim_owner=self.captured.claim_owner, claim_id=self.captured.claim_id, token_revision=self.captured.token_revision)
         if (delivery.instance_id, delivery.work_id, delivery.request_id) != (current.agent_ref, work.id, request.id):
             raise ProductSourceRetired()

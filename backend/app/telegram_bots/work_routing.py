@@ -19,6 +19,7 @@ class RoutingRead:
     source: WorkRequestRead
     recipients: tuple[dict, ...]
     after_wrong: bool
+    response_id: str | None = None
 
 
 class WorkRoutingReader(WorkRequestReader):
@@ -26,10 +27,10 @@ class WorkRoutingReader(WorkRequestReader):
         super().__init__(**kwargs)
         self.client = client
 
-    async def read_routing(self, link, request_id):
-        return await await_drained(self._read_routing(link, request_id))
+    async def read_routing(self, link, request_id, *, response_id=None):
+        return await await_drained(self._read_routing(link, request_id, response_id=response_id))
 
-    async def _read_routing(self, link, request_id):
+    async def _read_routing(self, link, request_id, *, response_id=None):
         from app.gateway.auth.mode import account_refusal
         from app.gateway.deps import bind_user_repo
         from deerflow.config.app_config import peek_loaded_app_config
@@ -75,17 +76,44 @@ class WorkRoutingReader(WorkRequestReader):
         if not same_displayed_basis(current, source) or peek_loaded_app_config() is not config or (config.auth.local.enabled is False) != mode:
             raise AgentDenied("Routing source changed")
         recipients.sort(key=lambda row: (row["user_id"] != link.owner_user_id, row["name"].casefold(), row["user_id"]))
-        return RoutingRead(source, tuple(recipients), excluded == link.owner_user_id and latest["request_revision"] == source.request["request_revision"] and latest["assignment_revision"] == source.request["assignment_revision"])
+        if response_id is not None:
+            routing_response(source, response_id)
+        return RoutingRead(
+            source, tuple(recipients), excluded == link.owner_user_id and latest["request_revision"] == source.request["request_revision"] and latest["assignment_revision"] == source.request["assignment_revision"], response_id
+        )
+
+
+def routing_response(source, response_id):
+    from app.telegram_bots.producer import ProductSourceRetired
+
+    response = next((row for row in source.responses if row["id"] == response_id), None)
+    if (
+        type(response_id) is not str
+        or not response_id
+        or response is None
+        or source.request["state"] != "pending"
+        or response["disposition"] not in {"cannot_provide", "wrong_recipient"}
+        or (response["request_revision"], response["assignment_revision"]) != (source.seen["request_revision"], source.seen["assignment_revision"])
+    ):
+        raise ProductSourceRetired()
+    return response
+
+
+def routing_basis(value, public_base_url):
+    return {"recipients": list(value.recipients), "after_wrong": value.after_wrong, "public_base_url": public_base_url, **({"response_id": value.response_id} if value.response_id is not None else {})}
 
 
 def present_routing(value, *, locale, link, public_base_url, product="HartMesh", concealed=False, outbox_id=None):
     source, recipients = value.source, value.recipients
+    response = routing_response(source, value.response_id) if value.response_id is not None else None
     if concealed:
         return present_request(source, locale=locale, concealed=True, outbox_id=outbox_id)
     request = source.request
     values = {"objective": source.work["objective"], "name": request["instance_name"], "question": request["question"], "product": product}
     key = "request.route_none" if not recipients else "request.route_ask" if value.after_wrong else "request.unrouted"
     html = render(key, locale, **values)
+    if response is not None:
+        html += "\n\n" + render("ask.comment_line", locale, person=source.people.get(response["actor_id"], render("label.colleague", locale)), text=response.get("text") or response.get("choice") or "")
     keyboard = [
         [
             {

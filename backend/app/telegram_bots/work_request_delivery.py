@@ -15,7 +15,7 @@ from app.telegram_bots.work_requests import present_request
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
 from deerflow.persistence.agent_instances.work import AgentWorkRow
-from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
 
@@ -67,23 +67,33 @@ class WorkRequestPlans:
                 request_id=request_id,
                 session=writer,
             )
-            presentation = present_request(source, locale=settings.locale, concealed=source.protected, outbox_id=identity)
-            controls = [list(line) for line in presentation.keyboard]
-            parts = []
-            for index, supplied in enumerate(presentation.parts):
-                part = {**supplied, "source_ref": {"key": "work.request.presentation", "values": {"request_id": request_id, "part": index}}}
-                if controls and index == len(presentation.parts) - 1:
-                    part["stored_keyboard"] = True
-                parts.append(part)
-            snapshot = asdict(source)
-            snapshot["responses"] = list(snapshot["responses"])
-            basis = {"version": 1, "source": snapshot, "locale": settings.locale, "concealed": source.protected, "parts": parts, "keyboard": controls}
             row = await writer.get(TelegramOutboxRow, identity)
-            row.payload = _safe_json({**row.payload, "work_request_basis": basis, "product_keyboard_basis": controls})
-            saved_parts = self.outbox._parts(parts, 0)
-            if controls:
-                group = await self.callbacks.write_group(link, controls, anchor_outbox_id=identity, presentation_version=0, chat_id=link.chat_id, message_id=None, message_thread_id=None, session=writer)
-                saved_parts[-1]["callback_group_id"] = group.group_id
-            row.parts = saved_parts
-            await writer.flush()
+            await self._freeze(writer, link, row, source, settings)
             return identity
+
+    async def _freeze(self, writer, link, row, source, settings, *, pending=False):
+        """Borrow an already-qualified writer and preserve its delivery identity."""
+        identity, request_id = row.id, source.request["id"]
+        presentation = present_request(source, locale=settings.locale, concealed=source.protected, outbox_id=identity)
+        controls = [list(line) for line in presentation.keyboard]
+        parts = []
+        for index, supplied in enumerate(presentation.parts):
+            part = {**supplied, "source_ref": {"key": "work.request.presentation", "values": {"request_id": request_id, "part": index}}}
+            if controls and index == len(presentation.parts) - 1:
+                part["stored_keyboard"] = True
+            parts.append(part)
+        snapshot = asdict(source)
+        snapshot["responses"] = list(snapshot["responses"])
+        basis = {"version": 1, "source": snapshot, "locale": settings.locale, "concealed": source.protected, "parts": parts, "keyboard": controls}
+        row = await writer.get(TelegramOutboxRow, identity)
+        row.payload = _safe_json({**row.payload, "work_request_basis": basis, "product_keyboard_basis": controls})
+        saved_parts = self.outbox._parts(parts, 0)
+        if controls:
+            group = await self.callbacks.write_group(link, controls, anchor_outbox_id=identity, presentation_version=0, chat_id=link.chat_id, message_id=None, message_thread_id=None, session=writer)
+            saved_parts[-1]["callback_group_id"] = group.group_id
+            if pending:
+                for callback in await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group.group_id)):
+                    callback.payload = {**callback.payload, "presentation_pending": True}
+        row.parts = saved_parts
+        await writer.flush()
+        return identity
