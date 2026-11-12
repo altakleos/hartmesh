@@ -186,6 +186,14 @@ types; only SQL dates and booleans are normalized into read-only source facts.
 Account and role joins occur once outside member subqueries. Missing members
 fail qualification; compiling a dialect is not evidence of runtime execution.
 
+`work_digest_members.py` derives navigation from current question, routing,
+review, result and colleague-news owners. Saved sources must be untouched,
+unsent presentations; a pending-preview validator never invents a dispatch.
+Final projections retain source events, exact claims, referenced Spaces, routing
+rosters, result identities and optional route permissions. Digest titles do not
+read file bytes or grant action authority. Delivery and item controllers still
+own whole-batch claims, acknowledgements and complete preview admission.
+
 `attention.py` exhausts stable Work/request pages before ranking or applying
 presentation caps. `attention_authority.py` prepares route decisions, then joins
 current account/role limits/binding/connection/grants/policy in a final snapshot.
