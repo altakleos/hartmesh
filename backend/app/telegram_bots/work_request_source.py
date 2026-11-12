@@ -575,7 +575,7 @@ class _RequestProjection:
 
 def cleanup_ready(parent, cleanup):
     """Require an acknowledged clear or its exact host-recorded missing target."""
-    identity = parent.payload.get("work_request_basis", {}).get("cleanup_id")
+    identity = parent.payload.get("result_notice_basis", parent.payload.get("work_request_basis", {})).get("cleanup_id")
     if identity is None:
         return True
     if (

@@ -2329,7 +2329,7 @@ class OutboxSender:
             return preferences
         if not row.parts and (row.class_ == "digest" or "work_event_intent" in row.payload):
             return DeliveryEligibility.wait()
-        work_basis = row.payload.get("work_request_basis", {})
+        work_basis = row.payload.get("result_notice_basis", row.payload.get("work_request_basis", {}))
         dependency = work_basis.get("cleanup_id") if type(work_basis) is dict else None
         if dependency is not None:
             from app.telegram_bots.work_request_source import cleanup_ready
@@ -2549,7 +2549,7 @@ class OutboxSender:
                 parts = deepcopy(saved.parts)
                 sending = next(value for value in parts if value["part_id"] == part["part_id"])
                 sending["state"] = "sending"
-                if "result_files" not in saved.payload.get("work_request_basis", {}):
+                if "result_notice_basis" not in saved.payload and "result_files" not in saved.payload.get("work_request_basis", {}):
                     sending["protect_content"] = bool(sending.get("protect_content") or decision.protect_content)
                 # A frozen result plan owns its protection transition, including
                 # a new Show teaser. Its adapter rejects weaker protection before
@@ -2705,7 +2705,7 @@ class OutboxSender:
 
     async def _replace(self, binding: BotLink, row: OutboxItem, claim: str, *, reason: str) -> None:
         routing = row.payload.get("work_request_basis", {}).get("version") in {5, 6}
-        result_files = "result_files" in row.payload.get("work_request_basis", {})
+        result_files = "result_notice_basis" in row.payload or "result_files" in row.payload.get("work_request_basis", {})
         if "work_outcome_basis" in row.payload or routing or result_files:
             # Frozen result and routing recipes need source-aware rematerialization. Never
             # replay their ACKed prefix or silently relocate a result.
@@ -2747,15 +2747,15 @@ class OutboxSender:
                 raise ValueError("invalid-unavailable-source-part")
             unavailable = parts[position]
             unavailable.update(state="unavailable", unavailable_reason=error.reason)
-            if "result_files" in row.payload.get("work_request_basis", {}):
+            if "result_notice_basis" in row.payload or "result_files" in row.payload.get("work_request_basis", {}):
                 from types import SimpleNamespace
 
-                from app.telegram_bots.work_request_source import frozen
+                from app.telegram_bots.work_result_delivery import frozen_result
                 from app.telegram_bots.work_result_history import qualified_history
                 from app.telegram_bots.work_result_ledger import qualify_result_parts, replace_unavailable
 
                 original = next(part for part in row.parts if part["part_id"] == part_id)
-                basis, source, _recipe = frozen(SimpleNamespace(link=BotLink.from_row(binding), item=_item(row), part=original))
+                basis, source, _recipe = frozen_result(SimpleNamespace(link=BotLink.from_row(binding), item=_item(row), part=original))
                 replace_unavailable(row, part_id, key=error.source_ref["key"])
                 carried, hashes = qualified_history(_item(row), source)
                 qualify_result_parts(_item(row), basis["parts"], carried=carried, known_hashes=hashes)
@@ -2820,6 +2820,16 @@ class OutboxSender:
             except ValueError:
                 await release_members(session, row, owner=row.claim_owner, claim=row.claim_id)
                 row.state, row.failed_reason, row.closed_at = "failed", "invalid-digest-receipt", now
+                row.claim_owner = row.claim_id = row.claimed_at = None
+                await session.flush()
+                return
+        if "result_notice_basis" in row.payload:
+            from app.telegram_bots.result_notice_delivery import acknowledge_notice
+
+            try:
+                await acknowledge_notice(session, row)
+            except (ProductSourceRetired, PermanentDeliveryError, ValueError, TypeError, KeyError, IndexError):
+                row.state, row.failed_reason, row.closed_at = "failed", "invalid-result-notice-receipt", now
                 row.claim_owner = row.claim_id = row.claimed_at = None
                 await session.flush()
                 return

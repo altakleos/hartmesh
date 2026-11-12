@@ -53,8 +53,36 @@ provider await; coherent stored URL substitution cannot authorize another origin
 Unavailable-file warnings have no navigation; other file failures reuse durable
 URL-button/plain-address fallback. Historical warning proofs retain their own
 navigation snapshot when the current card changes.
-Non-review result notifications and supervisor installation remain
-outstanding; these initial-delivery components must remain uninstalled.
+These initial-delivery components must remain uninstalled until the remaining
+notification paths and supervisor integration are complete.
+
+`result_notice_sources.py` owns non-review `result.done` and
+`result.waiting_review` facts. Its joined provider-final read binds the exact
+settlement, outcome attempt and requester/creator eligibility to the current
+Work, reviewer, agent name, account/grants and visible Space references. The
+initial displayed outcome metadata must match the raw canonical outcome before
+sealing its opaque signature. Suggestions retain their full canonical event and
+exact recorded attempt provenance, including when the stored suggestion is from
+an earlier attempt. Redaction never substitutes the raw source identity.
+
+`result_notices.py` renders the full statement and optional suggestion, with
+files before the card and no review or activation controls. Titles use the
+existing bounded first-line rule. An unnamed reviewer uses the existing localized
+colleague label; it does not suppress an otherwise valid unrouted-review result.
+`result_notice_delivery.py` preserves the intent's delivery identity and qualifies
+its own closed basis before sharing the result-media ledger and upload leaf.
+The final SDK snapshot also binds the exact sending claim, preferences, quiet
+hours, Show controls and protection. This read-only result path needs current
+Use+Inspect and per-file READ+EXPORT; it does not require a review write ceiling.
+Generic fixed text cannot impersonate this source family.
+
+`result_notice_recovery.py` currently owns protected Show only. It consumes the
+actual acknowledged teaser, waits for durable keyboard cleanup, then sends files
+and the complete card. Waiting-review notices retain their forced-silent flag.
+Consumed Show proofs and unfinished cleanup dependencies survive retention.
+These owners remain dormant. Source-aware refresh after partial delivery,
+policy upgrades and explicit failed-transport repair remain outstanding for
+non-review result notices; current source changes safely retire the old send.
 
 `work_event_intents.py` projects current recipient/grant/preferences into empty,
 content-free delivery intents in `WorkEventReader`'s pair writer. Ordinary

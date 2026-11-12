@@ -19,7 +19,8 @@ from deerflow.utils.file_io import await_drained
 
 async def send_result_file(channel, saved, capture):
     services, expected = channel._services, saved
-    source = services.work_result_sources
+    source = services.result_notice_sources if "result_notice_basis" in saved.item.payload else services.work_result_sources
+    require_write = getattr(source, "require_write", True)
     basis, read, recipe = await source._prepare(saved)
     part, files = saved.part, recipe["files"]
     original = saved.link
@@ -54,7 +55,7 @@ async def send_result_file(channel, saved, capture):
         # All members, the request, exact claim and account/grants share the
         # last provider-final SELECT. Sequential permission reads are weaker.
         projection = await source.file_projection(expected, now=channel._now())
-        await authorize_work_file_batch(exports, check_delivery=claimed, protect_content=bool(part.get("protect_content")), projection=projection, require_write=True)
+        await authorize_work_file_batch(exports, check_delivery=claimed, protect_content=bool(part.get("protect_content")), projection=projection, require_write=require_write)
         if not channel._callback_current(original):
             raise DeliveryClaimRetired()
 
@@ -80,7 +81,7 @@ async def send_result_file(channel, saved, capture):
                     original,
                     work_id=read.work["id"],
                     outcome_id=read.work["outcome_id"],
-                    evidence_revision=read.seen["evidence_revision"],
+                    evidence_revision=read.work["outcome"]["evidence_revision"],
                     source_index=file["source_index"],
                     current=lambda: channel._callback_current(original),
                 )
@@ -93,7 +94,7 @@ async def send_result_file(channel, saved, capture):
             try:
                 projection = await source.file_projection(expected, now=channel._now())
                 data = await retry_export(
-                    lambda: export.read(max_bytes=ceiling, check_delivery=claimed, projection=projection, require_write=True),
+                    lambda: export.read(max_bytes=ceiling, check_delivery=claimed, projection=projection, require_write=require_write),
                     current=current,
                     retry_seconds=services.config.files.retry_seconds,
                     retry_max_seconds=services.config.files.retry_max_seconds,

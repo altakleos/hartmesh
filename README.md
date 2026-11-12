@@ -2033,8 +2033,12 @@ a language or file-access change. Explicit repair of cards in General preserves
 delivered files. File-failure links open the conversation that produced the
 result; unavailable-file warnings omit the link. Review-ready event plans use
 this same file/card sequence and recheck the original event before delivery.
-Remaining notification rendering
-and startup integration are still pending.
+Result notifications without review controls also have a delivery foundation:
+the complete outcome and any suggestion follow its files, protected results wait
+for Show, and a waiting-review notice stays silent after Show. Each notice checks
+the actual event, recipient, outcome and suggestion before sending. These workers
+remain uninstalled; result-notice refresh, other notification rendering and startup
+integration are still pending.
 Background recovery preserves newer
 request previews. Complete first-tap previews now have
 a durable delivery boundary that waits for the entire message before enabling controls

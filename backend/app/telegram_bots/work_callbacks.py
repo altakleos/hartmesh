@@ -67,12 +67,13 @@ class WorkCallbacks:
             link = deepcopy(channel.link)
             async with self.outcomes.outbox.sessions() as reader:
                 parent = await reader.get(TelegramOutboxRow, row.payload.get("anchor_outbox_id"))
-                if parent is None or not ("work_request_basis" in parent.payload or "work_outcome_basis" in parent.payload):
+                if parent is None or not ("work_request_basis" in parent.payload or "work_outcome_basis" in parent.payload or "result_notice_basis" in parent.payload):
                     return False
                 if (row.link_id, row.binding_generation, row.chat_id) != (link.id, link.binding_generation, link.chat_id):
                     raise CallbackRefused()
                 family = parent.payload.get("work_request_basis", {}).get("version")
                 result_files = "result_files" in parent.payload.get("work_request_basis", {})
+                notice = "result_notice_basis" in parent.payload
             guard = self.services.commands._guard(channel, link)
             scope = {"chat_id": row.chat_id, "message_id": row.message_id, "message_thread_id": row.message_thread_id, "guard": guard}
 
@@ -80,7 +81,12 @@ class WorkCallbacks:
                 return channel._callback_current(link)
 
             try:
-                if family == 4 and row.kind in {"changes_open", "dismiss", "back", "decide_note"}:
+                if notice:
+                    recovery = getattr(getattr(self.services, "result_notice_sources", None), "recovery", None)
+                    if row.kind != "reveal" or recovery is None:
+                        raise CallbackRefused()
+                    await recovery.reveal(link, row.id, **scope)
+                elif family == 4 and row.kind in {"changes_open", "dismiss", "back", "decide_note"}:
                     await self.drafts.navigate(link, row.id, **scope)
                 elif row.kind == "dismiss":
                     return False
