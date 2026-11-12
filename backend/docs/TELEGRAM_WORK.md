@@ -1080,3 +1080,11 @@ wire proof as a held conflict, including after retention sweeps. Prior summary
 cutoffs require a valid persisted plan, with JSON versions compared as text to
 avoid PostgreSQL conversion failures. These owners remain uninstalled; summary navigation, refresh and
 scheduler integration must be qualified before activation.
+
+The dormant `summary_scheduler.SummaryScheduler` pages connected healthy
+instance links and delegates to the source-owned planner. It consults the same
+availability gate before storage and between links; final publication checks
+that gate again after asynchronous source preparation. A denied source defers
+only its own link. The supervisor must supply its cause/readiness/shutdown gate
+and invoke this owner at `SUMMARY_TICK_SECONDS`; the scheduler sends nothing
+and never starts Work.
