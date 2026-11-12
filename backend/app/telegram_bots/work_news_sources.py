@@ -11,6 +11,7 @@ from app.telegram_bots.authority import AccessOff, CeilingRefused
 from app.telegram_bots.producer import ProductSourceRetired, _item
 from app.telegram_bots.result_notice_sources import fields
 from app.telegram_bots.work_actions import same_body
+from app.telegram_bots.work_answer_news import AnswerNews
 from app.telegram_bots.work_event_source import event_signature
 from app.telegram_bots.work_result_identity import digest
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
@@ -59,6 +60,7 @@ class WorkNewsProjection:
         self.reader, self.link, self.item, self.source = reader, link, item, source
         self.work = source.work if source else work
         self.protected = source.protected if source else protected
+        self.answer = AnswerNews(item) if item.payload.get("work_event_intent", {}).get("key") == "request.answered" else None
 
     def extend(self, query):
         self.column = len(query.column_descriptions)
@@ -72,7 +74,7 @@ class WorkNewsProjection:
             .correlate(event)
             .scalar_subquery()
         )
-        return (
+        result = (
             query.add_columns(work, event, attempt, activation, actor.email, delivery)
             .join(work, work.id == self.item.work_id)
             .join(event, event.id == self.item.event_id)
@@ -81,39 +83,53 @@ class WorkNewsProjection:
             .outerjoin(actor, actor.id == event.actor_id)
             .join(delivery, delivery.id == self.item.id)
         )
+        return self.answer.extend(result) if self.answer else result
 
     def check(self, rows):
         bot, instance, _permission, policy = rows[0][:4]
         work, event, attempt, activation, person, delivery = rows[0][self.column : self.column + 6]
-        try:
-            command = WorkCommand.model_validate(event.request)
-        except ValueError:
-            raise ProductSourceRetired() from None
-        expected_assignment = command.expected_assignment_revision + (event.action in {"edit", "cancel", "reopen", "changes_requested"})
+        intent = self.item.payload.get("work_event_intent", {})
+        key = intent.get("key")
+        answer_signature = self.answer.qualify(rows, event, work, intent) if self.answer else None
+        if self.answer is None:
+            try:
+                command = WorkCommand.model_validate(event.request)
+            except ValueError:
+                raise ProductSourceRetired() from None
+            expected_assignment = command.expected_assignment_revision + (event.action in {"edit", "cancel", "reopen", "changes_requested"})
+            if (
+                not same_body(command.model_dump(mode="json", exclude_unset=True), event.request)
+                or command.operation_id != event.operation_id
+                or command.action != event.action
+                or command.expected_revision + 1 != event.revision
+                or expected_assignment != event.assignment_revision
+                or type(event.result.get("revision")) is not int
+                or event.result["revision"] != event.revision
+                or type(event.result.get("assignment_revision")) is not int
+                or event.result["assignment_revision"] != event.assignment_revision
+                or event.result.get("creator_id") != work.creator_id
+            ):
+                raise ProductSourceRetired()
         if (
-            not same_body(command.model_dump(mode="json", exclude_unset=True), event.request)
-            or command.operation_id != event.operation_id
-            or command.action != event.action
-            or command.expected_revision + 1 != event.revision
-            or expected_assignment != event.assignment_revision
-            or type(event.result.get("revision")) is not int
+            type(event.result.get("revision")) is not int
             or event.result["revision"] != event.revision
             or type(event.result.get("assignment_revision")) is not int
             or event.result["assignment_revision"] != event.assignment_revision
             or event.result.get("creator_id") != work.creator_id
         ):
             raise ProductSourceRetired()
-        intent = self.item.payload.get("work_event_intent", {})
-        key = intent.get("key")
         if (
             key not in COMMAND_KEYS
+            and key != "request.answered"
             or type(intent.get("version")) is not int
             or intent["version"] != 1
             or any(type(intent.get(name)) is not int for name in ("event_revision", "assignment_revision"))
-            or (event.instance_id, event.work_id, event.revision, event.assignment_revision, event.action) != (self.link.agent_ref, work.id, intent["event_revision"], intent["assignment_revision"], COMMAND_KEYS[key])
+            or (event.instance_id, event.work_id, event.revision, event.assignment_revision, event.action)
+            != (self.link.agent_ref, work.id, intent["event_revision"], intent["assignment_revision"], ("human_response" if self.answer else COMMAND_KEYS[key]))
             or (event.actor_kind, event.actor_id) == ("human", self.link.owner_user_id)
             or event.actor_kind != "human"
-            or event.request.get("action") != event.action
+            or self.answer is None
+            and event.request.get("action") != event.action
             or (event.result.get("id"), event.result.get("instance_id")) != (work.id, self.link.agent_ref)
             or work.instance_id != self.link.agent_ref
             or any(getattr(bot, field) != getattr(self.link, field) for field in _SCOPE)
@@ -135,13 +151,15 @@ class WorkNewsProjection:
         if self.link.owner_user_id not in recipients:
             raise ProductSourceRetired()
         values = {"objective": work.objective, "person": person}
+        if self.answer:
+            values["open_assignment"] = self.answer.open_assignment
         if key == "result.changes":
             values["text"] = event.request["note"]
         elif key == "decision.recorded":
             # Work stores one decision statement, not independent choice/note
             # fields. Do not invent or duplicate a second annotation.
             values.update(decision=event.request["note"], note=None)
-        signature = event_signature(event, None, intent)
+        signature = answer_signature or event_signature(event, None, intent)
         fresh = WorkNewsRead(work.id, key, values, self.protected, self.work, signature, digest([signature, self.work, values, fields(attempt, _ATTEMPT), None if activation is None else event_signature(activation, None, {})]))
         if self.source is not None and self.source != fresh:
             raise ProductSourceRetired()

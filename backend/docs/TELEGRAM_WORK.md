@@ -813,4 +813,11 @@ event changes and withdrawn authority still retire it. Explicit repair accepts k
 failures after all claim fields clear. It never moves a topic or repeats a Work
 operation. Refreshed teasers still require their own actual acknowledged Show;
 a missing edit target is cleared before a complete replacement message. The
-remaining news kinds and installation are still pending.
+`work_answer_news.py` additionally joins the exact information-response receipt
+and saved response at materialization and final SDK admission. It validates the
+canonical response command, operation, actor, purpose and request/assignment
+revision, including supplied disposition and every saved source. Management
+comments and unsupplied responses cannot become answer news. The original
+requester gets one silent notice; the responder is excluded. Open assignment
+is a web link only when no attempt is unresolved, rechecked in the final snapshot. Other news kinds
+and installation remain pending.
