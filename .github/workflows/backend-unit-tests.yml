@@ -48,11 +48,9 @@ jobs:
   backend-unit-tests:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    # Collection and post-test drainage share the deadline with every case.
-    # Keep room for the full suite on slower hosted runners. The upstream merge
-    # to b537d9c16 put each shard at 13-20 minutes (tests new since the
-    # .test_durations baseline get an estimated cost), so 20 cut a shard off
-    # after its last case.
+    # Collection, tests and cleanup share this deadline. Eight duration-balanced
+    # shards leave room for the growing suite without extending stalled jobs:
+    # six shards reached the deadline during passing cases or post-test cleanup.
     timeout-minutes: 30
     strategy:
       # Duration-aware split: `make test-shard` balances the shards by real
@@ -62,7 +60,7 @@ jobs:
       # its peers.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
 
     services:
       postgres:
@@ -110,7 +108,7 @@ jobs:
         working-directory: backend
         run: uv sync --group dev --extra postgres
 
-      - name: Run unit tests of backend (shard ${{ matrix.shard }} of 6)
+      - name: Run unit tests of backend (shard ${{ matrix.shard }} of 8)
         working-directory: backend
         env:
           # Expose the job's Postgres service to the cross-pod dedupe integration
@@ -120,7 +118,7 @@ jobs:
           DEERFLOW_TEST_WORKFLOW_POSTGRES: ${{ env.TEST_POSTGRES_URI }}
           DEDUPE_TEST_POSTGRES_URL: ${{ env.TEST_POSTGRES_URI }}
           PYTEST_ADDOPTS: --junitxml=test-results/backend-unit-shard-${{ matrix.shard }}.xml
-        run: make test-shard SPLITS=6 GROUP=${{ matrix.shard }}
+        run: make test-shard SPLITS=8 GROUP=${{ matrix.shard }}
 
       - name: Upload backend unit test results (shard ${{ matrix.shard }})
         if: always()
