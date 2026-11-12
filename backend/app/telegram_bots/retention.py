@@ -108,7 +108,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             delivery.state,
             delivery.payload["member_ids"],
             delivery.payload["digest_id"].as_string(),
-            func.coalesce(delivery.payload["result_notice_basis"]["cleanup_id"].as_string(), delivery.payload["work_request_basis"]["cleanup_id"].as_string()),
+            func.coalesce(delivery.payload["work_news_basis"]["cleanup_id"].as_string(), delivery.payload["result_notice_basis"]["cleanup_id"].as_string(), delivery.payload["work_request_basis"]["cleanup_id"].as_string()),
             delivery.payload["work_request_basis"]["origin"]["anchor_outbox_id"].as_string(),
             delivery.payload["work_outcome_basis"]["origin"]["anchor_outbox_id"].as_string(),
             delivery.payload["work_outcome_basis"]["refresh"]["anchor_outbox_id"].as_string(),

@@ -794,5 +794,13 @@ original activation/attempt, actor name and delivery, including unclaimed-row
 checks. Historical requester selection never substitutes a later activation.
 The originating event signature stays separate from mutable display facts.
 Work stores one decision statement; render it once as the decision rather than
-inventing a separate choice or duplicating it as a note. Remaining news kinds,
-source-owned materialization, Show, refresh and SDK admission are still pending.
+inventing a separate choice or duplicating it as a note. `work_news_delivery.py` materializes these six command families on their
+original rows. Its closed text recipes bind actual ordered ACKs, current locale,
+quiet hours, notification preferences, live page origin and exact claims in the
+final provider snapshot. Protected Show consumes its acknowledged teaser;
+`work_news_recovery.py` edits a single-part notice in place or waits for keyboard
+cleanup before sending a multipart notice. Original teaser and consumed Show
+proofs remain qualified, and cleanup/Show retention follows the parent.
+A missing anchor/topic is held as `work-news-refresh-required`; generic repair
+cannot rewrite the source-owned plan. Source-aware refresh/repair and the
+remaining news kinds are still pending. These owners remain uninstalled.

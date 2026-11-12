@@ -1899,7 +1899,12 @@ class TelegramBotChannel(TelegramChannel):
         source_key = part.get("source_ref", {}).get("key", "")
         work_part = None
         work_sources = getattr(self._services, "work_request_sources", None)
-        if "result_notice_basis" in saved.item.payload:
+        if "work_news_basis" in saved.item.payload:
+            work_sources = getattr(self._services, "work_news_sources", None)
+            if work_sources is None or any(key in saved.item.payload for key in ("result_notice_basis", "work_request_basis", "work_outcome_basis")):
+                raise PermanentDeliveryError("unsupported-work-news-source")
+            work_part = await work_sources.read_part(saved)
+        elif "result_notice_basis" in saved.item.payload:
             work_sources = getattr(self._services, "result_notice_sources", None)
             if work_sources is None or "work_request_basis" in saved.item.payload or "work_outcome_basis" in saved.item.payload:
                 raise PermanentDeliveryError("unsupported-result-notice-source")

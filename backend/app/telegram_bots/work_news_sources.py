@@ -121,12 +121,12 @@ class WorkNewsProjection:
             or delivery.state != "sending"
             and any(getattr(delivery, field) is not None for field in ("claim_owner", "claim_id", "claimed_at"))
             or (delivery.link_id, delivery.owner_user_id, delivery.binding_generation, delivery.chat_id, delivery.instance_id, delivery.class_)
-            != (self.link.id, self.link.owner_user_id, self.link.binding_generation, self.link.chat_id, self.link.agent_ref, "info")
+            != (self.link.id, self.link.owner_user_id, self.link.binding_generation, self.link.chat_id, self.link.agent_ref, "reply" if self.item.payload.get("work_news_basis", {}).get("reveal") else "info")
             or delivery.dedupe_key != "event:" + event.id + ":info"
             or (attempt.id if attempt else None) != intent.get("attempt_id")
             or (event.request.get("attempt_id") is not None or activation is not None)
             and attempt is None
-            or self.work != fields(work, _WORK)
+            or not same_body(self.work, fields(work, _WORK))
             or self.protected != (instance.custody != "personal" and policy == "protected")
         ):
             raise ProductSourceRetired()
