@@ -1107,3 +1107,12 @@ and remain pending until the complete exact ACK. Pending views retain their
 origin through callback and outbox sweeps without making expired controls
 usable. Optional callback ingress is available, but view refresh/relocation,
 item navigation and supervisor installation remain required follow-ups.
+
+`summary_view_recovery.py` refreshes a queued Show against the complete current
+source while retaining its original daily cutoff, Show proof and callback age.
+Each replacement records its prior recipe/part and retires its old controls.
+A missing edit target requires held source-aware repair, which may create a new
+protected message; it cannot reclaim active claims or erase a changed failure
+reason. Final provider checks qualify both sides of the replacement transaction.
+Daily summary and Show SDK calls drain admitted requests during cancellation,
+matching digest delivery; shutdown cannot admit another part.

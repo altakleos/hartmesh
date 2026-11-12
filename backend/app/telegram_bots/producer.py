@@ -1750,11 +1750,20 @@ class Outbox:
                 except ValueError:
                     return False
                 stored_urls = any("url" in button for line in keyboard for button in line)
+            summary_edit = False
+            if current.part["kind"] == "edit" and "summary_view_basis" in current.item.payload:
+                from app.telegram_bots.summary_views import frozen_view
+
+                try:
+                    frozen_view(current)
+                    summary_edit = True
+                except PermanentDeliveryError:
+                    return False
             scope = ("owner_user_id", "agent_kind", "agent_ref", "bot_id", "connection_id", "binding_generation", "telegram_user_id", "chat_id", "token_revision")
             if (
                 current.part != captured.part
                 or current.part.get("url_button_fallback")
-                or current.part["kind"] not in ({"text", "edit"} if pages else {"text"})
+                or current.part["kind"] not in ({"text", "edit"} if pages or summary_edit else {"text"})
                 or not ("url_button" in current.part or stored_urls or pages)
                 or current.item.message_thread_id != captured.item.message_thread_id
                 or any(getattr(current.link, field) != getattr(captured.link, field) for field in scope)
@@ -2725,6 +2734,13 @@ class OutboxSender:
             await self.outbox.inbox.settle_deliveries(link_id=link_id, session=writer)
 
     async def _replace(self, binding: BotLink, row: OutboxItem, claim: str, *, reason: str) -> None:
+        if "summary_view_basis" in row.payload:
+            async with self.outbox._writer(binding.id) as (writer, _binding):
+                saved = await writer.get(TelegramOutboxRow, row.id, with_for_update=True)
+                if self.outbox._fenced(saved, generation=binding.binding_generation, owner=self.run_id, claim=claim):
+                    self._pending(saved)
+                    saved.state, saved.failed_reason, saved.closed_at = "failed", "summary-view-refresh-required", self.outbox.clock()
+            return
         if "work_digest_view_basis" in row.payload:
             async with self.outbox._writer(binding.id) as (writer, _binding):
                 saved = await writer.get(TelegramOutboxRow, row.id, with_for_update=True)
