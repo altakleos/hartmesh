@@ -86,7 +86,7 @@ def frozen(captured, *, acknowledged=False, pending=False, replay=False):
             | ({"reply_origin"} if basis.get("version") in {2, 6} and "reply_origin" in basis else set())
             | ({"choice_origin"} if basis.get("version") == 6 and "choice_origin" in basis else set())
             | ({"result_files"} if basis.get("version") in {1, 2} and "result_files" in basis else set())
-            | ({"navigation_origin"} if basis.get("version") == 1 and "navigation_origin" in basis else set())
+            | ({"navigation_origin"} if basis.get("version") in {1, 2} and "navigation_origin" in basis else set())
             | ({"prompt_id"} if basis.get("version") == 3 and type(basis.get("interaction")) is dict and basis["interaction"].get("view") == "prompt" else set())
             or type(basis["version"]) is not int
             or basis["version"] not in {1, 2, 3, 4, 5, 6}
@@ -365,10 +365,12 @@ class WorkRequestSources:
                 raise ProductSourceRetired()
             if changed or settings.locale != basis["locale"]:
                 if basis.get("navigation_origin") is not None:
-                    # Navigation recovery must retain the original gesture and
-                    # physical anchor; the ordinary notice repair cannot do so.
-                    raise ProductSourceRetired()
-                await self.recovery.refresh(captured)
+                    refresh = getattr(self.recovery, "refresh_navigation", None)
+                    if refresh is None:
+                        raise ProductSourceRetired()
+                    await refresh(captured)
+                else:
+                    await self.recovery.refresh(captured)
                 raise DeliveryClaimRetired()
         elif content(current) != content(source):
             raise ProductSourceRetired()

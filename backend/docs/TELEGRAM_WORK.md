@@ -1034,6 +1034,10 @@ preserve original batch membership and reusable controls. Publication qualifies
 source, exact anchor and the complete new pending group before and after its
 writer; dispatch composes preview and origin authority in one final read. New
 controls inherit the original age and protection stays source-owned. Retention
-follows preview → navigation anchor → original batch → members. Ordinary request
-repair refuses these origins until their dedicated recovery owner is installed;
-review/routing/news/result previews and installation remain separate work.
+follows preview → navigation anchor → original batch → members.
+`work_navigation_recovery.WorkNavigationRecovery` refreshes queued or acknowledged
+ordinary previews with the same origin, full protection and original callback age.
+It qualifies the current source, retained anchor, exact delivery/claim and complete
+replacement group before and after mutation. Ordinary recovery refuses these
+origins without that explicit proof. Review/routing/news/result previews and
+installation remain separate work.
