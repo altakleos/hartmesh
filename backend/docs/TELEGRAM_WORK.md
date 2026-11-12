@@ -922,5 +922,16 @@ accepts a source projection owner so status authority stays separate from collea
 events. Refresh may adopt later progress, but cannot rewrite an already used event.
 Raw status templates require this source owner. Initial status sends are silent,
 including when discretionary notices are disabled, and expose no execution controls.
-This foundation remains dormant; coalesced status edits, exact pin/unpin ownership
-and supervisor installation are separate pending work.
+`work_status_updates.py` coalesces newer progress into that attempt's fully
+acknowledged presentation. Every edit is silent, with the 30-second interval
+checked again immediately before dispatch. A missing message, changed protection
+or different part count uses a complete replacement; only its complete typed
+acknowledgement moves the target. Later updates require that retained target and
+its monotonically advancing acknowledged revision. They cannot fall back to an
+obsolete message. Ordinary transport retries retain acknowledged parts; display
+refresh and known missing-target repair retain a flat presentation history.
+Current authority and immutable source evidence are checked after provider waits.
+A late locale change preserves delivery for refresh, while revoked access or
+changed source retires it. Retention keeps original and moved presentations while
+the attempt or an update remains unresolved. These owners remain dormant; exact
+pin/unpin ownership and supervisor installation are separate pending work.
