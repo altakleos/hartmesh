@@ -199,6 +199,20 @@ cursor and preserve absent cursors for Work created while down. Initialization
 locks each link and drains through cancellation. Neither path renders content,
 sends messages or calls a provider. Supervisor installation remains outstanding.
 
+`work_event_reader.py` supplies bounded, per-pair catch-up after that baseline.
+It requires an explicit SQL-only recipient projector borrowing the same writer;
+no default projector may consume history. Each link lock fences the generation
+through projection, outbox insertion and cursor commit. Event pages follow exact
+revision order through the captured Work revision. Missing history rolls back
+the entire pair. An absent cursor in an initialized generation starts at zero.
+Round-robin link and Work bookmarks advance after failure too; other due pairs
+can proceed, even with a batch of one. Bookmarks affect fairness only; persisted
+cursors and delivery dedupe own restart and concurrent-reader correctness.
+Cancellation drains admitted projection/commit. This primitive sends nothing
+and does not consult transport health or the copy guard. The complete recipient
+mapper, content materializers and supervisor installation remain outstanding;
+test fixture projectors qualify transaction ownership, not recipient behavior.
+
 Codes store hashes with captured link/conflict epoch/token revision. Every
 current-token conflict commits a monotonic epoch and invalidates waiting codes;
 stale tokens cannot change it. Exhausted epochs fail closed. Generic `update`

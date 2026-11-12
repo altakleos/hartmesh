@@ -2012,7 +2012,10 @@ albums retain every member for explicit recovery choices. Reopen asks for a new
 answer; Send as new preserves the files and captions; Discard settles the group.
 Controller activation remains outstanding. A binding-scoped event baseline
 foundation preserves unread Work revisions across restarts without replaying
-history from before connection or restoration. Background recovery preserves newer
+history from before connection or restoration. Its catch-up primitive commits
+delivery writes with each cursor, rotates across bots and assignments, and holds
+incomplete history for repair. The recipient mapper and startup integration
+remain outstanding. Background recovery preserves newer
 request previews. Complete first-tap previews now have
 a durable delivery boundary that waits for the entire message before enabling controls
 or typing prompts. Confirmed choices also have durable, single-operation admission
