@@ -149,7 +149,7 @@ async def test_reply_to_closed_work_prompt_stays_work_owned(work_delivery):
 
 
 @pytest.mark.asyncio
-async def test_input_owned_card_reply_is_held_for_its_own_recovery(work_delivery, monkeypatch):
+async def test_input_owned_card_reply_has_a_separate_comment_owner(work_delivery, monkeypatch):
     from test_telegram_work_retained_drafts import draft
 
     e = work_delivery
@@ -159,8 +159,9 @@ async def test_input_owned_card_reply_is_held_for_its_own_recovery(work_delivery
     await e.channel._drain_ingress()
     async with e.db.sessions() as reader:
         mark = await reader.get(TelegramInboundMarkRow, (e.link.id, 901, e.link.chat_id))
-        assert mark is not None and mark.route_kind == "work_card_hold"
-        assert not list(await reader.scalars(select(TelegramActRow)))
+        assert mark is not None and mark.route_kind == "work_input" and mark.route_basis["work_input"]["purpose"] == "comment"
+        actions = list(await reader.scalars(select(TelegramActRow)))
+        assert len(actions) == 1 and actions[0].kind == "respond" and actions[0].state == "done"
 
 
 @pytest.mark.asyncio

@@ -399,10 +399,17 @@ recovery.
 
 `work_card_inputs.py` supplies direct-card capture/admission separately from
 prompt capture. A plain explicit Telegram reply to any part of a complete,
-acknowledged V1/V2/V3 request card owns `work_input` version2. It freezes the
+acknowledged V1/V2/V3/V4 request card owns `work_input` version2. It freezes the
 shown source, exact quoted message, complete current control group, text and one
 operation id before any domain admission. The old group retires with a durable
-keyboard cleanup. Prompt and input-owned V4 views are excluded from this owner.
+keyboard cleanup for ordinary cards. Prompt views use their own capture owner.
+On an input-owned V4 confirmation, a comment leaves the original draft input
+and controls intact. Its later confirmation uses the existing complete-preview
+refresh to retain the unsubmitted note or decision alongside the new comment;
+only another explicit press can submit it. Expired or already-reserved controls
+cannot admit a fresh comment. Once captured, comment replay keeps its separate
+operation and acknowledged source even after navigation closes the original
+draft. An uncertain admitted comment reconciles its receipt without resubmission.
 
 Admission creates only Respond: an information answer or a decision/review
 comment. Current Use+Inspect and route write authority, original request and
@@ -419,7 +426,7 @@ reinterpreted against that presentation. An explicit reply received before the
 host saves its ACK remains eligible once the full delivery is acknowledged.
 
 Replies to any part of a complete prompt use the same prompt owner. Known
-spent cards, closed prompts and input-owned presentations retain a durable
+spent cards and closed prompts retain a durable
 `work_card_hold` route, never ordinary-chat ownership. `work_closed_inputs.py`
 offers explicit Reopen, Send as new message and Discard choices. Reopen verifies
 the original target and current rights, settles the held input without submitting

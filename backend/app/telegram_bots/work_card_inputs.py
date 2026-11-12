@@ -24,12 +24,21 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBot
 from deerflow.utils.file_io import await_drained
 
 
-def reply_basis(link, parent, mark, controls, *, consumed):
+def reply_basis(link, parent, mark, controls, *, consumed, require_live=False):
     source = acknowledged_source(link, parent)
     basis = parent.payload.get("work_request_basis", {})
     comment = parent.payload.get("work_outcome_basis", {}).get("version") == 5
-    if not comment and (basis.get("version") not in {1, 2, 3} or basis.get("interaction", {}).get("view") == "prompt"):
+    if not comment and (basis.get("version") not in {1, 2, 3, 4} or basis.get("interaction", {}).get("view") == "prompt"):
         raise CallbackRefused()
+    # A comment owns neither the unsubmitted input nor its confirmation.
+    # Keep those controls so their existing stale-preview recovery can retain
+    # the note/decision after this separate response changes the request.
+    draft = basis.get("version") == 4
+    # Once captured, this independent comment keeps its acknowledged source
+    # even if the original draft is navigated or confirmed. Only fresh capture
+    # requires that draft's controls to remain live through the final writer.
+    check_lifecycle = not draft or not consumed or require_live
+    consumed = consumed and not draft
     raw = mark.sanitized_input
     if type(raw) is not dict or set(raw) - {"type", "text", "reply_to_message_id"} or raw.get("type", "text") != "text":
         raise CallbackRefused()
@@ -56,7 +65,7 @@ def reply_basis(link, parent, mark, controls, *, consumed):
         part = next(part for part in parts if part.get("callback_group_id") == control.group_id)
         if type(control.message_id) is not int or part["message_ids"] != [control.message_id]:
             raise CallbackRefused()
-    if any("work_action_id" in row.payload or (row.consumed_at is not None) is not consumed or consumed and row.closed_reason != "work-reply" for row in controls):
+    if check_lifecycle and any("work_action_id" in row.payload or (row.consumed_at is not None) is not consumed or consumed and row.closed_reason != "work-reply" for row in controls):
         raise CallbackRefused()
     return {
         "version": 2,
@@ -105,14 +114,16 @@ class WorkCardInputs:
                 else:
                     for row in rows:
                         self.callbacks._usable(row)
+                    composed.fresh_capture = True
                     operation = uuid4().hex
                     composed.captured = replace(InboxRow.from_row(mark), route_kind="work_input", route_target_id=data["request_id"], route_basis={"work_input": data}, operation_ids=[operation], state="reply_pending")
                     await self.inbox.route(InboxRow.from_row(mark), kind="work_input", target_id=data["request_id"], basis={"work_input": data}, operation_ids=[operation], session=writer)
-                    group = CallbackGroup(_row(rows[0]), tuple(_row(row) for row in rows), parent.id, parent.payload["presentation_version"])
-                    await self.callbacks.consume_group(group, reason="work-reply", session=writer)
-                    cleanup = keyboard_cleanup_row(rows[0], owner_user_id=link.owner_user_id, now=self.plans.outbox.clock(), dedupe_key="notice:work-reply-cleanup:" + rows[0].group_id)
-                    cleanup.payload = {**cleanup.payload, "work_request_parent_id": parent.id}
-                    writer.add(cleanup)
+                    if parent.payload.get("work_request_basis", {}).get("version") != 4:
+                        group = CallbackGroup(_row(rows[0]), tuple(_row(row) for row in rows), parent.id, parent.payload["presentation_version"])
+                        await self.callbacks.consume_group(group, reason="work-reply", session=writer)
+                        cleanup = keyboard_cleanup_row(rows[0], owner_user_id=link.owner_user_id, now=self.plans.outbox.clock(), dedupe_key="notice:work-reply-cleanup:" + rows[0].group_id)
+                        cleanup.payload = {**cleanup.payload, "work_request_parent_id": parent.id}
+                        writer.add(cleanup)
                     await self.inbox.register_delivery([origin], outbox_id=parent.id, primary=False, finish=False, session=writer)
                 if composed.captured is None:
                     composed.captured = InboxRow.from_row(mark)
@@ -153,6 +164,7 @@ class _CardGuard:
     def __init__(self, base, admission, link, *, captured=None):
         self.base, self.admission, self.link, self.captured = base, admission, link, captured
         self.require_current, self.action = False, None
+        self.fresh_capture = False
 
     async def prepare(self):
         await prepare_publication_guard(self.base)
@@ -188,7 +200,7 @@ class _CardProjection:
         work, request, parent, mark, _callback, saved = rows[0][8:14]
         guard, captured = self.guard, self.guard.captured
         controls = list({row[12].id: row[12] for row in rows if row[12] is not None}.values())
-        data = reply_basis(guard.link, parent, mark, controls, consumed=True)
+        data = reply_basis(guard.link, parent, mark, controls, consumed=True, require_live=guard.fresh_capture)
         if (
             not same_body(data, captured.route_basis["work_input"])
             or not same_body(mark.route_basis, captured.route_basis)
