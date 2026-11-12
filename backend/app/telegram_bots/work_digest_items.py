@@ -30,6 +30,17 @@ class DigestItems:
         if any(owner is not None and (owner.outbox is not self.outbox or owner.callbacks is not self.callbacks) for owner in (requests, reviews, routing, news, results)):
             raise ValueError("digest-items-require-shared-owners")
 
+    async def execute_callback(self, channel, row, *, query_id=None, **_options):
+        if row.kind != "digest_item":
+            return False
+        link = deepcopy(channel.link)
+        guard = channel._services.commands._guard(channel, link)
+        try:
+            await self.open(link, callback_id=row.id, query_id=query_id, chat_id=row.chat_id, message_id=row.message_id, message_thread_id=row.message_thread_id, guard=guard)
+        except ProductSourceRetired:
+            raise CallbackRefused("stale.not_waiting") from None
+        return True
+
     def _owner(self, member):
         if "work_request_basis" in member.item.payload:
             basis = member.item.payload["work_request_basis"]

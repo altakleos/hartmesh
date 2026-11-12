@@ -1040,8 +1040,14 @@ follows preview → navigation anchor → original batch → members.
 ordinary previews with the same origin, full protection and original callback age.
 It qualifies the current source, retained anchor, exact delivery/claim and complete
 replacement group before and after mutation. Ordinary recovery refuses these
-origins without that explicit proof. Review/routing/news/result recovery and
-installation remain separate work. Their new previews reuse the family renderers
-and media ledgers; both final SDK admission and native file reads compose current
-family authority with the complete original digest proof. Pending previews retain
-their navigation evidence through cleanup without extending callback usability.
+origins without that explicit proof. Review/routing recovery delegates source and
+presentation changes to their existing owners; `work_notice_navigation_recovery`
+adds the same compound before/after proof around news/result recovery. Claim-free
+held repairs preserve exact originals, and acknowledged media remain historical
+receipts with their actual protection flags. A new card follows current protection;
+refresh never relabels an old file receipt or repeats acknowledged media. New
+previews reuse family renderers and media ledgers; final SDK admission and native
+file reads compose current family authority with the complete original digest proof.
+Pending previews retain navigation evidence without extending callback usability.
+Optional `work_digest_items` callback dispatch preserves per-query dedupe and leaves
+reusable digest controls intact. Supervisor installation remains separate work.

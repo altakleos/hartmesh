@@ -58,9 +58,7 @@ def frozen_notice(captured, *, acknowledged=False, pending=False):
         if (
             type(basis) is not dict
             or set(basis)
-            != {"version", "source", "locale", "concealed", "result_files", "parts", "keyboard"}
-            | ({"reveal", "cleanup_id"} if basis.get("version") == 2 else set())
-            | ({"navigation_origin"} if basis.get("version") == 1 and "navigation_origin" in basis else set())
+            != {"version", "source", "locale", "concealed", "result_files", "parts", "keyboard"} | ({"reveal", "cleanup_id"} if basis.get("version") == 2 else set()) | ({"navigation_origin"} if "navigation_origin" in basis else set())
             or type(basis["version"]) is not int
             or basis["version"] not in {1, 2}
         ):
@@ -177,7 +175,7 @@ class ResultNoticeSources:
         from app.telegram_bots.result_notice_recovery import ResultNoticeRecovery
 
         self.reader, self.outbox, self.callbacks, self.settings = plans.reader, plans.outbox, plans.callbacks, plans.settings
-        self.recovery = ResultNoticeRecovery(plans)
+        self.recovery = ResultNoticeRecovery(plans, navigation=navigation)
         self.navigation = navigation
 
     async def _prepare(self, captured):
@@ -189,8 +187,6 @@ class ResultNoticeSources:
         if settings is None:
             raise ProductSourceRetired()
         if not same_body(asdict(current), asdict(source)) or settings.locale != basis["locale"]:
-            if "navigation_origin" in basis:
-                raise ProductSourceRetired()
             await self.recovery.refresh(captured)
             raise DeliveryClaimRetired()
         return basis, source, part

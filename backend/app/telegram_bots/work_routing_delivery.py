@@ -130,10 +130,14 @@ class WorkRoutingSources(WorkRequestSources):
         routing = routing_basis(current, load_config(config).public_base_url)
         changed = not same_displayed_basis(current.source, source) or settings.locale != basis["locale"] or basis["routing"] != routing
         if changed:
-            if "navigation_origin" in basis:
-                raise ProductSourceRetired()
             if self.recovery is not None:
-                await self.recovery.refresh(captured)
+                if "navigation_origin" in basis:
+                    refresh = getattr(self.recovery, "refresh_navigation", None)
+                    if refresh is None:
+                        raise ProductSourceRetired()
+                    await refresh(captured)
+                else:
+                    await self.recovery.refresh(captured)
                 raise DeliveryClaimRetired()
             raise ProductSourceRetired()
         return basis, current.source, part

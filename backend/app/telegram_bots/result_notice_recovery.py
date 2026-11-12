@@ -20,10 +20,16 @@ from deerflow.utils.file_io import await_drained
 
 
 class ResultNoticeRecovery:
-    def __init__(self, plans):
+    def __init__(self, plans, *, navigation=None):
         self.plans, self.reader, self.outbox, self.callbacks = plans, plans.reader, plans.outbox, plans.callbacks
+        from app.telegram_bots.work_notice_navigation_recovery import NoticeNavigationRecovery
+
+        self.navigation_recovery = NoticeNavigationRecovery(self, navigation, "result_notice_basis")
 
     async def refresh(self, captured):
+        if "navigation_origin" in captured.item.payload.get("result_notice_basis", {}):
+            return await self.navigation_recovery.refresh(captured)
+
         async def perform():
             source = await self.reader.read(captured.link, captured.item)
             settings = await self.plans.settings.get(captured.link.owner_user_id)
@@ -56,6 +62,8 @@ class ResultNoticeRecovery:
                 if not self._repairable(row):
                     return None
                 item = _item(row)
+            if "navigation_origin" in item.payload.get("result_notice_basis", {}):
+                return await self.navigation_recovery.repair(link, item, guard=guard)
             source = await self.reader.read(link, item)
             settings = await self.plans.settings.get(link.owner_user_id)
             if settings is None:
@@ -107,9 +115,17 @@ class ResultNoticeRecovery:
 
         return await await_drained(perform())
 
-    async def _replace(self, writer, link, row, source, settings, *, reveal=None, repair=False):
+    async def _replace(self, writer, link, row, source, settings, *, reveal=None, repair=False, navigation_origin=None):
         from app.telegram_bots.result_notice_delivery import frozen_notice, recipes
 
+        saved = row.payload.get("result_notice_basis", {}).get("navigation_origin")
+        if saved is not None or navigation_origin is not None:
+            from app.telegram_bots.work_actions import same_body
+            from app.telegram_bots.work_navigation_origin import validate_origin
+
+            validate_origin(navigation_origin)
+            if not same_body(saved, navigation_origin) or reveal is not None:
+                raise ProductSourceRetired()
         item = _item(row)
         parts = [part for part in row.parts if part["presentation_version"] == row.payload["presentation_version"]]
         if repair:
@@ -163,7 +179,17 @@ class ResultNoticeRecovery:
         for part in old:
             if part["state"] not in {"sent", "retired", "unavailable"}:
                 part["state"] = "retired"
-        fresh_basis = {"version": 2, "source": asdict(source), "locale": settings.locale, "concealed": source.protected and origin is None, "result_files": basis["result_files"], "reveal": origin, "cleanup_id": cleanup_id}
+        fresh_basis = {
+            "version": 2,
+            "source": asdict(source),
+            "locale": settings.locale,
+            "concealed": source.protected and origin is None and navigation_origin is None,
+            "result_files": basis["result_files"],
+            "reveal": origin,
+            "cleanup_id": cleanup_id,
+        }
+        if navigation_origin is not None:
+            fresh_basis["navigation_origin"] = navigation_origin
         templates, keyboard = recipes(source, fresh_basis, row.id)
         fresh = self.outbox._parts(templates, version)
         row.parts = old + fresh
@@ -186,7 +212,7 @@ class ResultNoticeRecovery:
                     parent = next(part for part in proof["parts"] if part["part_id"] == event["old"])
                     documents.update(file["source_index"] for file in parent["files"])
         carry_media(row, carried, hashes, documents=documents)
-        row.class_, row.state, row.silent, row.not_before = "reply" if origin else "result", "pending", bool(item.silent), self.outbox.clock()
+        row.class_, row.state, row.silent, row.not_before = "reply" if origin or navigation_origin else "result", "pending", bool(item.silent), self.outbox.clock()
         row.sent_at = row.closed_at = row.failed_reason = row.skip_reason = row.degraded_at = None
         row.claim_id = row.claim_owner = row.claimed_at = None
         if keyboard:

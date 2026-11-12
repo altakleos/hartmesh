@@ -64,7 +64,7 @@ def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
             or set(basis)
             != {"version", "source", "locale", "concealed", "public_base_url", "parts", "keyboard"}
             | ({"reveal", "cleanup_id", "origin"} if basis.get("version") == 2 else {"reveal", "cleanup_id", "history", "teaser_version", "edit_target"} if basis.get("version") == 3 else set())
-            | ({"navigation_origin"} if basis.get("version") == 1 and "navigation_origin" in basis else set())
+            | ({"navigation_origin"} if basis.get("version") in {1, 3} and "navigation_origin" in basis else set())
             or type(basis["version"]) is not int
             or basis["version"] not in {1, 2, 3}
         ):
@@ -287,7 +287,7 @@ class WorkNewsSources:
 
         self.reader, self.outbox, self.callbacks, self.settings = plans.reader, plans.outbox, plans.callbacks, plans.settings
         self.projection = plans.projection
-        self.recovery = WorkNewsRecovery(plans)
+        self.recovery = WorkNewsRecovery(plans, navigation=navigation)
         self.navigation = navigation
 
     async def read_part(self, captured):
@@ -300,8 +300,6 @@ class WorkNewsSources:
             if settings is None:
                 raise ProductSourceRetired()
             if not same_body(asdict(current), asdict(source)) or settings.locale != basis["locale"] or NavigationOrigin().base != basis["public_base_url"]:
-                if "navigation_origin" in basis:
-                    raise ProductSourceRetired()
                 await self.recovery.refresh(captured)
                 raise DeliveryClaimRetired()
             return part["html"], part["visible_text"]
