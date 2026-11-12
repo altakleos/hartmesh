@@ -226,6 +226,14 @@ snapshot before and after mutation. Explicit repair reconciles claim-free held
 failures or retired previews; it never takes an active claim. Item previews and
 startup installation remain pending.
 
+`work_navigation_origin.py` supplies an explicit closed origin for full previews
+opened from ordinary or revealed digest cards. It retains the acknowledged
+navigation presentation, selected member and original batch, and composes their
+current authority in one final query. A reusable item button is never consumed;
+its per-query publication key deduplicates retries while a later press gets a
+fresh preview. The original member stays skipped in its acknowledged batch.
+This is an admission contract; family renderer/source integration is separate.
+
 `work_digest_delivery.py` freezes one bounded navigation card and its complete
 pending keyboard. The adapter requires this owner for digest delivery; raw class
 labels and templates do not supply source authority. The final compound read
