@@ -32,3 +32,17 @@ async def test_superseded_outcome_final_authority(work_delivery, monkeypatch):
     from test_telegram_work_superseded_outcomes import test_queued_conflict_yields_to_fresh_preview_before_sdk
 
     await test_queued_conflict_yields_to_fresh_preview_before_sdk(work_delivery, monkeypatch, "final_authority")
+
+
+@pytest.mark.asyncio
+async def test_transient_preview_failure(work_delivery, monkeypatch):
+    from test_telegram_work_transient_callbacks import test_failed_first_tap_reports_failure_and_keeps_its_button
+
+    await test_failed_first_tap_reports_failure_and_keeps_its_button(work_delivery, monkeypatch, False)
+
+
+@pytest.mark.asyncio
+async def test_conclusive_storage_refusal_retry(work_delivery, monkeypatch):
+    from test_telegram_work_transient_callbacks import test_storage_busy_waits_for_explicit_press_and_reuses_original_operation
+
+    await test_storage_busy_waits_for_explicit_press_and_reuses_original_operation(work_delivery, monkeypatch, "success")

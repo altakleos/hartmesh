@@ -346,7 +346,15 @@ prompts, confirmations, routing, Show and explicit Retry. The adapter consults i
 only when a collaborator is installed; the supervisor does not install it yet.
 It reserves the existing immutable operation before checking it, and lets canonical
 outcome planning own result replies. A result-read failure after saving an action
-is deferred to receipt observation, never reported as a failed save. Direct
+is deferred to receipt observation, never reported as a failed save. Preview-only
+read failures report `tap.failed` while the original button remains unconsumed;
+an ambiguous committed preview stays silent. Conclusive `storage-busy` refusals
+also report `tap.failed` and wait for an explicit press. That press checks receipts
+first and retains the same body, operation, first-attempt clock and all current
+authority/revision guards. Its locked original acknowledged control must still
+be usable, and a transferred presentation cannot reopen; the final effect read
+also rejects retained transfer receipts. Timers, unknown outcomes, cancellation and other
+refusals do not gain retry permission from this path. Direct
 wrong-person routing uses the reply-owned refresh coordinator when a selected
 recipient loses access. General routing uses a locked acknowledged choice to
 refresh the current roster, admitting only an unreserved choice or its exact

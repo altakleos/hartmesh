@@ -177,6 +177,25 @@ class WorkActionMethods:
 
         return await prepare_effect_admission(self, link, act, attempt_current=attempt_current)
 
+    async def _work_refusal_retry_current(self, writer, link, act):
+        from app.telegram_bots.callbacks import CallbackRefused
+        from app.telegram_bots.work_outcome_transfer import transfer_receipt
+
+        if transfer_receipt(act.continuation) is not None:
+            return False
+        try:
+            parent, rows, selected = await self.callbacks._locked(writer, link, act.id)
+            self.callbacks._usable(selected)
+            if parent.state != "sent" or any(row.payload.get("work_action_id") != act.id for row in rows):
+                return False
+            # The exact acknowledged keyboard must still own this retry after
+            # any receipt/provider await. A retired draft cannot be reopened by
+            # a press that passed its earlier SDK precheck.
+            part = next(part for part in parent.parts if part.get("callback_group_id") == selected.group_id and part["presentation_version"] == parent.payload["presentation_version"])
+            return selected.message_id is not None and part["state"] == "sent" and part["message_ids"] == [selected.message_id]
+        except (CallbackRefused, StopIteration):
+            return False
+
     async def _attempt_work(self, act, *, explicit=False, attempt_current=lambda: True):
         from app.telegram_bots.acts import _snapshot, _utc
 
@@ -190,7 +209,8 @@ class WorkActionMethods:
             # Replays still require current receipt/read authority.
             await self.receipt_for(act)
             return act
-        if act.state in {"conflict", "refused"} or act.cancel_requested_at is not None:
+        retry_refusal = explicit and act.state == "refused" and act.reason == "storage-busy"
+        if (act.state in {"conflict", "refused"} and not retry_refusal) or act.cancel_requested_at is not None:
             return act
         if act.attempts:
             try:
@@ -233,6 +253,8 @@ class WorkActionMethods:
             async with self.outbox._writer(link.id) as (writer, current):
                 saved = await writer.get(TelegramActRow, act.id, with_for_update=True, populate_existing=True)
                 if saved.state == "done" or saved.attempts != act.attempts or saved.cancel_requested_at is not None or any(getattr(saved, field) != getattr(act, field) for field in _ACT_SCOPE) or not same_body(saved.body, act.body):
+                    return _snapshot(saved)
+                if retry_refusal and not await self._work_refusal_retry_current(writer, link, saved):
                     return _snapshot(saved)
                 if current is None or any(getattr(current, field) != getattr(link, field) for field in _SCOPE) or current.state != "connected" or current.health != "ok":
                     raise AgentDenied("The bot binding is no longer current")

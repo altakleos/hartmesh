@@ -27,7 +27,7 @@ def outcome_text(act, *, purpose, permissions, attempt_status, request_changed=F
             return WorkOutcomeText("link.limited")
         return None
     if act.state == "refused":
-        return WorkOutcomeText("tap.failed" if act.reason == "invalid" else WORK_DENIALS.get(act.kind, "denied.other"))
+        return WorkOutcomeText("tap.failed" if act.reason in {"invalid", "storage-busy"} else WORK_DENIALS.get(act.kind, "denied.other"))
     if act.state == "conflict":
         refresh = act.kind != "route" or request_changed
         return WorkOutcomeText("stale.changed_resend" if refresh else "tap.failed", refresh_request=refresh)

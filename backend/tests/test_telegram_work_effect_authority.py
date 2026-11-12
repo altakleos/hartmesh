@@ -15,7 +15,7 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBot
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["recipient_grant", "recipient_disabled", "manager", "binding", "policy", "cancelled"])
+@pytest.mark.parametrize("change", ["recipient_grant", "recipient_disabled", "manager", "binding", "policy", "cancelled", "presentation"])
 async def test_route_effect_rolls_back_changes_during_final_provider_await(actions, monkeypatch, change):
     from app.gateway import authz
     from app.gateway.auth.models import User
@@ -62,6 +62,11 @@ async def test_route_effect_rolls_back_changes_during_final_provider_await(actio
                         writer.add(TelegramInstancePolicyRow(instance_id=e.instance.id, policy="off", updated_by=e.actor.subject_id, updated_at=now))
                     else:
                         policy.policy = "off"
+                elif change == "presentation":
+                    # Simulate a retained historical transfer reaching a pending
+                    # row: the final effect guard must reject the receipt even
+                    # though its old refused phase differs from pending.
+                    (await writer.get(TelegramActRow, operation_id)).continuation = {"version": 2, "work_outcome_transfer": {"phase": ["refused", "storage-busy", 0], "outbox_id": uuid4().hex}}
                 else:
                     (await writer.get(TelegramActRow, operation_id)).cancel_requested_at = now
                 await writer.flush()
