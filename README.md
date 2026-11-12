@@ -2035,6 +2035,9 @@ An unsubmitted note whose review closes can show a replacement review for anothe
 explicit confirmation, or retire its old controls with a closed notice.
 The same recovery follows a conclusively rejected save; it preserves the original
 operation and never repeats a save whose result remains unknown.
+A direct-card input foundation captures explicitly quoted Work-card text and
+admits one answer or comment with its original revision. Controller installation
+and comment-card refresh remain pending.
 Assignments continue to be managed on the web.
 
 Instance site-permission cards require current Manage access when planned, sent

@@ -7,11 +7,12 @@ from sqlalchemy import select
 
 from app.telegram_bots.callbacks import CallbackRefused, Prompts, normalize_callback_topic
 from app.telegram_bots.inbox import InboxRow
-from app.telegram_bots.producer import ProductSourceRetired
+from app.telegram_bots.producer import ProductSourceRetired, _item
+from app.telegram_bots.work_card_text import WorkCardText
 from app.telegram_bots.work_input_admission import WorkInputAdmissions
 from app.telegram_bots.work_input_capture import WorkInputCaptures
 from app.telegram_bots.work_input_previews import WorkInputPreviews, blocked_input_actions, input_identity
-from app.telegram_bots.work_typing import PURPOSES
+from app.telegram_bots.work_typing import PURPOSES, shown_prompt_messages
 from deerflow.agent_instances.contract import AgentConflict
 from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 class WorkTextInputs:
     def __init__(self, services, callbacks):
         self.services, self.callbacks = services, callbacks
+        self.cards = WorkCardText(services, callbacks, prompt_input=self._capture_prompt)
         self.inbox = services.outbox.inbox
         self.prompts = Prompts(services.callbacks)
         self.captures = WorkInputCaptures(self.inbox, services.callbacks)
@@ -37,6 +39,8 @@ class WorkTextInputs:
                 return False
             if message.forward_origin is not None or message.is_automatic_forward is True or any(message.api_kwargs.get(key) is not None for key in ("forward_from", "forward_from_chat", "forward_sender_name", "forward_date")):
                 return False
+            if await self.cards.handle(channel, update, link=link):
+                return True
             guard = self.services.commands._guard(channel, link)
             topic = normalize_callback_topic(message.message_thread_id)
             quoted = message.reply_to_message.message_id if message.reply_to_message else None
@@ -50,10 +54,12 @@ class WorkTextInputs:
                     origin, prompt_id = InboxRow.from_row(mark), mark.route_basis["work_input"]["prompt_id"]
                 else:
                     prompt = await self.prompts.current(link, message.chat_id, topic, guard=guard, session=writer)
-                    if prompt is None or prompt.payload.get("purpose") not in PURPOSES.values() or not self.prompts.is_visible(prompt) or quoted is not None and quoted != prompt.message_id:
+                    if prompt is None or prompt.payload.get("purpose") not in PURPOSES.values() or not self.prompts.is_visible(prompt):
                         return False
                     parent = await writer.get(TelegramOutboxRow, prompt.payload.get("anchor_outbox_id"))
                     if parent is None or parent.payload.get("work_request_basis", {}).get("prompt_id") != prompt.id:
+                        return False
+                    if quoted is not None and quoted not in shown_prompt_messages(_item(parent)):
                         return False
                     origin, prompt_id = None, prompt.id
             if origin is None:
@@ -69,6 +75,8 @@ class WorkTextInputs:
         async def perform():
             link = deepcopy(channel.link)
             guard = self.services.commands._guard(channel, link)
+            if await self.cards.resume(channel, link, origin, guard=guard):
+                return True
             async with self.services.callbacks.writer(link, guard) as writer:
                 stored = (await self.inbox._rows(writer, [origin]))[0]
                 self.inbox._current(link, stored)
@@ -81,6 +89,10 @@ class WorkTextInputs:
             return await self._apply(channel, link, captured, guard)
 
         return await await_drained(perform())
+
+    async def _capture_prompt(self, channel, link, origin, prompt_id, guard):
+        captured = await self.captures.capture(link, origin, prompt_id=prompt_id, guard=guard)
+        return await self._apply(channel, link, captured, guard)
 
     async def _apply(self, channel, link, captured, guard):
         data = captured.route_basis["work_input"]

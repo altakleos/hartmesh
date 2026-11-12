@@ -20,7 +20,7 @@ from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
 
 
 @pytest_asyncio.fixture
-async def work_delivery(work_pages):
+async def work_delivery(work_pages, monkeypatch):
     e = work_pages
     from deerflow.persistence.spaces.model import SpaceGrantRow
 
@@ -29,6 +29,8 @@ async def work_delivery(work_pages):
     services = e.channel._services
     services.authority = e.live.authority
     services.outbox = Outbox(e.db.sessions)
+    # Accepted input and dispatched presentations share one logical timeline.
+    monkeypatch.setattr("app.telegram_bots.inbox._now", lambda: services.outbox.clock())
     services.callbacks = CallbackRepository(e.db.sessions)
     e.reader = WorkRequestReader(work=e.human.work, authority=e.live.authority, links=e.db.links)
     e.plans = WorkRequestPlans(outbox=services.outbox, reader=e.reader, callbacks=services.callbacks)

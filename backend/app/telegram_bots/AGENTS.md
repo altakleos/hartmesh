@@ -12,7 +12,16 @@ legacy-channel closure; an absent environment key means on. See
 Keep bot network, supervisor and router startup outside configuration loading.
 Use socket-free transports and synthetic credentials in offline tests.
 
-Optional `work_text_inputs.py` routes only plain text for a shown Work prompt.
+Optional `work_text_inputs.py` routes plain text for shown Work prompts and,
+through `work_card_text.py`, explicit card replies. Complete prompt previews
+accept a reply to any part. Known spent/closed/input-owned Work presentations
+retain input ownership for recovery; they cannot fall through to ordinary chat.
+`work_card_inputs.py` owns explicit replies to complete V1/V2/V3 cards: immutable
+`work_input` version2 proof, consumed source group and one Respond Act. Comments
+never decide or accept. Supervisor installation and V4/closed-input controllers remain
+separate. Final writer proof binds the original input across its own writes. A card's
+complete presentation must have been dispatched before the input was accepted;
+a delayed host ACK does not invalidate an explicit reply.
 `work_retained_drafts.py` settles a retained review note on Edit/Discard and a typed
 decision on Back/Add note; it creates no Work action. Final input/action/source
 checks include the transition's own settlement. Editing opens a separate prompt

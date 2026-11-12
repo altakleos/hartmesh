@@ -396,3 +396,31 @@ in a complete fresh preview instead of applying navigation to an unseen basis.
 Back/Add note remain available while actions are paused, including their
 unreserved stale refresh. An admitted unresolved confirmation continues to own
 recovery.
+
+
+`work_card_inputs.py` supplies direct-card capture/admission separately from
+prompt capture. A plain explicit Telegram reply to any part of a complete,
+acknowledged V1/V2/V3 request card owns `work_input` version2. It freezes the
+shown source, exact quoted message, complete current control group, text and one
+operation id before any domain admission. The old group retires with a durable
+keyboard cleanup. Prompt and input-owned V4 views are excluded from this owner.
+
+Admission creates only Respond: an information answer or a decision/review
+comment. Current Use+Inspect and route write authority, original request and
+assignment revisions, exact request instance, current request basis and unfinished
+input gate new admission. Replays keep
+the same operation and missing marked journals stay held. The final joined read
+reproves complete source ACKs, canonical consumed controls, original input and
+immutable Act after external owner preparation. Captures retain their immutable
+input across routing and delivery bookkeeping instead of adopting late mutations.
+The optional text controller uses this primitive for actual Telegram replies,
+observes canonical outcomes and resumes stored inputs without resubmitting an
+unknown operation. A reply predating a newer presentation's dispatch cannot be
+reinterpreted against that presentation. An explicit reply received before the
+host saves its ACK remains eligible once the full delivery is acknowledged.
+
+Replies to any part of a complete prompt use the same prompt owner. Known
+spent cards, closed prompts and input-owned presentations retain a durable
+`work_card_hold` route, never ordinary-chat ownership. This hold is an internal
+recovery foundation; its user choices and current-comment-card refresh remain
+required before activation. The supervisor does not install these controllers.

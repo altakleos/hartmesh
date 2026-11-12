@@ -17,7 +17,7 @@ from app.telegram_bots.work_input_capture import accepted_text
 from app.telegram_bots.work_interaction_delivery import WorkInteractionPlans, acknowledged_source
 from app.telegram_bots.work_interactions import interaction_state
 from app.telegram_bots.work_request_recovery import WorkRequestRecovery, _RecoveryProjection
-from app.telegram_bots.work_typing import validate_shown_prompt
+from app.telegram_bots.work_typing import shown_prompt_messages, validate_shown_prompt
 from deerflow.agent_instances.contract import AgentDenied
 from deerflow.persistence.json_compat import json_match
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
@@ -144,7 +144,7 @@ def _check_input_origin(link, parent, callbacks, mark, blocked, basis, source, *
         "purpose": prompt.payload["purpose"],
         "interaction": prompt.payload["interaction"],
         "seen": previous.seen,
-        "text": accepted_text(mark, prompt, acknowledged_at),
+        "text": accepted_text(mark, prompt, acknowledged_at, message_ids=shown_prompt_messages(_item(parent), accepted_at=mark.accepted_at)),
     }
     if not same_body(data, mark.route_basis.get("work_input")) or not same_body(input_state(data, source), basis["interaction"]):
         raise ProductSourceRetired()
