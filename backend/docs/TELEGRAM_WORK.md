@@ -207,6 +207,15 @@ Confirmation admission locks and rechecks the original input proof; restart or
 caller text cannot replace it. Back restores the complete request and its choices
 without applying an action. These components remain dormant until controller wiring.
 
+`work_retained_drafts.py` owns explicit Edit note and Discard for a V4 review note.
+Both recheck the whole acknowledged group and original input, refuse unresolved
+actions or claimed deliveries, retire old controls and finish the old input in
+one guarded writer. Edit publishes a new prompt against the displayed current
+review; Discard queues only keyboard removal. Neither creates an Act or erases
+the visible note. The draft's 24-hour deadline starts at original input acceptance
+and survives preview refreshes. Stale note previews explain the change before
+the complete current review. Closed/replaced-review recovery remains separate.
+
 `work_outcomes.py` renders complete success/refusal/uncertain wording, without
 issuing commands or installing controls. Unknown actions never become a failed
 save. A known attempt-closing refusal keeps the original confirmation; a retained

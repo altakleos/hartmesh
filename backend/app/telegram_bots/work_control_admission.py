@@ -70,7 +70,7 @@ class WorkControlAdmissions:
                     captured = acknowledged_source(link, parent)
                     from app.telegram_bots.work_input_previews import lock_input_origin
 
-                    await lock_input_origin(writer, link, parent, captured)
+                    await lock_input_origin(writer, link, parent, captured, draft_ttl_hours=self.callbacks.config.callbacks.draft_ttl_hours)
                     if not same_displayed_basis(captured, source):
                         raise AgentConflict("Review the current request and all responses")
                     rows = [await writer.get(TelegramCallbackRow, row.id) for row in group.rows]

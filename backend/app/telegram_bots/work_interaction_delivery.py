@@ -1,19 +1,20 @@
 """Acknowledged Work controls publish unsubmitted replies, never service actions."""
 
 from dataclasses import asdict
+from datetime import timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
 from sqlalchemy import select
 
 from app.telegram_bots.attention_authority import prepare_attention
-from app.telegram_bots.callbacks import CallbackRefused, Prompts, _plain, _validate_rows
+from app.telegram_bots.callbacks import CallbackRefused, Prompts, _aware, _plain, _validate_rows
 from app.telegram_bots.producer import ProductSourceRetired, _item, _safe_json, keyboard_cleanup_row
 from app.telegram_bots.work_interactions import interaction_state, present_interaction
 from app.telegram_bots.work_request_recovery import WorkRequestRecovery, _RecoveryGuard
 from app.telegram_bots.work_request_source import same_displayed_basis
 from deerflow.agent_instances.contract import AgentConflict
-from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
 CURRENT_REQUEST_KINDS = frozenset({"hi_answer", "hi_choice", "hi_cant_open", "hi_cannot", "hi_wrong", "decide_choice", "decide_own", "decide_note", "decide_confirm", "accept_open", "accept_confirm", "changes_open", "back"})
@@ -127,7 +128,14 @@ class WorkInteractionPlans:
     async def _publish(self, writer, link, group, parent, source, settings, state, *, key, chat_id, message_id, message_thread_id, guard, reason="work-preview", input_origin=None):
         """Publish a source-checked transition inside its caller's guarded writer."""
         callback_id, request_id, composed = group.selected.id, source.request["id"], guard
-        shown = present_interaction(source, state, locale=settings.locale)
+        created_at, expires_at = group.selected.created_at, None
+        if input_origin is not None and state["view"] == "changes":
+            mark = await writer.get(TelegramInboundMarkRow, (input_origin["link_id"], input_origin["message_id"], input_origin["chat_id"]), populate_existing=True)
+            if mark is None or mark.operation_ids != [input_origin["operation_id"]]:
+                raise CallbackRefused()
+            created_at = mark.accepted_at
+            expires_at = _aware(created_at) + timedelta(hours=self.callbacks.config.callbacks.draft_ttl_hours)
+        shown = present_interaction(source, state, locale=settings.locale, expires_at=expires_at)
         keyboard = [list(line) for line in shown.keyboard]
         recipes = [
             {**part, "source_ref": {"key": "work.request.presentation", "values": {"request_id": request_id, "part": index}}, **({"stored_keyboard": True} if index == len(shown.parts) - 1 and keyboard else {})}
@@ -168,7 +176,7 @@ class WorkInteractionPlans:
             fresh = await self.callbacks.write_group(link, keyboard, anchor_outbox_id=identity, presentation_version=0, chat_id=chat_id, message_id=None, message_thread_id=message_thread_id, session=writer)
             parts[-1]["callback_group_id"] = fresh.group_id
             for control in await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == fresh.group_id)):
-                control.created_at = group.selected.created_at
+                control.created_at = created_at
                 control.payload = {**control.payload, "presentation_pending": True}
         row.parts = parts
         if state["view"] == "prompt":

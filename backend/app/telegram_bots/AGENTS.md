@@ -13,6 +13,10 @@ Keep bot network, supervisor and router startup outside configuration loading.
 Use socket-free transports and synthetic credentials in offline tests.
 
 Optional `work_text_inputs.py` routes only plain text for a shown Work prompt.
+`work_retained_drafts.py` settles a retained review note when Edit or Discard
+retires its controls; it creates no Work action. Edit publishes a separate prompt
+against the complete displayed review. Draft controls inherit the original input's
+24-hour age, including after repeated refreshes.
 Capture precedes admission; stored-input resume never reconstructs an Update or
 retries an unknown action. Typed decision confirmations own their original input
 until outcome delivery. Supervisor installation and broader input routing remain deferred.

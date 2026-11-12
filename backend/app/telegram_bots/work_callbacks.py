@@ -13,6 +13,7 @@ from app.telegram_bots.work_followup_refresh import WorkRoutingFollowupRecovery
 from app.telegram_bots.work_interaction_delivery import WorkInteractionPlans
 from app.telegram_bots.work_refusal_recovery import WorkRefusalRecovery
 from app.telegram_bots.work_request_recovery import WorkRequestRecovery
+from app.telegram_bots.work_retained_drafts import WorkRetainedDrafts
 from app.telegram_bots.work_routing_admission import WorkRoutingAdmissions
 from app.telegram_bots.work_routing_recovery import WorkRoutingRecovery
 from app.telegram_bots.work_stale_recovery import WorkStaleRecovery
@@ -33,12 +34,13 @@ class WorkCallbacks:
         self.refusals = WorkRefusalRecovery(self.controls)
         self.stale = WorkStaleRecovery(self.controls, self.interactions)
         self.recovery = WorkRequestRecovery(outcomes.plans)
+        self.drafts = WorkRetainedDrafts(outcomes.plans)
         self.routing = WorkRoutingAdmissions(outcomes.routing, self.acts) if outcomes.routing is not None else None
         self.routing_recovery = WorkRoutingRecovery(outcomes.routing) if outcomes.routing is not None else None
         self.followups, self.retries = WorkRoutingFollowupRecovery(outcomes), WorkActionRetries(outcomes)
 
     async def execute_callback(self, channel, row, *, update_id=None, query_id=None):
-        if row.kind not in _VIEWS | _ACTIONS.keys() | {"reveal", "act_check"}:
+        if row.kind not in _VIEWS | _ACTIONS.keys() | {"reveal", "act_check", "dismiss"}:
             return False
 
         async def perform():
@@ -57,7 +59,11 @@ class WorkCallbacks:
                 return channel._callback_current(link)
 
             try:
-                if row.kind in _VIEWS:
+                if family == 4 and row.kind in {"changes_open", "dismiss"}:
+                    await self.drafts.navigate(link, row.id, **scope)
+                elif row.kind == "dismiss":
+                    return False
+                elif row.kind in _VIEWS:
                     await self.interactions.open(link, row.id, **scope)
                 elif row.kind == "reveal":
                     recovery = self.routing_recovery if family in {5, 6} else self.recovery

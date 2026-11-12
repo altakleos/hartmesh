@@ -66,7 +66,7 @@ def interaction_state(value, source):
     return state
 
 
-def present_interaction(source, value, *, locale):
+def present_interaction(source, value, *, locale, expires_at=None):
     state = interaction_state(value, source)
     view = state["view"]
     base = present_request(source, locale=locale)
@@ -96,6 +96,9 @@ def present_interaction(source, value, *, locale):
     elif view == "changes":
         suffix = render("review.changes_confirm", locale, note=state["note"])
         keyboard = [[button(kind, label)] for kind, label in (("changes_confirm", "label.request_these_changes"), ("changes_open", "label.edit_note"), ("dismiss", "label.discard"))]
+        for line in keyboard:
+            for control in line:
+                control["expires_at"] = expires_at
     elif view in {"answer", "voice"}:
         suffix = escape(state["text"]) + "\n\n" + render("ask.is_this_answer", locale) if view == "answer" else render("voice.confirm_answer", locale, text=state["text"])
         keyboard = [[button("answer_yes" if view == "answer" else "voice_save_answer", "label.save_answer")], [button("answer_no" if view == "answer" else "voice_discard", "label.new_message" if view == "answer" else "label.discard")]]
@@ -104,6 +107,8 @@ def present_interaction(source, value, *, locale):
         if state["purpose"] == "decision_note":
             suffix = escape(state["decision"]) + "\n\n" + suffix
     html = "".join(part["html"] for part in base.parts) + ("\n\n" + suffix if suffix else "")
+    if view == "changes":
+        html = render("stale.changed_resend", locale) + "\n\n" + html
     return WorkRequestPresentation(
         tuple({"kind": "text", "html": chunk, "visible_text": visible_text(chunk), "protect_content": source.protected} for chunk in split_html(html)),
         tuple(tuple(line) for line in canonical_keyboard(keyboard)),
