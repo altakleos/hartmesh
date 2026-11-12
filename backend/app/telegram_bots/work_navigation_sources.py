@@ -23,12 +23,11 @@ async def qualify_navigation(navigation, captured, basis, source, projection, *,
     if navigation is None:
         raise ProductSourceRetired()
     origin = await navigation.restore(captured.link, basis["navigation_origin"])
-    if family not in origin.member.item.payload:
+    if family != origin.target.family:
         raise ProductSourceRetired()
-    original = origin.member.source
+    original = origin.target.source
     if family == "work_request_basis":
-        original_basis = origin.member.item.payload[family]
-        if ("result_files" in original_basis) != ("result_files" in basis) or (original_basis["version"] in {5, 6}) != (basis["version"] in {5, 6}):
+        if origin.target.review != ("result_files" in basis) or origin.target.routing != (basis["version"] in {5, 6}):
             raise ProductSourceRetired()
         if basis["version"] in {5, 6} and basis["routing"].get("response_id") != original.routing.get("response_id"):
             raise ProductSourceRetired()

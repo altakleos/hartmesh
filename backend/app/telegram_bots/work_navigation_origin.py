@@ -20,20 +20,15 @@ from deerflow.utils.file_io import await_drained
 
 
 def validate_origin(value):
-    if type(value) is not dict or set(value) != {"version", "kind", "digest_id", "digest_proof", "anchor_outbox_id", "anchor_proof", "presentation_version", "message_id", "callback_id", "member_id", "query_key"}:
+    if type(value) is not dict or value.get("kind") not in {"digest", "summary"}:
         raise ProductSourceRetired()
-    if (
-        type(value["version"]) is not int
-        or value["version"] != 1
-        or value["kind"] != "digest"
-        or type(value["presentation_version"]) is not int
-        or value["presentation_version"] < 0
-        or type(value["message_id"]) is not int
-        or value["message_id"] <= 0
-    ):
+    root = value["kind"]
+    if set(value) != {"version", "kind", root + "_id", root + "_proof", "anchor_outbox_id", "anchor_proof", "presentation_version", "message_id", "callback_id", "member_id", "query_key"}:
         raise ProductSourceRetired()
-    for key in ("digest_id", "anchor_outbox_id", "callback_id", "member_id", "digest_proof", "anchor_proof", "query_key"):
-        size = 64 if key in {"digest_proof", "anchor_proof", "query_key"} else 32
+    if type(value["version"]) is not int or value["version"] != 1 or type(value["presentation_version"]) is not int or value["presentation_version"] < 0 or type(value["message_id"]) is not int or value["message_id"] <= 0:
+        raise ProductSourceRetired()
+    for key in (root + "_id", "anchor_outbox_id", "callback_id", "member_id", root + "_proof", "anchor_proof", "query_key"):
+        size = 64 if key in {root + "_proof", "anchor_proof", "query_key"} else 32
         if type(value[key]) is not str or len(value[key]) != size or any(char not in "0123456789abcdef" for char in value[key]):
             raise ProductSourceRetired()
     return value
@@ -55,6 +50,18 @@ def frozen_anchor(link, item):
 
 
 @dataclass(frozen=True)
+class NavigationTarget:
+    source: object
+    family: str
+    work_id: str
+    request_id: str | None
+    event_id: str | None
+    review: bool = False
+    routing: bool = False
+    intent: dict | None = None
+
+
+@dataclass(frozen=True)
 class NavigationRead:
     owner: object
     snapshot: object
@@ -65,6 +72,22 @@ class NavigationRead:
     def member(self):
         return self.snapshot.members[0]
 
+    @property
+    def target(self):
+        item = self.member.item
+        family = next(key for key in ("work_request_basis", "work_news_basis", "result_notice_basis") if key in item.payload)
+        basis = item.payload[family]
+        return NavigationTarget(
+            self.member.source,
+            family,
+            item.work_id,
+            item.request_id,
+            item.event_id,
+            review="result_files" in basis,
+            routing=family == "work_request_basis" and basis["version"] in {5, 6},
+            intent={key: deepcopy(item.payload[key]) for key in ("work_event_intent", "work_event_source") if key in item.payload},
+        )
+
     async def authorize(self, *, session=None):
         async def perform():
             admission = await prepare_attention(self.owner.plans.reader, self.snapshot.link)
@@ -74,8 +97,13 @@ class NavigationRead:
 
 
 class WorkNavigation:
-    def __init__(self, plans):
+    def __init__(self, plans, *, summaries=None, requests=None, reviews=None):
         self.plans, self.digests = plans, DigestNavigation(plans)
+        self.summaries = None
+        if summaries is not None:
+            from app.telegram_bots.summary_items import SummaryItemsNavigation
+
+            self.summaries = SummaryItemsNavigation(summaries, requests=requests, reviews=reviews)
 
     async def read(self, link, *, callback_id, query_id):
         if type(query_id) is not str or not 1 <= len(query_id) <= 256 or type(callback_id) is not str or len(callback_id) != 32 or any(char not in "0123456789abcdef" for char in callback_id):
@@ -92,12 +120,16 @@ class WorkNavigation:
     async def _read(self, link, callback_id, query_key, *, expected=None):
         async with self.plans.outbox.sessions() as reader:
             callback = await reader.get(TelegramCallbackRow, callback_id)
-            if callback is None or callback.kind != "digest_item" or callback.target_kind != "outbox" or callback.link_id != link.id or type(callback.payload) is not dict:
+            if callback is None or callback.kind != "digest_item" or callback.target_kind not in {"outbox", "request"} or callback.link_id != link.id or type(callback.payload) is not dict:
                 raise ProductSourceRetired()
             row = await reader.get(TelegramOutboxRow, callback.payload.get("anchor_outbox_id"))
             if row is None or (row.link_id, row.owner_user_id, row.binding_generation, row.chat_id, row.instance_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id, link.agent_ref):
                 raise ProductSourceRetired()
             item, member_id = _item(row), callback.target_id
+        if self.summaries is not None and {"summary_basis", "summary_view_basis"}.intersection(item.payload):
+            return await self.summaries.read(link, item, callback, query_key, expected=expected)
+        if callback.target_kind != "outbox":
+            raise ProductSourceRetired()
         digest_id, show_id = frozen_anchor(link, item)
         snapshot = await self.digests.read(link, digest_id, callback_id=show_id or callback_id, member_id=member_id, closed_reason="revealed" if show_id else None)
         if show_id and item.payload["work_digest_view_basis"]["parent_proof"] != parent_proof(snapshot.item):
@@ -124,7 +156,7 @@ class WorkNavigation:
         return result
 
 
-class NavigationOriginProjection(_NavigationProjection):
+class _DigestOriginProjection(_NavigationProjection):
     """Original source plus the exact acknowledged navigation group, one read."""
 
     def __init__(self, navigation):
@@ -167,3 +199,29 @@ class NavigationOriginProjection(_NavigationProjection):
                 raise CallbackRefused()
         except CallbackRefused:
             raise ProductSourceRetired() from None
+
+
+class NavigationOriginProjection:
+    """Compose an explicitly typed origin with each existing preview owner."""
+
+    def __init__(self, navigation):
+        self.navigation = navigation
+        if navigation.value["kind"] == "summary":
+            from app.telegram_bots.summary_items import SummaryItemProjection
+
+            self.delegate = SummaryItemProjection(navigation)
+        else:
+            self.delegate = _DigestOriginProjection(navigation)
+
+    def extend(self, query):
+        return self.delegate.extend(query)
+
+    @property
+    def callback_column(self):
+        if self.navigation.value["kind"] == "summary":
+            return self.delegate.callback_column
+        delegate = self.delegate
+        return delegate.column + 2 if delegate.origin_column is None else delegate.origin_column + 1
+
+    def check_with_permissions(self, rows, held):
+        self.delegate.check_with_permissions(rows, held)

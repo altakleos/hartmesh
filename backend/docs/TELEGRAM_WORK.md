@@ -1116,3 +1116,12 @@ protected message; it cannot reclaim active claims or erase a changed failure
 reason. Final provider checks qualify both sides of the replacement transaction.
 Daily summary and Show SDK calls drain admitted requests during cancellation,
 matching digest delivery; shutdown cannot admit another part.
+
+Summary item buttons use an explicit `summary` navigation origin and request ID;
+no notification outbox is invented or required. The common preview dispatcher
+selects existing question/decision/review owners from a typed navigation target.
+Current summary selection, canonical request, acknowledged parent/Show, original
+control age and exact reusable callback are checked in one provider-final read.
+Review media keeps the existing result identity, export guards and receipt ledger.
+Navigation recovery retains that same origin and age. These optional owners remain
+uninstalled until the supervisor integration is qualified.
