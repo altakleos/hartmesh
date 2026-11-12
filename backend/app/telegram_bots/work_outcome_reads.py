@@ -13,7 +13,7 @@ from deerflow.agent_instances.work import UNRESOLVED
 from deerflow.persistence.agent_instances.human_input import HumanInputEventRow, HumanInputRequestRow
 from deerflow.persistence.agent_instances.model import AgentInstanceRow
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow, AgentWorkRow
-from deerflow.persistence.telegram_bots.model import TelegramActRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow
 from deerflow.persistence.user.model import UserRow
 from deerflow.utils.file_io import await_drained
 
@@ -93,9 +93,28 @@ class _OutcomeProjection:
         supervisor, recipient = aliased(UserRow), aliased(UserRow)
         other, attempt = aliased(AgentWorkAttemptRow), AgentWorkAttemptRow
         latest = select(other.id).where(other.work_id == work.id).order_by(other.created_at.desc(), other.id.desc()).limit(1).scalar_subquery()
+        # A conclusive old operation transfers presentation ownership when its
+        # source controls are retired for a fresh preview. Apply this inside
+        # the final joined authority read, including queued SDK deliveries.
+        original = aliased(TelegramCallbackRow)
+        transferred = (
+            select(original.id)
+            .where(
+                original.id == act.id,
+                original.link_id == act.link_id,
+                original.chat_id == act.chat_id,
+                original.binding_generation == act.binding_generation,
+                original.payload["work_action_id"].as_string() == act.id,
+                original.consumed_at.is_not(None),
+                original.closed_reason.in_(("work-refresh", "superseded")),
+            )
+            .correlate(act)
+            .exists()
+        )
         return (
             query.add_columns(act, work, request, event, attempt, effect, supervisor.email, recipient.email, self.file_answer.expression() if self.file_answer else literal(None).label("work_file_evidence"))
             .join(act, act.id == self.act.id)
+            .where(~and_(act.state.in_(("conflict", "refused")), transferred))
             .join(work, work.id == self.act.work_id)
             .join(request, request.id == self.act.request_id)
             .outerjoin(event, and_(event.instance_id == act.instance_id, event.operation_id == act.id))
@@ -107,6 +126,10 @@ class _OutcomeProjection:
 
     def check(self, rows):
         from app.telegram_bots.acts import _snapshot
+        from app.telegram_bots.work_outcome_transfer import transferred
+
+        if transferred(self.act):
+            raise ProductSourceRetired()
 
         if self.file_answer is not None:
             self.file_answer.check(rows[0]._mapping["work_file_evidence"])

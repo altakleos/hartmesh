@@ -325,7 +325,19 @@ absence leaves the action unchanged. This differs from an explicit `Acts.check`,
 which can repeat the original command. Observation never calls that retry path.
 Each tick scans one bounded keyset page for one binding with a fixed maximum ID
 for that pass; new records cannot postpone revisiting older deferred actions.
-Acknowledged phases need no new observation. Per-link tasks share eight slots,
+Acknowledged phases need no new observation. A conclusive conflict or refusal
+whose presentation moved to a fresh preview cannot publish an old outcome.
+The source-qualified writer records a version-2 `work_outcome_transfer` on the
+original Act, distinct from a version-1 acknowledged delivery receipt. It survives
+callback/outbox cleanup, applies only to that conclusive phase and expires with
+the settled journal. Transfer retires earlier outcome phases and their controls,
+including failed deliveries, while preserving acknowledged history. An active
+claim must drain before the successor can take ownership. Observation reconciles
+canonical receipts first: later success still wins. The transfer proof shares the final source/authority check
+for publication and SDK dispatch; queued obsolete replies retire without changing
+the new preview or claiming delivery. Completed and uncertain operations retain
+their receipt and retry handling.
+Per-link tasks share eight slots,
 so a held link cannot drop another link's tick. The worker owns and drains all
 tasks across stop/cancellation and fences publication after shutdown. These components remain uninstalled until the full controller wiring.
 
@@ -334,7 +346,15 @@ prompts, confirmations, routing, Show and explicit Retry. The adapter consults i
 only when a collaborator is installed; the supervisor does not install it yet.
 It reserves the existing immutable operation before checking it, and lets canonical
 outcome planning own result replies. A result-read failure after saving an action
-is deferred to receipt observation, never reported as a failed save. Direct
+is deferred to receipt observation, never reported as a failed save. Preview-only
+read failures report `tap.failed` while the original button remains unconsumed;
+an ambiguous committed preview stays silent. Conclusive `storage-busy` refusals
+also report `tap.failed` and wait for an explicit press. That press checks receipts
+first and retains the same body, operation, first-attempt clock and all current
+authority/revision guards. Its locked original acknowledged control must still
+be usable, and a transferred presentation cannot reopen; the final effect read
+also rejects retained transfer receipts. Timers, unknown outcomes, cancellation and other
+refusals do not gain retry permission from this path. Direct
 wrong-person routing uses the reply-owned refresh coordinator when a selected
 recipient loses access. General routing uses a locked acknowledged choice to
 refresh the current roster, admitting only an unreserved choice or its exact

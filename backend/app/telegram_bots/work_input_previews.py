@@ -226,6 +226,9 @@ class WorkInputPreviews:
             input_origin=identity,
         )
         await self.captures.inbox.register_delivery([captured], outbox_id=result, primary=False, finish=False, session=writer)
+        from app.telegram_bots.work_outcome_transfer import transfer_input_outcomes
+
+        await transfer_input_outcomes(writer, link, captured, result, outbox=self.plans.outbox)
         return result
 
     async def _retire_previous(self, writer, link, identity):

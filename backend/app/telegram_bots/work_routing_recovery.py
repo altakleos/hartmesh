@@ -72,6 +72,9 @@ class WorkRoutingRecovery(WorkRequestRecovery):
                     if body.recipient_id != group.selected.payload["recipient_id"] or body.expected_request_revision != group.selected.payload["request_revision"]:
                         raise CallbackRefused()
                 await self._replace(writer, link, parent, source, settings, choice=callback_id)
+                from app.telegram_bots.work_outcome_transfer import transfer_outcome
+
+                await transfer_outcome(writer, link, callback_id, parent.id, outbox=self.outbox)
                 return parent.id
 
         return await await_drained(perform())

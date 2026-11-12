@@ -2010,7 +2010,8 @@ acknowledgement without starting work. Album collection retains every member
 before choosing its destination, including across restarts. Closed or ambiguous
 albums retain every member for explicit recovery choices. Reopen asks for a new
 answer; Send as new preserves the files and captions; Discard settles the group.
-Controller activation remains outstanding. Complete first-tap previews now have
+Controller activation remains outstanding. Background recovery preserves newer
+request previews. Complete first-tap previews now have
 a durable delivery boundary that waits for the entire message before enabling controls
 or typing prompts. Confirmed choices also have durable, single-operation admission
 for recovery after a restart. Temporarily refused confirmations can rebuild a
@@ -2025,7 +2026,10 @@ Those replies can refresh changed recipient choices without resubmitting the res
 Their original input remains available while live choices or pending refreshes need it.
 An optional callback dispatcher connects previews, confirmations and routing to
 those durable operations. Explicit Retry keeps the original operation and body;
-duplicate presses of one shown retry do not start another attempt. Changed review
+duplicate presses of one shown retry do not start another attempt. Preview
+buttons remain available after a temporary read failure. A temporary storage
+refusal keeps its buttons and waits for another tap on the same saved action.
+Changed review
 confirmations show the complete current review before offering fresh controls;
 routing choices refresh when a selected person loses access. Optional prompt-text
 routing saves answers and unchanged changes notes once, retains changed review

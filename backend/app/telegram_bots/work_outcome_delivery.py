@@ -86,6 +86,10 @@ def phase(act):
 
 
 def delivery_receipt(value):
+    from app.telegram_bots.work_outcome_transfer import transfer_receipt
+
+    if transfer_receipt(value) is not None:
+        return None
     if value is None:
         return None
     from collections.abc import Mapping
@@ -432,51 +436,59 @@ class WorkOutcomePlans:
         return original, origin, topic
 
     async def _retire_controls(self, writer, link, row, reason, *, editing=None):
-        groups = {part.get("callback_group_id") for part in row.parts} - {None}
-        controls = list(await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id.in_(groups)).order_by(TelegramCallbackRow.id).with_for_update()))
-        cleared = set()
-        for control in controls:
-            if control.consumed_at is not None and control.closed_reason != "work-done":
-                continue
-            if (row.link_id, row.owner_user_id, row.binding_generation, row.chat_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id) or (
-                control.link_id,
-                control.chat_id,
-                control.binding_generation,
-                control.message_thread_id,
-                control.payload.get("anchor_outbox_id"),
-            ) != (link.id, link.chat_id, link.binding_generation, row.message_thread_id, row.id):
-                raise ProductSourceRetired()
-            own = next((part for part in row.parts if part.get("callback_group_id") == control.group_id and part["presentation_version"] == control.payload.get("presentation_version")), None)
-            if own is None or control.message_id is not None and (own["state"] != "sent" or own["message_ids"] != [control.message_id]):
-                raise ProductSourceRetired()
-            if control.message_id is not None and control.message_id != editing and control.group_id not in cleared:
-                cleared.add(control.group_id)
-                key = "notice:work-outcome-cleanup:" + control.group_id
-                existing = await writer.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == key))
-                if existing is None:
-                    writer.add(keyboard_cleanup_row(control, owner_user_id=link.owner_user_id, now=self.outbox.clock(), dedupe_key=key))
-            if control.consumed_at is None:
-                control.consumed_at, control.closed_reason = self.outbox.clock(), reason
-            if reason == "work-done" and control.kind == "voice_save_answer":
-                control.payload = {key: value for key, value in control.payload.items() if key != "transcript"}
-                keyboard = deepcopy(row.payload["product_keyboard_basis"])
-                for line in keyboard:
-                    for descriptor in line:
-                        if descriptor.get("kind") == "voice_save_answer":
-                            descriptor["payload"].pop("transcript", None)
-                row.payload = {**row.payload, "product_keyboard_basis": keyboard}
+        await retire_outcome_controls(self.outbox, writer, link, row, reason, editing=editing)
 
     async def _retire(self, writer, link, row):
-        if row.claim_id is not None:
-            raise DeliveryRetry(timedelta(seconds=5))
-        await self._retire_controls(writer, link, row, "superseded")
-        if row.state not in {"sent", "skipped"}:
-            row.state, row.skip_reason, row.closed_at = "skipped", "superseded", self.outbox.clock()
-            parts = deepcopy(row.parts)
-            for part in parts:
-                if part["state"] not in {"sent", "retired", "unavailable"}:
-                    part["state"] = "retired"
-            row.parts = parts
+        await retire_outcome(self.outbox, writer, link, row)
+
+
+async def retire_outcome_controls(outbox, writer, link, row, reason, *, editing=None):
+    groups = {part.get("callback_group_id") for part in row.parts} - {None}
+    controls = list(await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id.in_(groups)).order_by(TelegramCallbackRow.id).with_for_update()))
+    cleared = set()
+    for control in controls:
+        if control.consumed_at is not None and control.closed_reason != "work-done":
+            continue
+        if (row.link_id, row.owner_user_id, row.binding_generation, row.chat_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id) or (
+            control.link_id,
+            control.chat_id,
+            control.binding_generation,
+            control.message_thread_id,
+            control.payload.get("anchor_outbox_id"),
+        ) != (link.id, link.chat_id, link.binding_generation, row.message_thread_id, row.id):
+            raise ProductSourceRetired()
+        own = next((part for part in row.parts if part.get("callback_group_id") == control.group_id and part["presentation_version"] == control.payload.get("presentation_version")), None)
+        if own is None or control.message_id is not None and (own["state"] != "sent" or own["message_ids"] != [control.message_id]):
+            raise ProductSourceRetired()
+        if control.message_id is not None and control.message_id != editing and control.group_id not in cleared:
+            cleared.add(control.group_id)
+            key = "notice:work-outcome-cleanup:" + control.group_id
+            existing = await writer.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == key))
+            if existing is None:
+                writer.add(keyboard_cleanup_row(control, owner_user_id=link.owner_user_id, now=outbox.clock(), dedupe_key=key))
+        if control.consumed_at is None:
+            control.consumed_at, control.closed_reason = outbox.clock(), reason
+        if reason == "work-done" and control.kind == "voice_save_answer":
+            control.payload = {key: value for key, value in control.payload.items() if key != "transcript"}
+            keyboard = deepcopy(row.payload["product_keyboard_basis"])
+            for line in keyboard:
+                for descriptor in line:
+                    if descriptor.get("kind") == "voice_save_answer":
+                        descriptor["payload"].pop("transcript", None)
+            row.payload = {**row.payload, "product_keyboard_basis": keyboard}
+
+
+async def retire_outcome(outbox, writer, link, row):
+    if row.claim_id is not None:
+        raise DeliveryRetry(timedelta(seconds=5))
+    await retire_outcome_controls(outbox, writer, link, row, "superseded")
+    if row.state not in {"sent", "skipped"}:
+        row.state, row.skip_reason, row.closed_at = "skipped", "superseded", outbox.clock()
+        parts = deepcopy(row.parts)
+        for part in parts:
+            if part["state"] not in {"sent", "retired", "unavailable"}:
+                part["state"] = "retired"
+        row.parts = parts
 
 
 def _followup_candidates(plans, link, data, routing):

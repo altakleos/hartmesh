@@ -82,6 +82,7 @@ class _EffectProjection:
         return result
 
     def check(self, rows):
+        from app.telegram_bots.work_outcome_transfer import transfer_receipt
         from deerflow.config.app_config import peek_loaded_app_config
 
         bot, _target, permissions, _policy = rows[0][:4]
@@ -99,6 +100,8 @@ class _EffectProjection:
             raise AuthorityUnavailable()
         if any(getattr(saved, name) != getattr(self.act, name) for name in _ACT_SCOPE) or not same_body(saved.body, self.act.body) or saved.state != "pending" or saved.attempts != self.act.attempts or saved.cancel_requested_at is not None:
             raise AgentDenied("The action admission is no longer current")
+        if transfer_receipt(saved.continuation) is not None:
+            raise AgentDenied("The action presentation has been retired")
         if saved.kind != "respond" and permissions & 6 != 6:
             raise AgentDenied("Management access is unavailable")
         if saved.kind in {"decide", "accept"} and bot.acts_paused_since is not None:

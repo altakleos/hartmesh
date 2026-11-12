@@ -94,13 +94,17 @@ class WorkOutcomeRecovery:
                 # Inspecting a receipt never calls check(): that method is an
                 # explicit retry and may issue the original command again.
                 before = await self.acts._work_record(identity)
+                from app.telegram_bots.work_outcome_transfer import transferred
+
                 receipt = delivery_receipt(before.continuation)
                 if receipt is not None and same_body(receipt["phase"], phase({"state": before.state, "reason": before.reason, "attempts": before.attempts})):
                     continue
                 if before.state == "pending" and before.reason is None and before.attempts == 0:
                     continue
-                await self.acts.reconcile_receipt(identity)
+                current = await self.acts.reconcile_receipt(identity)
                 guard.current()
+                if transferred(current):
+                    continue
                 await self.plans.plan(link, identity, guard=guard)
             except Exception as exc:
                 # A blocked source must not starve independent eligible Work.

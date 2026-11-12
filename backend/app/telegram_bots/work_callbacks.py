@@ -117,7 +117,7 @@ class WorkCallbacks:
                         elif staged.kind in {"decide", "accept"} and staged.state == "pending" and staged.reason == "attempt-unresolved":
                             if await self.refusals.refresh(link, row.id, **scope) is not None:
                                 return True
-                        if staged.attempts == 0 or staged.state == "pending" and staged.reason in {"attempt-unresolved", "actions-paused"}:
+                        if staged.attempts == 0 or staged.state == "pending" and staged.reason in {"attempt-unresolved", "actions-paused"} or staged.state == "refused" and staged.reason == "storage-busy":
                             expected = {"id": staged.id, "kind": staged.kind, "body": staged.body, "attempts": staged.attempts}
                             result = await self.acts.check(staged.id, expected=expected, attempt_current=current)
                         else:
@@ -151,6 +151,11 @@ class WorkCallbacks:
             except CallbackRefused:
                 raise
             except Exception as error:
+                if row.kind in _VIEWS | {"reveal", "dismiss"}:
+                    # These gestures only publish previews, never Work effects.
+                    # The adapter rechecks the original control and stays silent
+                    # if an ambiguous presentation commit already consumed it.
+                    raise CallbackRefused("tap.failed") from error
                 # A storage/read failure may follow an admitted operation.
                 # Its receipt observer supplies the eventual result; a generic
                 # 'failed' reply here could contradict the saved action.
