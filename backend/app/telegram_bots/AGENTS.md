@@ -1,9 +1,8 @@
 # Managed Telegram bots
 
-`config.py` validates the optional `AppConfig.model_extra["telegram_bots"]`
-section without starting services. Nested models forbid unknown keys and type
-coercion; absence returns fresh defaults with `enabled=False`. Keep this separate
-from the existing deployment-wide channel adapter.
+`config.py` validates optional `AppConfig.model_extra["telegram_bots"]` without
+starting services. Nested models forbid unknown keys and coercion; absence returns
+defaults with `enabled=False`. Keep the deployment-wide adapter separate.
 
 Compose's renderer owns enabled/public URL/bot limits/voice provider and the
 legacy-channel closure; an absent environment key means on. See
@@ -61,8 +60,9 @@ Space READ checks; comment publication uses that proof too. Multipart recovery
 preserves the original operation and ACKs. Supervisor installation remains pending.
 
 The optional `work_callbacks.py` dispatcher composes existing Work owners; the
-supervisor does not install it yet. Stale callbacks can refresh only unreserved
-controls or exact conclusive conflicts; retained input has its own owner. Known
+supervisor does not install it yet. Result Show and file receipts:
+[Work guidance](../../docs/TELEGRAM_WORK.md). Stale callbacks refresh only
+unreserved controls or exact conclusive conflicts; retained input has its own owner. Known
 non-effect confirmation refusals use `work_refusal_recovery.py` before retry.
 Routing refresh preserves unresolved and collected journals. Explicit Retry validates the whole shown
 outcome and original Act body, then serializes one attempt for that displayed

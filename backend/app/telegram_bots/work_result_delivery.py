@@ -16,8 +16,12 @@ class WorkReviewPlans(WorkRequestPlans):
         return present_review_files(source, locale=settings.locale, concealed=source.protected, outbox_id=identity, **result_options(self._extras(source)["result_files"]))
 
     async def _freeze(self, writer, link, row, source, settings, *, pending=True):
+        from app.telegram_bots.work_result_identity import result_identity
+        from deerflow.persistence.agent_instances.work import AgentWorkRow
+
         identity = await super()._freeze(writer, link, row, source, settings, pending=True)
-        row.payload = {**row.payload, "work_result_ledger": initial_ledger(row.parts)}
+        work = await writer.get(AgentWorkRow, source.work["id"], populate_existing=True)
+        row.payload = {**row.payload, "work_result_ledger": initial_ledger(row.parts), "work_result_identity": result_identity(work)}
         await writer.flush()
         return identity
 
@@ -35,6 +39,7 @@ async def _change_result_part(outbox, captured, *, hashes=None, templates=None, 
 
     from app.telegram_bots.producer import DeliveryClaimRetired, _item
     from app.telegram_bots.work_request_source import frozen
+    from app.telegram_bots.work_result_history import qualified_history
     from app.telegram_bots.work_result_ledger import qualify_result_parts, replace_media
     from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
 
@@ -43,7 +48,7 @@ async def _change_result_part(outbox, captured, *, hashes=None, templates=None, 
         current = outbox._sending(binding, row, link_id=captured.link.id, part_id=captured.part["part_id"], claim_owner=captured.claim_owner, claim_id=captured.claim_id, token_revision=captured.token_revision)
         if current != captured:
             raise DeliveryClaimRetired()
-        basis, _source, _part = frozen(current)
+        basis, source, _part = frozen(current)
         if "result_files" not in basis:
             raise DeliveryClaimRetired()
         if hashes is not None:
@@ -59,7 +64,8 @@ async def _change_result_part(outbox, captured, *, hashes=None, templates=None, 
             frozen(SimpleNamespace(link=current.link, item=_item(row), part=selected))
         else:
             replace_media(row, current.part["part_id"], templates, reason=reason)
-            qualify_result_parts(_item(row), basis["parts"])
+            carried, hashes = qualified_history(_item(row), source)
+            qualify_result_parts(_item(row), basis["parts"], carried=carried, known_hashes=hashes)
             row.state, row.not_before = "pending", outbox.clock()
             row.claim_owner = row.claim_id = row.claimed_at = None
         return True

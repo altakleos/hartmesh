@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_request_source import WorkRequestSources, _RequestProjection
+from app.telegram_bots.work_result_identity import result_identity
 from deerflow.utils.file_io import await_drained
 
 
@@ -30,4 +31,14 @@ class WorkResultSources(WorkRequestSources):
         if settings is None:
             raise ProductSourceRetired()
         zone = await asyncio.to_thread(ZoneInfo, settings.timezone)
-        return _RequestProjection(self, captured, basis, source, settings, zone, True, now)
+        return _ResultProjection(self, captured, basis, source, settings, zone, True, now)
+
+
+class _ResultProjection(_RequestProjection):
+    def check(self, rows):
+        if result_identity(rows[0][self.column]) != self.captured.item.payload.get("work_result_identity"):
+            raise ProductSourceRetired()
+        super().check(rows)
+
+
+WorkResultSources.projection_type = _ResultProjection

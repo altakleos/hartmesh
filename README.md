@@ -2026,8 +2026,11 @@ rendering and startup integration remain outstanding. Result-file export prepara
 checks the original outcome and the recipient's current file permissions.
 Initial review-file delivery keeps files before the complete card, preserves
 acknowledged files through card retries, and waits for the whole delivery before
-enabling controls. Protected result Show, changed-source recovery, failure links
-and notification startup integration remain pending.
+enabling controls. Protected result Show clears its teaser button before sending
+protected files and a new card. A changed review resumes unfinished files and
+refreshes the card without uploading acknowledged files again, including after
+a language or file-access change. Failed-transport repair, failure links and
+notification startup integration remain pending.
 Background recovery preserves newer
 request previews. Complete first-tap previews now have
 a durable delivery boundary that waits for the entire message before enabling controls
