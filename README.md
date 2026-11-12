@@ -2036,8 +2036,12 @@ this same file/card sequence and recheck the original event before delivery.
 Result notifications without review controls also have a delivery foundation:
 the complete outcome and any suggestion follow its files, protected results wait
 for Show, and a waiting-review notice stays silent after Show. Each notice checks
-the actual event, recipient, outcome and suggestion before sending. These workers
-remain uninstalled; result-notice refresh, other notification rendering and startup
+the actual event, recipient, outcome and suggestion before sending. Result-notice
+refresh preserves delivered files. Colleague notices also have delivery, protected
+Show and recovery foundations, including answers and stopped attempts. Proposed
+assignments show their complete objective and completion criteria, with Open
+assignment on the web and Not now to clear the buttons without changing Work.
+These workers remain uninstalled; remaining notification forms and startup
 integration are still pending.
 Background recovery preserves newer
 request previews. Complete first-tap previews now have

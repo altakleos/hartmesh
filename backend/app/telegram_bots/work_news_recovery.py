@@ -21,6 +21,35 @@ class WorkNewsRecovery:
     def __init__(self, plans):
         self.plans, self.reader, self.outbox, self.callbacks = plans, plans.reader, plans.outbox, plans.callbacks
 
+    async def dismiss(self, link, callback_id, *, chat_id, message_id, message_thread_id, guard):
+        """Retire an exact acknowledged proposal keyboard, with no Work effect."""
+
+        async def perform():
+            from app.telegram_bots.work_news_delivery import frozen_news
+
+            async with self.callbacks.writer(link, guard) as writer:
+                group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=guard, session=writer)
+                row = await writer.get(TelegramOutboxRow, group.anchor_outbox_id, with_for_update=True, populate_existing=True)
+                if row is None or row.state != "sent" or group.selected.kind != "dismiss" or group.selected.target_kind != "outbox" or group.selected.target_id != row.id:
+                    raise CallbackRefused()
+                item = _item(row)
+                basis, source, _recipe = frozen_news(SimpleNamespace(link=link, item=item, part=item.parts[-1]), acknowledged=True)
+                part = item.parts[-1]
+                if (
+                    source.key != "work.proposed"
+                    or basis["concealed"]
+                    or part.get("callback_group_id") != group.selected.group_id
+                    or part["message_ids"] != [group.selected.message_id]
+                    or part["presentation_version"] != group.presentation_version
+                ):
+                    raise CallbackRefused()
+                await self.callbacks.consume_group(group, reason="dismissed", session=writer)
+                cleanup = keyboard_cleanup_row(group.selected, owner_user_id=link.owner_user_id, now=self.outbox.clock())
+                writer.add(cleanup)
+                return cleanup.id
+
+        return await await_drained(perform())
+
     async def refresh(self, captured):
         async def perform():
             source = await self.reader.read(captured.link, captured.item)

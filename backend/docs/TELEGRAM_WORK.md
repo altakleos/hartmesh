@@ -837,3 +837,14 @@ clock at each source/provider snapshot, so crossing midnight or changing the
 timezone defers the old presentation for refresh. Untimed edit/withdrawal notices
 leave preference drift to the ordinary final settings fence. These sources remain
 dormant pending installation; progress/status messages are separate.
+
+`work_proposal_news.py` qualifies a derived assignment's exact source Work,
+attempt and activation, including its original requester and agent principal.
+It does not infer a parent report from timestamps. The child must remain open
+and never have started; the complete current objective and success criteria are
+rechecked at final delivery and refreshed when changed. The full proposal offers
+Open assignment on the web and Not now. Protected proposals first offer Show.
+Not now consumes only the exact fully acknowledged proposal group and queues
+durable keyboard cleanup in the same guarded transaction. It does not modify,
+withdraw or start Work, and it can clear an old proposal after Work changes.
+An already consumed group cannot repeat dismissal. These owners remain dormant.

@@ -29,10 +29,12 @@ from deerflow.utils.file_io import await_drained
 def recipes(source, basis, identity, link):
     view = present_news(source.key, values=source.values, locale=basis["locale"], protected=source.protected, concealed=basis["concealed"], outbox_id=identity)
     keyboard = [list(line) for line in view.keyboard]
-    if not basis["concealed"] and (source.key in {"decision.recorded", "result.changes", "attempt.stopped", "attempt.stopped_changed"} or source.key == "request.answered" and source.values.get("open_assignment") is True):
+    if not basis["concealed"] and (source.key in {"decision.recorded", "result.changes", "attempt.stopped", "attempt.stopped_changed", "work.proposed"} or source.key == "request.answered" and source.values.get("open_assignment") is True):
         address = page_address("web.work", link, work_id=source.work_id, permissions=3, public_base_url=basis["public_base_url"])
         if address:
             keyboard.append([{"label": "label.open_assignment", "url": address}])
+    if not basis["concealed"] and source.key == "work.proposed":
+        keyboard.append([{"label": "label.not_now", "kind": "dismiss", "target_kind": "outbox", "target_id": identity, "payload": {}}])
     keyboard = canonical_keyboard(keyboard)
     parts = [{**part, "source_ref": {"key": "work.news.presentation", "values": {"work_id": source.work_id, "part": index}}} for index, part in enumerate(view.parts)]
     if keyboard:
