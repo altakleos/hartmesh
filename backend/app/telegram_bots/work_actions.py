@@ -27,7 +27,7 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow
 from deerflow.spaces.contract import PrincipalRef
 from deerflow.utils.file_io import await_drained
 
-_ACT_SCOPE = ("link_id", "owner_user_id", "bot_id", "binding_generation", "telegram_user_id", "chat_id", "instance_id", "work_id", "request_id", "kind")
+_ACT_SCOPE = ("link_id", "owner_user_id", "bot_id", "binding_generation", "telegram_user_id", "chat_id", "instance_id", "work_id", "request_id", "kind", "message_id")
 
 WORK_ACT_KINDS = frozenset({"respond", "decide", "accept", "changes_requested", "route"})
 _SCOPE = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "binding_generation", "token_revision", "telegram_user_id", "chat_id", "connection_id")
@@ -122,10 +122,12 @@ class WorkActionMethods:
         owner = await self.authority.prepare_live_owner(link.owner_user_id)
         return await self._stage_work_act(link, kind=kind, request_id=request_id, work_id=work_id, request=request, owner=owner)
 
-    async def _stage_work_act(self, link, *, kind, request_id, work_id, request, owner, session=None):
+    async def _stage_work_act(self, link, *, kind, request_id, work_id, request, owner, session=None, message_id=None):
         """Store an exact operation in its caller's guarded writer; do not act."""
         from app.telegram_bots.acts import _snapshot
 
+        if message_id is not None and (kind != "respond" or type(message_id) is not int or not 0 < message_id < 2**63):
+            raise ValueError("invalid-work-file-origin")
         request_for(kind, request.model_dump(mode="json", exclude_unset=True), identity=request.operation_id)
         body = request.model_dump(mode="json", exclude_unset=True)
         async with self.outbox._writer(link.id, session=session) as (session, current):
@@ -143,6 +145,7 @@ class WorkActionMethods:
                 work_id=work_id,
                 request_id=request_id,
                 kind=kind,
+                message_id=message_id,
             )
             if row is not None:
                 if any(getattr(row, key) != value for key, value in scope.items()) or not same_body(row.body, body):

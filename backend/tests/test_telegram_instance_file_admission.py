@@ -29,7 +29,10 @@ pytestmark = pytest.mark.asyncio
 
 @pytest_asyncio.fixture
 async def file_admission(publication, tmp_path, monkeypatch):
-    e = publication
+    yield await prepare_file_home(publication, tmp_path, monkeypatch)
+
+
+async def prepare_file_home(e, tmp_path, monkeypatch):
     agents = e.http_app.state.agent_instances
     async with e.db.engine.begin() as connection:
         await connection.run_sync(
@@ -69,7 +72,7 @@ async def file_admission(publication, tmp_path, monkeypatch):
 
     agents.residents = NoWorkspace()
     e.file_service, e.files, e.home, e.actor = agents, files, home, actor
-    yield e
+    return e
 
 
 async def test_use_only_put_is_direct_attributed_and_replayable_without_workspace(file_admission):

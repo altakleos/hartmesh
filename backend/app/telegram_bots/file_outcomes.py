@@ -54,7 +54,7 @@ class FileOutcomes:
             return check_recovery(recovery, self.services, channel, link) and (current is None or current() is True)
         return channel._callback_current(link) and (current is None or current() is True)
 
-    async def question(self, channel, link, saved, *, current=None, _recovery=None):
+    async def question(self, channel, link, saved, *, current=None, _recovery=None, _settle=None):
         """One captionless question closes only actually saved input members."""
         if not saved or len(saved) > 64:
             raise ValueError("file-question-conflict") from None
@@ -84,6 +84,8 @@ class FileOutcomes:
                     receipts.append(receipt)
                     origins.append(origin)
                 self.services.file_puts.inbox._group(origins)
+                if _settle is not None:
+                    await _settle(writer)
                 first = origins[0]
                 identity = f"file-received:{link.chat_id}:{first.message_id}"
                 basis = dict(version=1, sources=[row.message_id for row in origins], files=[_basis(row) for row in receipts])

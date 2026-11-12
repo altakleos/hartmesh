@@ -9,7 +9,7 @@ from sqlalchemy.orm import aliased
 
 from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.callbacks import CallbackGroup, CallbackRefused, _aware, _row, _validate_rows
-from app.telegram_bots.inbox import InboxRow
+from app.telegram_bots.inbox import InboxRow, validate_chat_file
 from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.producer import keyboard_cleanup_row
 from app.telegram_bots.work_actions import _ACT_SCOPE, same_body
@@ -40,8 +40,16 @@ def reply_basis(link, parent, mark, controls, *, consumed, require_live=False):
     check_lifecycle = not draft or not consumed or require_live
     consumed = consumed and not draft
     raw = mark.sanitized_input
-    if type(raw) is not dict or set(raw) - {"type", "text", "reply_to_message_id"} or raw.get("type", "text") != "text":
+    media = type(raw) is dict and raw.get("type") == "media"
+    if type(raw) is not dict or set(raw) - ({"type", "text", "reply_to_message_id", "files", "media_group_id"} if media else {"type", "text", "reply_to_message_id"}) or raw.get("type", "text") not in {"text", "media"}:
         raise CallbackRefused()
+    if media:
+        files = raw.get("files")
+        if type(files) is not list or len(files) != 1:
+            raise CallbackRefused()
+        file = validate_chat_file(files[0])
+        if file["message_id"] != mark.message_id or file["telegram_bot_id"] != link.bot_id or type(raw.get("text")) is not str:
+            raise CallbackRefused()
     quoted = raw.get("reply_to_message_id")
     if type(quoted) is not int or (parent.link_id, parent.chat_id, parent.binding_generation, parent.message_thread_id) != (mark.link_id, mark.chat_id, mark.binding_generation, mark.message_thread_id):
         raise CallbackRefused()
@@ -68,7 +76,7 @@ def reply_basis(link, parent, mark, controls, *, consumed, require_live=False):
     if check_lifecycle and any("work_action_id" in row.payload or (row.consumed_at is not None) is not consumed or consumed and row.closed_reason != "work-reply" for row in controls):
         raise CallbackRefused()
     return {
-        "version": 2,
+        "version": 4 if media else 2,
         "source_outbox_id": parent.id,
         "presentation_version": parent.payload["presentation_version"],
         "group_id": controls[0].group_id,
@@ -77,15 +85,23 @@ def reply_basis(link, parent, mark, controls, *, consumed, require_live=False):
         "work_id": source.work["id"],
         "purpose": "answer" if source.request["purpose"] == "information" else "comment",
         "seen": source.seen,
-        "text": _TEXT.validate_python(raw.get("text")),
+        "text": None if media and not raw["text"].strip() else _TEXT.validate_python(raw.get("text")),
+        **({"files": files} if media else {}),
     }
 
 
 def response(captured):
     data = captured.route_basis["work_input"]
-    if data.get("version") != 2 or data.get("purpose") not in {"answer", "comment"} or len(captured.operation_ids) != 1:
+    if data.get("version") not in {2, 4} or data.get("purpose") not in {"answer", "comment"} or len(captured.operation_ids) != 1:
         raise CallbackRefused()
-    return Respond(operation_id=captured.operation_ids[0], expected_request_revision=data["seen"]["request_revision"], expected_assignment_revision=data["seen"]["assignment_revision"], text=data["text"])
+    file_text = None
+    if data["version"] == 4:
+        from app.telegram_bots.work_file_inputs import saved_file_text
+
+        file_text = saved_file_text(captured)
+    return Respond(
+        operation_id=captured.operation_ids[0], expected_request_revision=data["seen"]["request_revision"], expected_assignment_revision=data["seen"]["assignment_revision"], text=file_text if file_text is not None else data["text"]
+    )
 
 
 class WorkCardInputs:
@@ -115,9 +131,11 @@ class WorkCardInputs:
                     for row in rows:
                         self.callbacks._usable(row)
                     composed.fresh_capture = True
+                    composed.require_current = data["version"] == 4
                     operation = uuid4().hex
-                    composed.captured = replace(InboxRow.from_row(mark), route_kind="work_input", route_target_id=data["request_id"], route_basis={"work_input": data}, operation_ids=[operation], state="reply_pending")
-                    await self.inbox.route(InboxRow.from_row(mark), kind="work_input", target_id=data["request_id"], basis={"work_input": data}, operation_ids=[operation], session=writer)
+                    basis = {"work_input": data, **({"input_profile": {"version": 2, "kind": "chat_input", "forwarded": False, "origin": None}} if data["version"] == 4 else {})}
+                    composed.captured = replace(InboxRow.from_row(mark), route_kind="work_input", route_target_id=data["request_id"], route_basis=basis, operation_ids=[operation], state="reply_pending")
+                    await self.inbox.route(InboxRow.from_row(mark), kind="work_input", target_id=data["request_id"], basis=basis, operation_ids=[operation], session=writer)
                     if parent.payload.get("work_request_basis", {}).get("version") != 4:
                         group = CallbackGroup(_row(rows[0]), tuple(_row(row) for row in rows), parent.id, parent.payload["presentation_version"])
                         await self.callbacks.consume_group(group, reason="work-reply", session=writer)
@@ -125,6 +143,8 @@ class WorkCardInputs:
                         cleanup.payload = {**cleanup.payload, "work_request_parent_id": parent.id}
                         writer.add(cleanup)
                     await self.inbox.register_delivery([origin], outbox_id=parent.id, primary=False, finish=False, session=writer)
+                if data["version"] == 4 and "work_action_id" not in mark.route_basis:
+                    composed.require_current = True
                 if composed.captured is None:
                     composed.captured = InboxRow.from_row(mark)
                 return composed.captured
@@ -135,23 +155,40 @@ class WorkCardInputs:
         async def perform():
             async with self.plans.outbox.sessions() as reader:
                 mark = (await self.inbox._rows(reader, [origin]))[0]
-                if mark.route_kind != "work_input" or mark.route_basis.get("work_input", {}).get("version") != 2:
+                if mark.route_kind != "work_input" or mark.route_basis.get("work_input", {}).get("version") not in {2, 4}:
                     raise CallbackRefused()
                 parent_id = mark.route_basis["work_input"]["source_outbox_id"]
             captured = await self.capture(link, origin, source_outbox_id=parent_id, guard=guard)
-            request = response(captured)
             data = captured.route_basis["work_input"]
+            if data["version"] == 4:
+                from app.telegram_bots.file_puts import work_input_digest
+
+                if work_input_digest(captured) != work_input_digest(origin):
+                    raise CallbackRefused()
             await self.controls.acts._work_link(link)
             owner = await self.controls.acts.authority.prepare_live_owner(link.owner_user_id)
             admission = await prepare_attention(self.plans.reader, link)
             composed = _CardGuard(guard, admission, link, captured=captured)
             async with self.callbacks.writer(link, composed) as writer:
-                existing = await writer.get(TelegramActRow, request.operation_id, with_for_update=True, populate_existing=True)
+                existing = await writer.get(TelegramActRow, captured.operation_ids[0], with_for_update=True, populate_existing=True)
+                if data["version"] == 4 and existing is None:
+                    from app.telegram_bots.work_file_inputs import freeze_file_answer, read_file_response
+
+                    composed.file_receipt = await read_file_response(link, captured, session=writer)
+                    frozen = freeze_file_answer(composed.file_receipt)
+                    if "work_file" in captured.route_basis and not same_body(captured.route_basis["work_file"], frozen):
+                        raise CallbackRefused()
+                    mark = (await self.inbox._rows(writer, [origin]))[0]
+                    mark.route_basis = {**mark.route_basis, "work_file": frozen}
+                    captured = composed.captured = replace(captured, route_basis={**captured.route_basis, "work_file": frozen})
+                request = response(captured)
                 if "work_action_id" in captured.route_basis and (captured.route_basis["work_action_id"] != request.operation_id or existing is None):
                     raise CallbackRefused()
                 composed.require_current = existing is None
                 await composed.check(writer)
-                result = await self.controls.acts._stage_work_act(link, kind="respond", request_id=data["request_id"], work_id=data["work_id"], request=request, owner=owner, session=writer)
+                result = await self.controls.acts._stage_work_act(
+                    link, kind="respond", request_id=data["request_id"], work_id=data["work_id"], request=request, owner=owner, session=writer, message_id=captured.message_id if data["version"] == 4 else None
+                )
                 mark = (await self.inbox._rows(writer, [origin]))[0]
                 mark.route_basis = {**mark.route_basis, "work_action_id": result.id}
                 composed.captured, composed.action = replace(captured, route_basis={**captured.route_basis, "work_action_id": result.id}), result
@@ -165,6 +202,7 @@ class _CardGuard:
         self.base, self.admission, self.link, self.captured = base, admission, link, captured
         self.require_current, self.action = False, None
         self.fresh_capture = False
+        self.file_receipt = None
 
     async def prepare(self):
         await prepare_publication_guard(self.base)
@@ -186,7 +224,7 @@ class _CardProjection:
         captured = self.guard.captured
         data = captured.route_basis["work_input"]
         work, request, parent, mark, callback, saved = AgentWorkRow, HumanInputRequestRow, TelegramOutboxRow, TelegramInboundMarkRow, TelegramCallbackRow, aliased(TelegramActRow)
-        return (
+        query = (
             query.add_columns(work, request, parent, mark, callback, saved)
             .join(work, and_(work.id == data["work_id"], work.instance_id == TelegramBotLinkRow.agent_ref))
             .join(request, and_(request.id == data["request_id"], request.work_id == work.id, request.instance_id == TelegramBotLinkRow.agent_ref))
@@ -196,7 +234,19 @@ class _CardProjection:
             .outerjoin(saved, saved.id == captured.operation_ids[0])
         )
 
+        if self.guard.file_receipt is not None:
+            from deerflow.persistence.agent_instances.model import AgentInstanceRow
+            from deerflow.persistence.spaces.model import SpaceRow
+
+            file = aliased(TelegramActRow)
+            query = query.add_columns(file, SpaceRow.generation).join(file, file.id == self.guard.file_receipt[0].id).join(SpaceRow, SpaceRow.id == AgentInstanceRow.home_id)
+        return query
+
     def check(self, rows):
+        if self.guard.file_receipt is not None:
+            from app.telegram_bots.work_file_inputs import validate_file_response
+
+            validate_file_response(self.guard.link, self.guard.captured, self.guard.file_receipt, rows[0][14], rows[0][1], rows[0][15])
         work, request, parent, mark, _callback, saved = rows[0][8:14]
         guard, captured = self.guard, self.guard.captured
         controls = list({row[12].id: row[12] for row in rows if row[12] is not None}.values())

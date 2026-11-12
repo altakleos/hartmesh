@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import json
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -32,6 +33,13 @@ _BODY = {"name", "size", "sha256", "path", "file_id", "file_unique_id", "message
 
 def file_act_id(link, file):
     return hashlib.sha256(f"{link.id}:{file['file_unique_id']}:{file['message_id']}".encode()).hexdigest()[:32]
+
+
+def work_input_digest(mark):
+    """Bind a native receipt to the immutable actual Work input, not later routing."""
+    packet = {name: getattr(mark, name) for name in ("link_id", "chat_id", "message_id", "message_thread_id", "update_id", "binding_generation", "sanitized_input", "operation_ids")}
+    packet.update(work_input=mark.route_basis["work_input"], input_profile=mark.route_basis["input_profile"])
+    return hashlib.sha256(json.dumps(packet, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
 
 
 def child_operation(identity, label):
@@ -80,9 +88,11 @@ def _file_journal(row, *, max_bytes=None):
     if row.kind != "file_put" or type(row.id) is not str or re.fullmatch(r"[0-9a-f]{32}", row.id) is None:
         raise ValueError("file-act-conflict") from None
     continuation = row.continuation
-    if type(continuation) is not dict or type(continuation.get("version")) is not int or continuation["version"] not in {1, 2, 3}:
+    if type(continuation) is not dict or type(continuation.get("version")) is not int or continuation["version"] not in {1, 2, 3, 4}:
         raise ValueError("file-act-conflict") from None
-    if set(continuation) != {"version", "file", "labels", "presses", "target"} | ({"input"} if continuation["version"] >= 2 else set()) | ({"delivery"} if continuation["version"] == 3 else set()):
+    if set(continuation) != {"version", "file", "labels", "presses", "target"} | ({"input"} if continuation["version"] >= 2 else set()) | ({"delivery"} if continuation["version"] >= 3 else set()) | (
+        {"work"} if continuation["version"] == 4 else set()
+    ):
         raise ValueError("file-act-conflict") from None
     if continuation["version"] >= 2:
         source = continuation["input"]
@@ -99,6 +109,21 @@ def _file_journal(row, *, max_bytes=None):
             or row.message_id not in source["message_ids"]
         ):
             raise ValueError("file-act-conflict") from None
+    if continuation["version"] == 4:
+        work = continuation["work"]
+        if (
+            type(work) is not dict
+            or set(work) != {"version", "request_id", "source_outbox_id", "operation_id", "update_id", "input_sha256"}
+            or type(work["version"]) is not int
+            or work["version"] != 1
+            or type(work["update_id"]) is not int
+            or not 0 <= work["update_id"] < 2**63
+        ):
+            raise ValueError("file-work-input-conflict") from None
+        if type(work["input_sha256"]) is not str or re.fullmatch(r"[0-9a-f]{64}", work["input_sha256"]) is None:
+            raise ValueError("file-work-input-conflict") from None
+        if any(type(work[key]) is not str or re.fullmatch(r"[0-9a-f]{32}", work[key]) is None for key in ("request_id", "source_outbox_id", "operation_id")) or continuation["input"]["message_ids"] != [row.message_id]:
+            raise ValueError("file-work-input-conflict") from None
     target = continuation["target"]
     if (
         type(target) is not dict
@@ -192,6 +217,29 @@ def settled_file_journal(row):
     return True
 
 
+async def retain_captionless_file(writer, link, row, now):
+    """Retain one newly completed or explicitly transferred file for the next text."""
+    file = row.continuation["file"]
+    values = dict(
+        chat_id=link.chat_id,
+        message_thread_id=row.continuation["input"]["topic"],
+        binding_generation=link.binding_generation,
+        file_id=file["file_id"],
+        file_unique_id=file["file_unique_id"],
+        filename=file["filename"],
+        mime_type=file["mime_type"],
+        size=-1 if file["size"] is None else file["size"],
+        is_image=file["type"] == "image",
+        agent_file_path=row.result["path"],
+    )
+    existing = await writer.get(TelegramPendingFileRow, (link.id, row.message_id), with_for_update=True, populate_existing=True)
+    if existing is not None:
+        if any(getattr(existing, key) != value for key, value in values.items()):
+            raise ValueError("pending-file-conflict") from None
+    else:
+        writer.add(TelegramPendingFileRow(link_id=link.id, message_id=row.message_id, created_at=now, **values))
+
+
 class FilePuts:
     """One journal per source file; recovery never resumes bytes or file effects.
 
@@ -258,14 +306,32 @@ class FilePuts:
                     raise ValueError("file-act-conflict") from None
                 return _snapshot(row)
             mark = await writer.get(TelegramInboundMarkRow, (origin.link_id, origin.message_id, origin.chat_id), with_for_update=True, populate_existing=True)
-            if mark is None or (mark.link_id, mark.chat_id, mark.binding_generation, mark.route_kind, mark.route_target_id) != (link.id, link.chat_id, link.binding_generation, "turn", link.agent_ref) or mark.route_complete:
+            new_file = mark is not None and mark.route_kind == "work_file_new" and access.input_projection is not None
+            work_file = mark is not None and mark.route_kind == "work_input" and mark.route_basis.get("work_input", {}).get("version") == 4 and mark.route_target_id == mark.route_basis["work_input"].get("request_id")
+            if (
+                mark is None
+                or (mark.link_id, mark.chat_id, mark.binding_generation) != (link.id, link.chat_id, link.binding_generation)
+                or mark.route_complete
+                or not (work_file or new_file or (mark.route_kind, mark.route_target_id) == ("turn", link.agent_ref))
+            ):
                 raise ValueError("file-act-conflict") from None
+            if work_file and origins is not None:
+                raise ValueError("file-work-input-conflict") from None
             self.inbox._publication_snapshot_matches(mark, origin)
             actual = InboxRow.from_row(mark)
             _text, files = chat_input_parts(actual, bot_id=link.bot_id)
             if file not in files or file["message_id"] != mark.message_id:
                 raise ValueError("file-act-conflict") from None
             source = await self._input(writer, link, origin, origins) if origins is not None else None
+            work = None
+            if new_file:
+                source = {"captionless": not _text.strip(), "topic": mark.message_thread_id, "message_ids": [mark.message_id]}
+            if work_file:
+                data = mark.route_basis["work_input"]
+                if data.get("files") != files or len(mark.operation_ids) != 1:
+                    raise ValueError("file-work-input-conflict") from None
+                source = {"captionless": not _text.strip(), "topic": mark.message_thread_id, "message_ids": [mark.message_id]}
+                work = {"version": 1, "request_id": data["request_id"], "source_outbox_id": data["source_outbox_id"], "operation_id": mark.operation_ids[0], "update_id": mark.update_id, "input_sha256": work_input_digest(mark)}
             now = datetime.now(UTC)
             row = TelegramActRow(
                 id=identity,
@@ -277,7 +343,15 @@ class FilePuts:
                 operation_ids=[identity],
                 attempts=0,
                 first_attempt_at=None,
-                continuation=dict(version=3 if source is not None else 1, file=file, labels=["initial"], presses=[], target=_target(access), **({"input": source, "delivery": None} if source is not None else {})),
+                continuation=dict(
+                    version=4 if work is not None else 3 if source is not None else 1,
+                    file=file,
+                    labels=["initial"],
+                    presses=[],
+                    target=_target(access),
+                    **({"input": source, "delivery": None} if source is not None else {}),
+                    **({"work": work} if work is not None else {}),
+                ),
                 created_at=now,
                 updated_at=now,
             )
@@ -309,28 +383,10 @@ class FilePuts:
                 row.result = asdict(result)
                 row.body = {**row.body, "size": result.size, "sha256": result.sha256, "path": result.path}
             row.state, row.reason, row.updated_at = state, reason, now
-            if state == "done" and row.continuation.get("input", {}).get("captionless") is True:
+            if state == "done" and row.continuation["version"] in {2, 3} and row.continuation.get("input", {}).get("captionless") is True:
                 # Completion and the one pending handoff share a transaction.
                 # The terminal replay above never recreates a consumed handoff.
-                file = row.continuation["file"]
-                values = dict(
-                    chat_id=link.chat_id,
-                    message_thread_id=row.continuation["input"]["topic"],
-                    binding_generation=link.binding_generation,
-                    file_id=file["file_id"],
-                    file_unique_id=file["file_unique_id"],
-                    filename=file["filename"],
-                    mime_type=file["mime_type"],
-                    size=-1 if file["size"] is None else file["size"],
-                    is_image=file["type"] == "image",
-                    agent_file_path=row.result["path"],
-                )
-                existing = await writer.get(TelegramPendingFileRow, (link.id, row.message_id), with_for_update=True, populate_existing=True)
-                if existing is not None:
-                    if any(getattr(existing, key) != value for key, value in values.items()):
-                        raise ValueError("pending-file-conflict") from None
-                else:
-                    writer.add(TelegramPendingFileRow(link_id=link.id, message_id=row.message_id, created_at=now, **values))
+                await retain_captionless_file(writer, link, row, now)
             await writer.flush()
             return _snapshot(row)
 
@@ -360,6 +416,10 @@ class FilePuts:
         async def perform():
             async with self._locks.hold(file_act_id(link, file)):
                 access = await prepare_file_write(authority, link, current=current)
+                if origin.route_kind == "work_file_new":
+                    from app.telegram_bots.work_file_handoff import new_file_projection
+
+                    access = replace(access, input_projection=await new_file_projection(self, link, origin, access))
                 row = await self._prepare(link, origin, file, access, origins)
                 if row.state in {"pending", "waiting"}:
                     return await self._transition(link, row, access, state="uncertain", reason="interrupted")
@@ -401,7 +461,7 @@ class FilePuts:
                         raise CallbackRefused() from None
                     label = f"retry:{len(row.continuation['presses']) + 2}"
                     row.continuation = {**row.continuation, "labels": [*row.continuation["labels"], label], "presses": [*row.continuation["presses"], dict(callback_id=callback_id, message_id=message_id, topic=topic)]}
-                    if row.continuation["version"] == 3:
+                    if row.continuation["version"] >= 3:
                         row.continuation = {**row.continuation, "delivery": None}
                     row.operation_ids = [*row.operation_ids, child_operation(identity, label)]
                     row.state, row.reason, row.updated_at = "draft", None, datetime.now(UTC)
@@ -447,6 +507,10 @@ class FilePuts:
                 raise ValueError("file-recovery-unavailable") from None
             async with self._locks.hold(file_act_id(link, file)):
                 access = await prepare_file_write(authority, link, current=current)
+                if origin.route_kind == "work_file_new":
+                    from app.telegram_bots.work_file_handoff import new_file_projection
+
+                    access = replace(access, input_projection=await new_file_projection(self, link, origin, access))
                 row = await self._prepare(link, origin, file, access, origins)
                 if row.continuation["version"] < 3 and row.state in {"done", "refused", "uncertain"}:
                     # An open original input does not prove a legacy child's
@@ -480,7 +544,12 @@ class FilePuts:
                 deadline, repeated_workflow, waiting = self._time() + self.config.retry_max_seconds, False, False
                 while True:
                     try:
-                        result = await access.apply(operation_id=row.operation_ids[-1], name=row.body["name"], content=content, size=len(lease.data))
+                        write_access = access
+                        if row.continuation["version"] == 4:
+                            from app.telegram_bots.work_file_inputs import WorkFileWriteProjection
+
+                            write_access = replace(access, input_projection=WorkFileWriteProjection(link, row))
+                        result = await write_access.apply(operation_id=row.operation_ids[-1], name=row.body["name"], content=content, size=len(lease.data))
                     except (AgentFileRefusal, ResidentFilesBusy) as exc:
                         reason = exc.reason
                         rename = reason == "invalid-name" and "rename" not in row.continuation["labels"]
@@ -568,7 +637,7 @@ class FileReceiptReader:
     async def record_delivery(self, captured, outbox_id, *, session):
         """Keep a terminal planning receipt after ordinary outbox retention."""
         row = await self.journal._row(session, self.access.link, captured.id, self.access)
-        if row.continuation["version"] != 3:
+        if row.continuation["version"] < 3:
             return  # Legacy journals remain readable and are never upgraded.
         if _snapshot(row) != captured or row.state not in {"done", "refused", "uncertain"}:
             raise ValueError("file-outcome-changed") from None

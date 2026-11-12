@@ -32,6 +32,9 @@ class WorkTextInputs:
         self.admissions = WorkInputAdmissions(callbacks.controls, self.captures)
         self.previews = WorkInputPreviews(callbacks.outcomes.plans, self.captures)
         self.voice = WorkVoiceInputs(self)
+        from app.telegram_bots.work_file_inputs import WorkFileInputs
+
+        self.files = WorkFileInputs(self)
 
     async def handle_text(self, channel, update, *, captured_link=None):
         async def perform():
@@ -92,6 +95,8 @@ class WorkTextInputs:
         async def perform():
             link = deepcopy(channel.link)
             guard = self.services.commands._guard(channel, link)
+            if await self.files.resume(channel, origin):
+                return True
             if await self.untied.resume(channel, link, origin, guard=guard):
                 return True
             if await self.cards.resume(channel, link, origin, guard=guard):

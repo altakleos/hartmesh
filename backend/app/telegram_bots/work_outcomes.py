@@ -61,7 +61,7 @@ class WorkOutcomePresentation:
     parts: tuple[dict, ...]
 
 
-def present_outcome(act, *, purpose, permissions, attempt_status, locale, values, request_changed=False, protected=False, continued=False):
+def present_outcome(act, *, purpose, permissions, attempt_status, locale, values, request_changed=False, protected=False, continued=False, file_answer=None):
     """Render complete text only; the receipt owner separately installs controls."""
     from app.telegram_bots.render import render
     from app.telegram_bots.split import split_html, visible_text
@@ -74,5 +74,11 @@ def present_outcome(act, *, purpose, permissions, attempt_status, locale, values
         supplied["text"] = act.body["note"]
     html = render(shown.key, locale, **supplied)
     if shown.echo is not None:
-        html = render("ask.saved_echo", locale, text=shown.echo) + "\n\n" + html
+        if file_answer is None:
+            html = render("ask.saved_echo", locale, text=shown.echo) + "\n\n" + html
+        else:
+            prefix = render("ask.saved_file", locale, file=file_answer["file"], name=values["name"])
+            if file_answer["caption"]:
+                prefix += "\n\n" + render("ask.saved_echo", locale, text=file_answer["caption"])
+            html = prefix + "\n\n" + html
     return WorkOutcomePresentation(shown, tuple({"kind": "text", "html": part, "visible_text": visible_text(part), "protect_content": protected} for part in split_html(html)))

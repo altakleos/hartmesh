@@ -36,6 +36,7 @@ class _FileWrite:
     live_owner: object
     guard: object
     current: object
+    input_projection: object = None
 
     def _current(self):
         if self.current() is not True or getattr(self.authority.app.state, "agent_instances", None) is not self.service or self.service.files is not self.files or self.service.agent_files is not self.writer:
@@ -66,23 +67,24 @@ class _FileWrite:
 
     async def _check_snapshot(self, writer):
         bot, instance, grant, policy = TelegramBotLinkRow, AgentInstanceRow, AgentInstanceGrantRow, TelegramInstancePolicyRow
-        facts = (
-            await writer.execute(
-                select(bot, instance, grant.permissions, policy.policy, SpaceRow.generation, UserRow, DisabledIdentityRow)
-                .join(instance, instance.id == bot.agent_ref)
-                .join(grant, and_(grant.instance_id == instance.id, grant.user_id == bot.owner_user_id))
-                .join(SpaceRow, SpaceRow.id == instance.home_id)
-                .join(UserRow, UserRow.id == bot.owner_user_id)
-                .outerjoin(policy, policy.instance_id == instance.id)
-                .outerjoin(DisabledIdentityRow, or_(DisabledIdentityRow.subject == UserRow.id, DisabledIdentityRow.subject == UserRow.oauth_id))
-                .where(bot.id == self.link.id)
-                .execution_options(populate_existing=True)
-            )
-        ).all()
+        query = (
+            select(bot, instance, grant.permissions, policy.policy, SpaceRow.generation, UserRow, DisabledIdentityRow)
+            .join(instance, instance.id == bot.agent_ref)
+            .join(grant, and_(grant.instance_id == instance.id, grant.user_id == bot.owner_user_id))
+            .join(SpaceRow, SpaceRow.id == instance.home_id)
+            .join(UserRow, UserRow.id == bot.owner_user_id)
+            .outerjoin(policy, policy.instance_id == instance.id)
+            .outerjoin(DisabledIdentityRow, or_(DisabledIdentityRow.subject == UserRow.id, DisabledIdentityRow.subject == UserRow.oauth_id))
+            .where(bot.id == self.link.id)
+            .execution_options(populate_existing=True)
+        )
+        if self.input_projection is not None:
+            query = self.input_projection.extend(query)
+        facts = (await writer.execute(query)).all()
         if not facts:
             raise AgentDenied("The file input is no longer available")
-        actual, target, permissions, policy_value, home_generation, user, _ = facts[0]
-        self.live_owner.check_snapshot(user, [row[-1] for row in facts])
+        actual, target, permissions, policy_value, home_generation, user, _ = facts[0][:7]
+        self.live_owner.check_snapshot(user, [row[6] for row in facts])
         policy_value = "allowed" if target.custody == "personal" or policy_value is None else policy_value
         if (
             any(getattr(actual, key) != getattr(self.link, key) for key in _SCOPE)
@@ -101,6 +103,8 @@ class _FileWrite:
             or pending_discard(actual) is not None
         ):
             raise AgentDenied("The file input is no longer available")
+        if self.input_projection is not None:
+            self.input_projection.check(facts)
         # No await follows the joined grant/policy/account decision.
         self._current()
 

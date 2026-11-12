@@ -194,8 +194,8 @@ class _RefreshProjection(_ContextProjection):
 
     def check(self, rows):
         super().check(rows)
-        self.origin.check([row[:20] for row in rows])
-        callback, fresh, mark, reserved = rows[0][20:24]
+        self.origin.check([row[:21] for row in rows])
+        callback, fresh, mark, reserved = rows[0][21:25]
         if callback is None:
             raise ProductSourceRetired()
         if callback.payload.get("work_action_id") is not None and (reserved is None or reserved.kind != "route" or reserved.state != "refused" or reserved.reason != "recipient-ineligible"):
@@ -203,7 +203,7 @@ class _RefreshProjection(_ContextProjection):
         if self.published_id is not None:
             if fresh is None:
                 raise ProductSourceRetired()
-            validate_refresh(callback, rows[0][19], fresh.payload["work_outcome_basis"], fresh)
+            validate_refresh(callback, rows[0][20], fresh.payload["work_outcome_basis"], fresh)
             if fresh.payload["work_outcome_basis"]["input"] is not None:
                 validate_input(mark, fresh.payload["work_outcome_basis"], fresh)
         self.candidates.check(rows)

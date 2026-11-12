@@ -4,7 +4,8 @@ Each table is swept in its own short transaction. Outbox candidates are locked
 before their dependencies are read, so the check holds where the deletion runs.
 
 Unknown Act continuations and stop dispatches are retained. A validated settled
-file journal has no live continuation or outbox dependency and expires normally.
+ordinary file journal expires normally; an unfinished Work file input retains
+its native receipt until the explicit input is settled.
 """
 
 from __future__ import annotations
@@ -154,7 +155,23 @@ async def _sweep_acts(sessions, now):
         )
         expired = (~pending_outcome, TelegramActRow.created_at < now - timedelta(days=ACT_RETENTION_DAYS), TelegramActRow.state.in_(_SETTLED_ACTS), TelegramActRow.stop_dispatch.is_(None))
         ordinary = await session.execute(delete(TelegramActRow).where(*expired, TelegramActRow.kind != "file_put", TelegramActRow.continuation.is_(None)))
-        candidates = list(await session.scalars(select(TelegramActRow).where(*expired, TelegramActRow.kind == "file_put").with_for_update(skip_locked=True)))
+        mark = TelegramInboundMarkRow
+        work_file_input = (
+            select(mark.message_id)
+            .where(
+                mark.link_id == TelegramActRow.link_id,
+                mark.chat_id == TelegramActRow.chat_id,
+                mark.binding_generation == TelegramActRow.binding_generation,
+                mark.message_id == TelegramActRow.message_id,
+                mark.route_complete.is_(False),
+                or_(
+                    and_(cast(mark.route_basis["work_input"]["version"].as_string(), String) == "4", cast(TelegramActRow.continuation["version"].as_string(), String) == "4"),
+                    and_(mark.route_kind == "work_file_new", cast(TelegramActRow.continuation["version"].as_string(), String) == "3"),
+                ),
+            )
+            .exists()
+        )
+        candidates = list(await session.scalars(select(TelegramActRow).where(*expired, TelegramActRow.kind == "file_put", ~work_file_input).with_for_update(skip_locked=True)))
         identities = [row.id for row in candidates if settled_file_journal(row)]
         for start in range(0, len(identities), _BATCH):
             await session.execute(delete(TelegramActRow).where(TelegramActRow.id.in_(identities[start : start + _BATCH])))
