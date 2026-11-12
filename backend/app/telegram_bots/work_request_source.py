@@ -68,10 +68,12 @@ def _references(value):
             yield from _references(child)
 
 
-def frozen(captured, *, acknowledged=False):
+def frozen(captured, *, acknowledged=False, pending=False):
     """A class label or literal template cannot manufacture a Work source."""
     try:
         basis = captured.item.payload["work_request_basis"]
+        if pending and (acknowledged or "result_files" not in basis):
+            raise ValueError()
         if (
             type(basis) is not dict
             or set(basis)
@@ -209,10 +211,13 @@ def frozen(captured, *, acknowledged=False):
             from app.telegram_bots.work_result_history import qualified_history
             from app.telegram_bots.work_result_identity import qualify_identity
             from app.telegram_bots.work_result_ledger import qualify_result_parts
+            from app.telegram_bots.work_result_navigation import qualify_navigation
 
             qualify_identity(captured.item.payload.get("work_result_identity"), source)
+            if "work_result_navigation" in captured.item.payload:
+                qualify_navigation(captured.item.payload["work_result_navigation"], captured.link, source)
             carried, hashes = qualified_history(captured.item, source)
-            recipe = qualify_result_parts(captured.item, expected, selected=captured.part, acknowledged=acknowledged, carried=carried, known_hashes=hashes)
+            recipe = qualify_result_parts(captured.item, expected, selected=captured.part, acknowledged=acknowledged, carried=carried, known_hashes=hashes, pending=pending)
             return basis, source, recipe
         index = captured.part["source_ref"]["values"]["part"]
         if type(index) is not int or not 0 <= index < len(expected):

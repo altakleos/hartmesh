@@ -2029,8 +2029,10 @@ acknowledged files through card retries, and waits for the whole delivery before
 enabling controls. Protected result Show clears its teaser button before sending
 protected files and a new card. A changed review resumes unfinished files and
 refreshes the card without uploading acknowledged files again, including after
-a language or file-access change. Failed-transport repair, failure links and
-notification startup integration remain pending.
+a language or file-access change. Explicit repair of cards in General preserves
+delivered files. File-failure links open the conversation that produced the
+result; unavailable-file warnings omit the link. Remaining notification rendering
+and startup integration are still pending.
 Background recovery preserves newer
 request previews. Complete first-tap previews now have
 a durable delivery boundary that waits for the entire message before enabling controls

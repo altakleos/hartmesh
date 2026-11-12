@@ -38,15 +38,19 @@ def initial_ledger(parts):
     return {"version": 1, "roots": [part["part_id"] for part in parts], "events": []}
 
 
-def _warning(parent, key, file):
+def _warning(parent, key, file, navigation=None):
+    from app.telegram_bots.work_result_navigation import navigation_url
+
     if key not in {"file.no_access", "file.out_failed", "file.too_large_out"}:
         raise ValueError("invalid-result-file-warning")
+    address = navigation_url(navigation) if key != "file.no_access" else None
     return {
         "kind": "text",
-        "source_ref": deepcopy(parent["source_ref"]),
+        "source_ref": {"key": key, "values": {"file": file["filename"]}} if address else deepcopy(parent["source_ref"]),
         "result_file_warning": {"key": key, "file": deepcopy(file)},
         "silent": True,
         "protect_content": parent["protect_content"],
+        **({"url_button": {"page": "web.conversation", "url": address}} if address else {}),
     }
 
 
@@ -58,7 +62,7 @@ def _media_recipe(parent, kind, files):
     return {**_clean(parent), "kind": kind, "files": deepcopy(files)}
 
 
-def qualify_result_parts(item, expected, *, selected=None, acknowledged=False, carried=None, known_hashes=None):
+def qualify_result_parts(item, expected, *, selected=None, acknowledged=False, carried=None, known_hashes=None, pending=False):
     """Replay every rewrite, validate typed ACKs, and require the shown prefix."""
     try:
         ledger, version = item.payload["work_result_ledger"], item.payload["presentation_version"]
@@ -108,7 +112,7 @@ def qualify_result_parts(item, expected, *, selected=None, acknowledged=False, c
             elif event["reason"] == "unavailable":
                 if parent["state"] != "unavailable":
                     raise ValueError()
-                allowed = [_warning(parent, event["key"], file) for file in parent["files"]]
+                allowed = [_warning(parent, event["key"], file, item.payload.get("work_result_navigation")) for file in parent["files"]]
             elif event["reason"] in {"photo-classification", "photo-rejected", "capacity"}:
                 if parent["state"] != "retired" or parent["kind"] not in {"photo", "album"} or [file for part in fresh for file in part["files"]] != parent["files"]:
                     raise ValueError()
@@ -136,7 +140,7 @@ def qualify_result_parts(item, expected, *, selected=None, acknowledged=False, c
         messages, selected_index = set(), None
         if selected is not None:
             selected_index = next(index for index, part in enumerate(parts) if part == selected)
-            if selected["state"] != ("sent" if acknowledged else "sending"):
+            if pending and acknowledged or selected["state"] != ("sent" if acknowledged else "pending" if pending else "sending"):
                 raise ValueError()
         for ordinal, part in enumerate(parts):
             identity = part["part_id"]
@@ -215,7 +219,7 @@ def replace_media(item, part_id, templates, *, reason):
 
 
 def replace_unavailable(item, part_id, *, key):
-    _replace(item, part_id, lambda parent: [_warning(parent, key, file) for file in parent["files"]], reason="unavailable", key=key)
+    _replace(item, part_id, lambda parent: [_warning(parent, key, file, item.payload.get("work_result_navigation")) for file in parent["files"]], reason="unavailable", key=key)
 
 
 def carry_media(item, carried, hashes, *, documents=()):

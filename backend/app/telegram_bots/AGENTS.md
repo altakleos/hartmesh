@@ -60,7 +60,7 @@ Space READ checks; comment publication uses that proof too. Multipart recovery
 preserves the original operation and ACKs. Supervisor installation remains pending.
 
 The optional `work_callbacks.py` dispatcher composes existing Work owners; the
-supervisor does not install it yet. Result Show and file receipts:
+supervisor does not install it yet. Result delivery and repair:
 [Work guidance](../../docs/TELEGRAM_WORK.md). Stale callbacks refresh only
 unreserved controls or exact conclusive conflicts; retained input has its own owner. Known
 non-effect confirmation refusals use `work_refusal_recovery.py` before retry.

@@ -17,11 +17,13 @@ class WorkReviewPlans(WorkRequestPlans):
 
     async def _freeze(self, writer, link, row, source, settings, *, pending=True):
         from app.telegram_bots.work_result_identity import result_identity
+        from app.telegram_bots.work_result_navigation import capture_navigation
         from deerflow.persistence.agent_instances.work import AgentWorkRow
 
         identity = await super()._freeze(writer, link, row, source, settings, pending=True)
         work = await writer.get(AgentWorkRow, source.work["id"], populate_existing=True)
-        row.payload = {**row.payload, "work_result_ledger": initial_ledger(row.parts), "work_result_identity": result_identity(work)}
+        navigation = await capture_navigation(writer, link, source)
+        row.payload = {**row.payload, "work_result_ledger": initial_ledger(row.parts), "work_result_identity": result_identity(work), "work_result_navigation": navigation}
         await writer.flush()
         return identity
 

@@ -41,6 +41,7 @@ def archive_media(item, source, *, locale, options, earlier=None):
         "options": deepcopy(options),
         "ledger": ledger,
         "parts": parts,
+        **({"navigation": deepcopy(item.payload["work_result_navigation"])} if "work_result_navigation" in item.payload else {}),
     }
     read_media_history(item, proof, source, earlier=earlier)
     return proof
@@ -49,7 +50,7 @@ def archive_media(item, source, *, locale, options, earlier=None):
 def read_media_history(item, proof, source, *, earlier=None):
     """Return source-index references and byte identities, never invented ACKs."""
     try:
-        if type(proof) is not dict or set(proof) != {"version", "presentation_version", "request_id", "work", "locale", "protected", "options", "ledger", "parts"}:
+        if type(proof) is not dict or set(proof) != {"version", "presentation_version", "request_id", "work", "locale", "protected", "options", "ledger", "parts"} | ({"navigation"} if "navigation" in proof else set()):
             raise ValueError()
         if type(proof["version"]) is not int or proof["version"] != 1 or type(proof["protected"]) is not bool or proof["request_id"] != source.request["id"] or set(proof["work"]) != _WORK:
             raise ValueError()
@@ -63,7 +64,7 @@ def read_media_history(item, proof, source, *, earlier=None):
         previous, latest = old["outcome"]["sources"], current["outcome"]["sources"]
         if len(previous) != len(latest) or any(left != right and left != _HIDDEN and right != _HIDDEN for left, right in zip(previous, latest, strict=True)):
             raise ValueError()
-        snapshot = SimpleNamespace(parts=proof["parts"], payload={"presentation_version": proof["presentation_version"], "work_result_ledger": proof["ledger"]})
+        snapshot = SimpleNamespace(parts=proof["parts"], payload={"presentation_version": proof["presentation_version"], "work_result_ledger": proof["ledger"], "work_result_navigation": proof.get("navigation")})
         recipes = _recipes(proof)
         qualify_result_parts(snapshot, recipes, carried=earlier)
         carried, hashes = {}, {}

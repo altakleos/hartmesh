@@ -43,8 +43,17 @@ past receipts and remembered hashes, and every current plan must carry all known
 ACKs exactly once. Compare historical JSON with strict Boolean/integer identity.
 A protection upgrade creates a new teaser before any further content;
 the generic sender must not overwrite a frozen result's protection recipe.
-Failed-transport repair, exact-attempt warning
-links, non-review result notifications and event/supervisor installation remain
+Explicit repair rebuilds only a held failed General result with all claim fields
+cleared, under current source and owner guards. Non-General retained failures
+stay held pending a separate source-aware destination transition. It preserves file ACKs and refuses
+changed canonical outcomes. `work_result_navigation.py` binds failure links to
+the outcome's exact attempt and rechecks its Work/thread in final joined reads.
+The captured origin must still equal the prepared live configuration after every
+provider await; coherent stored URL substitution cannot authorize another origin.
+Unavailable-file warnings have no navigation; other file failures reuse durable
+URL-button/plain-address fallback. Historical warning proofs retain their own
+navigation snapshot when the current card changes.
+Non-review result notifications and event/supervisor installation remain
 outstanding; these initial-delivery components must remain uninstalled.
 
 `work_event_intents.py` projects current recipient/grant/preferences into empty,
