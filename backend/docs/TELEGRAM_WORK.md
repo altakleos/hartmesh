@@ -781,3 +781,43 @@ Reopen's source proof ties all settled members to the original request and fresh
 prompt; the collector still recognizes their retained Work ownership after any
 choice. The single-file recovery path refuses group roots. All Work controllers
 remain dormant; notification production and lifecycle installation remain pending.
+
+
+Colleague news remains dormant. `work_news.py` renders complete escaped
+statements and optional notes; its first line contains only product words and
+bounded navigation names/titles. Protected teasers contain no assignment or
+colleague details. Presentation alone grants no delivery authority: generic
+product replies cannot send these source keys.
+
+`work_news_sources.py` currently owns canonical reads for edit, cancel, reopen,
+accept, changes-requested and decide notifications. The current recipient must
+retain Use+Inspect. Final provider reads join the exact event, current Work,
+original activation/attempt, actor name and delivery, including unclaimed-row
+checks. Historical requester selection never substitutes a later activation.
+The originating event signature stays separate from mutable display facts.
+Work stores one decision statement; render it once as the decision rather than
+inventing a separate choice or duplicating it as a note. `work_news_delivery.py` materializes these six command families on their
+original rows. Its closed text recipes bind actual ordered ACKs, current locale,
+quiet hours, notification preferences, live page origin and exact claims in the
+final provider snapshot. Protected Show consumes its acknowledged teaser;
+`work_news_recovery.py` edits a single-part notice in place or waits for keyboard
+cleanup before sending a multipart notice. Original teaser and consumed Show
+proofs remain qualified, and cleanup/Show retention follows the parent.
+A missing anchor/topic is held as `work-news-refresh-required`; generic repair
+cannot rewrite the source-owned plan. Source-aware refresh replaces locale,
+protection and URL presentation under the exact claim, preserving the immutable
+event and every historical ACK. V3 keeps a flat per-version list of qualified capsules and
+parts; only unfinished parts retire, and repeated refreshes retain bounded JSON depth.
+Recoverable presentation drift at final SDK admission defers delivery; immutable
+event changes and withdrawn authority still retire it. Explicit repair accepts known General
+failures after all claim fields clear. It never moves a topic or repeats a Work
+operation. Refreshed teasers still require their own actual acknowledged Show;
+a missing edit target is cleared before a complete replacement message. The
+`work_answer_news.py` additionally joins the exact information-response receipt
+and saved response at materialization and final SDK admission. It validates the
+canonical response command, operation, actor, purpose and request/assignment
+revision, including supplied disposition and every saved source. Management
+comments and unsupplied responses cannot become answer news. The original
+requester gets one silent notice; the responder is excluded. Open assignment
+is a web link only when no attempt is unresolved, rechecked in the final snapshot. Other news kinds
+and installation remain pending.

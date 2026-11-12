@@ -796,8 +796,12 @@ class CallbackRepository:
                 group = part.get("callback_group_id")
                 rows = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group).order_by(TelegramCallbackRow.id)))
                 try:
-                    work_preview = "work_request_basis" in parent.payload or "work_outcome_basis" in parent.payload or "result_notice_basis" in parent.payload
-                    if "result_notice_basis" in parent.payload:
+                    work_preview = "work_request_basis" in parent.payload or "work_outcome_basis" in parent.payload or "result_notice_basis" in parent.payload or "work_news_basis" in parent.payload
+                    if "work_news_basis" in parent.payload:
+                        from app.telegram_bots.work_news_delivery import frozen_news
+
+                        frozen_news(captured)
+                    elif "result_notice_basis" in parent.payload:
                         from app.telegram_bots.result_notice_delivery import frozen_notice
 
                         frozen_notice(captured)
@@ -945,7 +949,7 @@ class CallbackRepository:
                     ):
                         show_proofs.add(prompt.id)
                 parent = TelegramOutboxRow
-                for proof_id in (parent.payload["work_request_basis"]["reply_origin"].as_string(), parent.payload["result_notice_basis"]["reveal"].as_string()):
+                for proof_id in (parent.payload["work_request_basis"]["reply_origin"].as_string(), parent.payload["result_notice_basis"]["reveal"].as_string(), parent.payload["work_news_basis"]["reveal"].as_string()):
                     for saved in await session.execute(select(parent.id, parent.link_id, parent.chat_id, parent.binding_generation, proof_id.label("proof_id")).where(proof_id.is_not(None))):
                         try:
                             require_show(by_id.get(saved.proof_id), saved)
