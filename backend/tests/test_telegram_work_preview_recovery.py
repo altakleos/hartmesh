@@ -179,8 +179,8 @@ async def test_refresh_rechecks_its_claim_and_source_before_replacing(work_deliv
         (await writer.get(AgentWorkRow, e.work["id"])).revision += 1
     original = e.recovery._source
 
-    async def change(*args):
-        result = await original(*args)
+    async def change(*args, **kwargs):
+        result = await original(*args, **kwargs)
         async with e.db.sessions.begin() as writer:
             if race == "claim":
                 (await writer.get(TelegramOutboxRow, e.identity)).claim_id = "other-process"
@@ -317,8 +317,8 @@ async def test_reveal_does_not_commit_consent_after_authority_withdrawal(work_de
     show = await concealed(e)
     original = e.recovery._source
 
-    async def change(*args):
-        result = await original(*args)
+    async def change(*args, **kwargs):
+        result = await original(*args, **kwargs)
         async with e.db.sessions.begin() as writer:
             if withdraw == "grant":
                 (await writer.get(AgentInstanceGrantRow, (e.link.agent_ref, e.link.owner_user_id))).permissions = 1
