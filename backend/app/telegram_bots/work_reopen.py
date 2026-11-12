@@ -23,7 +23,7 @@ def identity(mark):
 
 
 def validate_reopen(value):
-    if type(value) is not dict or set(value) != {"version", "input", "prompt_id"} or type(value["version"]) is not int or value["version"] != 1:
+    if type(value) is not dict or set(value) != ({"version", "input", "prompt_id", "album"} if value.get("version") == 2 else {"version", "input", "prompt_id"}) or type(value["version"]) is not int or value["version"] not in {1, 2}:
         raise ProductSourceRetired()
     origin = value["input"]
     if type(origin) is not dict or set(origin) != {"link_id", "chat_id", "message_id", "update_id", "binding_generation"}:
@@ -32,6 +32,12 @@ def validate_reopen(value):
         raise ProductSourceRetired()
     if type(origin["link_id"]) is not str or type(value["prompt_id"]) is not str or len(value["prompt_id"]) != 32:
         raise ProductSourceRetired()
+    if value["version"] == 2:
+        from types import SimpleNamespace
+
+        from app.telegram_bots.work_album_recovery import recovery_context
+
+        recovery_context(SimpleNamespace(route_basis={"work_album_recovery": value["album"]}, message_id=origin["message_id"]))
     return value
 
 
@@ -39,6 +45,10 @@ def check_reopen_origin(link, parent, callbacks, mark, basis, source, outbox_id)
     from app.telegram_bots.work_closed_inputs import validate_closed_voice
 
     reopened = validate_reopen(basis["reopen"])
+    if reopened["version"] == 2:
+        from app.telegram_bots.work_album_reopen import validate_reopened_group
+
+        return validate_reopened_group(link, parent, callbacks, mark, basis, source, outbox_id)
     origin = basis["origin"]
     selected = next((row for row in callbacks if row.id == origin["callback_id"]), None)
     old_prompt = next((row for row in callbacks if row.id == reopened["prompt_id"]), None)

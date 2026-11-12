@@ -60,6 +60,10 @@ class NewFileProjection:
 
 
 async def new_file_projection(journal, link, origin, access):
+    if "work_album_handoff" in origin.route_basis:
+        from app.telegram_bots.work_album_handoff import new_album_projection
+
+        return await new_album_projection(journal, link, origin, access)
     async with journal.callbacks.writer(link, access.guard) as writer:
         mark = (await journal.inbox._rows(writer, [origin]))[0]
         journal.inbox._publication_snapshot_matches(mark, origin)

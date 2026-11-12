@@ -32,6 +32,8 @@ async def collected_album(
     extra_members=(),
     fail_first=False,
     live_submit=False,
+    second_identity=901,
+    second_quote_id=None,
 ):
     owned = []
 
@@ -55,14 +57,14 @@ async def collected_album(
         second = Update(
             2901,
             message=Message(
-                901,
+                second_identity,
                 datetime.now(UTC),
                 first.message.chat,
                 from_user=first.message.from_user,
                 media_group_id="answer-album",
                 caption=second_caption or None,
                 document=Document("second-file", "second-unique", file_name=filenames[1], mime_type="application/pdf", file_size=4),
-                reply_to_message=None if quoted_first else Message(801, datetime.now(UTC), first.message.chat, from_user=User(e.link.bot_id, "Bot", True), text="Question"),
+                reply_to_message=None if quoted_first and second_quote_id is None else Message(second_quote_id or 801, datetime.now(UTC), first.message.chat, from_user=User(e.link.bot_id, "Bot", True), text="Question"),
             ),
         )
         assert await e.channel.handle_update(second)
@@ -93,7 +95,7 @@ async def collected_album(
             await owned[0]._flush_join(key, joined)
         monkeypatch.setattr(album_owner, "submit", submit)
         async with e.db.sessions() as reader:
-            root = InboxRow.from_row(await reader.get(TelegramInboundMarkRow, (e.link.id, 900 if quoted_first else 901, e.link.chat_id)))
+            root = InboxRow.from_row(await reader.get(TelegramInboundMarkRow, (e.link.id, 900 if quoted_first else second_identity, e.link.chat_id)))
         assert root.route_kind == ("work_input" if live_submit else "work_file_album")
         assert reads == ([True, True] if live_submit else [])
         yield request, root, reads
@@ -350,16 +352,20 @@ async def test_album_response_receipt_replays_without_native_storage(work_delive
 
 @pytest.mark.asyncio
 async def test_album_bounds_collision_name_growth_before_any_native_write(work_delivery, monkeypatch, tmp_path):
-    from pydantic import ValidationError
+    from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
 
     e = work_delivery
     names = tuple(letter * 36 + ".pdf" for letter in "abcd")
     async with collected_album(e, monkeypatch, tmp_path, caption="a" * 972, second_caption="b" * 972, filenames=names[:2], extra_members=((names[2], "c" * 973), (names[3], "d" * 972))) as (_request, root, reads):
-        with pytest.raises(ValidationError):
-            await e.channel._services.work_text_inputs.files.albums.submit(e.channel, root)
+        assert await e.channel._services.work_text_inputs.files.albums.submit(e.channel, root)
         assert reads == []
         async with e.db.sessions() as reader:
             assert not list(await reader.scalars(select(TelegramActRow)))
+            retained = await reader.get(TelegramInboundMarkRow, (e.link.id, root.message_id, e.link.chat_id))
+            context = retained.route_basis["work_album_recovery"]
+            assert context["member_ids"] == [900, 901, 902, 903]
+            notice = await reader.get(TelegramOutboxRow, context["notice_id"])
+            assert notice.parts[0]["source_ref"]["key"] == "ask.answer_too_long"
 
 
 @pytest.mark.asyncio
@@ -519,7 +525,9 @@ async def test_late_member_blocks_response_after_native_receipts_are_frozen(work
             await services.turns._flush_join(key, joined)
         async with e.db.sessions() as reader:
             late = await reader.get(TelegramInboundMarkRow, (e.link.id, 902, e.link.chat_id))
-            assert late.route_kind == "work_file_album" and late.route_basis["album"]["state"] == "late"
+            assert late.route_kind == "work_album_hold" and late.route_basis["album"]["state"] == "late"
+            assert late.route_basis["work_album_recovery"]["member_ids"] == [902]
+            assert not list(await reader.scalars(select(TelegramActRow).where(TelegramActRow.kind == "file_put", TelegramActRow.message_id == 902)))
 
 
 @pytest.mark.asyncio

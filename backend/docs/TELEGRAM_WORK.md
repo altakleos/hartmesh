@@ -585,7 +585,32 @@ that identity even after SDK I/O. Every original member registers that outcome a
 is sealed together after its final part. Unfinished followers retain their native
 receipts, and root/member SDK redeliveries cannot enter ordinary chat.
 
-Late or conflicting cohorts remain held without another response. Explicit
-closed/ambiguous/overlong group recovery choices remain an activation prerequisite;
-the single-file recovery path refuses group roots. All Work controllers remain
-dormant, with notification production and lifecycle installation still outstanding.
+Late or conflicting cohorts retain their own members without another response.
+`work_album_recovery.py` gives a whole cohort explicit recovery choices. Only one
+known current source offers Reopen; ambiguous sources cannot select a request.
+Oversized answers explain the bound before upload. Discard settles every member;
+Reopen shows a fresh question without submitting the retained files or captions.
+Known-unavailable Reopen preserves the group for Send as new or Discard. An original
+Respond marker or unresolved journal prevents any purpose transfer.
+
+`work_album_handoff.py` transfers an explicit Send-as-new choice before ordinary
+publication. Native IDs, bodies, targets, selected children and receipts stay fixed;
+only their Work purpose metadata changes. Unstarted/interrupted siblings reconcile
+as uncertain on restart. Captionless groups retain saved files and ask once without
+starting a model. Captioned groups stage one callback publication with all actual
+input snapshots; original raw quotes and captions remain unchanged. Ordinary input
+scope rules stay strict, while Retry reconstructs authenticated callback-owned
+origins. Native receipt retention follows exact pending callback snapshots, including
+successors after original inbox rows are collected. A live Retry also retains its
+exact predecessor callback group; expiry or completed transfer releases obsolete
+owners and receipts.
+
+The closed recovery capsule binds input timestamps, member order, original route
+basis and operation IDs. `work_album_guard.py` joins complete group, choice and
+original-action facts to the final account/grant/policy snapshot after provider
+awaits. Metadata recovery requires Use; only Reopen additionally requires Inspect.
+Native transfer also checks the whole acknowledged choice group and presentation.
+Reopen's source proof ties all settled members to the original request and fresh
+prompt; the collector still recognizes their retained Work ownership after any
+choice. The single-file recovery path refuses group roots. All Work controllers
+remain dormant; notification production and lifecycle installation remain pending.

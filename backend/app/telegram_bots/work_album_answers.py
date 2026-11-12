@@ -2,14 +2,17 @@
 
 from copy import deepcopy
 
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.telegram_bots.callbacks import CallbackRefused
 from app.telegram_bots.file_outcomes import FileOutcomes
 from app.telegram_bots.inbox import InboxRow
+from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_actions import thaw
 from app.telegram_bots.work_album_inputs import album_context
 from app.telegram_bots.work_file_albums import album_manifest
+from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
 from deerflow.utils.file_io import await_drained
 
@@ -19,18 +22,35 @@ class WorkAlbumAnswers:
         self.files, self.services, self.cards, self.inbox = files, files.services, files.cards, files.inbox
 
     async def submit(self, channel, origin, *, recover=False):
+        from app.telegram_bots.work_album_recovery import WorkAlbumRecovery
+
+        async def perform():
+            try:
+                return await self._submit(channel, origin, recover=recover)
+            except ValidationError:
+                await WorkAlbumRecovery(self.files).offer(channel, origin, too_long=True)
+                return True
+            except (CallbackRefused, ProductSourceRetired, AgentConflict, AgentDenied):
+                await WorkAlbumRecovery(self.files).offer(channel, origin)
+                return True
+
+        return await await_drained(perform())
+
+    async def _submit(self, channel, origin, *, recover=False):
         async def perform():
             link = deepcopy(channel.link)
             guard = self.services.commands._guard(channel, link)
             async with self.services.callbacks.writer(link, guard) as writer:
                 mark = (await self.inbox._rows(writer, [origin]))[0]
                 self.inbox._current(link, mark)
+                if "work_album_recovery" in mark.route_basis:
+                    raise CallbackRefused()
                 if "work_album" in mark.route_basis:
                     root_id = album_context(mark)["root_message_id"]
                 else:
                     manifest = album_manifest(mark, link)
                     if manifest["state"] != "ready":
-                        return True
+                        raise CallbackRefused()
                     root_id = manifest["root_message_id"]
                 root = await writer.get(TelegramInboundMarkRow, (link.id, root_id, link.chat_id), with_for_update=True, populate_existing=True)
                 if root is None:

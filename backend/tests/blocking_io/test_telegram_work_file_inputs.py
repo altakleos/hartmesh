@@ -47,3 +47,17 @@ async def test_album_full_ack_keeps_io_off_loop(work_delivery, monkeypatch, tmp_
     from test_telegram_work_album_answers import test_multipart_album_ack_settles_nothing_before_last_part
 
     await test_multipart_album_ack_settles_nothing_before_last_part(work_delivery, monkeypatch, tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_album_group_handoff_and_publisher_keep_io_off_loop(work_delivery, monkeypatch, tmp_path):
+    from test_telegram_work_album_recovery import test_album_send_new_preserves_all_actual_inputs_in_one_publication
+
+    await test_album_send_new_preserves_all_actual_inputs_in_one_publication(work_delivery, monkeypatch, tmp_path, "First caption")
+
+
+@pytest.mark.asyncio
+async def test_album_reopen_delivery_keeps_io_off_loop(work_delivery, monkeypatch, tmp_path):
+    from test_telegram_work_album_recovery import test_reopen_album_displays_fresh_question_without_submitting_old_members
+
+    await test_reopen_album_displays_fresh_question_without_submitting_old_members(work_delivery, monkeypatch, tmp_path)

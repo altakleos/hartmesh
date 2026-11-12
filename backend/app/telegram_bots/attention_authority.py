@@ -21,7 +21,7 @@ async def current_attention(host, captured, *, projection=None):
     return await check(projection=projection)
 
 
-async def prepare_attention(host, captured):
+async def prepare_attention(host, captured, *, require_inspect=True):
     """Prepare off-writer configuration, then permit a shared transaction read."""
     from app.gateway.authz import _aget_cached_route_provider, resolve_route_permissions
     from app.gateway.deps import bind_user_repo
@@ -95,7 +95,7 @@ async def prepare_attention(host, captured):
                 or target.custody not in {"personal", "company"}
                 or type(permissions) is not int
                 or not 1 <= permissions <= 7
-                or permissions & 3 != 3
+                or permissions & (3 if require_inspect else 1) != (3 if require_inspect else 1)
                 or value not in POLICIES
                 or value == "off"
                 or pending_discard(current) is not None

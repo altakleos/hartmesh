@@ -51,7 +51,7 @@ WORK_REQUEST_KEYS = frozenset(
     (
         "ask.info ask.decision ask.comment_line review.ready concealed.question concealed.decision concealed.review "
         "request.unrouted request.route_ask request.route_none request.routed ask.type_prompt ask.cant_prompt ask.is_this_answer "
-        "decide.confirm decide.confirm_note decide.own_prompt decide.note_prompt review.accept_confirm review.changes_prompt review.changes_confirm voice.confirm_answer voice.transcript_part voice.answer_too_long "
+        "decide.confirm decide.confirm_note decide.own_prompt decide.note_prompt review.accept_confirm review.changes_prompt review.changes_confirm voice.confirm_answer voice.transcript_part voice.answer_too_long ask.answer_too_long "
         "ask.saved decide.saved review.changes_recorded ask.saved_echo ask.saved_file ask.saved_next ask.saved_running ask.saved_waiting ask.cant_saved ask.cant_saved_manager decide.saved_next decide.wait decide.comment_saved "
         "review.done_line review.changes_saved denied.respond denied.decide denied.accept denied.changes denied.route denied.other stale.changed_resend stale.closed stale.replaced stale.withdrawn act.unconfirmed"
     ).split()

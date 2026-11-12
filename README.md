@@ -2007,8 +2007,10 @@ menu at their next start.
 Work notifications, question routing and confirmation controls are still in
 preparation and are not enabled in Telegram. Optional single-file and album answers save files once and name them in the
 acknowledgement without starting work. Album collection retains every member
-before choosing its destination, including across restarts. Group recovery choices
-and controller activation remain outstanding. Complete first-tap previews now have
+before choosing its destination, including across restarts. Closed or ambiguous
+albums retain every member for explicit recovery choices. Reopen asks for a new
+answer; Send as new preserves the files and captions; Discard settles the group.
+Controller activation remains outstanding. Complete first-tap previews now have
 a durable delivery boundary that waits for the entire message before enabling controls
 or typing prompts. Confirmed choices also have durable, single-operation admission
 for recovery after a restart. Temporarily refused confirmations can rebuild a
