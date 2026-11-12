@@ -189,6 +189,16 @@ an old binding generation cannot reconnect. Inbox identities include the chat:
 must carry the captured chat; never delete older receipts to admit another
 account's same message ID.
 
+`work_event_cursors.py` provides a dormant binding/restoration hook and startup
+initializer. Install the hook before routes admit new bindings. It borrows the
+binding writer, replaces only that link's cursor set from one SQL Work snapshot,
+and stamps the generation in the same transaction. A restored held binding gets
+a new baseline before release returns. Startup seeds only null/mismatched bound
+instance generations, including blocked links; matching markers keep every
+cursor and preserve absent cursors for Work created while down. Initialization
+locks each link and drains through cancellation. Neither path renders content,
+sends messages or calls a provider. Supervisor installation remains outstanding.
+
 Codes store hashes with captured link/conflict epoch/token revision. Every
 current-token conflict commits a monotonic epoch and invalidates waiting codes;
 stale tokens cannot change it. Exhausted epochs fail closed. Generic `update`
