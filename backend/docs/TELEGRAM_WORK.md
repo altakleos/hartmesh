@@ -1097,3 +1097,13 @@ The final combined source/claim/group/settings checks surround replacement;
 held repair additionally fences the exact failure disposition and cannot take
 an active claim. SDK-manifest conflicts remain quarantined. Summary navigation
 and runtime installation are still separate requirements.
+
+`summary_navigation.py` and `summary_views.py` own explicit Show on a protected
+summary. The original daily receipt stays intact; a separate protected reply
+edits its exact acknowledged message after qualifying the complete current
+source and consumed Show proof. Reply visibility does not depend on whether
+future daily summaries are enabled. New item controls retain the original age
+and remain pending until the complete exact ACK. Pending views retain their
+origin through callback and outbox sweeps without making expired controls
+usable. Optional callback ingress is available, but view refresh/relocation,
+item navigation and supervisor installation remain required follow-ups.

@@ -154,6 +154,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
     pinned.update(await session.scalars(question_cleanup_anchors()))
     pinned.update(await status_cleanup_anchors(session))
     navigation_anchor = func.coalesce(*(delivery.payload[family]["navigation_origin"]["anchor_outbox_id"].as_string() for family in ("work_request_basis", "work_news_basis", "result_notice_basis")))
+    view_parent = func.coalesce(delivery.payload["work_digest_view_basis"]["parent_id"].as_string(), delivery.payload["summary_view_basis"]["parent_id"].as_string())
     # Compact dependency edges preserve complete digests behind live controls.
     records = await session.execute(
         select(
@@ -176,7 +177,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             delivery.payload["status_pin_tail"].as_string(),
             delivery.payload["digest_dispatch_conflict"],
             delivery.payload["summary_dispatch_conflict"],
-            delivery.payload["work_digest_view_basis"]["parent_id"].as_string(),
+            view_parent,
             navigation_anchor,
         ).where(
             or_(
@@ -187,7 +188,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
                 delivery.payload["status_pin_steps"][0].as_string().is_not(None),
                 delivery.payload["work_status_pin"]["presentation_id"].as_string().is_not(None),
                 delivery.payload["status_pin_tail"].as_string().is_not(None),
-                delivery.payload["work_digest_view_basis"]["parent_id"].as_string().is_not(None),
+                view_parent.is_not(None),
                 navigation_anchor.is_not(None),
             )
         )

@@ -1909,7 +1909,15 @@ class TelegramBotChannel(TelegramChannel):
         source_key = part.get("source_ref", {}).get("key", "")
         work_part = None
         work_sources = getattr(self._services, "work_request_sources", None)
-        if "summary_basis" in saved.item.payload:
+        if "summary_view_basis" in saved.item.payload:
+            work_sources = getattr(self._services, "summary_view_sources", None)
+            if work_sources is None or any(
+                key in saved.item.payload
+                for key in ("summary_basis", "work_digest_view_basis", "work_digest_basis", "work_status_update", "work_question_update", "work_news_basis", "result_notice_basis", "work_request_basis", "work_outcome_basis")
+            ):
+                raise PermanentDeliveryError("unsupported-summary-view-source")
+            work_part = await work_sources.read_part(saved)
+        elif "summary_basis" in saved.item.payload:
             work_sources = getattr(self._services, "summary_sources", None)
             if work_sources is None or any(
                 key in saved.item.payload for key in ("work_digest_view_basis", "work_digest_basis", "work_status_update", "work_question_update", "work_news_basis", "result_notice_basis", "work_request_basis", "work_outcome_basis")
