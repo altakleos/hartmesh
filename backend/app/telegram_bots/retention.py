@@ -237,7 +237,9 @@ async def _sweep_acts(sessions, now):
                 receipt = delivery_receipt(row.continuation)
             except (ValueError, TypeError, KeyError):
                 continue
-            if receipt is not None:
+            from app.telegram_bots.work_outcome_transfer import transferred
+
+            if receipt is not None or transferred(row):
                 settled.append(row.id)
         for start in range(0, len(settled), _BATCH):
             await session.execute(delete(TelegramActRow).where(TelegramActRow.id.in_(settled[start : start + _BATCH])))

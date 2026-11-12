@@ -68,7 +68,7 @@ Routing refresh preserves unresolved and collected journals. Explicit Retry vali
 outcome and original Act body, then serializes one attempt for that displayed
 attempt count. Delivery ACK and both kinds of shown controls share
 `acknowledged_parts`; keep full typed receipts before any control authority.
-Work outcome delivery uses canonical receipts and a final source/claim fence.
+Work outcomes fence superseded controls, receipts and current source/claims.
 Its dormant receipt observer never calls the explicit action-retry path. Routing
 results edit only their command’s exact ACKed selection; missing/incompatible
 anchors rematerialize current receipt content without another command.

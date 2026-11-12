@@ -89,7 +89,7 @@ class WorkReviewRecovery:
             async with self.plans.callbacks.writer(link, composed) as writer:
                 await self.previews._retire_previous(writer, link, {"operation_id": captured.operation_ids[0]})
                 key = "stale.withdrawn" if source.request.get("closed_reason") == "withdrawn" else "stale.closed"
-                await self.plans.outbox.plan_product_keyboard(
+                notice = await self.plans.outbox.plan_product_keyboard(
                     link,
                     source_id="work-review-retired:" + captured.operation_ids[0],
                     parts=[{"kind": "text", "source_ref": {"key": key, "values": {}}, "reply_to_message_id": captured.message_id}],
@@ -100,6 +100,9 @@ class WorkReviewRecovery:
                     finish_route=False,
                     session=writer,
                 )
+                from app.telegram_bots.work_outcome_transfer import transfer_input_outcomes
+
+                await transfer_input_outcomes(writer, link, captured, notice, outbox=self.plans.outbox)
                 await self.captures.inbox.finish_route(captured, session=writer)
                 composed.complete = True
             return True

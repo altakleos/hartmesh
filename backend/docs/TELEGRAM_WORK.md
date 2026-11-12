@@ -325,7 +325,19 @@ absence leaves the action unchanged. This differs from an explicit `Acts.check`,
 which can repeat the original command. Observation never calls that retry path.
 Each tick scans one bounded keyset page for one binding with a fixed maximum ID
 for that pass; new records cannot postpone revisiting older deferred actions.
-Acknowledged phases need no new observation. Per-link tasks share eight slots,
+Acknowledged phases need no new observation. A conclusive conflict or refusal
+whose presentation moved to a fresh preview cannot publish an old outcome.
+The source-qualified writer records a version-2 `work_outcome_transfer` on the
+original Act, distinct from a version-1 acknowledged delivery receipt. It survives
+callback/outbox cleanup, applies only to that conclusive phase and expires with
+the settled journal. Transfer retires earlier outcome phases and their controls,
+including failed deliveries, while preserving acknowledged history. An active
+claim must drain before the successor can take ownership. Observation reconciles
+canonical receipts first: later success still wins. The transfer proof shares the final source/authority check
+for publication and SDK dispatch; queued obsolete replies retire without changing
+the new preview or claiming delivery. Completed and uncertain operations retain
+their receipt and retry handling.
+Per-link tasks share eight slots,
 so a held link cannot drop another link's tick. The worker owns and drains all
 tasks across stop/cancellation and fences publication after shutdown. These components remain uninstalled until the full controller wiring.
 

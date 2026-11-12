@@ -200,4 +200,8 @@ class WorkInteractionPlans:
             await prompts.attach(link, basis["prompt_id"], outbox_id=identity, guard=composed, session=writer)
         if input_origin is None:
             await self.callbacks.consume_group(group, reason=reason, session=writer)
+            if reason == "work-refresh":
+                from app.telegram_bots.work_outcome_transfer import transfer_outcome
+
+                await transfer_outcome(writer, link, callback_id, identity, outbox=self.outbox)
         return identity
