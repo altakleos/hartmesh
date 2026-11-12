@@ -1027,3 +1027,13 @@ proves their pinned target, with fresh checks inside the SDK limiter. Retention
 uses the same closed, typed ledger and presentation receipts; a row's `sent` state
 alone never proves cleanup. Pin operations and all referenced presentations stay
 retained until exact cleanup is acknowledged. Installation remains deferred.
+
+`work_digest_items.DigestItems` publishes ordinary question/decision full previews
+as separate reply rows. The explicit navigation origin and Telegram query key
+preserve original batch membership and reusable controls. Publication qualifies
+source, exact anchor and the complete new pending group before and after its
+writer; dispatch composes preview and origin authority in one final read. New
+controls inherit the original age and protection stays source-owned. Retention
+follows preview → navigation anchor → original batch → members. Ordinary request
+repair refuses these origins until their dedicated recovery owner is installed;
+review/routing/news/result previews and installation remain separate work.

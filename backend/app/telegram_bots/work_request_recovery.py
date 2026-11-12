@@ -124,6 +124,10 @@ class WorkRequestRecovery:
         return reveal is not None and len(fresh) > 1
 
     async def _replace(self, writer, link, row, source, settings, *, reveal=None, force_new=False, choice=None):
+        if "navigation_origin" in row.payload.get("work_request_basis", {}):
+            # A reusable digest gesture has its own authority and physical
+            # anchor. Ordinary notification repair cannot discard that proof.
+            raise ProductSourceRetired()
         if not self._owns_basis(row.payload.get("work_request_basis", {})):
             # Result receipts and file ownership require their dedicated
             # recovery transition; ordinary text refresh would erase them.

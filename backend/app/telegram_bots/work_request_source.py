@@ -68,7 +68,7 @@ def _references(value):
             yield from _references(child)
 
 
-def frozen(captured, *, acknowledged=False, pending=False):
+def frozen(captured, *, acknowledged=False, pending=False, replay=False):
     """A class label or literal template cannot manufacture a Work source."""
     try:
         basis = captured.item.payload["work_request_basis"]
@@ -86,13 +86,14 @@ def frozen(captured, *, acknowledged=False, pending=False):
             | ({"reply_origin"} if basis.get("version") in {2, 6} and "reply_origin" in basis else set())
             | ({"choice_origin"} if basis.get("version") == 6 and "choice_origin" in basis else set())
             | ({"result_files"} if basis.get("version") in {1, 2} and "result_files" in basis else set())
+            | ({"navigation_origin"} if basis.get("version") == 1 and "navigation_origin" in basis else set())
             | ({"prompt_id"} if basis.get("version") == 3 and type(basis.get("interaction")) is dict and basis["interaction"].get("view") == "prompt" else set())
             or type(basis["version"]) is not int
             or basis["version"] not in {1, 2, 3, 4, 5, 6}
         ):
             raise ValueError()
         if (
-            captured.item.class_ != ("reply" if basis["version"] in {3, 4} or basis.get("reply_origin") is not None or basis.get("choice_origin") is not None else "question")
+            captured.item.class_ != ("reply" if basis["version"] in {3, 4} or basis.get("reply_origin") is not None or basis.get("choice_origin") is not None or "navigation_origin" in basis else "question")
             or type(basis["concealed"]) is not bool
             or type(basis["locale"]) is not str
             or type(captured.item.payload.get("presentation_version")) is not int
@@ -106,6 +107,15 @@ def frozen(captured, *, acknowledged=False, pending=False):
             if basis.get("interaction", {}).get("view") != "prompt":
                 raise ValueError()
         reply_origin = basis.get("reply_origin")
+        navigation_origin = basis.get("navigation_origin")
+        if replay and navigation_origin is None:
+            raise ValueError()
+        if "navigation_origin" in basis:
+            from app.telegram_bots.work_navigation_origin import validate_origin
+
+            validate_origin(navigation_origin)
+            if basis["concealed"] or "result_files" in basis or captured.item.dedupe_key != "notice:work-navigation:" + navigation_origin["query_key"]:
+                raise ValueError()
         if reply_origin is not None and (type(reply_origin) is not str or len(reply_origin) != 32 or any(ch not in "0123456789abcdef" for ch in reply_origin)):
             raise ValueError()
         choice_origin = basis.get("choice_origin")
@@ -121,6 +131,8 @@ def frozen(captured, *, acknowledged=False, pending=False):
             raise ValueError()
         data = basis["source"]
         source = WorkRequestRead(**{**data, "responses": tuple(data["responses"])})
+        if navigation_origin is not None and source.request["purpose"] not in {"information", "decision"}:
+            raise ValueError()
         if (
             source.request["instance_id"] != captured.link.agent_ref
             or captured.link.agent_kind != "instance"
@@ -132,7 +144,7 @@ def frozen(captured, *, acknowledged=False, pending=False):
             raise ValueError()
         if type(source.protected) is not bool or json.dumps(source.seen, sort_keys=True) != json.dumps(seen_basis(source.work, source.request, source.responses), sort_keys=True):
             raise ValueError()
-        if source.protected and not basis["concealed"] and reveal is None and reply_origin is None and choice_origin is None and basis["version"] not in {3, 4}:
+        if source.protected and not basis["concealed"] and reveal is None and reply_origin is None and choice_origin is None and navigation_origin is None and basis["version"] not in {3, 4}:
             raise ValueError()
         if basis["version"] in {3, 4}:
             from app.telegram_bots.work_interactions import present_interaction
@@ -248,6 +260,7 @@ def frozen(captured, *, acknowledged=False, pending=False):
             "target_message_id",
             "target_protect_content",
         }
+        replay_receipts = set()
         for ordinal, (part, recipe) in enumerate(zip(parts, expected, strict=True)):
             identity = part.get("part_id")
             if type(identity) is not str or len(identity) != 32 or identity in identities or any(ch not in "0123456789abcdef" for ch in identity):
@@ -265,10 +278,21 @@ def frozen(captured, *, acknowledged=False, pending=False):
                 raise ValueError()
             if source.protected and not part.get("protect_content") or ordinal < len(parts) - 1 and part.get("callback_group_id"):
                 raise ValueError()
-            if (acknowledged or ordinal < index and not pending) and (part["state"] != "sent" or not part.get("sent_at") or not part.get("message_ids") or any(type(identity) is not int or identity <= 0 for identity in part["message_ids"])):
+            if (acknowledged or ordinal < index and (not pending or replay)) and (part["state"] != "sent" or not part.get("sent_at") or not part.get("message_ids") or any(type(identity) is not int or identity <= 0 for identity in part["message_ids"])):
                 raise ValueError()
-            if pending and (part["state"] != "pending" or part.get("message_ids") or part.get("sent_at") or part.get("dispatched_at")):
+            if pending and (not replay or ordinal >= index) and (part["state"] != "pending" or part.get("message_ids") or part.get("sent_at") or not replay and part.get("dispatched_at")):
                 raise ValueError()
+            if replay:
+                if part["state"] == "sent":
+                    ids = part.get("message_ids")
+                    if type(ids) is not list or len(ids) != 1 or type(ids[0]) is not int or ids[0] <= 0 or ids[0] in replay_receipts:
+                        raise ValueError()
+                    replay_receipts.add(ids[0])
+                elif ordinal > index and part["state"] != "pending":
+                    raise ValueError()
+                for field in ("sent_at", "dispatched_at"):
+                    if field in part and (type(part[field]) is not str or datetime.fromisoformat(part[field]).utcoffset() is None):
+                        raise ValueError()
         recipe = expected[index]
         return basis, source, recipe
     except (KeyError, TypeError, ValueError, IndexError):
@@ -312,8 +336,9 @@ async def acknowledge_request(session, row):
 class WorkRequestSources:
     projection_type = None
 
-    def __init__(self, *, reader, outbox, callbacks, recovery=None):
+    def __init__(self, *, reader, outbox, callbacks, recovery=None, navigation=None):
         self.recovery = recovery
+        self.navigation = navigation
         self.reader, self.outbox, self.callbacks = reader, outbox, callbacks
         self.settings = SettingsRepository(outbox.sessions, outbox.config)
         if reader.links.session_factory.kw.get("bind") is not outbox.sessions.kw.get("bind") or callbacks.sessions.kw.get("bind") is not outbox.sessions.kw.get("bind"):
@@ -330,7 +355,7 @@ class WorkRequestSources:
             raise ProductSourceRetired()
         if not (current.request["can_respond"] if current.request["purpose"] == "information" else current.request["can_manage"]):
             raise ProductSourceRetired()
-        revealed = bool(basis.get("reveal") or basis.get("reply_origin") or basis.get("choice_origin"))
+        revealed = bool(basis.get("reveal") or basis.get("reply_origin") or basis.get("choice_origin") or basis.get("navigation_origin"))
         changed = not same_displayed_basis(current, source) or current.protected != basis["concealed"] and not revealed and basis["version"] not in {3, 4}
         if basis["version"] in {3, 4} and changed:
             raise ProductSourceRetired()
@@ -339,6 +364,10 @@ class WorkRequestSources:
             if settings is None:
                 raise ProductSourceRetired()
             if changed or settings.locale != basis["locale"]:
+                if basis.get("navigation_origin") is not None:
+                    # Navigation recovery must retain the original gesture and
+                    # physical anchor; the ordinary notice repair cannot do so.
+                    raise ProductSourceRetired()
                 await self.recovery.refresh(captured)
                 raise DeliveryClaimRetired()
         elif content(current) != content(source):
@@ -365,6 +394,7 @@ class WorkRequestSources:
                 raise DeliveryClaimRetired()
             zone = await asyncio.to_thread(ZoneInfo, settings.timezone)
             projection = (self.projection_type or _RequestProjection)(self, captured, basis, source, settings, zone, silent, now)
+            projection = await self.qualify_navigation(captured, basis, source, projection)
             held, _target = await current_attention(self.reader, captured.link, projection=projection)
             if "agents:write" not in held:
                 raise ProductSourceRetired()
@@ -373,6 +403,21 @@ class WorkRequestSources:
             await await_drained(read())
         except (AccessOff, CeilingRefused, AgentDenied, AgentConflict, CallbackRefused):
             raise ProductSourceRetired() from None
+
+    async def qualify_navigation(self, captured, basis, source, projection):
+        if "navigation_origin" not in basis:
+            return projection
+        if self.navigation is None:
+            raise ProductSourceRetired()
+        from app.telegram_bots.work_digest_members import require_request_origin
+        from app.telegram_bots.work_digest_projection import DigestProjection
+        from app.telegram_bots.work_navigation_origin import NavigationOriginProjection
+
+        origin = await self.navigation.restore(captured.link, basis["navigation_origin"])
+        if "work_request_basis" not in origin.member.item.payload:
+            raise ProductSourceRetired()
+        require_request_origin(origin.member.source, source)
+        return DigestProjection(captured.link, [projection, NavigationOriginProjection(origin)])
 
 
 class _RequestProjection:
@@ -495,7 +540,7 @@ class _RequestProjection:
         if (
             protected != self.source.protected
             or protected != self.basis["concealed"]
-            and not (self.basis.get("reveal") or self.basis.get("reply_origin") or self.basis.get("choice_origin"))
+            and not (self.basis.get("reveal") or self.basis.get("reply_origin") or self.basis.get("choice_origin") or self.basis.get("navigation_origin"))
             and self.basis["version"] not in {3, 4}
             or protected
             and not self.captured.part.get("protect_content")
