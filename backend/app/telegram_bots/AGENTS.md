@@ -118,9 +118,9 @@ Stale lists retire without blocking later messages. Ordinary bots dispatch
 `/assistants` and `/employees` to `handle_list`; their Work words only point to
 those chats. Instance/custom bots do not acquire these ordinary-chat commands.
 
-Work, notification, digest and interaction contracts:
+Work, notification, digest, summary and interaction contracts:
 [Work delivery guide](../../docs/TELEGRAM_WORK.md). Read it before changing
-`attention*`, `notification*`, `digest*`, `work_*` or their sender/callback integration.
+`attention*`, `notification*`, `digest*`, `summary*`, `work_*` or sender/callback integration.
 Result media and event proofs: see the Work guide.
 
 `commands.py` handles fixed navigation and language settings only. A command closes
