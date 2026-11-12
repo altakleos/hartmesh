@@ -186,6 +186,8 @@ async def test_protected_result_notice_requires_actual_show_and_cleanup_before_f
     async with e.db.sessions() as reader:
         row = await reader.get(TelegramOutboxRow, identity)
         assert row.payload["result_notice_basis"]["cleanup_id"]
+        cleanup = await reader.get(TelegramOutboxRow, row.payload["result_notice_basis"]["cleanup_id"])
+        assert len(cleanup.dedupe_key) <= TelegramOutboxRow.__table__.c.dedupe_key.type.length
         assert (await reader.get(TelegramCallbackRow, show.id)).consumed_at is not None
     e.delivery_clock.advance(2)
     message(sdk, "editMessageReplyMarkup", identity=981)
