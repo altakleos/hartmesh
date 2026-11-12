@@ -2014,8 +2014,10 @@ Controller activation remains outstanding. A binding-scoped event baseline
 foundation preserves unread Work revisions across restarts without replaying
 history from before connection or restoration. Its catch-up primitive commits
 delivery writes with each cursor, rotates across bots and assignments, and holds
-incomplete history for repair. The recipient mapper and startup integration
-remain outstanding. Background recovery preserves newer
+incomplete history for repair. Recipient intents use canonical response and
+attempt identities, preserve routing revisions, and wait for a rendered delivery
+plan. Notification rendering and startup integration remain outstanding.
+Background recovery preserves newer
 request previews. Complete first-tap previews now have
 a durable delivery boundary that waits for the entire message before enabling controls
 or typing prompts. Confirmed choices also have durable, single-operation admission

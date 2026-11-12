@@ -2324,7 +2324,7 @@ class OutboxSender:
         preferences = await self.outbox.notification_decision(row)
         if preferences.decision != "allow":
             return preferences
-        if row.class_ == "digest" and not row.parts:
+        if not row.parts and (row.class_ == "digest" or "work_event_intent" in row.payload):
             return DeliveryEligibility.wait()
         work_basis = row.payload.get("work_request_basis", {})
         dependency = work_basis.get("cleanup_id") if type(work_basis) is dict else None

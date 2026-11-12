@@ -209,9 +209,11 @@ Round-robin link and Work bookmarks advance after failure too; other due pairs
 can proceed, even with a batch of one. Bookmarks affect fairness only; persisted
 cursors and delivery dedupe own restart and concurrent-reader correctness.
 Cancellation drains admitted projection/commit. This primitive sends nothing
-and does not consult transport health or the copy guard. The complete recipient
-mapper, content materializers and supervisor installation remain outstanding;
-test fixture projectors qualify transaction ownership, not recipient behavior.
+and does not consult transport health or the copy guard. `WorkEventIntents.project`
+supplies the recipient projection; its source rules live in
+[Work delivery](TELEGRAM_WORK.md). Content materializers and supervisor
+installation remain outstanding. Reader test fixture projectors qualify
+transaction ownership separately from the recipient service tests.
 
 Codes store hashes with captured link/conflict epoch/token revision. Every
 current-token conflict commits a monotonic epoch and invalidates waiting codes;
