@@ -2016,7 +2016,11 @@ history from before connection or restoration. Its catch-up primitive commits
 delivery writes with each cursor, rotates across bots and assignments, and holds
 incomplete history for repair. Recipient intents use canonical response and
 attempt identities, preserve routing revisions, and wait for a rendered delivery
-plan. Notification rendering and startup integration remain outstanding.
+plan. Information and decision questions can now retain that delivery identity
+through rendering, recheck the original event before sending, and enable buttons
+only after complete delivery. Protected questions wait for Show; decisions wait
+for their attempt to finish or the bounded hold to expire. Other notification
+rendering and startup integration remain outstanding.
 Background recovery preserves newer
 request previews. Complete first-tap previews now have
 a durable delivery boundary that waits for the entire message before enabling controls
