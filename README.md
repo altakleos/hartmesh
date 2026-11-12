@@ -2007,7 +2007,8 @@ menu at their next start.
 Work notifications, question routing and confirmation controls are still in
 preparation and are not enabled in Telegram. The optional single-file answer flow
 saves the file once and names it in the acknowledgement without starting work;
-whole-album submission and controller activation remain outstanding. Complete first-tap previews now have
+Album collection retains every member before choosing its destination, including
+across restarts; whole-album submission and controller activation remain outstanding. Complete first-tap previews now have
 a durable delivery boundary that waits for the entire message before enabling controls
 or typing prompts. Confirmed choices also have durable, single-operation admission
 for recovery after a restart. Temporarily refused confirmations can rebuild a

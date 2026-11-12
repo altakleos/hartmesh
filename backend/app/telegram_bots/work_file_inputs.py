@@ -2,8 +2,6 @@
 
 from copy import deepcopy
 
-from sqlalchemy import select
-
 from app.telegram_bots.acts import _snapshot
 from app.telegram_bots.callbacks import CallbackRefused, normalize_callback_topic
 from app.telegram_bots.file_puts import _file_journal, file_act_id, work_input_digest
@@ -108,6 +106,9 @@ class WorkFileInputs:
     def __init__(self, inputs):
         self.inputs, self.services = inputs, inputs.services
         self.cards, self.inbox = inputs.cards.cards, inputs.inbox
+        from app.telegram_bots.work_file_albums import WorkFileAlbums
+
+        self.albums = WorkFileAlbums(self)
 
     async def handle(self, channel, update, *, captured_link):
         async def perform():
@@ -118,7 +119,12 @@ class WorkFileInputs:
                 return False
             guard = self.services.commands._guard(channel, link)
             if message.media_group_id is not None:
-                return await self._hold_album(channel, link, update, guard)
+                async with self.services.callbacks.writer(link, guard) as writer:
+                    mark = await writer.get(TelegramInboundMarkRow, (link.id, message.message_id, message.chat_id))
+                    if mark is not None and mark.route_kind == "work_file_album":
+                        self.inbox._current(link, mark)
+                        return True
+                return False  # The shared ingress joins the whole album before classification.
             async with self.services.callbacks.writer(link, guard) as writer:
                 mark = await writer.get(TelegramInboundMarkRow, (link.id, message.message_id, message.chat_id))
                 if mark is not None and mark.route_kind == "work_file_new":
@@ -148,49 +154,6 @@ class WorkFileInputs:
                 return await self._hold(channel, link, origin, source, guard)
 
         return await await_drained(perform())
-
-    async def _hold_album(self, channel, link, update, guard):
-        """Reserve actual members until whole-album submission is installed.
-
-        Single-file admission must never consume the question for the first
-        member or let later members enter ordinary chat independently.
-        """
-        message = update.message
-        source = None
-        if message.reply_to_message is not None:
-            source = await self.inputs.cards.find(link, message.reply_to_message.message_id, topic=normalize_callback_topic(message.message_thread_id))
-        async with self.services.callbacks.writer(link, guard) as writer:
-            row = TelegramInboundMarkRow
-            previous = await writer.scalar(
-                select(row)
-                .where(
-                    row.link_id == link.id,
-                    row.chat_id == link.chat_id,
-                    row.binding_generation == link.binding_generation,
-                    row.message_thread_id == normalize_callback_topic(message.message_thread_id),
-                    row.route_kind == "work_file_album",
-                    row.sanitized_input["media_group_id"].as_string() == message.media_group_id,
-                )
-                .order_by(row.message_id)
-                .limit(1)
-            )
-            if source is None and previous is not None:
-                source = previous.route_basis["source_outbox_id"]
-        if source is None:
-            return False
-        files = [{**value, "message_id": message.message_id, "telegram_bot_id": link.bot_id} for value in channel._extract_inbound_files(message)]
-        origin, _ = await self.inbox.accept(link, update, sanitized_input={"type": "media", "text": message.caption or "", "files": files})
-        async with self.services.callbacks.writer(link, guard) as writer:
-            mark = (await self.inbox._rows(writer, [origin]))[0]
-            self.inbox._current(link, mark)
-            if mark.route_kind is not None:
-                if mark.route_kind != "work_file_album" or mark.route_basis.get("source_outbox_id") != source:
-                    raise CallbackRefused()
-                return True
-            basis = {"source_outbox_id": source, "input_profile": {"version": 2, "kind": "chat_input", "forwarded": False, "origin": None}}
-            await self.inbox.route(origin, kind="work_file_album", target_id=source, basis=basis, operation_ids=[], session=writer)
-            await self.inbox.register_delivery([origin], outbox_id=source, primary=False, finish=False, session=writer)
-        return True
 
     async def _hold(self, channel, link, origin, source, guard):
         async with self.services.callbacks.writer(link, guard) as writer:

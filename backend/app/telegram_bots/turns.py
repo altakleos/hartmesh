@@ -385,16 +385,23 @@ class ChatTurns:
         if not await channel._input_current(link) or self._closed or channel in self._retired or not channel._callback_current(link):
             return False
         value = {"type": "media" if files else "text", "text": text, **({"files": files} if files else {})}
-        row, created = await await_drained(self.services.outbox.inbox.accept(link, update, sanitized_input=value))
+        forwarded, name = forward_origin(message)
+        profile = {"version": 2, "kind": "chat_input", "forwarded": forwarded, "origin": name} if files or forwarded else {"version": 1, "kind": "plain_text", "forwarded": False}
+        work_inputs = getattr(self.services, "work_text_inputs", None)
+        album_owner = getattr(getattr(work_inputs, "files", None), "albums", None)
+        pending_album = bool(files and not forwarded and link.agent_kind == "instance" and message.media_group_id and album_owner is not None)
+        if pending_album:
+            row, created = await album_owner.accept(link, update, value, profile)
+        else:
+            row, created = await await_drained(self.services.outbox.inbox.accept(link, update, sanitized_input=value))
         if not created and not self.unfinished(link, row):
             channel._classified(update, remember=True)
             return True
         # From here a channel going away leaves the update unacknowledged, so the row is not stranded.
         if not self._open(channel, link):
             return False
-        forwarded, name = forward_origin(message)
-        profile = {"version": 2, "kind": "chat_input", "forwarded": forwarded, "origin": name} if files or forwarded else {"version": 1, "kind": "plain_text", "forwarded": False}
-        row = await await_drained(self.services.outbox.inbox.route(row, kind="turn", target_id=link.agent_ref, basis={"input_profile": profile}, operation_ids=[]))
+        if not pending_album:
+            row = await await_drained(self.services.outbox.inbox.route(row, kind="turn", target_id=link.agent_ref, basis={"input_profile": profile}, operation_ids=[]))
         if not self._open(channel, link):
             return False
         key = (link.id, row.message_thread_id)
@@ -431,7 +438,12 @@ class ChatTurns:
         basis = _scope(row)
         album = row.sanitized_input.get("media_group_id")
         kind = "album" if album is not None else "forward" if forwarded else "longtext" if len(text.encode("utf-16-le")) // 2 >= 4000 else None
-        basis = (*basis, album if kind == "album" else None)
+        if row.route_kind == "work_album_pending":
+            # Collection may include an unquoted member before its Work quote.
+            # Ordinary admission below still partitions by the complete scope.
+            kind, basis = "work_album", (*basis[:7], row.sanitized_input.get("prompt_id"), album)
+        else:
+            basis = (*basis, album if kind == "album" else None)
         prior = self._joins.get(key)
         compatible = not separate and prior is not None and prior.channel is channel and prior.basis == basis and (prior.kind == kind or prior.kind == "longtext" and kind is None) and len(prior.origins) < 64
         if prior is not None and not compatible:
@@ -481,7 +493,25 @@ class ChatTurns:
             await asyncio.gather(joined.task, return_exceptions=True)
         if self._open(joined.channel, joined.link):
             try:
-                await self._admit_origins(joined.channel, joined.link, tuple(joined.origins))
+                if joined.kind == "work_album":
+                    from app.telegram_bots.inbox import _scope
+
+                    owner = self.services.work_text_inputs.files.albums
+                    captured = await owner.capture(joined.channel, joined.link, tuple(joined.origins))
+                    if captured.work_owned:
+                        return
+                    # Only the collector crosses missing quotes. Non-Work
+                    # inputs preserve the original reply/prompt boundaries.
+                    partitions = []
+                    for origin in captured.origins:
+                        if partitions and _scope(partitions[-1][-1]) == _scope(origin):
+                            partitions[-1].append(origin)
+                        else:
+                            partitions.append([origin])
+                    for partition in partitions:
+                        await self._admit_origins(joined.channel, joined.link, tuple(partition))
+                else:
+                    await self._admit_origins(joined.channel, joined.link, tuple(joined.origins))
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -491,6 +521,8 @@ class ChatTurns:
         """A join's updates were acknowledged when they joined, so no replay will bring these back."""
         channel, link, first = joined.channel, joined.link, joined.origins[0]
         _chat_line("chat_join_held", chat=link, error=error)
+        if joined.kind == "work_album":
+            return  # Durable collection owns recovery; ordinary Retry cannot choose its destination.
         if (link.id, first.message_id) in self._origins:
             return  # In line, and only its notice failed.
         try:
@@ -1617,6 +1649,10 @@ class ChatTurns:
             await recover_retries(self.services, phase, link_id=link_id)
 
     async def _close_left_inputs(self, phase, *, link_id=None):
+        work_inputs = getattr(self.services, "work_text_inputs", None)
+        albums = getattr(getattr(work_inputs, "files", None), "albums", None)
+        if albums is not None:
+            await albums.recover(phase, link_id=link_id)
         after = None
         while phase():
             # Retained SQL may settle after D. Its result never re-arms the phase.

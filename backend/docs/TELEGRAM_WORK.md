@@ -540,8 +540,25 @@ entry points drain repeated cancellation. Unfinished Work file inputs retain nat
 receipts beyond the ordinary terminal-journal age; historical JSON filters use text
 comparisons before closed-shape validation, never PostgreSQL integer casts.
 
-The single-file controller retains recognized album members as `work_file_album`
-without consuming the question, uploading a first member or admitting a partial
-response. Whole-album collection, including members preceding the quoted member,
-and startup/controller installation remain activation prerequisites. This dormant
-primitive does not enable Telegram Work interactions.
+The optional album collector commits `work_album_pending` with the first actual
+input, before the quiet-window join is acknowledged. It resolves the complete
+stored cohort before ordinary file effects, including an unquoted member preceding
+the quoted question. Exact scope includes link, chat, topic and binding generation;
+prompt boundaries remain distinct. Ordinary decisions persist before admission,
+which still partitions by each original reply/prompt scope. A Work cohort retains
+all actual members and pins its sources without consuming controls or uploading.
+
+The closed album manifest records member IDs, prior cohorts, sources and an actual
+quoted root only for one unambiguous source. Conflicting explicit quotes have no
+selected root. Later members retain the prior Work owner; a late Work quote cannot
+repurpose an already ordinary cohort. Malformed or oversized groups stay held.
+Classification failures expose no ordinary Retry button. Startup classifies pending
+metadata before generic interrupted-input recovery, without downloading, writing
+files or starting a model. Pending collection conservatively pins potential Work
+source outboxes in the same scope until classification; source removal must not
+change a Work reply into ordinary chat.
+
+Group upload, one canonical response, full acknowledgement and explicit closed-group
+recovery still require implementation. Before activation, their final effect must
+reprove the complete member manifest, including absence of newly admitted members.
+All Work controllers remain dormant.

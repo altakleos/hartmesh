@@ -78,7 +78,7 @@ async def file_reply(e, monkeypatch, tmp_path, *, caption="", quoted=801, filena
             caption=caption or None,
             media_group_id=album,
             document=Document("work-file", "work-unique", file_name=filename, mime_type="application/pdf", file_size=4),
-            reply_to_message=Message(quoted, datetime.now(UTC), chat, from_user=User(e.link.bot_id, "Bot", True), text="Question"),
+            reply_to_message=Message(quoted, datetime.now(UTC), chat, from_user=User(e.link.bot_id, "Bot", True), text="Question") if quoted is not None else None,
         ),
     )
     if before_input is not None:
@@ -591,27 +591,6 @@ async def test_file_retention_does_not_cast_historical_versions_to_postgres_inte
     monkeypatch.setattr(AsyncSession, "execute", execute)
     await _sweep_acts(e.db.sessions, e.clock())
     assert captured and all("AS INTEGER" not in sql for sql in captured)
-
-
-@pytest.mark.asyncio
-async def test_work_album_is_retained_without_partial_answer_or_ordinary_fallthrough(work_delivery, monkeypatch, tmp_path):
-    e = work_delivery
-    request, first, reads = await file_reply(e, monkeypatch, tmp_path, album="actual-album")
-    chat, person = first.message.chat, first.message.from_user
-    second = Update(2901, message=Message(901, datetime.now(UTC), chat, from_user=person, media_group_id="actual-album", document=Document("second-file", "second-unique", file_name="part-two.pdf", file_size=4)))
-    assert await e.channel.handle_update(second)
-    await e.channel._drain_ingress()
-    assert not reads and e.channel._services.turns.accept.await_count == 0
-    assert (await e.human.responses(actor=e.actor, request_id=request["id"]))["responses"] == []
-    async with e.db.sessions() as reader:
-        marks = list(await reader.scalars(select(TelegramInboundMarkRow).where(TelegramInboundMarkRow.link_id == e.link.id, TelegramInboundMarkRow.message_id.in_([900, 901])).order_by(TelegramInboundMarkRow.message_id)))
-        assert len(marks) == 2
-        assert all(mark.route_kind == "work_file_album" and not mark.operation_ids and not mark.route_complete for mark in marks)
-        assert {mark.sanitized_input["media_group_id"] for mark in marks} == {"actual-album"}
-        assert len({mark.route_basis["source_outbox_id"] for mark in marks}) == 1
-        assert not list(await reader.scalars(select(TelegramActRow)))
-    assert await e.channel.handle_update(first)
-    assert not reads and e.channel._services.turns.accept.await_count == 0
 
 
 @pytest.mark.asyncio

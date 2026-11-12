@@ -2694,7 +2694,7 @@ class InboxRepository:
 
         await await_drained(perform())
 
-    async def accept(self, link: BotLink, update: Update, *, sanitized_input: dict) -> tuple[InboxRow, bool]:
+    async def accept(self, link: BotLink, update: Update, *, sanitized_input: dict, session: AsyncSession | None = None) -> tuple[InboxRow, bool]:
         message = update.message
         if message is None or update.edited_message is not None or message.chat.type != "private" or message.from_user is None or message.from_user.is_bot:
             raise ValueError("invalid-inbox-update")
@@ -2712,7 +2712,7 @@ class InboxRepository:
             if value is not None:
                 payload[key] = value
         payload = _input(payload)
-        async with self._transaction() as session:
+        async with self._transaction(session) as session:
             current = await self._link(session, link.id)
             saved = list(
                 await session.scalars(
