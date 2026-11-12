@@ -31,13 +31,22 @@ async def work_exports(work_delivery, tmp_path, monkeypatch, request):
     async with e.db.sessions.begin() as writer:
         writer.add(SpaceGrantRow(space_id=e.home.id, principal_kind="human", subject_id=e.actor.subject_id, permissions=int(Permission.READ | Permission.EXPORT)))
     e.source_space = e.home
-    if getattr(request, "param", None) == "external":
+    if getattr(request, "param", None) in {"external", "review_album"}:
         from deerflow.spaces.contract import Custody, MutationMode
 
         e.source_space = await e.files.create(actor=e.actor, name="Shared evidence", custody=Custody.personal(e.actor), mode=MutationMode.NATIVE)
         await e.files.mkdir(actor=e.actor, space_id=e.source_space.id, expected_generation=e.source_space.generation, operation_id=uuid4().hex, path="outputs")
         await e.files.write(actor=e.actor, space_id=e.source_space.id, expected_generation=e.source_space.generation, operation_id=uuid4().hex, path="outputs/result.txt", content=b"external result", create=True)
-    record = await e.human.work.delegate(actor=e.actor, instance_id=e.instance.id, request=DelegateWork(operation_id=uuid4().hex, objective="Report the findings", success_criteria="Provide evidence"))
+    sources = [WorkSource(space_id=e.source_space.id, path="outputs/result.txt")]
+    if getattr(request, "param", None) == "review_album":
+        from test_telegram_output_planning import png_header
+
+        sources = []
+        for space, actor in ((e.home, e.instance.principal), (e.source_space, e.actor)):
+            await e.files.write(actor=actor, space_id=space.id, expected_generation=space.generation, operation_id=uuid4().hex, path="outputs/picture.png", content=png_header(2, 2), create=True)
+            sources.append(WorkSource(space_id=space.id, path="outputs/picture.png"))
+    review = {"review_required": True} if getattr(request, "param", None) in {"review", "review_album"} else {}
+    record = await e.human.work.delegate(actor=e.actor, instance_id=e.instance.id, request=DelegateWork(operation_id=uuid4().hex, objective="Report the findings", success_criteria="Provide evidence", **review))
     conversations = e.http_app.state.agent_conversations
     chat = await conversations.create(actor=e.actor, instance_id=e.instance.id, creation_id=uuid4().hex)
     execution = await conversations.execution(actor=e.actor, thread_id=chat["thread_id"])
@@ -47,9 +56,7 @@ async def work_exports(work_delivery, tmp_path, monkeypatch, request):
     run.user_id = e.actor.subject_id
     await scope.bind(execution, run, execution.thread_incarnation)
     current = (await scope.context(execution))["work"]
-    await scope.report(
-        execution, ReportWork(operation_id=uuid4().hex, expected_revision=current["revision"], action="outcome", statement="The findings are verified.", sources=[WorkSource(space_id=e.source_space.id, path="outputs/result.txt")])
-    )
+    await scope.report(execution, ReportWork(operation_id=uuid4().hex, expected_revision=current["revision"], action="outcome", statement="The findings are verified.", sources=sources))
     await scope.finish(execution, run, settled=True)
     e.result = await e.human.work.get(actor=e.actor, instance_id=e.instance.id, work_id=record["id"])
     e.export_calls = []

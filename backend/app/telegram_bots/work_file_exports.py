@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 
 from sqlalchemy import and_
+from sqlalchemy.orm import aliased
 
 from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.producer import DeliveryClaimRetired, ProductSourceRetired
@@ -39,31 +40,33 @@ class _WorkFileExport:
         ):
             raise ProductSourceRetired()
 
-    async def _admit(self, admission, writer, rows, *, check_delivery=None, protect_content=None, projection=None):
+    async def _admit(self, admission, writer, rows, *, check_delivery=None, protect_content=None, projection=None, require_write=False):
         self._current()
         admitted = rows.get(self.source["space_id"])
         if admitted is None or admitted[0].generation != self.generation:
             raise SpaceDenied("The original result file is unavailable")
         if check_delivery is not None:
             await check_delivery(writer)
-        await admission(session=writer, projection=_WorkFileProjection(self, protect_content, projection))
+        held, _target = await admission(session=writer, projection=_WorkFileProjection(self, protect_content, projection))
+        if require_write and "agents:write" not in held:
+            raise ProductSourceRetired()
         self._current()
 
-    async def authorize(self, *, check_delivery=None, protect_content=None, projection=None):
-        if protect_content is not None and type(protect_content) is not bool or check_delivery is not None and not callable(check_delivery):
+    async def authorize(self, *, check_delivery=None, protect_content=None, projection=None, require_write=False):
+        if type(require_write) is not bool or protect_content is not None and type(protect_content) is not bool or check_delivery is not None and not callable(check_delivery):
             raise ValueError("work-file-dispatch-required")
 
         async def perform():
             self._current()
             admission = await prepare_attention(self.reader, self.link)
             async with self.files.registry.admitted(actor=PrincipalRef("human", self.link.owner_user_id), requests={self.source["space_id"]: (Permission.READ | Permission.EXPORT, self.generation)}) as (writer, rows):
-                await self._admit(admission, writer, rows, check_delivery=check_delivery, protect_content=protect_content, projection=projection)
+                await self._admit(admission, writer, rows, check_delivery=check_delivery, protect_content=protect_content, projection=projection, require_write=require_write)
             self._current()
 
         return await await_drained(perform())
 
-    async def read(self, *, max_bytes, check_delivery=None, projection=None):
-        if type(max_bytes) is not int or not 0 < max_bytes <= 50_000_000 or check_delivery is not None and not callable(check_delivery):
+    async def read(self, *, max_bytes, check_delivery=None, projection=None, require_write=False):
+        if type(require_write) is not bool or type(max_bytes) is not int or not 0 < max_bytes <= 50_000_000 or check_delivery is not None and not callable(check_delivery):
             raise ValueError("work-file-export-limit")
 
         async def perform():
@@ -71,7 +74,7 @@ class _WorkFileExport:
             admission = await prepare_attention(self.reader, self.link)
 
             async def admitted(writer, rows):
-                await self._admit(admission, writer, rows, check_delivery=check_delivery, projection=projection)
+                await self._admit(admission, writer, rows, check_delivery=check_delivery, projection=projection, require_write=require_write)
 
             result = None
             try:
@@ -90,7 +93,7 @@ class _WorkFileProjection:
 
     def extend(self, query):
         value = self.export
-        work, space, grant = AgentWorkRow, SpaceRow, SpaceGrantRow
+        work, space, grant = aliased(AgentWorkRow), aliased(SpaceRow), aliased(SpaceGrantRow)
         self.column = len(query.column_descriptions)
         result = (
             query.add_columns(work, space, grant.permissions)
@@ -154,5 +157,42 @@ async def prepare_work_file_export(reader, link, *, work_id, outcome_id, evidenc
         export = _WorkFileExport(reader, deepcopy(link), files, work_id, outcome_id, evidence_revision, record["assignment_revision"], source_index, source, space.generation, current)
         await admission(projection=_WorkFileProjection(export))
         return export
+
+    return await await_drained(perform())
+
+
+async def authorize_work_file_batch(exports, *, check_delivery, protect_content, projection, require_write=False):
+    """Admit all album Spaces before one final combined source/claim snapshot."""
+    if (
+        type(exports) not in {tuple, list}
+        or not 1 <= len(exports) <= 10
+        or any(type(value) is not _WorkFileExport for value in exports)
+        or type(require_write) is not bool
+        or type(protect_content) is not bool
+        or not callable(check_delivery)
+    ):
+        raise ValueError("work-file-batch-required")
+    first = exports[0]
+    fields = ("work_id", "outcome_id", "evidence_revision", "assignment_revision", "link")
+    if len({value.source_index for value in exports}) != len(exports) or any(value.reader is not first.reader or value.files is not first.files or any(getattr(value, key) != getattr(first, key) for key in fields) for value in exports):
+        raise ValueError("work-file-batch-source-conflict")
+
+    async def perform():
+        requests = {}
+        combined = projection
+        for value in reversed(exports[1:]):
+            combined = _WorkFileProjection(value, protect_content, combined)
+        for value in exports:
+            value._current()
+            identity = value.source["space_id"]
+            request = Permission.READ | Permission.EXPORT, value.generation
+            if identity in requests and requests[identity] != request:
+                raise ProductSourceRetired()
+            requests[identity] = request
+        admission = await prepare_attention(first.reader, first.link)
+        async with first.files.registry.admitted(actor=PrincipalRef("human", first.link.owner_user_id), requests=requests) as (writer, rows):
+            await first._admit(admission, writer, rows, check_delivery=check_delivery, protect_content=protect_content, projection=combined, require_write=require_write)
+        for value in exports:
+            value._current()
 
     return await await_drained(perform())

@@ -121,7 +121,7 @@ those chats. Instance/custom bots do not acquire these ordinary-chat commands.
 Work, notification, digest and interaction contracts are in
 [the Work delivery guide](../../docs/TELEGRAM_WORK.md). Read it before changing
 `attention*`, `notification*`, `digest*`, `work_*` or their sender/callback integration.
-Event/file delivery rechecks sources at the final SDK snapshot.
+Result media and event proofs: see the Work guide.
 
 `commands.py` handles fixed navigation and language settings only. A command closes
 only a typing prompt; `/new` and `/stop` also end the forms and cards in scope.

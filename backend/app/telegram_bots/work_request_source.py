@@ -83,6 +83,7 @@ def frozen(captured, *, acknowledged=False):
             | ({"routing"} if basis.get("version") in {5, 6} else set())
             | ({"reply_origin"} if basis.get("version") in {2, 6} and "reply_origin" in basis else set())
             | ({"choice_origin"} if basis.get("version") == 6 and "choice_origin" in basis else set())
+            | ({"result_files"} if basis.get("version") in {1, 2} and "result_files" in basis else set())
             | ({"prompt_id"} if basis.get("version") == 3 and type(basis.get("interaction")) is dict and basis["interaction"].get("view") == "prompt" else set())
             or type(basis["version"]) is not int
             or basis["version"] not in {1, 2, 3, 4, 5, 6}
@@ -186,6 +187,10 @@ def frozen(captured, *, acknowledged=False):
                 concealed=basis["concealed"],
                 outbox_id=captured.item.id,
             )
+        elif "result_files" in basis:
+            from app.telegram_bots.work_result_files import present_review_files, result_options
+
+            presentation = present_review_files(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id, **result_options(basis["result_files"]))
         else:
             presentation = present_request(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id)
         if reveal is not None and len(presentation.parts) > 1 and cleanup_id is None:
@@ -200,6 +205,11 @@ def frozen(captured, *, acknowledged=False):
             expected.append(recipe)
         if basis["parts"] != expected or basis["keyboard"] != [list(line) for line in presentation.keyboard] or captured.item.payload.get("product_keyboard_basis") != basis["keyboard"]:
             raise ValueError()
+        if "result_files" in basis:
+            from app.telegram_bots.work_result_ledger import qualify_result_parts
+
+            recipe = qualify_result_parts(captured.item, expected, selected=captured.part, acknowledged=acknowledged)
+            return basis, source, recipe
         index = captured.part["source_ref"]["values"]["part"]
         if type(index) is not int or not 0 <= index < len(expected):
             raise ValueError()
@@ -279,6 +289,8 @@ async def acknowledge_request(session, row):
     if not parts:
         raise ProductSourceRetired()
     frozen(SimpleNamespace(link=BotLink.from_row(binding), item=_item(row), part=parts[-1]), acknowledged=True)
+    if "result_files" in row.payload["work_request_basis"]:
+        return
     messages = set()
     for part in parts:
         if len(part["message_ids"]) != 1 or part["message_ids"][0] in messages or datetime.fromisoformat(part["sent_at"]).utcoffset() is None:
@@ -367,6 +379,7 @@ class _RequestProjection:
         self.event_column = None
 
     def extend(self, query):
+        self.column = len(query.column_descriptions)
         bot, delivery, settings = TelegramBotLinkRow, TelegramOutboxRow, TelegramPersonSettingsRow
         request, work, callback = HumanInputRequestRow, AgentWorkRow, TelegramCallbackRow
         sqlite = self.host.outbox.sessions.kw["bind"].dialect.name == "sqlite"
@@ -444,10 +457,13 @@ class _RequestProjection:
 
     def check(self, rows):
         current, target, permissions, policy = rows[0][:4]
-        work, request, delivery, saved_settings = rows[0][8:12]
         if self.event_column is not None:
             event, receipt = rows[0][self.event_column : self.event_column + 2]
             require_event_source(self.captured.item, self.source, event=event, receipt=receipt, final=True)
+        # File admission may prepend its own source/Space facts. Keep this
+        # projection composable without moving the shared authority columns.
+        rows = [(*row[:8], *row[self.column :]) for row in rows]
+        work, request, delivery, saved_settings = rows[0][8:12]
         latest = self.host.outbox._sending(current, delivery, link_id=current.id, part_id=self.captured.part["part_id"], claim_owner=self.captured.claim_owner, claim_id=self.captured.claim_id, token_revision=self.captured.token_revision)
         if (delivery.instance_id, delivery.work_id, delivery.request_id) != (current.agent_ref, work.id, request.id):
             raise ProductSourceRetired()

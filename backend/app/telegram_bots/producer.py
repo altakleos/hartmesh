@@ -2699,14 +2699,15 @@ class OutboxSender:
 
     async def _replace(self, binding: BotLink, row: OutboxItem, claim: str, *, reason: str) -> None:
         routing = row.payload.get("work_request_basis", {}).get("version") in {5, 6}
-        if "work_outcome_basis" in row.payload or routing:
+        result_files = "result_files" in row.payload.get("work_request_basis", {})
+        if "work_outcome_basis" in row.payload or routing or result_files:
             # Frozen result and routing recipes need source-aware rematerialization. Never
             # replay their ACKed prefix or silently relocate a result.
             async with self.outbox._writer(binding.id) as (writer, _binding):
                 saved = await writer.get(TelegramOutboxRow, row.id, with_for_update=True)
                 if self.outbox._fenced(saved, generation=binding.binding_generation, owner=self.run_id, claim=claim):
                     self._pending(saved)
-                    saved.state, saved.failed_reason, saved.closed_at = "failed", "work-routing-refresh-required" if routing else "work-outcome-refresh-required", self.outbox.clock()
+                    saved.state, saved.failed_reason, saved.closed_at = "failed", "work-result-refresh-required" if result_files else "work-routing-refresh-required" if routing else "work-outcome-refresh-required", self.outbox.clock()
             return
         version = row.payload.get("presentation_version", 0)
         parts = []
@@ -2740,6 +2741,18 @@ class OutboxSender:
                 raise ValueError("invalid-unavailable-source-part")
             unavailable = parts[position]
             unavailable.update(state="unavailable", unavailable_reason=error.reason)
+            if "result_files" in row.payload.get("work_request_basis", {}):
+                from types import SimpleNamespace
+
+                from app.telegram_bots.work_request_source import frozen
+                from app.telegram_bots.work_result_ledger import qualify_result_parts, replace_unavailable
+
+                original = next(part for part in row.parts if part["part_id"] == part_id)
+                basis, _source, _recipe = frozen(SimpleNamespace(link=BotLink.from_row(binding), item=_item(row), part=original))
+                replace_unavailable(row, part_id, key=error.source_ref["key"])
+                qualify_result_parts(_item(row), basis["parts"])
+                self._pending(row)
+                return
             if row.payload.get("reply_basis", {}).get("version") in {6, 7}:
                 from app.telegram_bots.callbacks import CallbackRepository
                 from app.telegram_bots.file_source import file_warning_keyboard, unavailable_parts, validate_media_reply_basis

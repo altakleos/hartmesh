@@ -118,6 +118,10 @@ class WorkRequestRecovery:
         return {}
 
     async def _replace(self, writer, link, row, source, settings, *, reveal=None, force_new=False, choice=None):
+        if "result_files" in row.payload.get("work_request_basis", {}):
+            # Result receipts and file ownership require their dedicated
+            # recovery transition; ordinary text refresh would erase them.
+            raise ProductSourceRetired()
         if (row.link_id, row.owner_user_id, row.binding_generation, row.chat_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id) or row.payload.get("work_request_basis", {}).get(
             "version"
         ) not in self.family_versions:

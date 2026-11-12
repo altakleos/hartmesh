@@ -12,7 +12,24 @@ may acquire the claimed link/outbox locks in the borrowed writer. An earlier
 unlocked claim read is insufficient. Byte limits remain caller-bounded, and
 protected dispatch requires the actual protection flag. Reads drain cancellation
 and recheck lifetime after native I/O and transaction cleanup. This export
-primitive does not yet install result-file plans or SDK dispatch.
+primitive does not install workers. `authorize_work_file_batch` admits all album
+Spaces together before claim locks and the combined provider-final snapshot;
+review delivery also requires the current `agents:write` route ceiling.
+
+`work_result_delivery.py` provides dormant initial review-file plans. Its closed
+V1 `result_files` capsule augments the existing request basis, with files before
+the complete card and a filename trailer. Outcome indices preserve identical
+paths in distinct Spaces. `work_result_ledger.py` qualifies the ordered parts,
+explicit photo/document rewrites, first-byte hashes, per-member album receipts
+and visible failure notices. Known file ACKs survive ordinary card transport
+retries, and the full required sequence must finish before controls activate.
+`work_result_upload.py` reserves the entire bounded batch before reads and uses
+the existing SDK upload leaf. Every final upload snapshot combines canonical
+outcome references, all Space operation guards/grants, request, claim and owner.
+Generic text recovery cannot discard this media owner. Protected result Show,
+source-aware refresh/repair (including READ-loss redaction), exact-attempt warning
+links, non-review result notifications and event/supervisor installation remain
+outstanding; these initial-delivery components must remain uninstalled.
 
 `work_event_intents.py` projects current recipient/grant/preferences into empty,
 content-free delivery intents in `WorkEventReader`'s pair writer. Ordinary
