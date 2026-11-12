@@ -15,6 +15,7 @@ from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
 async def ended(e, kind, *, reason=None):
     from test_telegram_work_event_intents import activate, setup
 
+    from deerflow.persistence.models.run_event import RunEventRow
     from deerflow.persistence.run.model import RunRow
 
     e.channel._now = lambda: e.sender.outbox.clock()
@@ -24,6 +25,7 @@ async def ended(e, kind, *, reason=None):
     run.status = {"attempt.no_result": "success", "attempt.failed": "error", "attempt.stopped_restart": "interrupted", "interrupted": "error"}[kind]
     async with e.db.engine.begin() as connection:
         await connection.run_sync(lambda sync: RunRow.__table__.create(sync, checkfirst=True))
+        await connection.run_sync(lambda sync: RunEventRow.__table__.create(sync, checkfirst=True))
     async with e.db.sessions.begin() as writer:
         writer.add(RunRow(run_id=run.run_id, thread_id=run.thread_id, user_id=run.user_id, status=run.status, idempotency_key=run.idempotency_key, metadata_json={**run.metadata, "agent_instance_id": e.instance.id}, stop_reason=reason))
     if kind == "interrupted":

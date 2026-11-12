@@ -105,6 +105,11 @@ class WorkNewsProjection:
         result = result.outerjoin(actor, actor.id == event.actor_id).join(delivery, delivery.id == self.item.id)
         return self.answer.extend(result) if self.answer else self.stop.extend(result, activation) if self.stop else self.proposal.extend(result) if self.proposal else self.notice.extend(result, activation) if self.notice else result
 
+    def check_with_permissions(self, rows, held):
+        if self.notice:
+            self.notice.route_permissions = held
+        self.check(rows)
+
     def check(self, rows):
         bot, instance, _permission, policy = rows[0][:4]
         work, event, attempt, activation, person, delivery = rows[0][self.column : self.column + 6]

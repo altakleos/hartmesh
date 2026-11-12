@@ -1,17 +1,20 @@
 """Terminal Work notices bind settlement, activation and exact run metadata."""
 
-from sqlalchemy import exists, select
+from sqlalchemy import String, and_, cast, exists, select
 from sqlalchemy.orm import aliased
 
+from app.telegram_bots.attempt_output import attempt_output, output_identity
 from app.telegram_bots.attempt_text import FILES_REASONS
 from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.result_notice_sources import fields
 from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_event_source import event_signature
 from app.telegram_bots.work_result_identity import digest
-from deerflow.persistence.agent_instances.model import AgentInstanceRow
+from deerflow.persistence.agent_instances.model import AgentConversationRow, AgentInstanceRow
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow
+from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.access import issuer_key
 from deerflow.persistence.user.model import UserRow
 
@@ -19,13 +22,31 @@ from deerflow.persistence.user.model import UserRow
 class AttemptNotice:
     def __init__(self, link, item):
         self.link, self.item = link, item
+        self.route_permissions = frozenset()
+        self.no_result = item.payload.get("work_event_intent", {}).get("key") == "attempt.no_result"
 
     def extend(self, query, activation):
         self.column = len(query.column_descriptions)
         event, attempt = AgentWorkEventRow, AgentWorkAttemptRow
         cause, supervisor = aliased(event), aliased(UserRow)
         intervened = exists(select(cause.id).where(cause.work_id == event.work_id, cause.revision > activation.revision, cause.revision < event.revision, cause.action.in_(("stop", "edit", "cancel"))).correlate(event, activation))
-        return query.add_columns(RunRow, intervened, supervisor.email).outerjoin(RunRow, RunRow.run_id == attempt.run_id).outerjoin(supervisor, supervisor.id == AgentInstanceRow.supervisor_id)
+        result = query.add_columns(RunRow, intervened, supervisor.email).outerjoin(RunRow, RunRow.run_id == attempt.run_id).outerjoin(supervisor, supervisor.id == AgentInstanceRow.supervisor_id)
+        if self.no_result:
+            result = (
+                result.add_columns(AgentConversationRow, ThreadMetaRow, RunEventRow)
+                .outerjoin(AgentConversationRow, AgentConversationRow.thread_id == attempt.thread_id)
+                .outerjoin(ThreadMetaRow, ThreadMetaRow.thread_id == attempt.thread_id)
+                .outerjoin(
+                    RunEventRow,
+                    and_(
+                        RunEventRow.thread_id == attempt.thread_id,
+                        RunEventRow.run_id == attempt.run_id,
+                        RunEventRow.user_id == attempt.requester_id,
+                        cast(RunEventRow.seq, String) == cast(RunRow.kwargs_json["output_evidence"]["event_seq"].as_string(), String),
+                    ),
+                )
+            )
+        return result
 
     def qualify(self, rows, event, work, instance, attempt, activation, intent):
         run, intervened, supervisor = rows[0][self.column : self.column + 3]
@@ -66,6 +87,21 @@ class AttemptNotice:
         manager = bool(rows[0][2] & 4)
         user = rows[0][5]
         limited = any(row[7] is not None and row[7].role != "admin" and (not user.oauth_issuer or row[7].issuer == issuer_key(user.oauth_issuer)) for row in rows) if user.oauth_id and user.oauth_provider else False
+        thread_id, excerpt = None, None
+        if self.no_result:
+            binding, thread, output = rows[0][self.column + 3 : self.column + 6]
+            if (
+                "threads:read" in self.route_permissions
+                and binding is not None
+                and thread is not None
+                and type(attempt.incarnation) is str
+                and bool(attempt.incarnation)
+                and thread.incarnation == attempt.incarnation
+                and (binding.instance_id, binding.requester_id, thread.user_id) == (instance.id, self.link.owner_user_id, self.link.owner_user_id)
+            ):
+                thread_id = attempt.thread_id
+                if "runs:read" in self.route_permissions:
+                    excerpt = attempt_output(run, output)
         values = {
             "name": instance.name,
             "reason": reason,
@@ -74,15 +110,16 @@ class AttemptNotice:
             "reader_is_supervisor": instance.supervisor_id == self.link.owner_user_id,
             "reader_is_administrator": user.system_role == "admin" and not limited,
             "progress": event.result.get("progress", ""),
-            "thread_id": attempt.thread_id if key == "attempt.no_result" else None,
+            "thread_id": thread_id,
             "open_files": contained and reason in FILES_REASONS or key == "attempt.failed" and reason == "files-full" and manager,
-            "excerpt": None,
+            "excerpt": excerpt,
         }
         signature = digest(
             [
                 event_signature(event, None, intent),
-                fields(attempt, ("id", "work_id", "activation_id", "requester_id", "run_id", "thread_id", "status", "contained_reason", "attachment_id")),
+                fields(attempt, ("id", "work_id", "activation_id", "requester_id", "run_id", "thread_id", "incarnation", "status", "contained_reason", "attachment_id")),
                 fields(run, ("run_id", "thread_id", "user_id", "status", "stop_reason", "idempotency_key", "metadata_json")),
+                output_identity(run) if self.no_result else None,
             ]
         )
         return signature, values

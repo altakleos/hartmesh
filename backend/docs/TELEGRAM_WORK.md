@@ -874,6 +874,16 @@ only to managers; containment reasons have their specified files handover.
 claims that work was kept for unstarted, restored, moved or unknown outcomes.
 Protected Show and refresh reuse the source-owned ACK/history boundary while
 retaining the interrupt class. Generic fixed replies cannot impersonate these
-notices. Verified last-output excerpts still need their own source reader;
-until then no-result delivery uses its conversation link. Installation remains
-pending.
+notices. `attempt_output.py` accepts only the exact successful run's capture
+receipt and durable source event, including the original assistant identity,
+event sequence and text digest. Capture/receipt identity is immutable after
+planning; coherent replacement retires delivery instead of adopting new output.
+It never reads the latest conversation message
+or cached answer. Missing, changed or unsupported proof omits the excerpt.
+The source and current conversation binding are joined into the final provider
+snapshot. Current `threads:read` permits the original conversation link;
+`runs:read` is additionally required for an excerpt. Deleted, rebound or recreated threads
+lose both. The nonactionable excerpt is clipped to 600 characters at a word
+boundary; protected previews conceal it until Show. Attention projections that
+need optional route ceilings run their checks after provider resolution against
+a fresh joined snapshot. Installation remains pending.
