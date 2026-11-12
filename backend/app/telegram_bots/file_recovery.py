@@ -4,7 +4,7 @@ import asyncio
 from copy import deepcopy
 from types import SimpleNamespace
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, select
 
 from app.telegram_bots.file_outcomes import FileOutcomes
 from app.telegram_bots.inbox import chat_input_parts
@@ -84,7 +84,7 @@ async def recover_retries(host, phase, *, link_id=None):
                 statement = select(TelegramActRow.id, TelegramActRow.link_id).where(
                     TelegramActRow.kind == "file_put",
                     TelegramActRow.id > after,
-                    TelegramActRow.continuation["version"].as_integer() == 3,
+                    cast(TelegramActRow.continuation["version"].as_string(), String).in_(("3", "4")),
                     TelegramActRow.continuation["delivery"]["operation_id"].as_string().is_(None),
                 )
                 if link_id is not None:
@@ -109,7 +109,11 @@ async def recover_retries(host, phase, *, link_id=None):
                 ticket = _Recovery(_ISSUER, host, channel, link, phase)
                 reader = await host.file_puts.receipt_reader(link, authority=host.authority, current=ticket.current)
                 row = await reader.act(identity)
-                if row.continuation["version"] != 3 or row.continuation["delivery"] is not None or not row.continuation["presses"]:
+                if row.continuation["version"] not in {3, 4} or row.continuation["delivery"] is not None or not row.continuation["presses"]:
+                    continue
+                if row.continuation["version"] == 4 and row.state == "done":
+                    # The retained Work input owns Respond and its named-file
+                    # acknowledgement. File recovery never substitutes chat UI.
                     continue
                 press = row.continuation["presses"][-1]
                 callback = SimpleNamespace(kind="file_retry", target_kind="act", target_id=row.id, chat_id=link.chat_id, id=press["callback_id"], message_id=press["message_id"], message_thread_id=press["topic"])

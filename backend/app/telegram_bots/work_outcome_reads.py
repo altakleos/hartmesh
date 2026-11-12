@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, literal, select
 from sqlalchemy.orm import aliased
 
 from app.telegram_bots.attention_authority import current_attention
@@ -29,6 +29,7 @@ class WorkOutcomeRead:
     continued: bool
     supervisor: str | None
     recipient: str | None
+    file_answer: object = None
 
     @property
     def attempt_unresolved(self):
@@ -66,9 +67,12 @@ class WorkOutcomeReader:
             source = await self.requests.read_request(link, act.request_id)
             if source.work["id"] != act.work_id:
                 raise ProductSourceRetired()
-            projection = _OutcomeProjection(act, source, receipt)
+            from app.telegram_bots.work_file_outcomes import file_answer_proof
+
+            file_answer = await file_answer_proof(self, link, act)
+            projection = _OutcomeProjection(act, source, receipt, file_answer=file_answer)
             _held, target = await current_attention(self.requests, link, projection=projection)
-            return WorkOutcomeRead(act, receipt, source, target[0], target[1] == "protected", (source.work.get("attempt") or {}).get("status"), projection.continued, projection.supervisor, projection.recipient)
+            return WorkOutcomeRead(act, receipt, source, target[0], target[1] == "protected", (source.work.get("attempt") or {}).get("status"), projection.continued, projection.supervisor, projection.recipient, file_answer)
 
         return await await_drained(perform())
 
@@ -76,8 +80,9 @@ class WorkOutcomeReader:
 class _OutcomeProjection:
     """One final joined account/role/claim-free action and source read."""
 
-    def __init__(self, act, source, receipt):
+    def __init__(self, act, source, receipt, *, file_answer=None):
         self.act, self.source, self.receipt = act, source, receipt
+        self.file_answer = file_answer
         self.continued = False
         self.supervisor = self.recipient = None
 
@@ -89,7 +94,7 @@ class _OutcomeProjection:
         other, attempt = aliased(AgentWorkAttemptRow), AgentWorkAttemptRow
         latest = select(other.id).where(other.work_id == work.id).order_by(other.created_at.desc(), other.id.desc()).limit(1).scalar_subquery()
         return (
-            query.add_columns(act, work, request, event, attempt, effect, supervisor.email, recipient.email)
+            query.add_columns(act, work, request, event, attempt, effect, supervisor.email, recipient.email, self.file_answer.expression() if self.file_answer else literal(None).label("work_file_evidence"))
             .join(act, act.id == self.act.id)
             .join(work, work.id == self.act.work_id)
             .join(request, request.id == self.act.request_id)
@@ -103,6 +108,8 @@ class _OutcomeProjection:
     def check(self, rows):
         from app.telegram_bots.acts import _snapshot
 
+        if self.file_answer is not None:
+            self.file_answer.check(rows[0]._mapping["work_file_evidence"])
         bot, target, permissions, policy = rows[0][:4]
         saved, work, request, event, attempt, effect = rows[0][8:14]
         self.supervisor, self.recipient = rows[0][14:16]

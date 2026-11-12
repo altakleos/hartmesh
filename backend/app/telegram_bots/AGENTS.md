@@ -22,6 +22,10 @@ never decide or accept. Supervisor installation remains separate. Confirmation-c
 original unsubmitted draft; closed inputs offer explicit recovery choices. Final writer proof binds the original input across its own writes. A card's
 complete presentation must have been dispatched before the input was accepted;
 a delayed host ACK does not invalidate an explicit reply.
+`work_file_inputs.py` owns single-file answers (input/journal V4), immutable native
+receipts and named-file ACKs. `work_file_handoff.py` transfers explicit Send-as-new
+choices before chat publication. Album holds and all controllers remain dormant;
+see [Work guidance](../../docs/TELEGRAM_WORK.md).
 `work_untied_inputs.py` asks before saving unquoted text after the last acknowledged
 Work question, after ordinary clarification routing. Its durable `work_answer`
 route becomes version3 Work input only on the actual Yes callback; No owns one

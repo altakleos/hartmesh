@@ -854,7 +854,9 @@ class CallbackRepository:
                 # A captured Work input still owns its shown prompt until its
                 # outcome is delivered, even after ordinary prompt expiration.
                 for sources in await session.scalars(
-                    select(TelegramInboundMarkRow.delivery_ids).where(TelegramInboundMarkRow.route_kind.in_(("work_input", "work_answer", "voice", "work_card_hold")), TelegramInboundMarkRow.state != "done")
+                    select(TelegramInboundMarkRow.delivery_ids).where(
+                        TelegramInboundMarkRow.route_kind.in_(("work_input", "work_answer", "voice", "work_card_hold", "work_file_new", "work_file_album")), TelegramInboundMarkRow.state != "done"
+                    )
                 ):
                     unsettled.update(identity for identity in sources if type(identity) is str)
                 # A consumed Show remains proof for later direct refreshes as
@@ -871,7 +873,7 @@ class CallbackRepository:
                     .join(TelegramBotLinkRow, TelegramBotLinkRow.id == TelegramInboundMarkRow.link_id)
                     .where(
                         TelegramInboundMarkRow.state != "done",
-                        TelegramInboundMarkRow.route_kind.in_(("work_card_hold", "turn")),
+                        TelegramInboundMarkRow.route_kind.in_(("work_card_hold", "work_file_new", "turn")),
                         TelegramInboundMarkRow.binding_generation == TelegramBotLinkRow.binding_generation,
                         TelegramInboundMarkRow.chat_id == TelegramBotLinkRow.chat_id,
                     )

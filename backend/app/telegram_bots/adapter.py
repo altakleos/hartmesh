@@ -1106,6 +1106,9 @@ class TelegramBotChannel(TelegramChannel):
             if not skill:
                 return
         work_inputs = getattr(self._services, "work_text_inputs", None)
+        if not skill and work_inputs is not None and await work_inputs.files.handle(self, update, captured_link=self._admission(update).link):
+            self._classified(update)
+            return
         if not skill and work_inputs is not None and await work_inputs.handle_text(self, update, captured_link=self._admission(update).link):
             self._classified(update)
             return
@@ -1234,7 +1237,12 @@ class TelegramBotChannel(TelegramChannel):
         captured = await reader.act(callback.target_id)
         file = dict(captured.continuation["file"])
         origin = SimpleNamespace(message_thread_id=captured.continuation.get("input", {}).get("topic", callback.message_thread_id))
-        await self._own_instance_file(link, origin, file, callback=callback)
+        result = await self._own_instance_file(link, origin, file, callback=callback)
+        if result.continuation["version"] == 4 and result.state == "done":
+            work_inputs = getattr(self._services, "work_text_inputs", None)
+            if work_inputs is None:
+                raise ValueError("work-file-recovery-unavailable")
+            return await work_inputs.files.after_retry(self, link, result)
         return await FileOutcomes(self._services).plan(self, link, None, file, callback=callback)
 
     async def _own_instance_file(self, link, origin, file, *, current=None, origins=None, callback=None):

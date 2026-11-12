@@ -8,9 +8,10 @@ from app.telegram_bots.authority import AccessOff, AuthorityUnavailable, Ceiling
 from app.telegram_bots.work_actions import _ACT_SCOPE, same_body
 from deerflow.agent_instances.contract import AgentDenied
 from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
-from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
+from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow
 from deerflow.persistence.agent_instances.work import AgentWorkRow
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow
+from deerflow.persistence.spaces.model import SpaceRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramInboundMarkRow
 from deerflow.persistence.user.access import DisabledIdentityRow
 from deerflow.persistence.user.model import UserRow
 
@@ -18,7 +19,10 @@ from deerflow.persistence.user.model import UserRow
 async def prepare_effect_admission(acts, link, act, *, attempt_current):
     # Provider/config preparation must finish before the domain opens its writer.
     prepared = await prepare_attention(acts, link)
-    projection = _EffectProjection(acts, act, attempt_current)
+    from app.telegram_bots.work_file_inputs import prepare_file_effect
+
+    file_effect = await prepare_file_effect(acts, link, act)
+    projection = _EffectProjection(acts, act, attempt_current, file_effect=file_effect)
 
     async def admission(writer):
         acts._writer_required(writer)
@@ -39,11 +43,12 @@ async def prepare_effect_admission(acts, link, act, *, attempt_current):
 
 
 class _EffectProjection:
-    def __init__(self, acts, act, attempt_current):
+    def __init__(self, acts, act, attempt_current, *, file_effect=None):
         from app.gateway.deps import bind_user_repo
         from deerflow.config.app_config import peek_loaded_app_config
 
         self.acts, self.act, self.attempt_current = acts, act, attempt_current
+        self.file_effect = file_effect
         self.config = peek_loaded_app_config()
         if self.config is None:
             raise AuthorityUnavailable()
@@ -54,7 +59,7 @@ class _EffectProjection:
     def extend(self, query):
         act, request, work, bot = TelegramActRow, HumanInputRequestRow, AgentWorkRow, TelegramBotLinkRow
         user, grant, disabled = aliased(UserRow), aliased(AgentInstanceGrantRow), aliased(DisabledIdentityRow)
-        return (
+        result = (
             query.add_columns(act, request, work, user, grant.permissions, disabled)
             .join(act, act.id == self.act.id)
             .join(request, and_(request.id == self.act.request_id, request.instance_id == bot.agent_ref, request.work_id == self.act.work_id))
@@ -64,11 +69,31 @@ class _EffectProjection:
             .outerjoin(disabled, or_(disabled.subject == user.id, disabled.subject == user.oauth_id))
         )
 
+        if self.file_effect is not None:
+            captured, receipt = self.file_effect
+            mark, file = aliased(TelegramInboundMarkRow), aliased(TelegramActRow)
+            result = (
+                result.add_columns(mark, file, SpaceRow.generation)
+                .join(mark, and_(mark.link_id == captured.link_id, mark.chat_id == captured.chat_id, mark.message_id == captured.message_id))
+                .join(file, file.id == receipt[0].id)
+                .join(SpaceRow, SpaceRow.id == AgentInstanceRow.home_id)
+            )
+        return result
+
     def check(self, rows):
         from deerflow.config.app_config import peek_loaded_app_config
 
         bot, _target, permissions, _policy = rows[0][:4]
         saved, request, _work, recipient, recipient_grant = rows[0][8:13]
+        if self.file_effect is not None:
+            from app.telegram_bots.inbox import InboxRow
+            from app.telegram_bots.work_file_inputs import validate_file_response
+
+            captured, receipt = self.file_effect
+            mark, file, generation = rows[0][14:17]
+            if InboxRow.from_row(mark) != captured or not same_body(mark.route_basis, captured.route_basis) or not same_body(mark.sanitized_input, captured.sanitized_input):
+                raise AgentDenied("The original file input is no longer available")
+            validate_file_response(bot, captured, receipt, file, rows[0][1], generation)
         if not self.attempt_current() or peek_loaded_app_config() is not self.config or (self.config.auth.local.enabled is False) != self.sign_on_only:
             raise AuthorityUnavailable()
         if any(getattr(saved, name) != getattr(self.act, name) for name in _ACT_SCOPE) or not same_body(saved.body, self.act.body) or saved.state != "pending" or saved.attempts != self.act.attempts or saved.cancel_requested_at is not None:

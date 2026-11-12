@@ -33,6 +33,7 @@ from deerflow.utils.file_io import await_drained
 def context(read):
     act, source = read.act, read.source
     return {
+        **({"file_answer": read.file_answer.shown} if read.file_answer is not None else {}),
         "act": {"id": act.id, "kind": act.kind, "state": act.state, "reason": act.reason, "body": thaw(act.body), "attempts": act.attempts},
         "work_id": act.work_id,
         "request_id": act.request_id,
@@ -64,7 +65,9 @@ def materialize(link, data, *, locale, timezone, product, routing=None, comment=
     values = {"name": data["name"], "supervisor": data["supervisor"], "person": data["person"], "product": product}
     if accepted is not None:
         values["time"] = datetime.fromisoformat(accepted).astimezone(ZoneInfo(timezone)).strftime("%Y-%m-%d %H:%M")
-    shown = present_outcome(act, purpose=data["purpose"], permissions=data["permissions"], attempt_status=data["attempt_status"], continued=data["continued"], locale=locale, values=values, protected=data["protected"])
+    shown = present_outcome(
+        act, purpose=data["purpose"], permissions=data["permissions"], attempt_status=data["attempt_status"], continued=data["continued"], locale=locale, values=values, protected=data["protected"], file_answer=data.get("file_answer")
+    )
     if shown is None:
         return None
     keyboard = []
@@ -471,7 +474,7 @@ def _followup_candidates(plans, link, data, routing):
 
 class _ContextProjection(_OutcomeProjection):
     def __init__(self, read, *, routing=None, references=None):
-        super().__init__(read.act, read.source, read.receipt)
+        super().__init__(read.act, read.source, read.receipt, file_answer=read.file_answer)
         self.read, self.routing, self.references = read, routing, references
 
     def extend(self, query):
@@ -658,7 +661,7 @@ class _DeliveryProjection(_ContextProjection):
     def check(self, rows):
         super().check(rows)
         link = rows[0][0]
-        delivery, settings = rows[0][16:18]
+        delivery, settings = rows[0][17:19]
         actual = self.plans.outbox._sending(link, delivery, link_id=link.id, part_id=self.captured.part["part_id"], claim_owner=self.captured.claim_owner, claim_id=self.captured.claim_id, token_revision=self.captured.token_revision)
         if actual != self.captured or _snapshot(settings) != self.settings:
             raise DeliveryClaimRetired()
@@ -668,16 +671,16 @@ class _DeliveryProjection(_ContextProjection):
         recent = link.last_update_at is not None and self.now - aware(link.last_update_at) <= timedelta(seconds=self.plans.outbox.config.outbox.recent_act_seconds)
         if bool(delivery.silent or self.captured.part.get("silent") or quiet and not recent) != bool(self.silent):
             raise DeliveryClaimRetired()
-        validate_origin(rows[0][20], rows[0][21], delivery.payload["work_outcome_basis"], delivery)
-        validate_edit(rows[0][20], rows[0][21], delivery.payload["work_outcome_basis"], delivery)
+        validate_origin(rows[0][21], rows[0][22], delivery.payload["work_outcome_basis"], delivery)
+        validate_edit(rows[0][21], rows[0][22], delivery.payload["work_outcome_basis"], delivery)
         if "refresh" in delivery.payload["work_outcome_basis"]:
             from app.telegram_bots.work_followup_refresh import validate_refresh
 
-            validate_refresh(rows[0][22], rows[0][23], delivery.payload["work_outcome_basis"], delivery)
+            validate_refresh(rows[0][23], rows[0][24], delivery.payload["work_outcome_basis"], delivery)
         if delivery.payload["work_outcome_basis"]["input"] is not None:
-            validate_input(rows[0][19], delivery.payload["work_outcome_basis"], delivery)
+            validate_input(rows[0][20], delivery.payload["work_outcome_basis"], delivery)
         if self.controls_part is not None:
-            callbacks = {row[18].id: row[18] for row in rows if row[18] is not None}
+            callbacks = {row[19].id: row[19] for row in rows if row[19] is not None}
             _validate_rows(delivery, list(callbacks.values()), part=self.controls_part, allow_pending=True)
             for control in callbacks.values():
                 self.plans.callbacks._usable(control)

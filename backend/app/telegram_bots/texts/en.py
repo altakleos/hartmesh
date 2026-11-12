@@ -1,6 +1,7 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "ask.saved_file": "Saved as your answer: the file {file}, now in {name}'s files.",
     "ask.saved": "Saved.",
     "decide.saved": "Recorded.",
     "review.changes_recorded": 'Changes requested: "{text}"',

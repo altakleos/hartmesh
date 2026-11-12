@@ -506,3 +506,42 @@ a missing-topic response. The ordinary failed-delivery journal and Retry deliver
 control preserve acknowledged parts and retry only the unsent suffix, with no
 new transcription or Work action. Generic presentation relocation must not
 rewrite their version or move the input to another topic.
+
+
+`work_file_inputs.py` captures an actual document/photo reply as Work input V4.
+Its native FilePuts journal V4 retains the same original media, input digest,
+request/source and reserved Respond operation. The native writer rechecks that
+unsealed input after all provider awaits. The digest also binds response admission
+to the original caption, so a later input snapshot cannot replace what was sent.
+The saved path becomes response text; no fabricated Work source or additional
+Space grant is introduced. No chat, Work run or pending ordinary attachment is
+created by answering. The current Home/instance, native receipt and original input
+share the final Respond transaction snapshot. Once Respond is committed, receipt
+reconciliation uses the frozen admitted file intent despite Home changes or native
+journal collection. Named-file acknowledgements hide internal paths and settle the
+input only after the full delivery ACK, with a final joined immutable input check.
+
+A closed question retains its media. `work_file_handoff.py` reserves the actual
+Send-as-new choice as `work_file_new` before any missing file is saved. Native
+admission rechecks the original input and selected callback; other recovery choices
+cannot take that reservation. A terminal Work file journal transfers to ordinary
+V3 ownership without changing its operation, body, target or result. Uncertain
+files require the existing explicit File Retry; neither handoff nor restart
+repeats their effect. A caption then enters the stable callback publication as ordinary chat; existing
+saved files reach the actual manager as receipt-backed attachments. Without a
+caption, the file stays pending for the next text and a saved-file question starts
+nothing. The original callback and update IDs own interrupted handoffs; recovery
+reconciles metadata and never downloads or repeats an uncertain native upload.
+
+Metadata-only startup recovery recognizes V4 failed retries. Completed file retries
+remain owned by Work-input recovery, which observes/admits the response and its
+named-file outcome rather than an ordinary file-received question. Whole recovery
+entry points drain repeated cancellation. Unfinished Work file inputs retain native
+receipts beyond the ordinary terminal-journal age; historical JSON filters use text
+comparisons before closed-shape validation, never PostgreSQL integer casts.
+
+The single-file controller retains recognized album members as `work_file_album`
+without consuming the question, uploading a first member or admitting a partial
+response. Whole-album collection, including members preceding the quoted member,
+and startup/controller installation remain activation prerequisites. This dormant
+primitive does not enable Telegram Work interactions.

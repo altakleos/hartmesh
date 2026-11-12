@@ -187,6 +187,10 @@ class WorkClosedInputs:
                     raise CallbackRefused()
                 validate_closed_voice(parent, mark)
                 origin = InboxRow.from_row(mark)
+            if row.kind == "prompt_send_new" and origin.sanitized_input.get("type") == "media":
+                from app.telegram_bots.work_file_handoff import send_file_as_new
+
+                return await send_file_as_new(self, channel, link, row, update_id=update_id, guard=guard)
             if row.kind == "prompt_reopen":
                 from app.telegram_bots.work_reopen import WorkReopen
 
@@ -230,7 +234,8 @@ class WorkClosedInputs:
                         # This explicit choice, in the same writer as its stable
                         # callback publication owner, changes the input route.
                         mark.route_kind, mark.route_target_id = "turn", link.agent_ref
-                        mark.route_basis = {**mark.route_basis, "input_profile": {"version": 1, "kind": "plain_text", "forwarded": False}}
+                        profile = {"version": 2, "kind": "chat_input", "forwarded": False, "origin": None} if mark.sanitized_input.get("type") == "media" else {"version": 1, "kind": "plain_text", "forwarded": False}
+                        mark.route_basis = {**mark.route_basis, "input_profile": profile}
                         await writer.flush()
                     stage = await self.inbox.stage_prompt_message(
                         link, callback_id=selected.id, update_id=update_id, chat_id=selected.chat_id, message_id=selected.message_id, message_thread_id=selected.message_thread_id, callbacks=self.callbacks, guard=guard, session=writer
