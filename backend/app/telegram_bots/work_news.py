@@ -23,6 +23,10 @@ NEWS_KEYS = frozenset(
 )
 
 
+def news_class(key):
+    return "reminder" if key == "remind.ready_to_resume" else "info"
+
+
 def present_news(key, *, values, locale, protected, concealed=False, outbox_id=None):
     if key not in NEWS_KEYS:
         raise ValueError("unsupported-work-news")

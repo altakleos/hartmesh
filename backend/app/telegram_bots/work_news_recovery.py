@@ -11,6 +11,7 @@ from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
 from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.producer import DeliveryClaimRetired, ProductSourceRetired, _item, _safe_json, keyboard_cleanup_row
+from app.telegram_bots.work_news import news_class
 from app.telegram_bots.work_news_sources import WorkNewsProjection
 from app.telegram_bots.work_result_navigation import NavigationOrigin
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow
@@ -21,6 +22,35 @@ class WorkNewsRecovery:
     def __init__(self, plans):
         self.plans, self.reader, self.outbox, self.callbacks = plans, plans.reader, plans.outbox, plans.callbacks
 
+    async def dismiss(self, link, callback_id, *, chat_id, message_id, message_thread_id, guard):
+        """Retire an exact acknowledged proposal keyboard, with no Work effect."""
+
+        async def perform():
+            from app.telegram_bots.work_news_delivery import frozen_news
+
+            async with self.callbacks.writer(link, guard) as writer:
+                group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=guard, session=writer)
+                row = await writer.get(TelegramOutboxRow, group.anchor_outbox_id, with_for_update=True, populate_existing=True)
+                if row is None or row.state != "sent" or group.selected.kind != "dismiss" or group.selected.target_kind != "outbox" or group.selected.target_id != row.id:
+                    raise CallbackRefused()
+                item = _item(row)
+                basis, source, _recipe = frozen_news(SimpleNamespace(link=link, item=item, part=item.parts[-1]), acknowledged=True)
+                part = item.parts[-1]
+                if (
+                    source.key != "work.proposed"
+                    or basis["concealed"]
+                    or part.get("callback_group_id") != group.selected.group_id
+                    or part["message_ids"] != [group.selected.message_id]
+                    or part["presentation_version"] != group.presentation_version
+                ):
+                    raise CallbackRefused()
+                await self.callbacks.consume_group(group, reason="dismissed", session=writer)
+                cleanup = keyboard_cleanup_row(group.selected, owner_user_id=link.owner_user_id, now=self.outbox.clock())
+                writer.add(cleanup)
+                return cleanup.id
+
+        return await await_drained(perform())
+
     async def refresh(self, captured):
         async def perform():
             source = await self.reader.read(captured.link, captured.item)
@@ -29,14 +59,15 @@ class WorkNewsRecovery:
                 raise ProductSourceRetired()
             origin = NavigationOrigin()
             admission = await prepare_attention(self.reader, captured.link)
+            clock = await self.reader.prepare_clock(captured.link, captured.item)
             async with self.outbox._writer(captured.link.id) as (writer, binding):
                 row = await writer.get(TelegramOutboxRow, captured.item.id, with_for_update=True, populate_existing=True)
                 current = self.outbox._sending(binding, row, link_id=captured.link.id, part_id=captured.part["part_id"], claim_owner=captured.claim_owner, claim_id=captured.claim_id, token_revision=captured.token_revision)
                 if current != captured:
                     raise DeliveryClaimRetired()
-                await admission(session=writer, projection=WorkNewsProjection(self.reader, captured.link, captured.item, source))
+                await admission(session=writer, projection=WorkNewsProjection(self.reader, captured.link, captured.item, source, clock=clock))
                 await self._replace(writer, captured.link, row, source, settings, origin)
-                await admission(session=writer, projection=WorkNewsProjection(self.reader, captured.link, _item(row), source))
+                await admission(session=writer, projection=WorkNewsProjection(self.reader, captured.link, _item(row), source, clock=clock))
                 origin.check(row.payload["work_news_basis"])
 
         return await await_drained(perform())
@@ -60,7 +91,7 @@ class WorkNewsRecovery:
                 raise ProductSourceRetired()
             origin = NavigationOrigin()
             admission = await prepare_attention(self.reader, link)
-            composed = _RevealGuard(self, guard, admission, link, item, source)
+            composed = _RevealGuard(self, guard, admission, link, item, source, await self.reader.prepare_clock(link, item))
             async with self.callbacks.writer(link, composed) as writer:
                 row = await writer.get(TelegramOutboxRow, item.id, with_for_update=True, populate_existing=True)
                 if not self._repairable(row) or _item(row) != item:
@@ -95,7 +126,7 @@ class WorkNewsRecovery:
                 raise ProductSourceRetired()
             origin = NavigationOrigin()
             admission = await prepare_attention(self.reader, link)
-            composed = _RevealGuard(self, guard, admission, link, item, source)
+            composed = _RevealGuard(self, guard, admission, link, item, source, await self.reader.prepare_clock(link, item))
             async with self.callbacks.writer(link, composed) as writer:
                 group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=composed, session=writer)
                 row = await writer.get(TelegramOutboxRow, item.id, with_for_update=True, populate_existing=True)
@@ -145,7 +176,7 @@ class WorkNewsRecovery:
                 control.consumed_at, control.closed_reason = self.outbox.clock(), "superseded"
         history = deepcopy(basis.get("history", []))
         if basis["version"] == 2:
-            history = [{"basis": deepcopy(basis["origin"]), "parts": deepcopy([part for part in row.parts if part["presentation_version"] == 0]), "class": "info", "presentation_version": 0}]
+            history = [{"basis": deepcopy(basis["origin"]), "parts": deepcopy([part for part in row.parts if part["presentation_version"] == 0]), "class": news_class(source.key), "presentation_version": 0}]
         archived = deepcopy(basis)
         if archived["version"] == 3:
             archived["history"] = []
@@ -187,7 +218,7 @@ class WorkNewsRecovery:
                 part["state"] = "retired"
         row.parts = [*old, *fresh]
         row.payload = _safe_json({**row.payload, "presentation_version": version + 1, "work_news_basis": {**fresh_basis, "parts": parts, "keyboard": keyboard}, "product_keyboard_basis": keyboard})
-        row.class_, row.state, row.not_before = "reply" if reveal_id else "info", "pending", self.outbox.clock()
+        row.class_, row.state, row.not_before = "reply" if reveal_id else news_class(source.key), "pending", self.outbox.clock()
         row.sent_at = row.closed_at = row.failed_reason = row.skip_reason = row.degraded_at = None
         row.claim_id = row.claim_owner = row.claimed_at = None
         if keyboard:
@@ -201,16 +232,16 @@ class WorkNewsRecovery:
 
 
 class _RevealGuard:
-    def __init__(self, host, base, admission, link, item, source):
+    def __init__(self, host, base, admission, link, item, source, clock):
         if not callable(getattr(base, "current", None)):
             raise CallbackRefused()
-        self.host, self.base, self.admission, self.link, self.item, self.source = host, base, admission, link, item, source
+        self.host, self.base, self.admission, self.link, self.item, self.source, self.clock = host, base, admission, link, item, source, clock
 
     async def prepare(self):
         await prepare_publication_guard(self.base)
 
     async def check(self, writer):
         current = await self.base.check(writer)
-        await self.admission(session=writer, projection=WorkNewsProjection(self.host.reader, self.link, self.item, self.source))
+        await self.admission(session=writer, projection=WorkNewsProjection(self.host.reader, self.link, self.item, self.source, clock=self.clock))
         self.base.current()
         return current

@@ -1,6 +1,7 @@
 """Current recipient reads for colleague Work command notifications."""
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import and_, select
 from sqlalchemy.orm import aliased
@@ -13,7 +14,11 @@ from app.telegram_bots.result_notice_sources import fields
 from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_answer_news import AnswerNews
 from app.telegram_bots.work_event_source import event_signature
+from app.telegram_bots.work_news import news_class
+from app.telegram_bots.work_proposal_news import ProposalNews
 from app.telegram_bots.work_result_identity import digest
+from app.telegram_bots.work_resume_reminders import ResumeReminder
+from app.telegram_bots.work_stop_news import STOP_KEYS, StopNews, prepare_news_clock
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.agent_instances.work_contract import WorkCommand
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow, AgentWorkRow
@@ -39,28 +44,40 @@ class WorkNewsRead:
 
 
 class WorkNewsReader(AttentionReader):
+    def __init__(self, *, work, authority, links, clock=None):
+        super().__init__(work=work, authority=authority, links=links)
+        self.clock = clock or (lambda: datetime.now(UTC))
+
     async def read(self, link, item):
         try:
             return await await_drained(self._read(link, item))
         except (AccessOff, CeilingRefused, AgentConflict, AgentDenied):
             raise ProductSourceRetired() from None
 
+    async def prepare_clock(self, link, item):
+        return await prepare_news_clock(self, link, item)
+
     async def _read(self, link, item):
         authority = await self._current(link)
         current = await self.work.get(actor=PrincipalRef("human", link.owner_user_id), instance_id=link.agent_ref, work_id=item.work_id)
         work = {key: current[key] for key in _WORK}
-        projection = WorkNewsProjection(self, link, item, work=work, protected=authority[1][1] == "protected")
+        projection = WorkNewsProjection(self, link, item, work=work, protected=authority[1][1] == "protected", clock=await self.prepare_clock(link, item))
         admission = await prepare_attention(self, link)
         await admission(projection=projection)
         return projection.source
 
 
 class WorkNewsProjection:
-    def __init__(self, reader, link, item, source=None, *, work=None, protected=None):
+    def __init__(self, reader, link, item, source=None, *, work=None, protected=None, clock=None):
         self.reader, self.link, self.item, self.source = reader, link, item, source
         self.work = source.work if source else work
         self.protected = source.protected if source else protected
+        self.stop = StopNews(link, item, clock) if item.payload.get("work_event_intent", {}).get("key") in STOP_KEYS else None
         self.answer = AnswerNews(item) if item.payload.get("work_event_intent", {}).get("key") == "request.answered" else None
+        self.reminder = item.payload.get("work_event_intent", {}).get("key") == "remind.ready_to_resume"
+        if self.reminder:
+            self.answer = ResumeReminder(link, item)
+        self.proposal = ProposalNews(link, item) if item.payload.get("work_event_intent", {}).get("key") == "work.proposed" else None
 
     def extend(self, query):
         self.column = len(query.column_descriptions)
@@ -74,16 +91,16 @@ class WorkNewsProjection:
             .correlate(event)
             .scalar_subquery()
         )
-        result = (
-            query.add_columns(work, event, attempt, activation, actor.email, delivery)
-            .join(work, work.id == self.item.work_id)
-            .join(event, event.id == self.item.event_id)
-            .outerjoin(activation, activation.id == prior)
-            .outerjoin(attempt, and_(attempt.work_id == work.id, attempt.activation_id == activation.operation_id))
-            .outerjoin(actor, actor.id == event.actor_id)
-            .join(delivery, delivery.id == self.item.id)
-        )
-        return self.answer.extend(result) if self.answer else result
+        result = query.add_columns(work, event, attempt, activation, actor.email, delivery).join(work, work.id == self.item.work_id).join(event, event.id == self.item.event_id)
+        if self.stop or self.proposal:
+            source_work = event.request["source_work_id"].as_string() if self.proposal else work.id
+            result = result.outerjoin(attempt, and_(attempt.id == event.request["attempt_id"].as_string(), attempt.work_id == source_work)).outerjoin(
+                activation, and_(activation.work_id == source_work, activation.operation_id == attempt.activation_id)
+            )
+        else:
+            result = result.outerjoin(activation, activation.id == prior).outerjoin(attempt, and_(attempt.work_id == work.id, attempt.activation_id == activation.operation_id))
+        result = result.outerjoin(actor, actor.id == event.actor_id).join(delivery, delivery.id == self.item.id)
+        return self.answer.extend(result) if self.answer else self.stop.extend(result, activation) if self.stop else self.proposal.extend(result) if self.proposal else result
 
     def check(self, rows):
         bot, instance, _permission, policy = rows[0][:4]
@@ -91,7 +108,9 @@ class WorkNewsProjection:
         intent = self.item.payload.get("work_event_intent", {})
         key = intent.get("key")
         answer_signature = self.answer.qualify(rows, event, work, intent) if self.answer else None
-        if self.answer is None:
+        stop_signature, stop_values = self.stop.qualify(rows, event, work, instance, attempt, activation, intent) if self.stop else (None, {})
+        proposal_signature, proposal_values = self.proposal.qualify(rows, event, work, instance, attempt, activation, intent) if self.proposal else (None, {})
+        if self.answer is None and self.stop is None and self.proposal is None:
             try:
                 command = WorkCommand.model_validate(event.request)
             except ValueError:
@@ -121,14 +140,22 @@ class WorkNewsProjection:
         if (
             key not in COMMAND_KEYS
             and key != "request.answered"
+            and key not in STOP_KEYS
+            and key != "work.proposed"
+            and not self.reminder
             or type(intent.get("version")) is not int
             or intent["version"] != 1
             or any(type(intent.get(name)) is not int for name in ("event_revision", "assignment_revision"))
             or (event.instance_id, event.work_id, event.revision, event.assignment_revision, event.action)
-            != (self.link.agent_ref, work.id, intent["event_revision"], intent["assignment_revision"], ("human_response" if self.answer else COMMAND_KEYS[key]))
+            != (self.link.agent_ref, work.id, intent["event_revision"], intent["assignment_revision"], ("human_response" if self.answer else "attempt_settled" if self.stop else "derived" if self.proposal else COMMAND_KEYS[key]))
             or (event.actor_kind, event.actor_id) == ("human", self.link.owner_user_id)
-            or event.actor_kind != "human"
+            and not self.reminder
+            or self.stop is None
+            and self.proposal is None
+            and event.actor_kind != "human"
             or self.answer is None
+            and self.stop is None
+            and self.proposal is None
             and event.request.get("action") != event.action
             or (event.result.get("id"), event.result.get("instance_id")) != (work.id, self.link.agent_ref)
             or work.instance_id != self.link.agent_ref
@@ -137,8 +164,10 @@ class WorkNewsProjection:
             or delivery.state != "sending"
             and any(getattr(delivery, field) is not None for field in ("claim_owner", "claim_id", "claimed_at"))
             or (delivery.link_id, delivery.owner_user_id, delivery.binding_generation, delivery.chat_id, delivery.instance_id, delivery.class_)
-            != (self.link.id, self.link.owner_user_id, self.link.binding_generation, self.link.chat_id, self.link.agent_ref, "reply" if self.item.payload.get("work_news_basis", {}).get("reveal") else "info")
-            or delivery.dedupe_key != "event:" + event.id + ":info"
+            != (self.link.id, self.link.owner_user_id, self.link.binding_generation, self.link.chat_id, self.link.agent_ref, "reply" if self.item.payload.get("work_news_basis", {}).get("reveal") else news_class(key))
+            or delivery.dedupe_key != ("remind:" + intent["response_id"] if self.reminder else "event:" + event.id + ":info")
+            or self.reminder
+            and delivery.silent is not True
             or (attempt.id if attempt else None) != intent.get("attempt_id")
             or (event.request.get("attempt_id") is not None or activation is not None)
             and attempt is None
@@ -148,18 +177,22 @@ class WorkNewsProjection:
             raise ProductSourceRetired()
         requester = attempt.requester_id if attempt else None
         recipients = {work.creator_id} if key in {"work.changed", "work.reopened"} else {requester, work.creator_id} if key in {"result.accepted", "work.cancelled"} else {requester}
+        if self.reminder:
+            recipients = {event.actor_id}
         if self.link.owner_user_id not in recipients:
             raise ProductSourceRetired()
-        values = {"objective": work.objective, "person": person}
+        values = {"objective": work.objective, "person": person, **stop_values, **proposal_values}
         if self.answer:
             values["open_assignment"] = self.answer.open_assignment
+        if self.reminder:
+            values.update(name=instance.name, due=self.answer.due.isoformat())
         if key == "result.changes":
             values["text"] = event.request["note"]
         elif key == "decision.recorded":
             # Work stores one decision statement, not independent choice/note
             # fields. Do not invent or duplicate a second annotation.
             values.update(decision=event.request["note"], note=None)
-        signature = answer_signature or event_signature(event, None, intent)
+        signature = answer_signature or stop_signature or proposal_signature or event_signature(event, None, intent)
         fresh = WorkNewsRead(work.id, key, values, self.protected, self.work, signature, digest([signature, self.work, values, fields(attempt, _ATTEMPT), None if activation is None else event_signature(activation, None, {})]))
         if self.source is not None and self.source != fresh:
             raise ProductSourceRetired()

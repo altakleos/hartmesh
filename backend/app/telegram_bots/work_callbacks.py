@@ -84,9 +84,14 @@ class WorkCallbacks:
             try:
                 if notice:
                     recovery = getattr(getattr(self.services, notice_owner, None), "recovery", None)
-                    if row.kind != "reveal" or recovery is None:
+                    if recovery is None:
                         raise CallbackRefused()
-                    await recovery.reveal(link, row.id, **scope)
+                    if row.kind == "dismiss" and notice_owner == "work_news_sources":
+                        await recovery.dismiss(link, row.id, **scope)
+                    elif row.kind == "reveal":
+                        await recovery.reveal(link, row.id, **scope)
+                    else:
+                        raise CallbackRefused()
                 elif family == 4 and row.kind in {"changes_open", "dismiss", "back", "decide_note"}:
                     await self.drafts.navigate(link, row.id, **scope)
                 elif row.kind == "dismiss":

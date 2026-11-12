@@ -21,7 +21,7 @@ async def prepare(e, action="edit", *, item=None):
         for row in await writer.scalars(select(TelegramOutboxRow)):
             if row.id != item.id:
                 row.state = "sent"
-    plans = WorkNewsPlans(reader=WorkNewsReader(work=e.human.work, authority=e.live.authority, links=e.db.links), outbox=e.sender.outbox, callbacks=e.channel._services.callbacks)
+    plans = WorkNewsPlans(reader=WorkNewsReader(work=e.human.work, authority=e.live.authority, links=e.db.links, clock=lambda: e.sender.outbox.clock()), outbox=e.sender.outbox, callbacks=e.channel._services.callbacks)
     e.channel._services.work_news_sources = WorkNewsSources(plans)
     assert await plans.materialize(e.link, item.id)
     return plans, item.id

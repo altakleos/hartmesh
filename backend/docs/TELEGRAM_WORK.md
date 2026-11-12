@@ -821,3 +821,41 @@ comments and unsupplied responses cannot become answer news. The original
 requester gets one silent notice; the responder is excluded. Open assignment
 is a web link only when no attempt is unresolved, rechecked in the final snapshot. Other news kinds
 and installation remain pending.
+
+
+`work_stop_news.py` qualifies colleague Stop, edit and withdrawal notifications
+against the settlement's explicit attempt/run and its original activation. Only
+the latest intervening canonical command can supply the actor, and a person's
+own command sends no colleague notice. The original requester receives it
+silently; Stop/edit offer a web assignment link and withdrawal has no control.
+Command and settlement bodies, revisions and the cause timestamp remain part
+of immutable provenance even after a later attempt starts.
+
+`settings.format_time` uses HH:MM on the recipient's current day and a localized
+day label otherwise. `NewsClock` prepares ZoneInfo off-loop and reads its injected
+clock at each source/provider snapshot, so crossing midnight or changing the
+timezone defers the old presentation for refresh. Untimed edit/withdrawal notices
+leave preference drift to the ordinary final settings fence. These sources remain
+dormant pending installation; progress/status messages are separate.
+
+`work_proposal_news.py` qualifies a derived assignment's exact source Work,
+attempt and activation, including its original requester and agent principal.
+It does not infer a parent report from timestamps. The child must remain open
+and never have started; the complete current objective and success criteria are
+rechecked at final delivery and refreshed when changed. The full proposal offers
+Open assignment on the web and Not now. Protected proposals first offer Show.
+Not now consumes only the exact fully acknowledged proposal group and queues
+durable keyboard cleanup in the same guarded transaction. It does not modify,
+withdraw or start Work, and it can clear an old proposal after Work changes.
+An already consumed group cannot repeat dismissal. These owners remain dormant.
+
+`work_resume_reminders.py` reuses the canonical information-answer receipt and
+targets its answerer. It requires the same answered blocker and assignment with
+no unresolved or later activation, stop or assignment change. The final SDK
+snapshot checks the response's one-hour due time independently of queue timing.
+Reminders remain essential, silent and governed by question preferences. Current
+quiet hours plus an enabled summary retire unsolicited delivery as `quiet-hours`;
+an explicit protected Show is still served. Resumed or changed Work retires as
+`resumed`. The source-owned sender preserves these closed skip reasons under its
+exact claim fence. Refresh/Show history keeps the original reminder class, and
+the only navigation is a web assignment link. Installation remains pending.
