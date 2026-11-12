@@ -1119,6 +1119,9 @@ class TelegramBotChannel(TelegramChannel):
             if not media and not skill and human_inputs is not None and await human_inputs.handle_text(self, update, captured_link=self._admission(update).link):
                 self._classified(update)
                 return
+            if not media and not skill and work_inputs is not None and await work_inputs.handle_untied(self, update, captured_link=self._admission(update).link):
+                self._classified(update)
+                return
             link = self._admission(update).link
             typing_allowed = getattr(turns, "typing_allowed", None)
             topic = update.message.message_thread_id
@@ -1898,6 +1901,12 @@ class TelegramBotChannel(TelegramChannel):
         elif "work_request_basis" in saved.item.payload:
             if saved.item.payload["work_request_basis"].get("version") in {5, 6}:
                 work_sources = getattr(self._services, "work_routing_sources", None)
+            if work_sources is None:
+                raise PermanentDeliveryError("unsupported-work-request-source")
+            work_part = await work_sources.read_part(saved)
+        elif source_key in {"ask.is_this_answer", "voice.confirm_answer"}:
+            controller = getattr(self._services, "work_callbacks", None)
+            work_sources = getattr(getattr(controller, "untied", None), "notice", None)
             if work_sources is None:
                 raise PermanentDeliveryError("unsupported-work-request-source")
             work_part = await work_sources.read_part(saved)

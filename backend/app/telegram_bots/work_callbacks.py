@@ -20,6 +20,7 @@ from app.telegram_bots.work_review_recovery import WorkReviewRecovery
 from app.telegram_bots.work_routing_admission import WorkRoutingAdmissions
 from app.telegram_bots.work_routing_recovery import WorkRoutingRecovery
 from app.telegram_bots.work_stale_recovery import WorkStaleRecovery
+from app.telegram_bots.work_untied_inputs import WorkUntiedInputs
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
@@ -35,6 +36,7 @@ class WorkCallbacks:
         self.interactions = WorkInteractionPlans(outcomes.plans)
         self.controls = WorkControlAdmissions(outcomes.plans, self.acts)
         self.closed = WorkClosedInputs(services, self.controls)
+        self.untied = WorkUntiedInputs(services, self.controls)
         self.refusals = WorkRefusalRecovery(self.controls)
         self.stale = WorkStaleRecovery(self.controls, self.interactions)
         self.recovery = WorkRequestRecovery(outcomes.plans)
@@ -46,6 +48,8 @@ class WorkCallbacks:
         self.followups, self.retries = WorkRoutingFollowupRecovery(outcomes), WorkActionRetries(outcomes)
 
     async def execute_callback(self, channel, row, *, update_id=None, query_id=None):
+        if await self.untied.execute_callback(channel, row, update_id=update_id):
+            return True
         if await self.closed.execute_callback(channel, row, update_id=update_id):
             return True
         if row.kind not in _VIEWS | _ACTIONS.keys() | {"reveal", "act_check", "dismiss"}:

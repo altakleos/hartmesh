@@ -64,7 +64,7 @@ class WorkInputRefresh:
                 mark = await writer.get(TelegramInboundMarkRow, (identity["link_id"], identity["message_id"], identity["chat_id"]), populate_existing=True)
                 captured = InboxRow.from_row(mark)
                 composed.captured = captured
-                state = input_state(captured.route_basis["work_input"], source)
+                state = input_state(captured.route_basis["work_input"], source, voice="voice_note" in captured.route_basis)
                 return await self.previews._publish(writer, link, captured, source, settings, state, guard=composed)
 
         return await await_drained(perform())

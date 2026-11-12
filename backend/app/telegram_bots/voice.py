@@ -310,7 +310,11 @@ class VoiceNotes:
         row, created = await await_drained(inbox.accept(link, update, sanitized_input={"type": "voice", "voice": descriptor}))
         if created or row.route_kind is None:
             forwarded, origin = forward_origin(message)
-            row = await await_drained(inbox.route(row, kind="voice", target_id="working", basis={"forwarded": forwarded, "origin": origin}, operation_ids=[]))
+            work_voice = getattr(getattr(self.services, "work_text_inputs", None), "voice", None)
+            if work_voice is not None:
+                row = await work_voice.capture(channel, link, row, forwarded=forwarded, forward_origin=origin, guard=self._guard(channel, link))
+            else:
+                row = await await_drained(inbox.route(row, kind="voice", target_id="working", basis={"forwarded": forwarded, "origin": origin}, operation_ids=[]))
             channel._spawn_ingress(self._run(channel, link, row.message_id, lambda guard: self._consider(channel, link, row, guard)))
         channel._classified(update, remember=True)
 
@@ -326,6 +330,9 @@ class VoiceNotes:
             async with self._locks.hold(link.owner_user_id):
                 row = await step(self._guard(channel, link))
             if row is not None:
+                work_inputs = getattr(self.services, "work_text_inputs", None)
+                if row.route_kind.startswith("work_") and work_inputs is not None and await work_inputs.resume(channel, row):
+                    return
                 await self.services.turns.accept_transcript(channel, link, row)
         except CallbackRefused:
             pass  # A spent press: its note already has its owner.
@@ -479,10 +486,17 @@ class VoiceNotes:
             await self._answer(channel, link, row, "voice.failed", {})
             return None
         human_inputs = getattr(self.services, "human_inputs", None)
-        used_as = "answer" if human_inputs is not None and await human_inputs.answers_prompt(channel, link, row) else "message"
+        used_as = "answer" if "work_voice" in row.route_basis or human_inputs is not None and await human_inputs.answers_prompt(channel, link, row) else "message"
         async with self.services.callbacks.writer(link, guard) as writer:
             row = await self.services.outbox.inbox.complete_voice(link, row, text=text, session=writer, guard=guard)
             await self.services.acts.write_voice_note(link, message_id=row.message_id, duration=voice["duration"], provider=transcriber.provider, used_as=used_as, session=writer)
+            work_voice = getattr(getattr(self.services, "work_text_inputs", None), "voice", None)
+            if work_voice is not None:
+                completed = await work_voice.complete(link, row, guard=guard, session=writer)
+                if completed is True:
+                    return None
+                if completed is not False:
+                    return completed
             await self.services.outbox.plan_product(
                 link,
                 source_id=f"voice-heard:{row.chat_id}:{row.message_id}",

@@ -853,7 +853,9 @@ class CallbackRepository:
                 unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_outcome_basis"]["refresh"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
                 # A captured Work input still owns its shown prompt until its
                 # outcome is delivered, even after ordinary prompt expiration.
-                for sources in await session.scalars(select(TelegramInboundMarkRow.delivery_ids).where(TelegramInboundMarkRow.route_kind == "work_input", TelegramInboundMarkRow.state != "done")):
+                for sources in await session.scalars(
+                    select(TelegramInboundMarkRow.delivery_ids).where(TelegramInboundMarkRow.route_kind.in_(("work_input", "work_answer", "voice", "work_card_hold")), TelegramInboundMarkRow.state != "done")
+                ):
                     unsettled.update(identity for identity in sources if type(identity) is str)
                 # A consumed Show remains proof for later direct refreshes as
                 # long as its outbox exists (live controls pin that parent).

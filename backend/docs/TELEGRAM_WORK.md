@@ -457,3 +457,52 @@ The comment planner checks the same facts before publication. No extra provider
 read or prior successful read substitutes for that last dispatch check. A failed
 multipart replacement preserves its ACK history and rebuilds from the original
 response receipt; it never repeats the comment command.
+
+`work_untied_source.py` scans the complete chat/topic/binding history for the last
+acknowledged Work question before an unquoted plain-text input. A later received
+message or bot message prevents the fallback. `work_untied_inputs.py` runs after
+ordinary clarification routing, retaining the actual input until Save as answer
+or It's a new message is pressed. It never fabricates a quote or typing prompt.
+Save captures a Respond operation owned by that callback; review and decision
+text remains a comment. New-message publication retains one callback owner across
+replays. Sibling choices cannot win after either operation is reserved. The unfinished input
+pins its original question as a delivery dependency until settlement. Changed
+questions retain the text for existing closed-input recovery and a fresh choice.
+
+The fixed consent notice has its own `work_untied_delivery.py` source authority.
+It checks the exact sending claim, complete original question, retained input and
+canonical choices in the final joined account/grant snapshot. Compact callback
+facts avoid repeating full outbox JSON. Admission preserves the original input
+snapshot through its own writes, rejects finished input and compares JSON types
+strictly. Receipt-only replay does not repeat an unknown response. These optional
+controllers remain uninstalled until notification and lifecycle integration.
+
+`work_voice_inputs.py` captures an actual quoted card or shown typing prompt
+before transcription. Ordinary clarification keeps priority over an unquoted
+last-question fallback. Forwarded voice retains ordinary behavior. Source and
+prompt context remain pinned while transcription or consent is unfinished;
+completion refuses a changed captured context and never transcribes again.
+
+The answer-consent capsule's V2 variant preserves the original recording
+descriptor, prompt purpose and displayed revisions. It shows the full transcript
+across ordered parts, with Save/Discard only on the last part. Save requires the
+complete typed ACK and records one Respond; cannot/wrong preserve their
+disposition. Spoken decisions, decision notes and review changes use their
+existing specific confirmation owners. Even an unchanged spoken review note
+needs a press. Ordinary text submission semantics stay unchanged.
+
+Discard clears callback transcript payloads and classifies the same transcription
+audit as discarded, preserving its duration, provider and budget charge. Known
+completed responses clear their Save payload; receipt-only reconciliation still
+uses the original immutable Act. Source retirement retains Work ownership and
+offers existing closed-input choices. Overlong transcripts remain complete and
+offer reentry or a new-message choice without weakening the Work text limit.
+Those multipart recovery choices also require every transcript part's ACK.
+Send as new reclassifies the existing voice audit as a message. These optional
+controllers remain dormant until supervisor integration.
+
+Consent and transcript recovery notices keep their original destination after
+a missing-topic response. The ordinary failed-delivery journal and Retry delivery
+control preserve acknowledged parts and retry only the unsent suffix, with no
+new transcription or Work action. Generic presentation relocation must not
+rewrite their version or move the input to another topic.

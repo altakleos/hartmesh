@@ -46,6 +46,8 @@ def interaction_state(value, source):
         fields = fields | {"refreshed"}
     if view == "changes" and state.get("replaced") is True:
         fields = fields | {"replaced"}
+    if view == "changes" and state.get("refreshed") is False:
+        fields = fields | {"refreshed"}
     if set(state) != fields:
         raise ValueError("invalid-work-interaction")
     for key in {"text", "note", "decision"} & fields:
@@ -114,7 +116,7 @@ def present_interaction(source, value, *, locale, expires_at=None):
         if state["purpose"] == "decision_note":
             suffix = escape(state["decision"]) + "\n\n" + suffix
     html = "".join(part["html"] for part in base.parts) + ("\n\n" + suffix if suffix else "")
-    if view == "changes" or view == "decision" and state.get("refreshed") is True:
+    if view == "changes" and state.get("refreshed") is not False or view == "decision" and state.get("refreshed") is True:
         html = render("stale.replaced" if state.get("replaced") is True else "stale.changed_resend", locale) + "\n\n" + html
     return WorkRequestPresentation(
         tuple({"kind": "text", "html": chunk, "visible_text": visible_text(chunk), "protect_content": source.protected} for chunk in split_html(html)),

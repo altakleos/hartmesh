@@ -1059,7 +1059,7 @@ class InboxRepository:
         row = next((item for item in group if item.id == callback_id), None)
         if (
             row is None
-            or row.kind not in {"retry_message", "file_retry", "clarify_option", "network", "form_send", "prompt_send_new"}
+            or row.kind not in {"retry_message", "file_retry", "clarify_option", "network", "form_send", "prompt_send_new", "answer_no"}
             or (row.link_id, row.chat_id, row.binding_generation) != (link.id, link.chat_id, link.binding_generation)
         ):
             raise ValueError("callback-publication-conflict") from None
@@ -1132,13 +1132,17 @@ class InboxRepository:
                 raise ValueError("submission-conflict") from None
         return parent, record, request, request_basis, origins
 
-    async def stage_prompt_message(self, link, *, callback_id, update_id, chat_id, message_id, message_thread_id, callbacks, guard, session=None):
+    async def stage_prompt_message(self, link, **kwargs):
+        """The saved Send-as-new choice owns its actual held human message."""
+        return await self.stage_held_message(link, kind="prompt_send_new", **kwargs)
+
+    async def stage_held_message(self, link, *, callback_id, update_id, chat_id, message_id, message_thread_id, callbacks, guard, kind, session=None):
         """The saved Send-as-new choice owns its actual held human message."""
         from app.telegram_bots.callbacks import CALLBACK_METADATA_KEYS
         from app.telegram_bots.links import prepare_publication_guard
         from deerflow.utils.file_io import await_drained
 
-        if type(update_id) is not int or update_id < 0:
+        if kind not in {"prompt_send_new", "answer_no"} or type(update_id) is not int or update_id < 0:
             raise ValueError("submission-conflict") from None
         self._publication_guard_matches(guard, link=link)
         if session is not None:
@@ -1148,27 +1152,36 @@ class InboxRepository:
             await guard.check(writer)
             selected = await writer.get(TelegramCallbackRow, callback_id)
             if selected is not None and CALLBACK_PUBLICATION_KEY in selected.payload:
-                if selected.kind != "prompt_send_new" or (selected.chat_id, selected.message_id, selected.message_thread_id) != (chat_id, message_id, _topic(message_thread_id)):
+                if selected.kind != kind or (selected.chat_id, selected.message_id, selected.message_thread_id) != (chat_id, message_id, _topic(message_thread_id)):
                     raise ValueError("submission-conflict") from None
                 saved = await self.lock_callback_input(link, callback_id, session=writer)
             else:
                 group = await callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=guard, session=writer)
-                if group.selected.kind != "prompt_send_new":
+                if group.selected.kind != kind:
                     raise ValueError("submission-conflict") from None
                 payload = {key: _owner_json(value) for key, value in group.selected.payload.items() if key not in CALLBACK_METADATA_KEYS}
-                if set(payload) != {"prompt_id", "message_id"} or type(payload["message_id"]) is not int or payload["message_id"] <= 0:
+                if set(payload) != ({"prompt_id", "message_id"} if kind == "prompt_send_new" else {"text", "message_id"}) or type(payload["message_id"]) is not int or payload["message_id"] <= 0:
                     raise ValueError("submission-conflict") from None
-                prompt = await writer.get(TelegramCallbackRow, payload["prompt_id"], with_for_update=True)
+                prompt = await writer.get(TelegramCallbackRow, payload["prompt_id"], with_for_update=True) if kind == "prompt_send_new" else None
                 parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id)
-                if prompt is None or prompt.kind != "prompt" or (prompt.link_id, prompt.chat_id, prompt.message_thread_id, prompt.binding_generation) != (link.id, chat_id, _topic(message_thread_id), link.binding_generation):
+                if kind == "prompt_send_new" and (
+                    prompt is None or prompt.kind != "prompt" or (prompt.link_id, prompt.chat_id, prompt.message_thread_id, prompt.binding_generation) != (link.id, chat_id, _topic(message_thread_id), link.binding_generation)
+                ):
                     raise ValueError("submission-conflict") from None
                 basis = parent.payload.get("product_basis") if parent is not None else None
+                mark = await writer.get(TelegramInboundMarkRow, (link.id, payload["message_id"], chat_id), with_for_update=True)
+                closed_voice = kind == "prompt_send_new" and mark is not None and "voice_note" in mark.route_basis
+                if closed_voice:
+                    from app.telegram_bots.work_closed_inputs import validate_closed_voice
+
+                    validate_closed_voice(parent, mark)
                 expected = [[link.id, payload["message_id"], chat_id]]
                 if (
                     type(basis) is not dict
                     or basis.get("origins") != expected
                     or basis.get("finish_route") is not False
-                    or any(part.get("source_ref", {}).get("key") not in {"prompt.closed", "prompt.unavailable"} for part in basis.get("parts", []))
+                    or not closed_voice
+                    and any(part.get("source_ref", {}).get("key") not in ({"prompt.closed", "prompt.unavailable"} if kind == "prompt_send_new" else {"ask.is_this_answer"}) for part in basis.get("parts", []))
                     or not basis.get("parts")
                 ):
                     raise ValueError("submission-conflict") from None
@@ -1182,6 +1195,8 @@ class InboxRepository:
                     or mark.route_kind != "turn"
                     or mark.route_target_id != link.agent_ref
                     or not _recovery_plain_input([mark])
+                    or kind == "answer_no"
+                    and (payload["text"] != mark.sanitized_input.get("text") or mark.route_basis.get("work_answer", {}).get("notice_id") != parent.id)
                 ):
                     raise ValueError("submission-conflict") from None
                 self._current(link, mark)
@@ -1207,7 +1222,7 @@ class InboxRepository:
                     "closed_at": None,
                 }
                 row = await writer.get(TelegramCallbackRow, callback_id)
-                if any(CALLBACK_PUBLICATION_KEY in item.payload for item in group.rows if item.id != callback_id):
+                if any("work_action_id" in item.payload or CALLBACK_PUBLICATION_KEY in item.payload and item.id != callback_id for item in group.rows):
                     raise ValueError("submission-conflict") from None
                 row.payload = {**deepcopy(row.payload), CALLBACK_PUBLICATION_KEY: owner}
                 await self.register_delivery(origins, outbox_id=parent.id, primary=False, finish=True, session=writer)
@@ -1616,7 +1631,7 @@ class InboxRepository:
         spent = [row for row in rows if row.consumed_at is None]
         for row in spent:
             row.consumed_at, row.closed_reason = _now(), "done"
-        if spent and selected.kind in {"retry_message", "file_retry", "prompt_send_new"} and selected.message_id is not None:
+        if spent and selected.kind in {"retry_message", "file_retry", "prompt_send_new", "answer_no"} and selected.message_id is not None:
             from app.telegram_bots.producer import keyboard_cleanup_row
 
             session.add(keyboard_cleanup_row(selected, owner_user_id=owner_user_id, now=_now()))
@@ -2973,13 +2988,16 @@ class InboxRepository:
         self._current(current, mark)
         original = _input(mark.sanitized_input)
         forwarded, origin = mark.route_basis.get("forwarded"), mark.route_basis.get("origin")
+        if _canonical({"work_voice": mark.route_basis.get("work_voice")}) != _canonical({"work_voice": row.route_basis.get("work_voice")}):
+            raise ValueError("voice-note-conflict") from None
         if mark.route_kind != "voice" or mark.route_target_id != "working" or mark.route_complete or original.get("type") != "voice" or type(forwarded) is not bool or type(text) is not str or not text.strip():
             raise ValueError("voice-note-conflict") from None
         quoted = {"reply_to_message_id": original["reply_to_message_id"]} if "reply_to_message_id" in original else {}
         profile = {"version": 2, "kind": "chat_input", "forwarded": True, "origin": origin} if forwarded else {"version": 1, "kind": "plain_text", "forwarded": False}
         mark.sanitized_input = _input({"type": "text", "text": text, **quoted})
         mark.route_kind, mark.route_target_id = "turn", link.agent_ref
-        mark.route_basis = {"input_profile": profile, "voice_note": {"version": 1, "original": original}}
+        work_voice = {"work_voice": deepcopy(mark.route_basis["work_voice"])} if "work_voice" in mark.route_basis else {}
+        mark.route_basis = {"input_profile": profile, "voice_note": {"version": 1, "original": original}, **work_voice}
         await session.flush()
         await guard.check(session)
         return _snapshot(mark)
@@ -3004,7 +3022,7 @@ class InboxRepository:
             if mark.route_complete:
                 raise ValueError("inbox-route-complete")
             # Host facts written before route selection remain server-owned.
-            saved_host = {key: deepcopy(value) for key, value in mark.route_basis.items() if key in {"human_input_ui", "pending_files"}}
+            saved_host = {key: deepcopy(value) for key, value in mark.route_basis.items() if key in {"human_input_ui", "pending_files", "voice_note", "work_voice"}}
             routed_basis = {**basis, **saved_host}
             mark.route_kind, mark.route_target_id, mark.route_basis, mark.operation_ids = kind, target_id, routed_basis, deepcopy(operation_ids)
             await session.flush()
