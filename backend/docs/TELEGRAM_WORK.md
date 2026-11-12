@@ -1060,3 +1060,11 @@ uses request-target navigation and a web Work handover for omitted items.
 `due_date` uses the owner's local calendar date, defers to quiet end, and retains
 the scheduled day across an overnight delay; duplicate local times retain one
 date key. These pure helpers do not install a scheduler or authorize a delivery.
+
+`summary_sources.SummaryReader` first walks complete Attention pages, then
+qualifies the same selection in one provider-final SQL read. Work, latest attempts
+and requests form an additive union, so the display cap never limits source reads
+and independent source sets do not multiply each other. The final projection
+rebuilds all summary sections under current owner grants, write capability and
+protection. Titles, current answers and omitted-item counts share that snapshot.
+The reader writes no outbox row and starts no execution.
