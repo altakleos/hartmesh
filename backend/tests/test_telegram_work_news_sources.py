@@ -129,7 +129,7 @@ async def test_review_and_decision_news_use_original_requester_and_recorded_stat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("key", ["work.changed", "concealed.info"])
+@pytest.mark.parametrize("key", ["work.changed", "concealed.info", "interrupted", "attempt.failed", "concealed.no_result", "concealed.interrupted", "concealed.not_started"])
 async def test_generic_product_reply_cannot_impersonate_colleague_news(work_delivery, key):
     from test_telegram_bot_adapter import message
 

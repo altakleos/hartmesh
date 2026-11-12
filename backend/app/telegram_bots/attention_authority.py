@@ -65,7 +65,7 @@ async def prepare_attention(host, captured, *, require_inspect=True):
     async def check(*, projection=None, session=None):
         query = projection.extend(base_query) if projection is not None else base_query
 
-        async def snapshot():
+        async def snapshot(held=None):
             if session is None:
                 async with host.links.session_factory() as reader:
                     rows = (await reader.execute(query)).all()
@@ -106,7 +106,11 @@ async def prepare_attention(host, captured, *, require_inspect=True):
             limits = [row[7].role for row in rows if row[7] is not None and (not user.oauth_issuer or row[7].issuer == issuer_key(user.oauth_issuer))] if user.oauth_id and user.oauth_provider else []
             limit = min(limits, key=lambda role: ROLES.index(role) if role in ROLES else -1) if limits else None
             if projection is not None:
-                projection.check(rows)
+                qualified = getattr(projection, "check_with_permissions", None)
+                if qualified is None:
+                    projection.check(rows)
+                elif held is not None:
+                    qualified(rows, held)
             return users._row_to_user(user, role_limit=limit), (permissions, value, target.generation, target.definition_revision)
 
         def principal(user):
@@ -123,7 +127,7 @@ async def prepare_attention(host, captured, *, require_inspect=True):
             raise AuthorityUnavailable() from None
         # Provider evaluation may await. The final joined read covers account,
         # role limits, binding, grants and policy together after that preparation.
-        current_user, current_target = await snapshot()
+        current_user, current_target = await snapshot(held)
         if principal(current_user) != basis or current_target != target_basis:
             raise AuthorityUnavailable()
         if "agents:read" not in held:

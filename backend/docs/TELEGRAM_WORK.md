@@ -859,3 +859,31 @@ an explicit protected Show is still served. Resumed or changed Work retires as
 `resumed`. The source-owned sender preserves these closed skip reasons under its
 exact claim fence. Refresh/Show history keeps the original reminder class, and
 the only navigation is a web assignment link. Installation remains pending.
+
+`work_attempt_notices.py` qualifies failed, contained, service-restarted and
+no-result settlements against their explicit attempt and activation. Current
+run metadata, when retained, must match the Work, attempt, requester, thread and
+idempotency key; failure wording uses only its closed `stop_reason` vocabulary.
+Host containment uses the exact event/attempt reason and attachment. A restart
+notice refuses an intervening stop/edit/cancel. Saved progress belongs to the
+settlement snapshot, and conversation navigation keeps that attempt's thread
+even after a later activation. Manager and administrator forms come from the
+current joined grant and account/role limits. Files-full advice exposes Files
+only to managers; containment reasons have their specified files handover.
+`attempt_text.py` renders complete escaped progress and both locales, omitting
+claims that work was kept for unstarted, restored, moved or unknown outcomes.
+Protected Show and refresh reuse the source-owned ACK/history boundary while
+retaining the interrupt class. Generic fixed replies cannot impersonate these
+notices. `attempt_output.py` accepts only the exact successful run's capture
+receipt and durable source event, including the original assistant identity,
+event sequence and text digest. Capture/receipt identity is immutable after
+planning; coherent replacement retires delivery instead of adopting new output.
+It never reads the latest conversation message
+or cached answer. Missing, changed or unsupported proof omits the excerpt.
+The source and current conversation binding are joined into the final provider
+snapshot. Current `threads:read` permits the original conversation link;
+`runs:read` is additionally required for an excerpt. Deleted, rebound or recreated threads
+lose both. The nonactionable excerpt is clipped to 600 characters at a word
+boundary; protected previews conceal it until Show. Attention projections that
+need optional route ceilings run their checks after provider resolution against
+a fresh joined snapshot. Installation remains pending.
