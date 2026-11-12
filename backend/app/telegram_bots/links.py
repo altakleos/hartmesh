@@ -457,6 +457,7 @@ class BotLinkRepository:
         self._health_causes: dict[str, set[str]] = {}
         self._health_revisions: dict[str, int] = {}
         self._health_locks: dict[str, asyncio.Lock] = {}
+        self.work_baseline_seeder: Callable[[AsyncSession, TelegramBotLinkRow], Awaitable[bool]] | None = None
 
     def publication_guard(self, captured_link: BotLink, *, check_live_owner: LiveOwnerCheck, check_attempt_current: Callable[[], bool]) -> PublicationGuard:
         """Capture the original attempt without acquiring an owner-wide writer."""
@@ -1328,6 +1329,8 @@ class BotLinkRepository:
                 return None
             row.state, row.updated_at = "connected", _now()
             await self._event(session, row, "release", actor_id=owner)
+            if self.work_baseline_seeder is not None:
+                await self.work_baseline_seeder(session, row)
             return _snapshot(row)
 
     async def mark_notice_if_current(self, link_id: str, key: str, *, token_revision: int, binding_generation: int, at: datetime, minimum_interval_seconds: float = 0, only_if_unsent: bool = False) -> bool:
@@ -1750,8 +1753,8 @@ class BotLinkRepository:
                 )
             )
             await session.flush()
-            # A Work baseline joins this same session in stage three. Until then
-            # its generation marker stays null and claims no seeded history.
+            if self.work_baseline_seeder is not None:
+                await self.work_baseline_seeder(session, current)
             return _snapshot(current)
 
     @staticmethod

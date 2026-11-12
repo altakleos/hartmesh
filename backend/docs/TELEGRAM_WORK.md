@@ -2,6 +2,28 @@
 
 Read alongside [the managed bot guide](../app/telegram_bots/AGENTS.md).
 
+`work_event_intents.py` projects current recipient/grant/preferences into empty,
+content-free delivery intents in `WorkEventReader`'s pair writer. Ordinary
+events omit their human actor; status, existing-question edits, routing to self
+and the answerer's reminder have their explicit exceptions. Same-operation
+HumanInput receipts identify responses; supplied management comments create no
+answer notification. `work_event_facts.py` resolves exact recorded attempts or
+the activation preceding the event, never the latest attempt. Request identity
+uses canonical receipts or Work blocker/outcome basis, not wall-clock ordering.
+Question edits retain their specific request/assignment revision, with a route's
+old edit revision separate from its new question revision. Delivery still has
+to prove a current exact acknowledged anchor before editing anything.
+
+Review creation shares the Work settlement event in the current domain service.
+That event can create both a manager routing question and a requester result;
+class-specific event dedupe preserves both. Progress and edits retain their
+dedicated keys. Questions record a bounded decision hold, reminders their exact
+response and one-hour due time. No intent starts work or sends content. Empty
+intents cannot be claimed as delivered, even when proactive sending is opted
+in. Content materializers must still qualify recipient access, source freshness,
+protection, complete previews/files, exact edits, quiet-hour reminder suppression
+and decision-hold release before supervisor installation enables this path.
+
 `notifications.py` owns class preferences and optional-news budgets. The sender's
 `proactive` switch remains false until notification entry points are complete.
 Essential rows bypass discretionary budgets; edits require actual edit parts.

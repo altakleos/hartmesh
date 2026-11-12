@@ -189,6 +189,32 @@ an old binding generation cannot reconnect. Inbox identities include the chat:
 must carry the captured chat; never delete older receipts to admit another
 account's same message ID.
 
+`work_event_cursors.py` provides a dormant binding/restoration hook and startup
+initializer. Install the hook before routes admit new bindings. It borrows the
+binding writer, replaces only that link's cursor set from one SQL Work snapshot,
+and stamps the generation in the same transaction. A restored held binding gets
+a new baseline before release returns. Startup seeds only null/mismatched bound
+instance generations, including blocked links; matching markers keep every
+cursor and preserve absent cursors for Work created while down. Initialization
+locks each link and drains through cancellation. Neither path renders content,
+sends messages or calls a provider. Supervisor installation remains outstanding.
+
+`work_event_reader.py` supplies bounded, per-pair catch-up after that baseline.
+It requires an explicit SQL-only recipient projector borrowing the same writer;
+no default projector may consume history. Each link lock fences the generation
+through projection, outbox insertion and cursor commit. Event pages follow exact
+revision order through the captured Work revision. Missing history rolls back
+the entire pair. An absent cursor in an initialized generation starts at zero.
+Round-robin link and Work bookmarks advance after failure too; other due pairs
+can proceed, even with a batch of one. Bookmarks affect fairness only; persisted
+cursors and delivery dedupe own restart and concurrent-reader correctness.
+Cancellation drains admitted projection/commit. This primitive sends nothing
+and does not consult transport health or the copy guard. `WorkEventIntents.project`
+supplies the recipient projection; its source rules live in
+[Work delivery](TELEGRAM_WORK.md). Content materializers and supervisor
+installation remain outstanding. Reader test fixture projectors qualify
+transaction ownership separately from the recipient service tests.
+
 Codes store hashes with captured link/conflict epoch/token revision. Every
 current-token conflict commits a monotonic epoch and invalidates waiting codes;
 stale tokens cannot change it. Exhausted epochs fail closed. Generic `update`

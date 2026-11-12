@@ -645,7 +645,7 @@ Held-input and reconcile paths share its atomic access-off claim. A real new
 hold clears that category's prior claim; one disposable attempt serves the hold.
 
 Recovery, conversation preparation, polling, the supervisor, binding, tokens, health,
-profiles and strangers are in [the bot lifecycle](../../docs/TELEGRAM_BOT_LIFECYCLE.md).
+profiles, Work-event ingestion and strangers are in [the bot lifecycle](../../docs/TELEGRAM_BOT_LIFECYCLE.md).
 Read it before changing `recovery.py`, `recovery_authority.py`, `threads.py`, `polling.py`,
 `supervisor.py`, `profile.py`, `avatar.py`, `strangers.py`, or those paths of `links.py`.
 
