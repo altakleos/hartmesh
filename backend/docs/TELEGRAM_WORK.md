@@ -887,3 +887,24 @@ lose both. The nonactionable excerpt is clipped to 600 characters at a word
 boundary; protected previews conceal it until Show. Attention projections that
 need optional route ceilings run their checks after provider resolution against
 a fresh joined snapshot. Installation remains pending.
+
+`work_question_updates.py` qualifies closure facts independently of request
+actability. Answer updates require the exact supplied information response and
+HumanInput receipt; routing/withdrawal require canonical command receipts;
+assessment requires the nonhuman Work report and its exact HumanInput assessment.
+Question, assignment and request revisions stay tied to the original delivery.
+These silent edits bypass discretionary notification preferences, retaining all
+current account, instance and referenced-Space READ checks.
+
+`work_question_edits.py` waits for the original complete question ACK. It validates
+the original control group before consuming it, removes the keyboard and updates
+the closure footer. Full question text stays intact; an overflowing footer gets a
+separate message. Unopened protected questions close with the existing generic
+stale text. A protection upgrade clears the old keyboard before a protected
+replacement; only complete, typed ACKs move the physical target. Later events
+serialize behind an unresolved earlier update and cannot overwrite a newer
+terminal footer. Missing edit targets retire instead of creating endless copies.
+Display changes refresh a flat presentation history; canonical event changes
+retire. Explicit repair accepts only a held known refresh failure with no claim.
+Pending intents and updates retain their original and moved message evidence.
+This owner remains uninstalled until notification integration is complete.

@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import String, and_, cast, delete, func, or_, select, text
+from sqlalchemy.orm import aliased
 
 from app.telegram_bots.inbox import CALLBACK_PUBLICATION_KEY, callback_publication_pending
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkEventRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow, TelegramPendingFileRow
@@ -66,6 +67,26 @@ async def _first_replies(session, anchors: set[str]) -> set[str]:
     return keys
 
 
+def question_cleanup_anchors():
+    """Original message proofs needed by unfinished question edits."""
+    delivery = TelegramOutboxRow
+    edit = aliased(TelegramOutboxRow)
+    awaiting_cleanup = (
+        select(edit.id)
+        .where(
+            edit.link_id == delivery.link_id,
+            edit.binding_generation == delivery.binding_generation,
+            edit.request_id == delivery.request_id,
+            edit.class_ == "question",
+            edit.dedupe_key.startswith("edit:"),
+            edit.state.in_(("pending", "sending", "failed")),
+        )
+        .correlate(delivery)
+        .exists()
+    )
+    return select(delivery.id).where(delivery.class_ == "question", ~delivery.dedupe_key.startswith("edit:"), awaiting_cleanup)
+
+
 async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int) -> set[str]:
     """The ids and ``reply:`` keys of outbox rows a live control or unfinished delivery needs."""
     generations = dict((await session.execute(select(TelegramBotLinkRow.id, TelegramBotLinkRow.binding_generation))).all())
@@ -100,6 +121,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
         .exists()
     )
     pinned.update(await session.scalars(select(delivery.id).where(delivery.request_id.is_not(None), unresolved_album)))
+    pinned.update(await session.scalars(question_cleanup_anchors()))
     # Compact dependency edges preserve complete digests behind live controls.
     records = await session.execute(
         select(
@@ -112,17 +134,21 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             delivery.payload["work_request_basis"]["origin"]["anchor_outbox_id"].as_string(),
             delivery.payload["work_outcome_basis"]["origin"]["anchor_outbox_id"].as_string(),
             delivery.payload["work_outcome_basis"]["refresh"]["anchor_outbox_id"].as_string(),
-        ).where(or_(delivery.class_ == "digest", delivery.state.in_(("pending", "sending", "failed"))))
+            delivery.payload["work_question_update"]["anchor"]["outbox_id"].as_string(),
+            delivery.payload["question_anchor"]["outbox_id"].as_string(),
+        ).where(or_(delivery.class_ == "digest", delivery.state.in_(("pending", "sending", "failed")), delivery.payload["question_anchor"]["outbox_id"].as_string().is_not(None)))
     )
     graph = {}
-    for identity, kind, state, members, reservation, cleanup, origin, outcome_origin, refresh_origin in records:
+    for identity, kind, state, members, reservation, cleanup, origin, outcome_origin, refresh_origin, question_origin, question_anchor in records:
         if state in {"pending", "sending"}:
             pinned.add(identity)
             pinned |= _strings(reservation)
         if state in {"pending", "sending", "failed"}:
-            pinned |= _strings(cleanup, origin, outcome_origin, refresh_origin)
+            pinned |= _strings(cleanup, origin, outcome_origin, refresh_origin, question_origin)
+        if question_anchor:
+            graph.setdefault(identity, set()).update(_strings(question_anchor))
         if kind == "digest" and isinstance(members, list):
-            graph[identity] = _strings(*members)
+            graph.setdefault(identity, set()).update(_strings(*members))
     pending = list(pinned)
     while pending:
         children = graph.get(pending.pop(), set()) - pinned

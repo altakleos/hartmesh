@@ -35,6 +35,10 @@ def preference_skip(item, settings, now):
         raise ValueError("unsupported-notification-class")
     if kind == "reply":
         return None
+    # Removing obsolete controls from an existing question is maintenance of
+    # that acknowledged message, even after new notifications are disabled.
+    if kind == "question" and item.dedupe_key.startswith("edit:"):
+        return None
     if kind == "digest":
         from types import SimpleNamespace
 

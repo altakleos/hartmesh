@@ -1,6 +1,11 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "request.answered_elsewhere": "你已在网页上回答，{time}。",
+    "request.answered_by": "{person}已回答，{time}。",
+    "request.assessed": "{name}已阅读答案并关闭了问题。",
+    "request.rerouted": "已转给{person}。",
+    "request.withdrawn": "此问题已撤回。",
     "interrupted": "已中断：“{objective}”",
     "interrupted.title_not_started": "未启动：“{objective}”",
     "interrupted.reason.container-absent": "{name}的工作区意外停止了。",
