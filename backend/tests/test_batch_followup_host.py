@@ -233,8 +233,16 @@ async def test_resumed_native_batch_preserves_admitted_scope_in_followup(batch_h
     thread = await runs.create_thread(thread_id="scoped-resume")
     first = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "scoped work", "additional_kwargs": {KNOWLEDGE_SCOPE_KEY: scope}}]})
     assert (await runs.wait(thread_id=thread, run_id=first.run_id, timeout=5)).status == "success"
+    # A terminal status can precede owned checkpoint/receipt cleanup. The next
+    # admission needs that task to finish, not a longer status-poll timeout.
+    record = await state.run_manager.get(first.run_id)
+    if record.task is not None:
+        await asyncio.wait_for(asyncio.shield(record.task), 5)
     resumed = await runs.resume(thread_id=thread, resume="yes")
     assert (await runs.wait(thread_id=thread, run_id=resumed.run_id, timeout=5)).status == "success"
+    record = await state.run_manager.get(resumed.run_id)
+    if record.task is not None:
+        await asyncio.wait_for(asyncio.shield(record.task), 5)
     assert observed == [scope]
     now = datetime.now(UTC)
     item = (await repo.claim_items(now=now, lease_owner="scoped-worker", lease_seconds=120, limit=1))[0]
