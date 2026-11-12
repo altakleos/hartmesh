@@ -933,5 +933,21 @@ refresh and known missing-target repair retain a flat presentation history.
 Current authority and immutable source evidence are checked after provider waits.
 A late locale change preserves delivery for refresh, while revoked access or
 changed source retires it. Retention keeps original and moved presentations while
-the attempt or an update remains unresolved. These owners remain dormant; exact
-pin/unpin ownership and supervisor installation are separate pending work.
+the attempt or an update remains unresolved. These owners remain dormant pending
+supervisor installation.
+
+`work_status_pins.py` owns a durable, serialized pin ledger for each status root.
+Every operation binds an exact complete acknowledged presentation and its first
+message ID; the final joined account/grant/source/claim read includes that retained
+presentation. Pinning is silent. A moved message unpins the old exact target before
+pinning the fully acknowledged replacement; a terminal attempt only unpins.
+Possible dispatch and confirmed pin are distinct. A skipped attempt can be retried
+on the same target; a known refused target waits for a new presentation. Failed
+unpin repair admits only a claim-free cleanup of that same possibly pinned ID.
+Pin failures produce no generic message-delivery retry card. Ordinary transport
+retries retain their operation, and shutdown drains an admitted SDK call.
+Bot-authored pin service messages are deleted through ingress only when the ledger
+proves their pinned target, with fresh checks inside the SDK limiter. Retention
+uses the same closed, typed ledger and presentation receipts; a row's `sent` state
+alone never proves cleanup. Pin operations and all referenced presentations stay
+retained until exact cleanup is acknowledged. Installation remains deferred.

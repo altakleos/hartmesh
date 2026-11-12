@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 OUTBOX_SEND_CONCURRENCY = 8
 DELIVERY_RETRY_FIRST_SECONDS = 5
 DELIVERY_RETRY_CAP_SECONDS = 300
-_KINDS = frozenset({"text", "document", "photo", "album", "edit", "card"})
+_KINDS = frozenset({"text", "document", "photo", "album", "edit", "card", "pin"})
 _FINAL_PARTS = frozenset({"sent", "unavailable", "retired"})
 _STATUS_KEYS = frozenset({"access.agent_off", "agent.paused", "agent.retired", "unavailable.fix", "unavailable.off", "unavailable.paused", "unavailable.moved", "unavailable.files_unchecked", "refused.interrupted", "custom_agent.deleted"})
 _URL_SOURCES = {
@@ -2555,7 +2555,7 @@ class OutboxSender:
                 parts = deepcopy(saved.parts)
                 sending = next(value for value in parts if value["part_id"] == part["part_id"])
                 sending["state"] = "sending"
-                if not {"work_news_basis", "work_question_update", "work_status_update", "result_notice_basis"}.intersection(saved.payload) and "result_files" not in saved.payload.get("work_request_basis", {}):
+                if not {"work_news_basis", "work_question_update", "work_status_update", "work_status_pin", "result_notice_basis"}.intersection(saved.payload) and "result_files" not in saved.payload.get("work_request_basis", {}):
                     sending["protect_content"] = bool(sending.get("protect_content") or decision.protect_content)
                 # A frozen Work plan owns its protection transition, including
                 # a new Show teaser. Its adapter rejects weaker protection before
@@ -3042,6 +3042,8 @@ class OutboxSender:
                         return
                 part = next((part for part in row.parts if part["state"] == "sending"), {})
                 method = {"text": "sendMessage", "card": "sendMessage", "document": "sendDocument", "photo": "sendPhoto", "album": "sendMediaGroup", "edit": "editMessageText"}.get(part.get("kind"), "sendMessage")
+                if part.get("kind") == "pin":
+                    method = "unpinChatMessage" if part.get("operation") == "unpin" else "pinChatMessage"
                 if part.get("remove_keyboard"):
                     method = "editMessageReplyMarkup"
                 if getattr(error, "_hartmesh_telegram_failure_logged", False) is not True:
@@ -3067,7 +3069,7 @@ class OutboxSender:
                 failure_version = row.payload.get("failure_version", 0) + 1
                 row.payload = {**row.payload, "failure_version": failure_version}
                 # The safe recovery message never recursively produces another.
-                if row.payload.get("kind") == "delivery_failure_notice":
+                if row.payload.get("kind") == "delivery_failure_notice" or "work_status_pin" in row.payload:
                     return
                 if binding is None or binding.state != "connected" or (binding.owner_user_id, binding.binding_generation, binding.chat_id) != (row.owner_user_id, generation, row.chat_id):
                     return

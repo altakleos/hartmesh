@@ -733,6 +733,11 @@ class TelegramBotChannel(TelegramChannel):
         if update.my_chat_member is not None:
             return
         message = update.message
+        pins = getattr(self._services, "work_status_pins", None)
+        if pins is not None and message is not None and message.pinned_message is not None and user is not None and user.is_bot and user.id == link.bot_id and chat is not None and chat.id == link.chat_id and link.state == "connected":
+            await pins.delete_service(self, link, message)
+            self._classified(update)
+            raise ApplicationHandlerStop
         word, arguments = self._command(message) if message is not None else ("", [])
         if link.state == "waiting_connect" and word == "start" and arguments and link.bind_mode == "code" and user is not None and not user.is_bot:
             return
@@ -1896,6 +1901,11 @@ class TelegramBotChannel(TelegramChannel):
         if saved.item.dedupe_key.startswith(("notice:chat-stream:", "notice:preparation-capacity:", "notice:chat-wait:")) and (turns is None or turns.preview_allowed(self, saved.item) is not True):
             raise PreviewExpired()
         part = saved.part
+        if "work_status_pin" in saved.item.payload or part["kind"] == "pin":
+            pins = getattr(self._services, "work_status_pins", None)
+            if pins is None or "work_status_pin" not in saved.item.payload or part["kind"] != "pin":
+                raise PermanentDeliveryError("unsupported-status-pin")
+            return await pins.send(self, saved)
         source_key = part.get("source_ref", {}).get("key", "")
         work_part = None
         work_sources = getattr(self._services, "work_request_sources", None)
