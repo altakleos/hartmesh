@@ -2022,7 +2022,9 @@ only after complete delivery. Protected questions wait for Show; decisions wait
 for their attempt to finish or the bounded hold to expire. Manager routing notices
 retain the explanation for an unanswered question and offer current eligible
 recipients, including after protected Show. Other notification
-rendering and startup integration remain outstanding.
+rendering and startup integration remain outstanding. Result-file export preparation
+checks the original outcome and the recipient's current file permissions;
+delivery integration remains pending.
 Background recovery preserves newer
 request previews. Complete first-tap previews now have
 a durable delivery boundary that waits for the entire message before enabling controls

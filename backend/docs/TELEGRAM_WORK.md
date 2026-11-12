@@ -2,6 +2,18 @@
 
 Read alongside [the managed bot guide](../app/telegram_bots/AGENTS.md).
 
+`work_file_exports.py` exports one indexed source of the current Work outcome
+as the human recipient. Outcome, evidence and assignment revisions, source
+identity, referenced Space generation and READ+EXPORT grants are checked in
+the provider-final snapshot. It uses the referenced Space, which need not be
+the agent's Home, without workspace or execution readiness. Callers can compose
+their exact delivery projection into that same statement; `check_delivery`
+may acquire the claimed link/outbox locks in the borrowed writer. An earlier
+unlocked claim read is insufficient. Byte limits remain caller-bounded, and
+protected dispatch requires the actual protection flag. Reads drain cancellation
+and recheck lifetime after native I/O and transaction cleanup. This export
+primitive does not yet install result-file plans or SDK dispatch.
+
 `work_event_intents.py` projects current recipient/grant/preferences into empty,
 content-free delivery intents in `WorkEventReader`'s pair writer. Ordinary
 events omit their human actor; status, existing-question edits, routing to self
