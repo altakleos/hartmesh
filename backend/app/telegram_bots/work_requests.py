@@ -87,7 +87,7 @@ class WorkRequestReader(AttentionReader):
         return WorkRequestRead(request, record, tuple(responses), seen_basis(record, request, responses), people, authority[1][1] == "protected")
 
 
-def present_request(source, *, locale, concealed=False, outbox_id=None):
+def present_request(source, *, locale, concealed=False, outbox_id=None, files_above=()):
     """Full text precedes action controls; a concealed teaser conveys no basis."""
     request, record = source.request, source.work
     purpose = request["purpose"]
@@ -136,6 +136,10 @@ def present_request(source, *, locale, concealed=False, outbox_id=None):
                 keyboard.append([button("decide_own", "label.decide_own")])
             elif purpose == "review" and request["can_manage"]:
                 keyboard = [[button("accept_open", "label.accept")], [button("changes_open", "label.request_changes")]]
+        if files_above:
+            if purpose != "review" or any(type(name) is not str or not name for name in files_above):
+                raise ValueError("invalid-result-file-names")
+            html += "\n\n" + render("result.files_above", locale) + "\n" + "\n".join(escape(name) for name in files_above)
     chunks = split_html(html)
     if not chunks:
         raise ValueError("empty-work-preview")

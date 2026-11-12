@@ -1907,7 +1907,9 @@ class TelegramBotChannel(TelegramChannel):
         elif source_key.startswith("work.action."):
             raise PermanentDeliveryError("unsupported-work-outcome-source")
         elif "work_request_basis" in saved.item.payload:
-            if saved.item.payload["work_request_basis"].get("version") in {5, 6}:
+            if "result_files" in saved.item.payload["work_request_basis"]:
+                work_sources = getattr(self._services, "work_result_sources", None)
+            elif saved.item.payload["work_request_basis"].get("version") in {5, 6}:
                 work_sources = getattr(self._services, "work_routing_sources", None)
             if work_sources is None:
                 raise PermanentDeliveryError("unsupported-work-request-source")
@@ -1979,6 +1981,10 @@ class TelegramBotChannel(TelegramChannel):
             from app.telegram_bots.outbound import send_file_part
 
             return await send_file_part(self, saved, capture)
+        if part["kind"] in {"document", "photo", "album"} and "result_files" in saved.item.payload.get("work_request_basis", {}):
+            from app.telegram_bots.work_result_upload import send_result_file
+
+            return await send_result_file(self, saved, capture)
         model_part = None
         if uses_model_source(saved.item):
             # Validate model primaries before any legacy callback/media
@@ -2016,6 +2022,9 @@ class TelegramBotChannel(TelegramChannel):
             source["key"] = "net.blocked" if notice_manager else "net.blocked_ask"
             source["values"]["host"] = model_part.network_denial_host
             text = await self._render_source(saved.link, source, plain=part.get("plain_fallback", False))
+        elif work_part is not None and "result_file_warning" in part:
+            warning = part["result_file_warning"]
+            text = await self._render_source(saved.link, {"key": warning["key"], "values": {"file": warning["file"]["filename"]}}, plain=part.get("plain_fallback", False))
         elif work_part is not None:
             text = work_part[1] if part.get("plain_fallback", False) else work_part[0]
         elif model_part is None:
