@@ -178,6 +178,14 @@ Show. These bounded titles fit one message; item activation must still deliver a
 fresh complete member preview. This pure renderer supplies no source authority or
 callback admission and remains uninstalled with the reservation primitive.
 
+`work_digest_projection.py` composes up to ten source projections into one final
+authority statement, preserving each member's route permissions and distinct
+source roles. Each mapped entity occupies one JSON result column so complex
+batches stay below PostgreSQL's result-column limit. Nested JSON keeps its exact
+types; only SQL dates and booleans are normalized into read-only source facts.
+Account and role joins occur once outside member subqueries. Missing members
+fail qualification; compiling a dialect is not evidence of runtime execution.
+
 `attention.py` exhausts stable Work/request pages before ranking or applying
 presentation caps. `attention_authority.py` prepares route decisions, then joins
 current account/role limits/binding/connection/grants/policy in a final snapshot.
