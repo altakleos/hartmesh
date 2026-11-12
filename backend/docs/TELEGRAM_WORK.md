@@ -217,8 +217,22 @@ original protected receipt, every member edge, current full source and the new
 pending group. Controls retain their original age. SDK edits drain at shutdown;
 ACKs must identify the actual edit target. Retention follows the view to its
 original batch and members, and callback sweeping retains the consumed Show as
-long as its view exists. A missing edit target is held for source-aware repair;
-item previews and repair are separate pending work. No startup installation yet.
+long as its view exists. `work_digest_view_recovery.py` repairs a missing edit
+target with one new protected card and refreshes mutable locale/source displays
+before sending. Complete unacknowledged history stays attached; a replacement
+cannot erase or replay an acknowledged prefix. Fresh groups retain the original
+age. Current source, complete groups and exact claims share the final provider
+snapshot before and after mutation. Explicit repair reconciles claim-free held
+failures or retired previews; it never takes an active claim. Item previews and
+startup installation remain pending.
+
+`work_navigation_origin.py` supplies an explicit closed origin for full previews
+opened from ordinary or revealed digest cards. It retains the acknowledged
+navigation presentation, selected member and original batch, and composes their
+current authority in one final query. A reusable item button is never consumed;
+its per-query publication key deduplicates retries while a later press gets a
+fresh preview. The original member stays skipped in its acknowledged batch.
+This is an admission contract; family renderer/source integration is separate.
 
 `work_digest_delivery.py` freezes one bounded navigation card and its complete
 pending keyboard. The adapter requires this owner for digest delivery; raw class
@@ -1013,3 +1027,17 @@ proves their pinned target, with fresh checks inside the SDK limiter. Retention
 uses the same closed, typed ledger and presentation receipts; a row's `sent` state
 alone never proves cleanup. Pin operations and all referenced presentations stay
 retained until exact cleanup is acknowledged. Installation remains deferred.
+
+`work_digest_items.DigestItems` publishes ordinary question/decision full previews
+as separate reply rows. The explicit navigation origin and Telegram query key
+preserve original batch membership and reusable controls. Publication qualifies
+source, exact anchor and the complete new pending group before and after its
+writer; dispatch composes preview and origin authority in one final read. New
+controls inherit the original age and protection stays source-owned. Retention
+follows preview → navigation anchor → original batch → members.
+`work_navigation_recovery.WorkNavigationRecovery` refreshes queued or acknowledged
+ordinary previews with the same origin, full protection and original callback age.
+It qualifies the current source, retained anchor, exact delivery/claim and complete
+replacement group before and after mutation. Ordinary recovery refuses these
+origins without that explicit proof. Review/routing/news/result previews and
+installation remain separate work.

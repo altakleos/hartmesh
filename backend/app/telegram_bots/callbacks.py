@@ -925,6 +925,7 @@ class CallbackRepository:
                 # An unfinished direct Work reply still needs its consumed
                 # source group and acknowledged parent as dispatch evidence.
                 unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_request_basis"]["origin"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
+                unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_request_basis"]["navigation_origin"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
                 unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_outcome_basis"]["origin"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
                 unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_outcome_basis"]["refresh"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
                 # A captured Work input still owns its shown prompt until its

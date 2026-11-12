@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import asdict, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -12,7 +12,7 @@ from sqlalchemy.orm import aliased
 from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
 from app.telegram_bots.links import prepare_publication_guard
-from app.telegram_bots.producer import DeliveryClaimRetired, PermanentDeliveryError, ProductSourceRetired, _item, _safe_json
+from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryRetry, PermanentDeliveryError, ProductSourceRetired, _item, _safe_json
 from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_digest_delivery import member_proof
 from app.telegram_bots.work_digest_navigation import DigestNavigation, _NavigationProjection
@@ -28,21 +28,25 @@ def parent_proof(item):
 
 def recipes(basis, identity):
     shown = present_digest([DigestEntry(**entry) for entry in basis["entries"]], locale=basis["locale"], protected=basis["protected"], outbox_id=identity)
-    part = {**shown.parts[0], "kind": "edit", "target_message_id": basis["target"], "target_protect_content": True, "stored_keyboard": True, "source_ref": {"key": "work.digest.view", "values": {"outbox_id": identity}}}
+    part = {**shown.parts[0], "stored_keyboard": True, "source_ref": {"key": "work.digest.view", "values": {"outbox_id": identity}}}
+    if basis.get("replacement") is None:
+        part.update(kind="edit", target_message_id=basis["target"], target_protect_content=True)
     return part, [list(line) for line in shown.keyboard]
 
 
-def frozen_view(captured, *, pending=False, acknowledged=False):
+def frozen_view(captured, *, pending=False, acknowledged=False, _history=True):
     try:
         item = captured.item
         basis = item.payload["work_digest_view_basis"]
+        version = item.payload["presentation_version"]
         if (
             type(basis) is not dict
-            or set(basis) != {"version", "parent_id", "parent_proof", "callback_id", "locale", "protected", "target", "entries", "members", "parts", "keyboard"}
+            or set(basis) != {"version", "parent_id", "parent_proof", "callback_id", "locale", "protected", "target", "entries", "members", "parts", "keyboard"} | ({"history", "replacement"} if basis.get("version") == 2 else set())
             or type(basis["version"]) is not int
-            or basis["version"] != 1
-            or type(item.payload["presentation_version"]) is not int
-            or item.payload["presentation_version"] != 0
+            or basis["version"] not in {1, 2}
+            or type(version) is not int
+            or version < 0
+            or (basis["version"] == 1) != (version == 0)
             or item.class_ != "reply"
             or "digest_dispatch_conflict" in item.payload
             or item.message_thread_id is not None
@@ -52,17 +56,38 @@ def frozen_view(captured, *, pending=False, acknowledged=False):
             or basis["protected"] is not True
             or type(basis["locale"]) is not str
             or any(type(basis[key]) is not str or len(basis[key]) != length or any(char not in "0123456789abcdef" for char in basis[key]) for key, length in (("parent_id", 32), ("callback_id", 32), ("parent_proof", 64)))
-            or len(item.parts) != 1
+            or len(item.parts) != (version + 1 if _history else 1)
         ):
+            raise ValueError()
+        if any(len({part[key] for part in item.parts}) != len(item.parts) for key in ("part_id", "callback_group_id")):
             raise ValueError()
         recipe, keyboard = recipes(basis, item.id)
         if not same_body([recipe], basis["parts"]) or not same_body(keyboard, basis["keyboard"]) or not same_body(keyboard, item.payload["product_keyboard_basis"]):
             raise ValueError()
-        part = item.parts[0]
+        if basis["version"] == 2:
+            replacement = basis["replacement"]
+            if type(basis["history"]) is not list or _history and len(basis["history"]) != version or not _history and basis["history"]:
+                raise ValueError()
+            if replacement is not None and (type(replacement) is not dict or set(replacement) != {"reason", "part_id"} or replacement["reason"] != "missing-target" or type(replacement["part_id"]) is not str):
+                raise ValueError()
+            if _history:
+                for index, record in enumerate(basis["history"]):
+                    if type(record) is not dict or set(record) != {"basis", "part"} or any(record["basis"][key] != basis[key] for key in ("parent_id", "parent_proof", "callback_id", "target")):
+                        raise ValueError()
+                    old = replace(item, payload={**item.payload, "work_digest_view_basis": record["basis"], "product_keyboard_basis": record["basis"]["keyboard"], "presentation_version": index}, parts=[record["part"]])
+                    frozen_view(SimpleNamespace(link=captured.link, item=old, part=None), pending=record["part"]["state"] == "pending", _history=False)
+                    if not same_body(item.parts[index], {**record["part"], "state": "retired"}):
+                        raise ValueError()
+                if replacement is not None and not any(record["part"]["part_id"] == replacement["part_id"] and record["part"]["kind"] == "edit" for record in basis["history"]):
+                    raise ValueError()
+        part = item.parts[-1]
         metadata = {"part_id", "ordinal", "presentation_version", "state", "message_ids", "sent_at", "dispatched_at", "plain_fallback", "invalid_token_verification_pending", "callback_group_id"}
         if (
             not same_body({key: value for key, value in part.items() if key not in metadata}, recipe)
-            or any(type(part[key]) is not int or part[key] != 0 for key in ("ordinal", "presentation_version"))
+            or type(part["ordinal"]) is not int
+            or part["ordinal"] != 0
+            or type(part["presentation_version"]) is not int
+            or part["presentation_version"] != version
             or any(type(part.get(key)) is not str or len(part[key]) != 32 or any(char not in "0123456789abcdef" for char in part[key]) for key in ("part_id", "callback_group_id"))
             or part["state"] != ("sent" if acknowledged else "pending" if pending else "sending")
             or captured.part is not None
@@ -72,7 +97,14 @@ def frozen_view(captured, *, pending=False, acknowledged=False):
         ):
             raise ValueError()
         if acknowledged:
-            if not same_body(part["message_ids"], [basis["target"]]) or datetime.fromisoformat(part["sent_at"]).utcoffset() is None:
+            if (
+                len(part["message_ids"]) != 1
+                or type(part["message_ids"][0]) is not int
+                or part["message_ids"][0] <= 0
+                or basis.get("replacement") is None
+                and part["message_ids"] != [basis["target"]]
+                or datetime.fromisoformat(part["sent_at"]).utcoffset() is None
+            ):
                 raise ValueError()
         elif part["message_ids"] or "sent_at" in part:
             raise ValueError()
@@ -87,6 +119,11 @@ class DigestViews:
     def __init__(self, plans):
         self.plans, self.navigation = plans, DigestNavigation(plans)
         self.outbox, self.callbacks = plans.outbox, plans.callbacks
+
+    async def repair(self, link, outbox_id, *, guard):
+        from app.telegram_bots.work_digest_view_recovery import DigestViewRecovery
+
+        return await DigestViewRecovery(self).repair(link, outbox_id, guard=guard)
 
     async def execute_callback(self, channel, row, **_options):
         if row.kind != "reveal":
@@ -191,35 +228,52 @@ class _ViewGuard:
 class DigestViewSources:
     def __init__(self, views):
         self.views = views
+        from app.telegram_bots.work_digest_view_recovery import DigestViewRecovery
+
+        self.recovery = DigestViewRecovery(views)
 
     async def prepare(self, captured):
         basis, part = frozen_view(captured)
         snapshot = await self.views.navigation.read(captured.link, basis["parent_id"], callback_id=basis["callback_id"], closed_reason="revealed")
-        if (
-            basis["parent_proof"] != parent_proof(snapshot.item)
-            or basis["locale"] != snapshot.locale
-            or not same_body(basis["members"], [member_proof(member) for member in snapshot.members])
-            or not same_body(basis["entries"], [asdict(member.entry) for member in snapshot.members])
-        ):
+        if basis["parent_proof"] != parent_proof(snapshot.item):
             raise ProductSourceRetired()
         if basis["target"] != snapshot.item.parts[0]["message_ids"][0] or snapshot.item.parts[0]["protect_content"] is not True:
             raise ProductSourceRetired()
+        if basis["locale"] != snapshot.locale or not same_body(basis["members"], [member_proof(member) for member in snapshot.members]) or not same_body(basis["entries"], [asdict(member.entry) for member in snapshot.members]):
+            raise _ViewChanged()
         return snapshot, part
 
     async def read_part(self, captured):
         async def read():
-            _, part = await self.prepare(captured)
+            try:
+                _, part = await self.prepare(captured)
+            except _ViewChanged:
+                await self.recovery.refresh(captured)
+                raise DeliveryClaimRetired() from None
             return part["html"], part["visible_text"]
 
         return await await_drained(read())
 
     async def authorize(self, captured, *, silent, now):
         async def read():
-            snapshot, _ = await self.prepare(captured)
-            admission = await prepare_attention(self.views.plans.reader, captured.link)
-            await admission(projection=_ViewProjection(self, snapshot, captured, silent))
+            try:
+                snapshot, _ = await self.prepare(captured)
+                admission = await prepare_attention(self.views.plans.reader, captured.link)
+                await admission(projection=_ViewProjection(self, snapshot, captured, silent))
+            except _ViewChanged:
+                raise DeliveryRetry(timedelta(seconds=1)) from None
+            except ProductSourceRetired:
+                try:
+                    await self.prepare(captured)
+                except _ViewChanged:
+                    raise DeliveryRetry(timedelta(seconds=1)) from None
+                raise
 
         return await await_drained(read())
+
+
+class _ViewChanged(Exception):
+    pass
 
 
 class _ViewProjection(_NavigationProjection):

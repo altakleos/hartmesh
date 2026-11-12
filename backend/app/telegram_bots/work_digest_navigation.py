@@ -9,6 +9,7 @@ from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
 from app.telegram_bots.digests import _members
 from app.telegram_bots.producer import PermanentDeliveryError, ProductSourceRetired, _item
+from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_digest_delivery import frozen_digest, member_proof
 from app.telegram_bots.work_digest_members import claim_of
 from app.telegram_bots.work_digest_projection import DigestProjection
@@ -44,7 +45,7 @@ class DigestNavigation:
         """Read previews without consuming controls or changing the batch ACK."""
 
         async def perform():
-            if closed_reason not in {None, "revealed"} or closed_reason is not None and member_id is not None:
+            if closed_reason not in {None, "revealed"}:
                 raise ProductSourceRetired()
             try:
                 async with self.plans.outbox.sessions() as reader:
@@ -94,7 +95,7 @@ class _NavigationProjection(DigestProjection):
         super().check_with_permissions(rows, held)
         snapshot = self.snapshot
         parent, _, _, settings = rows[0][self.column : self.column + 4]
-        if _item(parent) != snapshot.item or parent.state != "sent" or claim_of(parent) != (None, None, None) or settings.locale != snapshot.locale:
+        if not _same_item(parent, snapshot.item) or parent.state != "sent" or claim_of(parent) != (None, None, None) or settings.locale != snapshot.locale:
             raise ProductSourceRetired()
         part = parent.parts[0]
         if parent.message_id != part["message_ids"][0]:
@@ -104,7 +105,7 @@ class _NavigationProjection(DigestProjection):
             raise ProductSourceRetired()
         for item in snapshot.siblings:
             child = children[item.id]
-            if _item(child) != item or (child.state, child.skip_reason) != ("skipped", "in-digest") or claim_of(child) != (None, None, None):
+            if not _same_item(child, item) or (child.state, child.skip_reason) != ("skipped", "in-digest") or claim_of(child) != (None, None, None):
                 raise ProductSourceRetired()
         controls = {row[self.column + 2].id: row[self.column + 2] for row in rows if row[self.column + 2] is not None}
         selected = controls.get(snapshot.callback_id)
@@ -121,10 +122,15 @@ class _NavigationProjection(DigestProjection):
                     raise CallbackRefused()
             if selected is None or selected.target_kind != "outbox":
                 raise CallbackRefused()
-            if snapshot.member_id is None:
+            if snapshot.member_id is None or snapshot.closed_reason == "revealed":
                 if selected.kind != "reveal" or selected.target_id != parent.id or not parent.payload["work_digest_basis"]["concealed"]:
                     raise CallbackRefused()
             elif selected.kind != "digest_item" or selected.target_id != snapshot.member_id:
                 raise CallbackRefused()
         except CallbackRefused:
             raise ProductSourceRetired() from None
+
+
+def _same_item(row, expected):
+    actual = _item(row)
+    return actual == expected and same_body(actual.payload, expected.payload) and same_body(actual.parts, expected.parts)

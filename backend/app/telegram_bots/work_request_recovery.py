@@ -123,7 +123,15 @@ class WorkRequestRecovery:
     def _separate_reveal(self, reveal, fresh):
         return reveal is not None and len(fresh) > 1
 
-    async def _replace(self, writer, link, row, source, settings, *, reveal=None, force_new=False, choice=None):
+    async def _replace(self, writer, link, row, source, settings, *, reveal=None, force_new=False, choice=None, navigation_origin=None):
+        saved_origin = row.payload.get("work_request_basis", {}).get("navigation_origin")
+        if saved_origin is not None or navigation_origin is not None:
+            from app.telegram_bots.work_actions import same_body
+            from app.telegram_bots.work_navigation_origin import validate_origin
+
+            validate_origin(navigation_origin)
+            if not same_body(saved_origin, navigation_origin) or reveal is not None or choice is not None:
+                raise ProductSourceRetired()
         if not self._owns_basis(row.payload.get("work_request_basis", {})):
             # Result receipts and file ownership require their dedicated
             # recovery transition; ordinary text refresh would erase them.
@@ -174,7 +182,7 @@ class WorkRequestRecovery:
         for part in old:
             if part["state"] not in {"sent", "unavailable", "retired"}:
                 part["state"] = "retired"
-        concealed = source.protected and reply_origin is None and choice_origin is None
+        concealed = source.protected and reply_origin is None and choice_origin is None and navigation_origin is None
         presentation = self._presentation(source, settings, link, row, concealed)
         keyboard = [list(line) for line in presentation.keyboard]
         recipes = []
@@ -199,6 +207,8 @@ class WorkRequestRecovery:
         }
         if choice_origin is not None:
             basis["choice_origin"] = choice_origin
+        if navigation_origin is not None:
+            basis["navigation_origin"] = navigation_origin
         fresh = self.outbox._parts(recipes, version)
         # Telegram cannot add protection to an existing unprotected message.
         # A replacement receives a new anchor only after its complete ACK.
@@ -215,7 +225,7 @@ class WorkRequestRecovery:
                 writer.add(cleanup)
                 if multipart_reveal and control.id == reveal:
                     basis["cleanup_id"] = cleanup.id
-        row.class_ = "reply" if reply_origin is not None or choice_origin is not None else "question"
+        row.class_ = "reply" if reply_origin is not None or choice_origin is not None or navigation_origin is not None else "question"
         row.payload = _safe_json({**row.payload, "presentation_version": version, "work_request_basis": basis, "product_keyboard_basis": keyboard})
         row.parts = old + fresh
         row.state, row.not_before = "pending", self.outbox.clock()

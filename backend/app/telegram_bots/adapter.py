@@ -2306,7 +2306,7 @@ class TelegramBotChannel(TelegramChannel):
                     reply_markup=markup,
                     rate_limit_args=preview_fence,
                 )
-                message = await await_drained(request) if "work_digest_basis" in current.item.payload else await request
+                message = await await_drained(request) if {"work_digest_basis", "work_digest_view_basis"}.intersection(current.item.payload) else await request
         except (LongRetryAfter, RetryAfter) as error:
             self._failure()
             seconds = error.seconds if isinstance(error, LongRetryAfter) else error._retry_after.total_seconds()

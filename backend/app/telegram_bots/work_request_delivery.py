@@ -71,10 +71,10 @@ class WorkRequestPlans:
             await self._freeze(writer, link, row, source, settings)
             return identity
 
-    async def _freeze(self, writer, link, row, source, settings, *, pending=False):
+    async def _freeze(self, writer, link, row, source, settings, *, pending=False, navigation_origin=None):
         """Borrow an already-qualified writer and preserve its delivery identity."""
         identity, request_id = row.id, source.request["id"]
-        presentation = self._presentation(source, settings, identity)
+        presentation = self._presentation(source, settings, identity, concealed=False) if navigation_origin is not None else self._presentation(source, settings, identity)
         controls = [list(line) for line in presentation.keyboard]
         parts = []
         for index, supplied in enumerate(presentation.parts):
@@ -85,6 +85,10 @@ class WorkRequestPlans:
         snapshot = asdict(source)
         snapshot["responses"] = list(snapshot["responses"])
         basis = {"version": 1, "source": snapshot, "locale": settings.locale, "concealed": source.protected, "parts": parts, "keyboard": controls, **self._extras(source)}
+        if navigation_origin is not None:
+            from app.telegram_bots.work_navigation_origin import validate_origin
+
+            basis.update(navigation_origin=validate_origin(navigation_origin), concealed=False)
         row = await writer.get(TelegramOutboxRow, identity)
         row.payload = _safe_json({**row.payload, "work_request_basis": basis, "product_keyboard_basis": controls})
         saved_parts = self.outbox._parts(parts, 0)
@@ -98,8 +102,8 @@ class WorkRequestPlans:
         await writer.flush()
         return identity
 
-    def _presentation(self, source, settings, identity):
-        return present_request(source, locale=settings.locale, concealed=source.protected, outbox_id=identity)
+    def _presentation(self, source, settings, identity, *, concealed=None):
+        return present_request(source, locale=settings.locale, concealed=source.protected if concealed is None else concealed, outbox_id=identity)
 
     def _extras(self, source):
         return {}

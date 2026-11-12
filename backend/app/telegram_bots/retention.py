@@ -175,6 +175,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             delivery.payload["status_pin_tail"].as_string(),
             delivery.payload["digest_dispatch_conflict"],
             delivery.payload["work_digest_view_basis"]["parent_id"].as_string(),
+            delivery.payload["work_request_basis"]["navigation_origin"]["anchor_outbox_id"].as_string(),
         ).where(
             or_(
                 delivery.class_ == "digest",
@@ -185,6 +186,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
                 delivery.payload["work_status_pin"]["presentation_id"].as_string().is_not(None),
                 delivery.payload["status_pin_tail"].as_string().is_not(None),
                 delivery.payload["work_digest_view_basis"]["parent_id"].as_string().is_not(None),
+                delivery.payload["work_request_basis"]["navigation_origin"]["anchor_outbox_id"].as_string().is_not(None),
             )
         )
     )
@@ -209,7 +211,10 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
         pin_tail,
         digest_conflict,
         digest_parent,
+        navigation_anchor,
     ) in records:
+        if navigation_anchor:
+            graph.setdefault(identity, set()).update(_strings(navigation_anchor))
         if digest_parent:
             graph.setdefault(identity, set()).update(_strings(digest_parent))
         if digest_conflict is not None:
