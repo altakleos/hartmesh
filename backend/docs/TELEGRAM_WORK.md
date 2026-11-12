@@ -1051,3 +1051,49 @@ file reads compose current family authority with the complete original digest pr
 Pending previews retain navigation evidence without extending callback usability.
 Optional `work_digest_items` callback dispatch preserves per-query dedupe and leaves
 reusable digest controls intact. Supervisor installation remains separate work.
+
+
+`summary.sections` ranks a complete `AttentionReader.collect` result before
+`summary_text.present_summary` applies five-item display limits. Old requests
+precede start/resume lines; those lines have no execution buttons. The renderer
+uses request-target navigation and a web Work handover for omitted items.
+`due_date` uses the owner's local calendar date, defers to quiet end, and retains
+the scheduled day across an overnight delay; duplicate local times retain one
+date key. These pure helpers do not install a scheduler or authorize a delivery.
+
+`summary_sources.SummaryReader` first walks complete Attention pages, then
+qualifies the same selection in one provider-final SQL read. Work, latest attempts
+and requests form an additive union, so the display cap never limits source reads
+and independent source sets do not multiply each other. The final projection
+rebuilds all summary sections under current owner grants, write capability and
+protection. Titles, current answers and omitted-item counts share that snapshot.
+The reader writes no outbox row and starts no execution.
+
+`summary_delivery.py` persists one silent source-owned plan per local date,
+including `skipped: nothing-to-say` when the complete selection is empty. The
+previous plan's time bounds the next selection. A composed final projection
+qualifies current settings, source, binding, claim and original-age controls in
+one account snapshot after permission resolution. Protected plans retain only
+a Show teaser on the wire. Exact complete receipts are required before controls
+activate. An ACK for a manifest changed during the SDK await retains the actual
+wire proof as a held conflict, including after retention sweeps. Prior summary
+cutoffs require a valid persisted plan, with JSON versions compared as text to
+avoid PostgreSQL conversion failures. These owners remain uninstalled; summary navigation, refresh and
+scheduler integration must be qualified before activation.
+
+The dormant `summary_scheduler.SummaryScheduler` pages connected healthy
+instance links and delegates to the source-owned planner. It consults the same
+availability gate before storage and between links; final publication checks
+that gate again after asynchronous source preparation. A denied source defers
+only its own link. The supervisor must supply its cause/readiness/shutdown gate
+and invoke this owner at `SUMMARY_TICK_SECONDS`; the scheduler sends nothing
+and never starts Work.
+
+`summary_recovery.py` refreshes an unacknowledged plan through its source owner.
+It preserves the daily key, selection cutoff, original control age and retired
+presentation history. A changed complete selection, locale or protection never
+reuses stale buttons. A selection that becomes empty closes without a send.
+The final combined source/claim/group/settings checks surround replacement;
+held repair additionally fences the exact failure disposition and cannot take
+an active claim. SDK-manifest conflicts remain quarantined. Summary navigation
+and runtime installation are still separate requirements.

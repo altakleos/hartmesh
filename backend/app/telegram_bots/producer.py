@@ -2555,9 +2555,9 @@ class OutboxSender:
                 parts = deepcopy(saved.parts)
                 sending = next(value for value in parts if value["part_id"] == part["part_id"])
                 sending["state"] = "sending"
-                if not {"work_digest_basis", "work_news_basis", "work_question_update", "work_status_update", "work_status_pin", "result_notice_basis"}.intersection(saved.payload) and "result_files" not in saved.payload.get(
-                    "work_request_basis", {}
-                ):
+                if not {"summary_basis", "work_digest_basis", "work_news_basis", "work_question_update", "work_status_update", "work_status_pin", "result_notice_basis"}.intersection(
+                    saved.payload
+                ) and "result_files" not in saved.payload.get("work_request_basis", {}):
                     sending["protect_content"] = bool(sending.get("protect_content") or decision.protect_content)
                 # A frozen Work plan owns its protection transition, including
                 # a new Show teaser. Its adapter rejects weaker protection before
@@ -2565,7 +2565,7 @@ class OutboxSender:
                 sending["dispatched_at"] = self.outbox.clock().isoformat()
                 saved.parts = parts
                 required_protection = sending["protect_content"]
-                digest_dispatch = _item(saved) if {"work_digest_basis", "work_digest_view_basis"}.intersection(saved.payload) else None
+                source_dispatch = _item(saved) if {"summary_basis", "work_digest_basis", "work_digest_view_basis"}.intersection(saved.payload) else None
             if self._stopping:
                 return
             try:
@@ -2636,15 +2636,16 @@ class OutboxSender:
                     return
                 if current is None or current.binding_generation != generation:
                     return
-                if digest_dispatch is not None:
+                if source_dispatch is not None:
                     from app.telegram_bots.work_digest_delivery import same_dispatch
 
-                    if not same_dispatch(digest_dispatch, _item(saved)):
+                    if not same_dispatch(source_dispatch, _item(saved)):
                         # The SDK acknowledged the captured card, not a manifest
                         # rewritten during its await. Retain both the dispatched
                         # proof and reservations for explicit reconciliation.
-                        saved.payload = {**saved.payload, "digest_dispatch_conflict": {"payload": digest_dispatch.payload, "parts": digest_dispatch.parts, "message_ids": message_ids, "acknowledged_at": self.outbox.clock().isoformat()}}
-                        saved.state, saved.failed_reason, saved.closed_at = "failed", "invalid-digest-receipt", self.outbox.clock()
+                        family = "summary" if "summary_basis" in source_dispatch.payload else "digest"
+                        saved.payload = {**saved.payload, family + "_dispatch_conflict": {"payload": source_dispatch.payload, "parts": source_dispatch.parts, "message_ids": message_ids, "acknowledged_at": self.outbox.clock().isoformat()}}
+                        saved.state, saved.failed_reason, saved.closed_at = "failed", "invalid-" + family + "-receipt", self.outbox.clock()
                         saved.claim_owner = saved.claim_id = saved.claimed_at = None
                         return
                 parts = deepcopy(saved.parts)
@@ -2888,6 +2889,16 @@ class OutboxSender:
                 await acknowledge_view(session, row)
             except (ValueError, TypeError, KeyError, PermanentDeliveryError, ProductSourceRetired):
                 row.state, row.failed_reason, row.closed_at = "failed", "invalid-digest-view-receipt", now
+                row.claim_owner = row.claim_id = row.claimed_at = None
+                await session.flush()
+                return
+        if "summary_basis" in row.payload:
+            from app.telegram_bots.summary_delivery import acknowledge_summary
+
+            try:
+                await acknowledge_summary(session, row)
+            except (ValueError, TypeError, KeyError, PermanentDeliveryError, ProductSourceRetired):
+                row.state, row.failed_reason, row.closed_at = "failed", "invalid-summary-receipt", now
                 row.claim_owner = row.claim_id = row.claimed_at = None
                 await session.flush()
                 return

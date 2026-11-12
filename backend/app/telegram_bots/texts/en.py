@@ -1,6 +1,17 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "summary.header": "Good morning. Since yesterday {time}:",
+    "summary.finished": 'Finished: "{objective}"',
+    "summary.working": 'Working on: "{objective}"',
+    "summary.interrupted": 'Interrupted: "{objective}"',
+    "summary.waiting": "Waiting for you: {items}",
+    "summary.item.resume": '"{objective}", ready to resume',
+    "summary.item.start": '"{objective}", not started',
+    "summary.more": "and {n} more",
+    "summary.button.off": "Stop these summaries",
+    "summary.off": "Summaries from all your AI assistants and AI employees are off. /settings turns them on again.",
+    "concealed.summary": "Good morning. The summary is ready.",
     "digest.header": "{n} things need you:",
     "digest.header_news": "{n} new messages:",
     "concealed.digest": "{n} things need you.",

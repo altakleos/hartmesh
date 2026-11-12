@@ -82,6 +82,8 @@ WORK_NEWS_KEYS |= WORK_NEWS_FIRST_KEYS | {"concealed.progress"}
 WORK_NEWS_FIRST_KEYS |= {"digest.header", "digest.header_news"}
 WORK_NEWS_KEYS |= WORK_NEWS_FIRST_KEYS | set("concealed.digest concealed.digest_news summary.item.question summary.item.decision summary.item.review summary.button.question summary.button.decision summary.button.review".split())
 
+WORK_NEWS_KEYS |= frozenset("summary.header summary.finished summary.working summary.interrupted summary.waiting summary.item.resume summary.item.start summary.more summary.button.off summary.off concealed.summary".split())
+
 
 def test_text_catalog_locales_have_equal_keys():
     assert set(catalog("en")) == set(catalog("zh-CN"))
