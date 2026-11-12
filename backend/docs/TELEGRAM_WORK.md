@@ -168,6 +168,15 @@ controls before freeing owned members. Digest cards have one text part; invalid
 historical partial ACKs retain members for reconciliation. Retention follows
 transitive source edges. Reservations have no parts until source materialization;
 source dispatch and item/reveal controllers are not installed by this primitive.
+Reservations recognize canonical `event:` intents as well as retained `ev:` rows.
+A digest is silent only if every member would be silent; quiet hours are still
+applied at dispatch. Silent preview prefixes do not silence an audible final part.
+`work_digest_text.py` supplies bounded navigation in both locales: at most ten
+items, one 32-character item button per row, question/decision/review phrases and
+product first lines for other news. Concealed navigation exposes only a count and
+Show. These bounded titles fit one message; item activation must still deliver a
+fresh complete member preview. This pure renderer supplies no source authority or
+callback admission and remains uninstalled with the reservation primitive.
 
 `attention.py` exhausts stable Work/request pages before ranking or applying
 presentation caps. `attention_authority.py` prepares route decisions, then joins

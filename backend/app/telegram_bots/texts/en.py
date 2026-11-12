@@ -1,6 +1,16 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "digest.header": "{n} things need you:",
+    "digest.header_news": "{n} new messages:",
+    "concealed.digest": "{n} things need you.",
+    "concealed.digest_news": "{n} new messages.",
+    "summary.item.question": 'a question for "{objective}"',
+    "summary.item.decision": 'a decision for "{objective}"',
+    "summary.item.review": 'a review of "{objective}"',
+    "summary.button.question": 'Question for "{objective}"',
+    "summary.button.decision": 'Decision for "{objective}"',
+    "summary.button.review": 'Review "{objective}"',
     "status.starting": '"{objective}"\nStarting {name}\'s workspace…',
     "status.working": '"{objective}"\nWorking since {time}.\nLatest: {progress}',
     "status.waiting_you": '"{objective}"\nWaiting for your answer. The question is below.',

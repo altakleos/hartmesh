@@ -1955,7 +1955,9 @@ class TelegramBotChannel(TelegramChannel):
             if work_sources is None:
                 raise PermanentDeliveryError("unsupported-work-request-source")
             work_part = await work_sources.read_part(saved)
-        elif source_key.startswith(("ask.", "review.", "decide.", "work.", "request.route", "request.unrouted", "request.answered", "result.", "decision.recorded", "attempt.", "interrupted", "remind.", "status.")) or source_key in {
+        elif source_key.startswith(
+            ("ask.", "review.", "decide.", "work.", "request.route", "request.unrouted", "request.answered", "result.", "decision.recorded", "attempt.", "interrupted", "remind.", "status.", "digest.", "summary.", "concealed.digest")
+        ) or source_key in {
             "concealed.question",
             "concealed.decision",
             "concealed.review",

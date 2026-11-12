@@ -70,7 +70,7 @@ def validate(row):
 def unsolicited(row):
     return (
         row.class_ in MEMBER_CLASSES
-        and row.dedupe_key.startswith(("ev:", "summary:", "remind:", "rejected:", "free:"))
+        and row.dedupe_key.startswith(("event:", "ev:", "summary:", "remind:", "rejected:", "free:"))
         and not row.payload.get("digest_id")
         and bool(row.parts)
         and all(part.get("kind") != "edit" and part.get("state") == "pending" and not part.get("dispatched_at") and not part.get("sent_at") for part in row.parts)
@@ -152,7 +152,7 @@ class DigestReservations:
                 },
                 parts=[],
                 state="pending",
-                silent=any(bool(member.silent) or any(part.get("silent") is True for part in member.parts) or member.class_ in {"summary", "reminder"} for member in members),
+                silent=all(bool(member.silent) or all(part.get("silent") is True for part in member.parts) or member.class_ in {"summary", "reminder"} for member in members),
                 not_before=now,
                 created_at=now,
             )

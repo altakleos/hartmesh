@@ -1,6 +1,16 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "digest.header": "有 {n} 件事需要你处理：",
+    "digest.header_news": "有 {n} 条新消息：",
+    "concealed.digest": "有 {n} 件事需要你处理。",
+    "concealed.digest_news": "有 {n} 条新消息。",
+    "summary.item.question": "“{objective}”有一个问题",
+    "summary.item.decision": "“{objective}”需要决定",
+    "summary.item.review": "“{objective}”需要审查",
+    "summary.button.question": "回答“{objective}”的问题",
+    "summary.button.decision": "决定“{objective}”",
+    "summary.button.review": "审查“{objective}”",
     "status.starting": "“{objective}”\n正在启动{name}的工作区…",
     "status.working": "“{objective}”\n从{time}开始工作。\n最新进展：{progress}",
     "status.waiting_you": "“{objective}”\n正在等待你的回答。问题在下方。",

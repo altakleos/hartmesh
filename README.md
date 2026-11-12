@@ -2059,6 +2059,9 @@ when work ends. A replacement moves the pin only after complete delivery;
 pin failures preserve the status text and never start or stop work.
 These workers remain uninstalled; remaining notification forms and startup
 integration are still pending.
+Digest preparation keeps essential and optional news separate and preserves sound
+when any member needs it. Bounded English/Chinese navigation and protected count-only
+previews are prepared; source-checked digest delivery and item handling remain pending.
 Background recovery preserves newer
 request previews. Complete first-tap previews now have
 a durable delivery boundary that waits for the entire message before enabling controls
