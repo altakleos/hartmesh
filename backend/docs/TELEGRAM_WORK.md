@@ -35,7 +35,20 @@ current request, recipient and delivery claim. A stale unsolicited question
 cannot refresh into a question from a later routing revision. Acknowledged Show
 owns its separate explicit current-source proof. New controls stay pending
 until the whole presentation is acknowledged. This materializer remains dormant;
-review files, routing, edits, status and summaries require their own integration.
+review files, edits, status and summaries require their own integration.
+
+`work_routing_event_delivery.py` borrows that materialization pipeline for manager
+questions, including an unrouted review created by settlement. An exact unsupplied
+response may justify routing even while its original recipient remains eligible.
+The routing basis retains that response ID and complete explanation through
+refresh, Show and repair; another response cannot substitute for it. The final
+snapshot combines the canonical event proof with the entire current candidate
+roster and manager grant. `work_routing_response.py` also joins the actual response,
+its HumanInput receipt and Work event, comparing the full displayed explanation
+with canonical command data. That proof remains required during explicit Show
+and V6 recovery, after every provider await. The same bounded hold applies while the causal attempt
+is unresolved. Existing explicit wrong-person follow-ups keep their own receipt
+and source family. This event materializer is also uninstalled.
 
 `notifications.py` owns class preferences and optional-news budgets. The sender's
 `proactive` switch remains false until notification entry points are complete.

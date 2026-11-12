@@ -168,14 +168,23 @@ def frozen(captured, *, acknowledged=False):
                 raise ValueError()
             if (
                 type(routing) is not dict
-                or set(routing) != {"recipients", "after_wrong", "public_base_url"}
+                or set(routing) != {"recipients", "after_wrong", "public_base_url"} | ({"response_id"} if "response_id" in routing else set())
                 or type(routing["after_wrong"]) is not bool
                 or type(routing["recipients"]) is not list
                 or (routing["public_base_url"] is not None and type(routing["public_base_url"]) is not str)
             ):
                 raise ValueError()
+            if "response_id" in routing:
+                intent = captured.item.payload.get("work_event_intent", {})
+                if type(routing["response_id"]) is not str or not routing["response_id"] or intent.get("key") != "request.unrouted" or routing["response_id"] != intent.get("response_id"):
+                    raise ValueError()
             presentation = present_routing(
-                RoutingRead(source, tuple(routing["recipients"]), routing["after_wrong"]), locale=basis["locale"], link=captured.link, public_base_url=routing["public_base_url"], concealed=basis["concealed"], outbox_id=captured.item.id
+                RoutingRead(source, tuple(routing["recipients"]), routing["after_wrong"], routing.get("response_id")),
+                locale=basis["locale"],
+                link=captured.link,
+                public_base_url=routing["public_base_url"],
+                concealed=basis["concealed"],
+                outbox_id=captured.item.id,
             )
         else:
             presentation = present_request(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id)

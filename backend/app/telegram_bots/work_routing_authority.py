@@ -18,9 +18,11 @@ from deerflow.persistence.user.model import UserRow
 
 class RoutingCandidates:
     def __init__(self, sessions, link, source, routing):
+        from app.telegram_bots.work_routing_response import RoutingResponseProof
         from deerflow.config.app_config import peek_loaded_app_config
 
         self.sessions, self.link, self.source, self.routing = sessions, link, source, routing
+        self.response = RoutingResponseProof(source, routing.get("response_id"))
         self.config = peek_loaded_app_config()
         if self.config is None:
             raise ProductSourceRetired()
@@ -39,6 +41,7 @@ class RoutingCandidates:
             raise ProductSourceRetired()
 
     def extend(self, query):
+        query = self.response.extend(query)
         # Compact correlated facts keep each complete delivery out of the
         # candidate/account-disable cross product. Password hashes never enter it.
         user, grant, disabled = aliased(UserRow), aliased(AgentInstanceGrantRow), aliased(DisabledIdentityRow)
@@ -61,6 +64,7 @@ class RoutingCandidates:
     def check(self, rows):
         from app.gateway.deps import bind_user_repo
 
+        self.response.check(rows)
         self._mode_current()
         required = 3 if self.source.request["purpose"] == "information" else 6
         latest_wrong = max((row for row in self.source.responses if row["disposition"] == "wrong_recipient"), key=lambda row: (row["created_at"], row["id"]), default=None)
@@ -90,7 +94,12 @@ class RoutingCandidates:
             if user.id != excluded:
                 recipients.append({"user_id": user.id, "name": user.email, "permissions": user.permissions})
         recipients.sort(key=lambda row: (row["user_id"] != self.link.owner_user_id, row["name"].casefold(), row["user_id"]))
-        if not self.routing["after_wrong"] and self.source.request["recipient_id"] in eligible:
+        response_id = self.routing.get("response_id")
+        if response_id is not None:
+            from app.telegram_bots.work_routing import routing_response
+
+            routing_response(self.source, response_id)
+        if not self.routing["after_wrong"] and response_id is None and self.source.request["recipient_id"] in eligible:
             raise ProductSourceRetired()
         if recipients != self.routing["recipients"]:
             raise ProductSourceRetired()

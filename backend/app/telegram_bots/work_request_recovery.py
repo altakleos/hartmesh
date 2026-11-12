@@ -27,7 +27,7 @@ class WorkRequestRecovery:
         self.plans = plans
         self.outbox, self.reader, self.callbacks = plans.outbox, plans.reader, plans.callbacks
 
-    async def _source(self, link, request_id):
+    async def _source(self, link, request_id, *, intent=None):
         source = await self.reader.read_request(link, request_id)
         request = source.request
         if request["state"] != "pending" or request["needs_routing"] or request["recipient_id"] != link.owner_user_id or not (request["can_respond"] if request["purpose"] == "information" else request["can_manage"]):
@@ -41,7 +41,7 @@ class WorkRequestRecovery:
         return await await_drained(self._refresh(captured))
 
     async def _refresh(self, captured):
-        source, settings = await self._source(captured.link, captured.item.payload["work_request_basis"]["source"]["request"]["id"])
+        source, settings = await self._source(captured.link, captured.item.payload["work_request_basis"]["source"]["request"]["id"], intent=captured.item.payload.get("work_event_intent"))
         admission = await prepare_attention(self.reader, captured.link)
         async with self.outbox._writer(captured.link.id) as (writer, binding):
             row = await writer.get(TelegramOutboxRow, captured.item.id, with_for_update=True)
@@ -63,7 +63,7 @@ class WorkRequestRecovery:
                 if row.state != "sent" or row.payload["presentation_version"] != expected_version:
                     return None
                 request_id = row.request_id
-            source, settings = await self._source(link, request_id)
+            source, settings = await self._source(link, request_id, intent=row.payload.get("work_event_intent"))
             admission = await prepare_attention(self.reader, link)
             composed = _RecoveryGuard(self, guard, admission, source)
             async with self.callbacks.writer(link, composed) as writer:
@@ -89,7 +89,7 @@ class WorkRequestRecovery:
                 if parent is None or "work_request_basis" not in parent.payload or parent.link_id != link.id:
                     raise CallbackRefused()
                 identity, request_id = parent.id, parent.request_id
-            source, settings = await self._source(link, request_id)
+            source, settings = await self._source(link, request_id, intent=parent.payload.get("work_event_intent"))
             admission = await prepare_attention(self.reader, link)
             composed = _RecoveryGuard(self, guard, admission, source)
             async with self.callbacks.writer(link, composed) as writer:

@@ -15,7 +15,7 @@ def event_signature(event, receipt, intent):
 
 
 def unsolicited_event(item, basis):
-    return "work_event_intent" in item.payload and basis.get("version") in {1, 2} and not basis.get("reveal") and not basis.get("reply_origin")
+    return "work_event_intent" in item.payload and basis.get("version") in {1, 2, 5, 6} and not basis.get("reveal") and not basis.get("reply_origin") and not basis.get("choice_origin")
 
 
 def require_event_source(item, source, *, event=None, receipt=None, final=False):

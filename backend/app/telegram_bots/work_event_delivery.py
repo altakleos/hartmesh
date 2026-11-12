@@ -20,6 +20,9 @@ from deerflow.utils.file_io import await_drained
 
 
 class WorkEventDelivery:
+    keys = {"ask.info": "information", "ask.decision": "decision"}
+    actions = {"request_input", "revise_input", "request_route"}
+
     def __init__(self, plans):
         self.plans = plans
         self.outbox, self.reader = plans.outbox, plans.reader
@@ -37,7 +40,7 @@ class WorkEventDelivery:
                 raise ProductSourceRetired()
             captured = _item(stored)
         intent = captured.payload.get("work_event_intent")
-        if type(intent) is not dict or intent.get("key") not in {"ask.info", "ask.decision"} or captured.dedupe_key.startswith("edit:"):
+        if type(intent) is not dict or intent.get("key") not in self.keys or captured.dedupe_key.startswith("edit:"):
             return False
         if (
             (captured.link_id, captured.owner_user_id, captured.binding_generation, captured.chat_id, captured.instance_id, captured.class_) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id, link.agent_ref, "question")
@@ -53,9 +56,9 @@ class WorkEventDelivery:
             return True
         if captured.state != "pending" or captured.payload.get("presentation_version") != 0:
             raise ProductSourceRetired()
-        source, settings = await self.recovery._source(link, captured.request_id)
+        source, settings = await self.recovery._source(link, captured.request_id, intent=intent)
         if (
-            source.request["purpose"] != ("information" if intent["key"] == "ask.info" else "decision")
+            (self.keys[intent["key"]] is not None and source.request["purpose"] != self.keys[intent["key"]])
             or type(intent.get("request_revision")) is not int
             or type(intent.get("assignment_revision")) is not int
             or (source.seen["request_revision"], source.seen["assignment_revision"]) != (intent["request_revision"], intent["assignment_revision"])
@@ -71,7 +74,7 @@ class WorkEventDelivery:
                 raise DeliveryRetry(timedelta(seconds=5))
             if (
                 (event.instance_id, event.work_id, event.revision, event.assignment_revision) != (link.agent_ref, captured.work_id, intent.get("event_revision"), intent["assignment_revision"])
-                or event.action not in {"request_input", "revise_input", "request_route"}
+                or event.action not in self.actions
                 or type(intent.get("event_revision")) is not int
             ):
                 raise ProductSourceRetired()
@@ -81,10 +84,11 @@ class WorkEventDelivery:
             revision = receipt.receipt["request_revision"] if receipt is not None else 1
             if revision != intent["request_revision"]:
                 raise ProductSourceRetired()
+            await self._qualify_event(writer, event, intent, request, receipt)
             attempt = await event_attempt(writer, event)
             if (attempt.id if attempt else None) != intent.get("attempt_id"):
                 raise ProductSourceRetired()
-            if intent["key"] == "ask.decision" and attempt is not None and attempt.status in UNRESOLVED:
+            if intent["key"] in {"ask.decision", "request.unrouted"} and attempt is not None and attempt.status in UNRESOLVED:
                 deadline = datetime.fromisoformat(intent["hold_until"])
                 if deadline.tzinfo is None:
                     raise ProductSourceRetired()
@@ -93,12 +97,21 @@ class WorkEventDelivery:
             signature = event_signature(event, receipt, intent)
             await self.recovery._admit(admission, writer, source)
             row.payload = {**row.payload, "work_event_source": {"version": 1, "signature": signature}}
-            await self.plans._freeze(writer, link, row, source, settings, pending=True)
+            await self._freeze(writer, link, row, source, settings)
             await writer.flush()
-            held, _target = await admission(session=writer, projection=_MaterializationProjection(source, _item(row)))
+            held, _target = await admission(session=writer, projection=self._projection(source, _item(row)))
             if "agents:write" not in held:
                 raise ProductSourceRetired()
             return True
+
+    async def _freeze(self, writer, link, row, source, settings):
+        await self.plans._freeze(writer, link, row, source, settings, pending=True)
+
+    async def _qualify_event(self, writer, event, intent, request, receipt):
+        return None
+
+    def _projection(self, source, item):
+        return _MaterializationProjection(source, item)
 
 
 class _MaterializationProjection(_RecoveryProjection):

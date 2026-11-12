@@ -10,7 +10,7 @@ from app.telegram_bots.config import load_config
 from app.telegram_bots.producer import DeliveryClaimRetired, ProductSourceRetired, _safe_json
 from app.telegram_bots.work_request_delivery import WorkRequestPlans
 from app.telegram_bots.work_request_source import WorkRequestSources, _RequestProjection, frozen, same_displayed_basis
-from app.telegram_bots.work_routing import present_routing
+from app.telegram_bots.work_routing import present_routing, routing_basis
 from app.telegram_bots.work_routing_authority import RoutingCandidates
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
@@ -52,34 +52,40 @@ class WorkRoutingPlans(WorkRequestPlans):
                 request_id=request_id,
                 session=writer,
             )
-            shown = present_routing(value, locale=settings.locale, link=link, public_base_url=public_base_url, concealed=source.protected, outbox_id=identity)
-            controls = [list(line) for line in shown.keyboard]
-            parts = [
-                {**part, "source_ref": {"key": "work.request.presentation", "values": {"request_id": request_id, "part": index}}, **({"stored_keyboard": True} if controls and index == len(shown.parts) - 1 else {})}
-                for index, part in enumerate(shown.parts)
-            ]
-            source_data = asdict(source)
-            source_data["responses"] = list(source_data["responses"])
-            basis = {
-                "version": 5,
-                "source": source_data,
-                "routing": {"recipients": list(value.recipients), "after_wrong": value.after_wrong, "public_base_url": public_base_url},
-                "locale": settings.locale,
-                "concealed": source.protected,
-                "parts": parts,
-                "keyboard": controls,
-            }
             row = await writer.get(TelegramOutboxRow, identity)
-            row.payload = _safe_json({**row.payload, "work_request_basis": basis, "product_keyboard_basis": controls})
-            saved = self.outbox._parts(parts, 0)
-            if controls:
-                group = await self.callbacks.write_group(link, controls, anchor_outbox_id=identity, presentation_version=0, chat_id=link.chat_id, message_id=None, message_thread_id=None, session=writer)
-                saved[-1]["callback_group_id"] = group.group_id
-                for control in await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group.group_id)):
-                    control.payload = {**control.payload, "presentation_pending": True}
-            row.parts = saved
-            await writer.flush()
-            return identity
+            return await self.freeze_routing(writer, link, row, value, settings, public_base_url)
+
+    async def freeze_routing(self, writer, link, row, value, settings, public_base_url):
+        identity, source = row.id, value.source
+        request_id = source.request["id"]
+        shown = present_routing(value, locale=settings.locale, link=link, public_base_url=public_base_url, concealed=source.protected, outbox_id=identity)
+        controls = [list(line) for line in shown.keyboard]
+        parts = [
+            {**part, "source_ref": {"key": "work.request.presentation", "values": {"request_id": request_id, "part": index}}, **({"stored_keyboard": True} if controls and index == len(shown.parts) - 1 else {})}
+            for index, part in enumerate(shown.parts)
+        ]
+        source_data = asdict(source)
+        source_data["responses"] = list(source_data["responses"])
+        basis = {
+            "version": 5,
+            "source": source_data,
+            "routing": routing_basis(value, public_base_url),
+            "locale": settings.locale,
+            "concealed": source.protected,
+            "parts": parts,
+            "keyboard": controls,
+        }
+        row = await writer.get(TelegramOutboxRow, identity)
+        row.payload = _safe_json({**row.payload, "work_request_basis": basis, "product_keyboard_basis": controls})
+        saved = self.outbox._parts(parts, 0)
+        if controls:
+            group = await self.callbacks.write_group(link, controls, anchor_outbox_id=identity, presentation_version=0, chat_id=link.chat_id, message_id=None, message_thread_id=None, session=writer)
+            saved[-1]["callback_group_id"] = group.group_id
+            for control in await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group.group_id)):
+                control.payload = {**control.payload, "presentation_pending": True}
+        row.parts = saved
+        await writer.flush()
+        return identity
 
 
 class _RoutingProjection(_RequestProjection):
@@ -104,16 +110,20 @@ class WorkRoutingSources(WorkRequestSources):
         basis, source, part = frozen(captured)
         if basis["version"] not in {5, 6}:
             raise ProductSourceRetired()
-        current = await self.reader.read_routing(captured.link, source.request["id"])
-        if current.source.request["state"] == "closed" or not (current.source.request["needs_routing"] or current.after_wrong):
+        current = await self.reader.read_routing(captured.link, source.request["id"], response_id=basis["routing"].get("response_id"))
+        if current.source.request["state"] == "closed" or not (current.source.request["needs_routing"] or current.after_wrong or current.response_id is not None):
             raise ProductSourceRetired()
+        from app.telegram_bots.work_event_source import require_event_source, unsolicited_event
+
+        if unsolicited_event(captured.item, basis):
+            require_event_source(captured.item, current.source)
         config = peek_loaded_app_config()
         if config is None:
             raise ProductSourceRetired()
         settings = await self.settings.get(captured.link.owner_user_id)
         if settings is None:
             raise ProductSourceRetired()
-        routing = {"recipients": list(current.recipients), "after_wrong": current.after_wrong, "public_base_url": load_config(config).public_base_url}
+        routing = routing_basis(current, load_config(config).public_base_url)
         changed = not same_displayed_basis(current.source, source) or settings.locale != basis["locale"] or basis["routing"] != routing
         if changed:
             if self.recovery is not None:

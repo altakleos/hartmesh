@@ -2019,7 +2019,9 @@ attempt identities, preserve routing revisions, and wait for a rendered delivery
 plan. Information and decision questions can now retain that delivery identity
 through rendering, recheck the original event before sending, and enable buttons
 only after complete delivery. Protected questions wait for Show; decisions wait
-for their attempt to finish or the bounded hold to expire. Other notification
+for their attempt to finish or the bounded hold to expire. Manager routing notices
+retain the explanation for an unanswered question and offer current eligible
+recipients, including after protected Show. Other notification
 rendering and startup integration remain outstanding.
 Background recovery preserves newer
 request previews. Complete first-tap previews now have

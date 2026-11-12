@@ -10,7 +10,7 @@ from app.telegram_bots.producer import DeliveryRetry, ProductSourceRetired
 from app.telegram_bots.work_actions import request_for
 from app.telegram_bots.work_interaction_delivery import acknowledged_source
 from app.telegram_bots.work_request_recovery import WorkRequestRecovery, _RecoveryGuard, _RecoveryProjection
-from app.telegram_bots.work_routing import present_routing
+from app.telegram_bots.work_routing import present_routing, routing_basis
 from app.telegram_bots.work_routing_authority import RoutingCandidates
 from deerflow.agent_instances.contract import AgentDenied
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow
@@ -28,7 +28,7 @@ class _RoutingSource:
 
     @property
     def routing(self):
-        return {"recipients": list(self.value.recipients), "after_wrong": self.value.after_wrong, "public_base_url": self.public_base_url}
+        return routing_basis(self.value, self.public_base_url)
 
 
 class WorkRoutingRecovery(WorkRequestRecovery):
@@ -46,7 +46,9 @@ class WorkRoutingRecovery(WorkRequestRecovery):
                 if callback is None or callback.link_id != link.id or callback.kind != "route_to" or callback.target_kind != "request":
                     raise CallbackRefused()
                 request_id = callback.target_id
-            source, settings = await self._source(link, request_id)
+                original = await reader.get(TelegramOutboxRow, callback.payload.get("anchor_outbox_id"))
+                intent = original.payload.get("work_event_intent") if original is not None else None
+            source, settings = await self._source(link, request_id, intent=intent)
             admission = await prepare_attention(self.reader, link)
             composed = _RecoveryGuard(self, guard, admission, source)
             async with self.callbacks.writer(link, composed) as writer:
@@ -79,11 +81,11 @@ class WorkRoutingRecovery(WorkRequestRecovery):
 
         return await await_drained(perform())
 
-    async def _source(self, link, request_id):
+    async def _source(self, link, request_id, *, intent=None):
         from deerflow.config.app_config import get_app_config
 
-        value = await self.reader.read_routing(link, request_id)
-        if value.source.request["state"] == "closed" or not (value.source.request["needs_routing"] or value.after_wrong):
+        value = await self.reader.read_routing(link, request_id, response_id=(intent or {}).get("response_id"))
+        if value.source.request["state"] == "closed" or not (value.source.request["needs_routing"] or value.after_wrong or value.response_id is not None):
             raise ProductSourceRetired()
         settings = await self.plans.settings.get(link.owner_user_id)
         if settings is None:
@@ -102,7 +104,7 @@ class WorkRoutingRecovery(WorkRequestRecovery):
                 if row.state != "failed" or row.failed_reason != "work-routing-refresh-required" or row.claim_id is not None:
                     return None
                 version, request_id = row.payload["presentation_version"], row.request_id
-            source, settings = await self._source(link, request_id)
+            source, settings = await self._source(link, request_id, intent=row.payload.get("work_event_intent"))
             from app.telegram_bots.attention_authority import prepare_attention
 
             admission = await prepare_attention(self.reader, link)
