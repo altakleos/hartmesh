@@ -201,6 +201,13 @@ original reservations. Retention keeps this evidence and its original members.
 Parent silence is derived from the current member choices, not independently
 trusted from the batch row.
 
+`work_digest_navigation.py` reads current full sources behind an acknowledged
+digest. Its final composed snapshot retains the exact batch receipt, every
+reservation edge, the complete acknowledged callback group and the selected
+member's authority. Reading a preview never consumes controls or changes the
+original delivery receipt. This admission helper is not a controller and remains
+uninstalled until Show and item presentation owners are integrated.
+
 `work_digest_delivery.py` freezes one bounded navigation card and its complete
 pending keyboard. The adapter requires this owner for digest delivery; raw class
 labels and templates do not supply source authority. The final compound read
