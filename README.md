@@ -2031,7 +2031,9 @@ protected files and a new card. A changed review resumes unfinished files and
 refreshes the card without uploading acknowledged files again, including after
 a language or file-access change. Explicit repair of cards in General preserves
 delivered files. File-failure links open the conversation that produced the
-result; unavailable-file warnings omit the link. Remaining notification rendering
+result; unavailable-file warnings omit the link. Review-ready event plans use
+this same file/card sequence and recheck the original event before delivery.
+Remaining notification rendering
 and startup integration are still pending.
 Background recovery preserves newer
 request previews. Complete first-tap previews now have

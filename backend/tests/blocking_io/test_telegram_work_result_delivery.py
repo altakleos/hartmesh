@@ -14,6 +14,7 @@ from test_telegram_work_result_recovery import test_partial_album_refresh_surviv
 from test_telegram_work_result_recovery import test_protection_upgrade_requires_new_show_without_relabeling_old_file as recover_protection
 from test_telegram_work_result_recovery import test_show_clears_teaser_before_protected_files_and_final_controls as reveal
 from test_telegram_work_result_repair import test_explicit_repair_preserves_uploaded_file_and_replaces_only_card as repair
+from test_telegram_work_review_event_delivery import test_settled_review_event_sends_files_then_arms_review_controls as event_review
 from test_telegram_work_source_delivery import work_delivery as work_delivery
 from test_work_attention_pages import work_pages as work_pages
 
@@ -64,3 +65,9 @@ async def test_result_warning_link(work_exports, monkeypatch):
 @pytest.mark.parametrize("work_exports", ["review"], indirect=True)
 async def test_result_explicit_repair(work_exports, monkeypatch):
     await repair(work_exports, monkeypatch, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("work_exports", ["review_event"], indirect=True)
+async def test_result_event_materialization(work_exports):
+    await event_review(work_exports, True)
