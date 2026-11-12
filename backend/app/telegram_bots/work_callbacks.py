@@ -8,6 +8,7 @@ from app.telegram_bots.callbacks import CallbackRefused
 from app.telegram_bots.errors import text_key_for
 from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_action_retries import WorkActionRetries
+from app.telegram_bots.work_closed_inputs import WorkClosedInputs
 from app.telegram_bots.work_control_admission import WorkControlAdmissions
 from app.telegram_bots.work_followup_refresh import WorkRoutingFollowupRecovery
 from app.telegram_bots.work_input_refresh import WorkInputRefresh
@@ -33,6 +34,7 @@ class WorkCallbacks:
         self.services, self.outcomes, self.acts = services, outcomes, outcomes.acts
         self.interactions = WorkInteractionPlans(outcomes.plans)
         self.controls = WorkControlAdmissions(outcomes.plans, self.acts)
+        self.closed = WorkClosedInputs(services, self.controls)
         self.refusals = WorkRefusalRecovery(self.controls)
         self.stale = WorkStaleRecovery(self.controls, self.interactions)
         self.recovery = WorkRequestRecovery(outcomes.plans)
@@ -44,6 +46,8 @@ class WorkCallbacks:
         self.followups, self.retries = WorkRoutingFollowupRecovery(outcomes), WorkActionRetries(outcomes)
 
     async def execute_callback(self, channel, row, *, update_id=None, query_id=None):
+        if await self.closed.execute_callback(channel, row, update_id=update_id):
+            return True
         if row.kind not in _VIEWS | _ACTIONS.keys() | {"reveal", "act_check", "dismiss"}:
             return False
 

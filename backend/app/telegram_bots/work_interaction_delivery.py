@@ -67,8 +67,13 @@ def acknowledged_source(link, parent):
     return source
 
 
-def check_origin(link, parent, callbacks, basis, source):
+def check_origin(link, parent, callbacks, basis, source, *, reopened_mark=None, outbox_id=None):
     """A complete ACK and consumed canonical group prove this direct reply."""
+    if "reopen" in basis:
+        from app.telegram_bots.work_reopen import check_reopen_origin
+
+        check_reopen_origin(link, parent, callbacks, reopened_mark, basis, source, outbox_id)
+        return
     origin = basis["origin"]
     if parent is None or parent.id != origin["anchor_outbox_id"] or parent.payload.get("presentation_version") != origin["presentation_version"]:
         raise ProductSourceRetired()
@@ -130,7 +135,7 @@ class WorkInteractionPlans:
 
         return await await_drained(perform())
 
-    async def _publish(self, writer, link, group, parent, source, settings, state, *, key, chat_id, message_id, message_thread_id, guard, reason="work-preview", input_origin=None):
+    async def _publish(self, writer, link, group, parent, source, settings, state, *, key, chat_id, message_id, message_thread_id, guard, reason="work-preview", input_origin=None, reopen_origin=None):
         """Publish a source-checked transition inside its caller's guarded writer."""
         callback_id, request_id, composed = group.selected.id, source.request["id"], guard
         created_at, expires_at = group.selected.created_at, None
@@ -171,6 +176,8 @@ class WorkInteractionPlans:
             "interaction": state,
             "origin": {"callback_id": callback_id, "anchor_outbox_id": parent.id, "presentation_version": group.presentation_version, "message_id": message_id},
         }
+        if reopen_origin is not None:
+            basis["reopen"] = reopen_origin
         if input_origin is not None:
             basis["input"] = input_origin
         if state["view"] == "prompt":

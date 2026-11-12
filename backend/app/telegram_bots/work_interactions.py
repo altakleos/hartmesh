@@ -25,6 +25,7 @@ _FIELDS = {
     "prompt": {"view", "purpose"},
 }
 _PROMPTS = {
+    "comment": (None, "ask.type_prompt"),
     "answer": ("information", "ask.type_prompt"),
     "cannot": ("information", "ask.cant_prompt"),
     "wrong": ("information", "ask.cant_prompt"),
@@ -56,13 +57,15 @@ def interaction_state(value, source):
         if type(state["purpose"]) is not str or state["purpose"] not in _PROMPTS:
             raise ValueError("invalid-work-prompt")
         expected = _PROMPTS[state["purpose"]][0]
+        if state["purpose"] == "comment" and purpose in {"decision", "review"}:
+            expected = purpose
     else:
         expected = {"cannot": "information", "decision": "decision", "accept": "review", "changes": "review", "answer": "information", "voice": purpose, "request": purpose, "current": purpose}[view]
     if purpose != expected:
         raise ValueError("wrong-work-interaction-purpose")
     if source.request["state"] == "closed" or source.request["needs_routing"]:
         raise AgentConflict("The request is no longer available")
-    responding = view in {"request", "current"} and purpose == "information" or view in {"cannot", "answer", "voice"} or view == "prompt" and state["purpose"] in {"answer", "cannot", "wrong"}
+    responding = view in {"request", "current"} and purpose == "information" or view in {"cannot", "answer", "voice"} or view == "prompt" and state["purpose"] in {"answer", "cannot", "wrong", "comment"}
     if not source.request["can_respond" if responding else "can_manage"]:
         raise AgentDenied("The interaction is unavailable")
     if view == "decision":

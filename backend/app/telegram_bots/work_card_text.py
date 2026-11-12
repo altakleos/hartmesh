@@ -18,6 +18,7 @@ class WorkCardText:
         self.services, self.callbacks = services, callbacks
         self.cards = WorkCardInputs(callbacks.controls)
         self.prompt_input = prompt_input
+        self.closed = callbacks.closed
 
     async def handle(self, channel, update, *, link):
         async def perform():
@@ -26,14 +27,12 @@ class WorkCardText:
             async with self.services.callbacks.writer(link, guard) as writer:
                 mark = await writer.get(TelegramInboundMarkRow, (link.id, message.message_id, message.chat_id))
                 if mark is not None and mark.route_kind is not None:
-                    if mark.route_kind == "work_card_hold":
-                        return True
-                    if mark.route_kind != "work_input" or mark.route_basis.get("work_input", {}).get("version") != 2:
+                    if mark.route_kind != "work_card_hold" and (mark.route_kind != "work_input" or mark.route_basis.get("work_input", {}).get("version") != 2):
                         return False
                     if mark.route_complete:
                         return True
                     origin = InboxRow.from_row(mark)
-                    source_id = mark.route_basis["work_input"]["source_outbox_id"]
+                    source_id = mark.route_basis["source_outbox_id"] if mark.route_kind == "work_card_hold" else mark.route_basis["work_input"]["source_outbox_id"]
                 else:
                     origin, source_id = None, None
             prompt_id = None
@@ -64,13 +63,12 @@ class WorkCardText:
             async with self.services.callbacks.writer(link, guard) as writer:
                 mark = (await self.cards.inbox._rows(writer, [origin]))[0]
                 self.cards.inbox._current(link, mark)
-                if mark.route_kind == "work_card_hold":
-                    return True
-                if mark.route_kind != "work_input" or mark.route_basis.get("work_input", {}).get("version") != 2:
+                if mark.route_kind != "work_card_hold" and (mark.route_kind != "work_input" or mark.route_basis.get("work_input", {}).get("version") != 2):
                     return False
                 if mark.route_complete:
                     return True
-                stored, source_id = InboxRow.from_row(mark), mark.route_basis["work_input"]["source_outbox_id"]
+                stored = InboxRow.from_row(mark)
+                source_id = mark.route_basis["source_outbox_id"] if mark.route_kind == "work_card_hold" else mark.route_basis["work_input"]["source_outbox_id"]
             await self._apply(channel, link, stored, source_id, guard)
             return True
 
@@ -127,4 +125,5 @@ class WorkCardText:
                 stored = (await self.cards.inbox._rows(writer, [origin]))[0]
                 if stored.route_kind is None:
                     await self.cards.inbox.route(InboxRow.from_row(stored), kind="work_card_hold", target_id=source_id, basis={"source_outbox_id": source_id}, operation_ids=[], session=writer)
+            await self.closed.offer(link, origin, guard=guard)
             logger.warning("Work card input observation deferred (%s)", type(error).__name__)
