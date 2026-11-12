@@ -175,6 +175,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             delivery.payload["work_status_pin"]["presentation_id"].as_string(),
             delivery.payload["status_pin_tail"].as_string(),
             delivery.payload["digest_dispatch_conflict"],
+            delivery.payload["summary_dispatch_conflict"],
             delivery.payload["work_digest_view_basis"]["parent_id"].as_string(),
             navigation_anchor,
         ).where(
@@ -211,6 +212,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
         pin_presentation,
         pin_tail,
         digest_conflict,
+        summary_conflict,
         digest_parent,
         navigation_anchor,
     ) in records:
@@ -218,6 +220,8 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             graph.setdefault(identity, set()).update(_strings(navigation_anchor))
         if digest_parent:
             graph.setdefault(identity, set()).update(_strings(digest_parent))
+        if summary_conflict is not None:
+            pinned.add(identity)
         if digest_conflict is not None:
             pinned.add(identity)
             original = digest_conflict.get("payload", {}).get("member_ids") if isinstance(digest_conflict, dict) and isinstance(digest_conflict.get("payload"), dict) else None

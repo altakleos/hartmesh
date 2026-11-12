@@ -1068,3 +1068,15 @@ and independent source sets do not multiply each other. The final projection
 rebuilds all summary sections under current owner grants, write capability and
 protection. Titles, current answers and omitted-item counts share that snapshot.
 The reader writes no outbox row and starts no execution.
+
+`summary_delivery.py` persists one silent source-owned plan per local date,
+including `skipped: nothing-to-say` when the complete selection is empty. The
+previous plan's time bounds the next selection. A composed final projection
+qualifies current settings, source, binding, claim and original-age controls in
+one account snapshot after permission resolution. Protected plans retain only
+a Show teaser on the wire. Exact complete receipts are required before controls
+activate. An ACK for a manifest changed during the SDK await retains the actual
+wire proof as a held conflict, including after retention sweeps. Prior summary
+cutoffs require a valid persisted plan, with JSON versions compared as text to
+avoid PostgreSQL conversion failures. These owners remain uninstalled; summary navigation, refresh and
+scheduler integration must be qualified before activation.
