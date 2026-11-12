@@ -86,7 +86,7 @@ class AlbumProjection:
             if names is not None and column.name not in names:
                 continue
             field = getattr(row, "class_" if column.name == "class" else column.name)
-            args.extend((column.name, func.json(field) if self.sqlite and isinstance(column.type, JSON) else field))
+            args.extend((str(column.name), func.json(field) if self.sqlite and isinstance(column.type, JSON) else field))
         packet = func.json_object(*args) if self.sqlite else func.json_build_object(*args)
         return func.json_group_array(packet, type_=JSON) if self.sqlite else func.json_agg(packet, type_=JSON)
 
