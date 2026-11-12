@@ -26,6 +26,7 @@ class DigestNavigationSnapshot:
     locale: str
     callback_id: str
     member_id: str | None
+    closed_reason: str | None = None
 
     async def authorize(self, *, session=None):
         async def perform():
@@ -39,10 +40,12 @@ class DigestNavigation:
     def __init__(self, plans):
         self.plans = plans
 
-    async def read(self, link, identity, *, callback_id, member_id=None):
+    async def read(self, link, identity, *, callback_id, member_id=None, closed_reason=None):
         """Read previews without consuming controls or changing the batch ACK."""
 
         async def perform():
+            if closed_reason not in {None, "revealed"} or closed_reason is not None and member_id is not None:
+                raise ProductSourceRetired()
             try:
                 async with self.plans.outbox.sessions() as reader:
                     parent = await reader.get(TelegramOutboxRow, identity)
@@ -61,7 +64,7 @@ class DigestNavigation:
                 origins = {proof["id"]: proof["origin"] for proof in basis["members"]}
                 if any(member_proof(member)["origin"] != origins[member.item.id] for member in members):
                     raise ProductSourceRetired()
-                snapshot = DigestNavigationSnapshot(self, link, item, siblings, members, settings.locale, callback_id, member_id)
+                snapshot = DigestNavigationSnapshot(self, link, item, siblings, members, settings.locale, callback_id, member_id, closed_reason)
                 await snapshot.authorize()
                 return snapshot
             except (ValueError, TypeError, KeyError, PermanentDeliveryError):
@@ -108,7 +111,12 @@ class _NavigationProjection(DigestProjection):
         try:
             _validate_rows(parent, list(controls.values()))
             for control in controls.values():
-                snapshot.owner.plans.callbacks._usable(control)
+                if snapshot.closed_reason is None:
+                    snapshot.owner.plans.callbacks._usable(control)
+                else:
+                    if control.consumed_at is None or control.closed_reason != snapshot.closed_reason:
+                        raise CallbackRefused()
+                    snapshot.owner.plans.callbacks._unexpired(control)
                 if control.message_id != parent.message_id:
                     raise CallbackRefused()
             if selected is None or selected.target_kind != "outbox":

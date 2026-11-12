@@ -2565,7 +2565,7 @@ class OutboxSender:
                 sending["dispatched_at"] = self.outbox.clock().isoformat()
                 saved.parts = parts
                 required_protection = sending["protect_content"]
-                digest_dispatch = _item(saved) if "work_digest_basis" in saved.payload else None
+                digest_dispatch = _item(saved) if {"work_digest_basis", "work_digest_view_basis"}.intersection(saved.payload) else None
             if self._stopping:
                 return
             try:
@@ -2724,6 +2724,13 @@ class OutboxSender:
             await self.outbox.inbox.settle_deliveries(link_id=link_id, session=writer)
 
     async def _replace(self, binding: BotLink, row: OutboxItem, claim: str, *, reason: str) -> None:
+        if "work_digest_view_basis" in row.payload:
+            async with self.outbox._writer(binding.id) as (writer, _binding):
+                saved = await writer.get(TelegramOutboxRow, row.id, with_for_update=True)
+                if self.outbox._fenced(saved, generation=binding.binding_generation, owner=self.run_id, claim=claim):
+                    self._pending(saved)
+                    saved.state, saved.failed_reason, saved.closed_at = "failed", "digest-view-refresh-required", self.outbox.clock()
+            return
         if "work_status_update" in row.payload:
             async with self.outbox._writer(binding.id) as (writer, _binding):
                 saved = await writer.get(TelegramOutboxRow, row.id, with_for_update=True)
@@ -2871,6 +2878,16 @@ class OutboxSender:
                 await acknowledge_question_update(session, row)
             except (ProductSourceRetired, PermanentDeliveryError, ValueError, TypeError, KeyError, IndexError):
                 row.state, row.failed_reason, row.closed_at = "failed", "invalid-work-question-receipt", now
+                row.claim_owner = row.claim_id = row.claimed_at = None
+                await session.flush()
+                return
+        if "work_digest_view_basis" in row.payload:
+            from app.telegram_bots.work_digest_views import acknowledge_view
+
+            try:
+                await acknowledge_view(session, row)
+            except (ValueError, TypeError, KeyError, PermanentDeliveryError, ProductSourceRetired):
+                row.state, row.failed_reason, row.closed_at = "failed", "invalid-digest-view-receipt", now
                 row.claim_owner = row.claim_id = row.claimed_at = None
                 await session.flush()
                 return

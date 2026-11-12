@@ -582,12 +582,17 @@ class CallbackRepository:
         return parent, rows, selected
 
     def _usable(self, row):
+        if row.consumed_at is not None:
+            raise CallbackRefused() from None
+        self._unexpired(row)
+
+    def _unexpired(self, row):
         now = self.clock()
         created = _aware(row.created_at)
         interaction = row.payload.get("interaction")
         review_note = row.target_kind == "request" and row.kind in {"changes_confirm", "changes_open", "dismiss"} and isinstance(interaction, Mapping) and interaction.get("view") == "changes"
         too_old = now >= created + timedelta(days=self.config.callbacks.max_age_days) or (row.target_kind == "draft" or review_note) and now >= created + timedelta(hours=self.config.callbacks.draft_ttl_hours)
-        if row.consumed_at is not None or too_old or row.expires_at is not None and now >= _aware(row.expires_at):
+        if too_old or row.expires_at is not None and now >= _aware(row.expires_at):
             raise CallbackRefused() from None
 
     async def adopt(self, link, group_id, message_id, *, chat_id, message_thread_id, outbox_id, presentation_version, check_current):
@@ -796,8 +801,12 @@ class CallbackRepository:
                 group = part.get("callback_group_id")
                 rows = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group).order_by(TelegramCallbackRow.id)))
                 try:
-                    work_preview = bool({"work_digest_basis", "work_request_basis", "work_outcome_basis", "result_notice_basis", "work_news_basis"}.intersection(parent.payload))
-                    if "work_digest_basis" in parent.payload:
+                    work_preview = bool({"work_digest_view_basis", "work_digest_basis", "work_request_basis", "work_outcome_basis", "result_notice_basis", "work_news_basis"}.intersection(parent.payload))
+                    if "work_digest_view_basis" in parent.payload:
+                        from app.telegram_bots.work_digest_views import frozen_view
+
+                        frozen_view(captured)
+                    elif "work_digest_basis" in parent.payload:
                         from app.telegram_bots.work_digest_delivery import frozen_digest
 
                         frozen_digest(captured)
@@ -957,8 +966,10 @@ class CallbackRepository:
                     ):
                         show_proofs.add(prompt.id)
                 parent = TelegramOutboxRow
-                for proof_id in (parent.payload["work_request_basis"]["reply_origin"].as_string(), parent.payload["result_notice_basis"]["reveal"].as_string(), parent.payload["work_news_basis"]["reveal"].as_string()):
-                    for saved in await session.execute(select(parent.id, parent.link_id, parent.chat_id, parent.binding_generation, proof_id.label("proof_id")).where(proof_id.is_not(None))):
+                references = [(parent.id, parent.payload[key][field].as_string()) for key, field in (("work_request_basis", "reply_origin"), ("result_notice_basis", "reveal"), ("work_news_basis", "reveal"))]
+                references.append((parent.payload["work_digest_view_basis"]["parent_id"].as_string(), parent.payload["work_digest_view_basis"]["callback_id"].as_string()))
+                for anchor_id, proof_id in references:
+                    for saved in await session.execute(select(anchor_id.label("id"), parent.link_id, parent.chat_id, parent.binding_generation, proof_id.label("proof_id")).where(proof_id.is_not(None), anchor_id.is_not(None))):
                         try:
                             require_show(by_id.get(saved.proof_id), saved)
                         except ProductSourceRetired:

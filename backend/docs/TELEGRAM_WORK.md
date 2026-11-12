@@ -206,7 +206,19 @@ digest. Its final composed snapshot retains the exact batch receipt, every
 reservation edge, the complete acknowledged callback group and the selected
 member's authority. Reading a preview never consumes controls or changes the
 original delivery receipt. This admission helper is not a controller and remains
-uninstalled until Show and item presentation owners are integrated.
+uninstalled until Show and item presentation owners are integrated. Its explicit
+consumed-origin mode accepts only a revealed Show and still applies the original
+control age limit.
+
+`work_digest_views.py` publishes the protected Show as a separate reply owner that
+edits the exact original message. The batch's membership and whole ACK stay
+unchanged. Final source/claim/provider checks bind the consumed original Show,
+original protected receipt, every member edge, current full source and the new
+pending group. Controls retain their original age. SDK edits drain at shutdown;
+ACKs must identify the actual edit target. Retention follows the view to its
+original batch and members, and callback sweeping retains the consumed Show as
+long as its view exists. A missing edit target is held for source-aware repair;
+item previews and repair are separate pending work. No startup installation yet.
 
 `work_digest_delivery.py` freezes one bounded navigation card and its complete
 pending keyboard. The adapter requires this owner for digest delivery; raw class
