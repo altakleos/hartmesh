@@ -17,7 +17,7 @@ from app.telegram_bots.pages import page_address
 from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryRetry, PermanentDeliveryError, ProductSourceRetired, _item, _safe_json
 from app.telegram_bots.settings import SettingsRepository, _snapshot
 from app.telegram_bots.work_actions import same_body
-from app.telegram_bots.work_news import present_news
+from app.telegram_bots.work_news import news_class, present_news
 from app.telegram_bots.work_news_sources import WorkNewsProjection, WorkNewsRead
 from app.telegram_bots.work_request_source import cleanup_ready, require_show
 from app.telegram_bots.work_result_navigation import NavigationOrigin
@@ -29,7 +29,9 @@ from deerflow.utils.file_io import await_drained
 def recipes(source, basis, identity, link):
     view = present_news(source.key, values=source.values, locale=basis["locale"], protected=source.protected, concealed=basis["concealed"], outbox_id=identity)
     keyboard = [list(line) for line in view.keyboard]
-    if not basis["concealed"] and (source.key in {"decision.recorded", "result.changes", "attempt.stopped", "attempt.stopped_changed", "work.proposed"} or source.key == "request.answered" and source.values.get("open_assignment") is True):
+    if not basis["concealed"] and (
+        source.key in {"decision.recorded", "result.changes", "attempt.stopped", "attempt.stopped_changed", "work.proposed", "remind.ready_to_resume"} or source.key == "request.answered" and source.values.get("open_assignment") is True
+    ):
         address = page_address("web.work", link, work_id=source.work_id, permissions=3, public_base_url=basis["public_base_url"])
         if address:
             keyboard.append([{"label": "label.open_assignment", "url": address}])
@@ -69,7 +71,7 @@ def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
             and version != basis["version"] - 1
             or basis["version"] == 3
             and version < 1
-            or item.class_ != ("reply" if reveal else "info")
+            or item.class_ != ("reply" if reveal else news_class(source.key))
             or type(source.protected) is not bool
             or type(basis["concealed"]) is not bool
             or basis["concealed"] != (source.protected and reveal is None)
@@ -114,7 +116,7 @@ def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
             if type(basis["reveal"]) is not str or len(basis["reveal"]) != 32 or any(char not in "0123456789abcdef" for char in basis["reveal"]) or len(historical) != 1:
                 raise ValueError()
             origin = basis["origin"]
-            old = replace(item, class_="info", parts=historical, payload={**item.payload, "presentation_version": 0, "work_news_basis": origin, "product_keyboard_basis": origin["keyboard"]})
+            old = replace(item, class_=news_class(source.key), parts=historical, payload={**item.payload, "presentation_version": 0, "work_news_basis": origin, "product_keyboard_basis": origin["keyboard"]})
             _origin, previous, _recipe = frozen_news(SimpleNamespace(link=captured.link, item=old, part=historical[-1]), acknowledged=True)
             if not origin["concealed"] or previous.event_signature != source.event_signature or previous.work_id != source.work_id:
                 raise ValueError()
@@ -246,6 +248,8 @@ class WorkNewsPlans:
             parts, keyboard = recipes(source, basis, identity, link)
             row.parts = self.outbox._parts(parts, 0)
             row.payload = _safe_json({**row.payload, "work_news_basis": {**basis, "parts": parts, "keyboard": keyboard}, "product_keyboard_basis": keyboard})
+            if source.key == "remind.ready_to_resume":
+                row.payload = {**row.payload, "kind": "resume_reminder"}
             if keyboard:
                 group = await self.callbacks.write_group(link, keyboard, anchor_outbox_id=identity, presentation_version=0, chat_id=link.chat_id, message_id=None, message_thread_id=row.message_thread_id, session=writer)
                 row.parts = [*row.parts[:-1], {**row.parts[-1], "callback_group_id": group.group_id}]
@@ -335,6 +339,16 @@ class _SendProjection(WorkNewsProjection):
         local = self.now.astimezone(self.zone)
         minute, start, end = local.hour * 60 + local.minute, actual.quiet_start_minute, actual.quiet_end_minute
         quiet = actual.quiet_enabled and (minute >= start or minute < end if start > end else start <= minute < end)
+        if self.source.key == "remind.ready_to_resume":
+            now = self.host.outbox.clock()
+            due = datetime.fromisoformat(self.source.values["due"])
+            if now < due:
+                raise DeliveryRetry(due - now)
+            local = now.astimezone(self.zone)
+            minute = local.hour * 60 + local.minute
+            reminder_quiet = actual.quiet_enabled and (minute >= start or minute < end if start > end else start <= minute < end)
+            if not self.basis.get("reveal") and reminder_quiet and actual.summary_enabled:
+                raise ProductSourceRetired("quiet-hours")
         recent = rows[0][0].last_update_at is not None and self.now - aware(rows[0][0].last_update_at) <= timedelta(seconds=self.host.outbox.config.outbox.recent_act_seconds)
         if bool(delivery.silent or self.captured.part.get("silent") or quiet and not recent) != bool(self.silent):
             raise DeliveryClaimRetired()

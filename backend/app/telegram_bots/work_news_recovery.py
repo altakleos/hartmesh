@@ -11,6 +11,7 @@ from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
 from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.producer import DeliveryClaimRetired, ProductSourceRetired, _item, _safe_json, keyboard_cleanup_row
+from app.telegram_bots.work_news import news_class
 from app.telegram_bots.work_news_sources import WorkNewsProjection
 from app.telegram_bots.work_result_navigation import NavigationOrigin
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow
@@ -175,7 +176,7 @@ class WorkNewsRecovery:
                 control.consumed_at, control.closed_reason = self.outbox.clock(), "superseded"
         history = deepcopy(basis.get("history", []))
         if basis["version"] == 2:
-            history = [{"basis": deepcopy(basis["origin"]), "parts": deepcopy([part for part in row.parts if part["presentation_version"] == 0]), "class": "info", "presentation_version": 0}]
+            history = [{"basis": deepcopy(basis["origin"]), "parts": deepcopy([part for part in row.parts if part["presentation_version"] == 0]), "class": news_class(source.key), "presentation_version": 0}]
         archived = deepcopy(basis)
         if archived["version"] == 3:
             archived["history"] = []
@@ -217,7 +218,7 @@ class WorkNewsRecovery:
                 part["state"] = "retired"
         row.parts = [*old, *fresh]
         row.payload = _safe_json({**row.payload, "presentation_version": version + 1, "work_news_basis": {**fresh_basis, "parts": parts, "keyboard": keyboard}, "product_keyboard_basis": keyboard})
-        row.class_, row.state, row.not_before = "reply" if reveal_id else "info", "pending", self.outbox.clock()
+        row.class_, row.state, row.not_before = "reply" if reveal_id else news_class(source.key), "pending", self.outbox.clock()
         row.sent_at = row.closed_at = row.failed_reason = row.skip_reason = row.degraded_at = None
         row.claim_id = row.claim_owner = row.claimed_at = None
         if keyboard:

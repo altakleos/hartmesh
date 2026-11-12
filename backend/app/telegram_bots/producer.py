@@ -64,7 +64,7 @@ _URL_SOURCES = {
 }
 _TRANSPORT_RECEIPTS = frozenset({"sent_at", "dispatched_at", "unavailable_reason", "invalid_token_verification_pending", "url_button_fallback", "plain_fallback"})
 _PART_IDENTITY = frozenset({"part_id", "presentation_version", "ordinal", "state", "message_ids"})
-_SKIP_REASONS = frozenset({"no-access", "superseded", "link-not-connected", "disabled", "policy-off", "expired", "notifications-off", "source-gone"})
+_SKIP_REASONS = frozenset({"no-access", "superseded", "link-not-connected", "disabled", "policy-off", "expired", "notifications-off", "source-gone", "resumed", "quiet-hours"})
 _LIVE_CLAIMS: set[tuple[int, str, str]] = set()
 _TOKEN = re.compile(TOKEN_IN_TEXT)
 _FORBIDDEN_KEYS = frozenset({"token", "bot_token", "access_token", "raw_update", "update", "audio", "audio_bytes", "download_url", "temporary_url", "bytes"})
@@ -483,6 +483,12 @@ class DeliveryClaimRetired(Exception):
 
 class ProductSourceRetired(DeliveryClaimRetired):
     """An obsolete private fixed presentation must not obstruct later delivery."""
+
+    def __init__(self, reason="superseded"):
+        if reason not in _SKIP_REASONS:
+            raise ValueError("invalid-source-retirement-reason")
+        super().__init__(reason)
+        self.reason = reason
 
 
 class PreviewExpired(DeliveryClaimRetired):
@@ -2583,7 +2589,7 @@ class OutboxSender:
                 logger.warning("telegram_bots delivery_source_unread link=%s delivery=%s attempts=%s", link_id, row_id, row.attempts + 1)
                 await self._failure(link_id, row_id, generation, claim, error)
                 return
-            except ProductSourceRetired:
+            except ProductSourceRetired as error:
                 async with self.outbox._writer(link_id) as (writer, _binding):
                     obsolete = await writer.get(TelegramOutboxRow, row_id, with_for_update=True)
                     if self.outbox._fenced(obsolete, generation=generation, owner=self.run_id, claim=claim):
@@ -2594,7 +2600,7 @@ class OutboxSender:
                             self._pending(obsolete)
                             obsolete.state, obsolete.failed_reason, obsolete.closed_at = "failed", "work-outcome-refresh-required", self.outbox.clock()
                         else:
-                            await self._skip(writer, obsolete, "superseded")
+                            await self._skip(writer, obsolete, error.reason)
                 return
             except DeliveryClaimRetired:
                 return

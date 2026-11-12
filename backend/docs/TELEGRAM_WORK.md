@@ -848,3 +848,14 @@ Not now consumes only the exact fully acknowledged proposal group and queues
 durable keyboard cleanup in the same guarded transaction. It does not modify,
 withdraw or start Work, and it can clear an old proposal after Work changes.
 An already consumed group cannot repeat dismissal. These owners remain dormant.
+
+`work_resume_reminders.py` reuses the canonical information-answer receipt and
+targets its answerer. It requires the same answered blocker and assignment with
+no unresolved or later activation, stop or assignment change. The final SDK
+snapshot checks the response's one-hour due time independently of queue timing.
+Reminders remain essential, silent and governed by question preferences. Current
+quiet hours plus an enabled summary retire unsolicited delivery as `quiet-hours`;
+an explicit protected Show is still served. Resumed or changed Work retires as
+`resumed`. The source-owned sender preserves these closed skip reasons under its
+exact claim fence. Refresh/Show history keeps the original reminder class, and
+the only navigation is a web assignment link. Installation remains pending.

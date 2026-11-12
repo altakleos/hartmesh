@@ -14,8 +14,10 @@ from app.telegram_bots.result_notice_sources import fields
 from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_answer_news import AnswerNews
 from app.telegram_bots.work_event_source import event_signature
+from app.telegram_bots.work_news import news_class
 from app.telegram_bots.work_proposal_news import ProposalNews
 from app.telegram_bots.work_result_identity import digest
+from app.telegram_bots.work_resume_reminders import ResumeReminder
 from app.telegram_bots.work_stop_news import STOP_KEYS, StopNews, prepare_news_clock
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.agent_instances.work_contract import WorkCommand
@@ -72,6 +74,9 @@ class WorkNewsProjection:
         self.protected = source.protected if source else protected
         self.stop = StopNews(link, item, clock) if item.payload.get("work_event_intent", {}).get("key") in STOP_KEYS else None
         self.answer = AnswerNews(item) if item.payload.get("work_event_intent", {}).get("key") == "request.answered" else None
+        self.reminder = item.payload.get("work_event_intent", {}).get("key") == "remind.ready_to_resume"
+        if self.reminder:
+            self.answer = ResumeReminder(link, item)
         self.proposal = ProposalNews(link, item) if item.payload.get("work_event_intent", {}).get("key") == "work.proposed" else None
 
     def extend(self, query):
@@ -137,12 +142,14 @@ class WorkNewsProjection:
             and key != "request.answered"
             and key not in STOP_KEYS
             and key != "work.proposed"
+            and not self.reminder
             or type(intent.get("version")) is not int
             or intent["version"] != 1
             or any(type(intent.get(name)) is not int for name in ("event_revision", "assignment_revision"))
             or (event.instance_id, event.work_id, event.revision, event.assignment_revision, event.action)
             != (self.link.agent_ref, work.id, intent["event_revision"], intent["assignment_revision"], ("human_response" if self.answer else "attempt_settled" if self.stop else "derived" if self.proposal else COMMAND_KEYS[key]))
             or (event.actor_kind, event.actor_id) == ("human", self.link.owner_user_id)
+            and not self.reminder
             or self.stop is None
             and self.proposal is None
             and event.actor_kind != "human"
@@ -157,8 +164,10 @@ class WorkNewsProjection:
             or delivery.state != "sending"
             and any(getattr(delivery, field) is not None for field in ("claim_owner", "claim_id", "claimed_at"))
             or (delivery.link_id, delivery.owner_user_id, delivery.binding_generation, delivery.chat_id, delivery.instance_id, delivery.class_)
-            != (self.link.id, self.link.owner_user_id, self.link.binding_generation, self.link.chat_id, self.link.agent_ref, "reply" if self.item.payload.get("work_news_basis", {}).get("reveal") else "info")
-            or delivery.dedupe_key != "event:" + event.id + ":info"
+            != (self.link.id, self.link.owner_user_id, self.link.binding_generation, self.link.chat_id, self.link.agent_ref, "reply" if self.item.payload.get("work_news_basis", {}).get("reveal") else news_class(key))
+            or delivery.dedupe_key != ("remind:" + intent["response_id"] if self.reminder else "event:" + event.id + ":info")
+            or self.reminder
+            and delivery.silent is not True
             or (attempt.id if attempt else None) != intent.get("attempt_id")
             or (event.request.get("attempt_id") is not None or activation is not None)
             and attempt is None
@@ -168,11 +177,15 @@ class WorkNewsProjection:
             raise ProductSourceRetired()
         requester = attempt.requester_id if attempt else None
         recipients = {work.creator_id} if key in {"work.changed", "work.reopened"} else {requester, work.creator_id} if key in {"result.accepted", "work.cancelled"} else {requester}
+        if self.reminder:
+            recipients = {event.actor_id}
         if self.link.owner_user_id not in recipients:
             raise ProductSourceRetired()
         values = {"objective": work.objective, "person": person, **stop_values, **proposal_values}
         if self.answer:
             values["open_assignment"] = self.answer.open_assignment
+        if self.reminder:
+            values.update(name=instance.name, due=self.answer.due.isoformat())
         if key == "result.changes":
             values["text"] = event.request["note"]
         elif key == "decision.recorded":
