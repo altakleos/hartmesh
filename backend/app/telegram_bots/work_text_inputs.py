@@ -24,6 +24,7 @@ class WorkTextInputs:
     def __init__(self, services, callbacks):
         self.services, self.callbacks = services, callbacks
         self.cards = WorkCardText(services, callbacks, prompt_input=self._capture_prompt)
+        self.untied = callbacks.untied
         self.inbox = services.outbox.inbox
         self.prompts = Prompts(services.callbacks)
         self.captures = WorkInputCaptures(self.inbox, services.callbacks)
@@ -39,6 +40,8 @@ class WorkTextInputs:
                 return False
             if message.forward_origin is not None or message.is_automatic_forward is True or any(message.api_kwargs.get(key) is not None for key in ("forward_from", "forward_from_chat", "forward_sender_name", "forward_date")):
                 return False
+            if await self.untied.handle(channel, update, link=link, replay_only=True):
+                return True
             if await self.cards.handle(channel, update, link=link):
                 return True
             guard = self.services.commands._guard(channel, link)
@@ -71,12 +74,24 @@ class WorkTextInputs:
 
         return await await_drained(perform())
 
+    async def handle_untied(self, channel, update, *, captured_link=None):
+        link, message = deepcopy(captured_link or channel.link), update.message
+        if link.agent_kind != "instance" or message is None or type(message.text) is not str or not message.text.strip() or not channel._callback_current(link):
+            return False
+        if message.photo or message.document or message.voice or message.audio or message.video or message.media_group_id is not None:
+            return False
+        if message.forward_origin is not None or message.is_automatic_forward is True or any(message.api_kwargs.get(key) is not None for key in ("forward_from", "forward_from_chat", "forward_sender_name", "forward_date")):
+            return False
+        return await self.untied.handle(channel, update, link=link)
+
     async def resume(self, channel, origin):
         """Resume the stored route; caller copies supply only lookup identity."""
 
         async def perform():
             link = deepcopy(channel.link)
             guard = self.services.commands._guard(channel, link)
+            if await self.untied.resume(channel, link, origin, guard=guard):
+                return True
             if await self.cards.resume(channel, link, origin, guard=guard):
                 return True
             async with self.services.callbacks.writer(link, guard) as writer:

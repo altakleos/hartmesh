@@ -129,6 +129,16 @@ def validate_origin(callback, parent, basis, row):
     if parent.owner_user_id != row.owner_user_id or callback.payload.get("work_action_id") != data["act"]["id"] or callback.group_id not in {part.get("callback_group_id") for part in parent.parts}:
         raise ProductSourceRetired()
     original_input = parent.payload.get("work_request_basis", {}).get("input")
+    if callback.kind == "answer_yes" and original_input is None and mark is not None:
+        fixed = parent.payload.get("product_basis", {})
+        if (
+            fixed.get("origins") != [[mark["link_id"], mark["message_id"], mark["chat_id"]]]
+            or fixed.get("finish_route") is not False
+            or not fixed.get("parts")
+            or any(part.get("source_ref", {}).get("key") != "ask.is_this_answer" for part in fixed["parts"])
+        ):
+            raise ProductSourceRetired()
+        original_input = mark
     if not same_body(original_input, mark):
         raise ProductSourceRetired()
 

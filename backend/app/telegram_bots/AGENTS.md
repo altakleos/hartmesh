@@ -16,12 +16,19 @@ Optional `work_text_inputs.py` routes plain text for shown Work prompts and,
 through `work_card_text.py`, explicit card replies. Complete prompt previews
 accept a reply to any part. Known spent/closed/input-owned Work presentations
 retain input ownership for recovery; they cannot fall through to ordinary chat.
-`work_card_inputs.py` owns explicit replies to complete V1/V2/V3 cards: immutable
+`work_card_inputs.py` owns explicit replies to complete Work cards: immutable
 `work_input` version2 proof, consumed source group and one Respond Act. Comments
-never decide or accept. Supervisor installation and V4/closed-input controllers remain
-separate. Final writer proof binds the original input across its own writes. A card's
+never decide or accept. Supervisor installation remains separate. Confirmation-card comments preserve the
+original unsubmitted draft; closed inputs offer explicit recovery choices. Final writer proof binds the original input across its own writes. A card's
 complete presentation must have been dispatched before the input was accepted;
 a delayed host ACK does not invalidate an explicit reply.
+`work_untied_inputs.py` asks before saving unquoted text after the last acknowledged
+Work question, after ordinary clarification routing. Its durable `work_answer`
+route becomes version3 Work input only on the actual Yes callback; No owns one
+ordinary callback publication. Replays reconcile receipts without resubmission.
+`work_untied_delivery.py` joins current claim/input/source/choice facts to final
+account and grant checks at the SDK fence. Keep JSON types and the original input
+snapshot intact across awaited admission; all public operations drain cancellation.
 `work_retained_drafts.py` settles a retained review note on Edit/Discard and a typed
 decision on Back/Add note; it creates no Work action. Final input/action/source
 checks include the transition's own settlement. Editing opens a separate prompt
