@@ -217,8 +217,14 @@ original protected receipt, every member edge, current full source and the new
 pending group. Controls retain their original age. SDK edits drain at shutdown;
 ACKs must identify the actual edit target. Retention follows the view to its
 original batch and members, and callback sweeping retains the consumed Show as
-long as its view exists. A missing edit target is held for source-aware repair;
-item previews and repair are separate pending work. No startup installation yet.
+long as its view exists. `work_digest_view_recovery.py` repairs a missing edit
+target with one new protected card and refreshes mutable locale/source displays
+before sending. Complete unacknowledged history stays attached; a replacement
+cannot erase or replay an acknowledged prefix. Fresh groups retain the original
+age. Current source, complete groups and exact claims share the final provider
+snapshot before and after mutation. Explicit repair reconciles claim-free held
+failures or retired previews; it never takes an active claim. Item previews and
+startup installation remain pending.
 
 `work_digest_delivery.py` freezes one bounded navigation card and its complete
 pending keyboard. The adapter requires this owner for digest delivery; raw class
