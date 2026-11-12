@@ -241,7 +241,8 @@ async def test_policy_upgrade_preserves_frozen_news_recipe_while_retiring_send(w
     assert not [call for call in e.channel.bot.request.calls if call.endpoint == "sendMessage"]
     async with e.db.sessions() as reader:
         row = await reader.get(TelegramOutboxRow, identity)
-        assert row.payload["work_news_basis"]["source"]["protected"] is False
+        assert row.payload["work_news_basis"]["history"][-1]["basis"]["source"]["protected"] is False
+        assert row.payload["work_news_basis"]["source"]["protected"] is True
         assert row.parts[0]["protect_content"] is False
 
 

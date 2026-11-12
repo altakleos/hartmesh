@@ -1,6 +1,7 @@
 """Dormant source-owned colleague news plans and final SDK admission."""
 
 import asyncio
+from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -38,15 +39,17 @@ def recipes(source, basis, identity, link):
     return parts, keyboard
 
 
-def frozen_news(captured, *, acknowledged=False):
+def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
     try:
         item = captured.item
         basis = item.payload["work_news_basis"]
         if (
             type(basis) is not dict
-            or set(basis) != {"version", "source", "locale", "concealed", "public_base_url", "parts", "keyboard"} | ({"reveal", "cleanup_id", "origin"} if basis.get("version") == 2 else set())
+            or set(basis)
+            != {"version", "source", "locale", "concealed", "public_base_url", "parts", "keyboard"}
+            | ({"reveal", "cleanup_id", "origin"} if basis.get("version") == 2 else {"reveal", "cleanup_id", "history", "teaser_version", "edit_target"} if basis.get("version") == 3 else set())
             or type(basis["version"]) is not int
-            or basis["version"] not in {1, 2}
+            or basis["version"] not in {1, 2, 3}
         ):
             raise ValueError()
         source = WorkNewsRead(**basis["source"])
@@ -54,21 +57,57 @@ def frozen_news(captured, *, acknowledged=False):
             raise ValueError()
         if any(type(value) is not str or len(value) != 64 or any(char not in "0123456789abcdef" for char in value) for value in (source.signature, source.event_signature)):
             raise ValueError()
-        version = basis["version"] - 1
+        version = item.payload["presentation_version"]
+        reveal = basis.get("reveal")
         if (
             type(item.payload["presentation_version"]) is not int
-            or item.payload["presentation_version"] != version
-            or item.class_ != ("reply" if version else "info")
+            or version < 0
+            or basis["version"] < 3
+            and version != basis["version"] - 1
+            or basis["version"] == 3
+            and version < 1
+            or item.class_ != ("reply" if reveal else "info")
             or type(source.protected) is not bool
             or type(basis["concealed"]) is not bool
-            or basis["concealed"] != (source.protected and not version)
+            or basis["concealed"] != (source.protected and reveal is None)
         ):
             raise ValueError()
         historical = [part for part in item.parts if part["presentation_version"] < version]
         parts = [part for part in item.parts if part["presentation_version"] == version]
         if len(parts) + len(historical) != len(item.parts):
             raise ValueError()
-        if version:
+        if basis["version"] == 3:
+            archive = basis["history"]
+            if type(archive) is not list or (_history is not None and archive) or (_history is None and len(archive) != version):
+                raise ValueError()
+            qualified = {} if _history is None else _history
+            for index, previous in enumerate(archive):
+                if type(previous) is not dict or set(previous) != {"basis", "parts", "class", "presentation_version"} or type(previous["presentation_version"]) is not int or previous["presentation_version"] != index:
+                    raise ValueError()
+                prefix = [part for part in historical if part["presentation_version"] < index]
+                old = replace(
+                    item,
+                    class_=previous["class"],
+                    parts=[*prefix, *previous["parts"]],
+                    payload={**item.payload, "presentation_version": index, "work_news_basis": previous["basis"], "product_keyboard_basis": previous["basis"]["keyboard"]},
+                )
+                _prior, prior_source, _recipe = frozen_news(SimpleNamespace(link=captured.link, item=old, part=None), _history=qualified)
+                retired = deepcopy(previous["parts"])
+                for part in retired:
+                    if part["state"] in {"pending", "sending"}:
+                        part["state"] = "retired"
+                actual = [part for part in historical if part["presentation_version"] == index]
+                if not same_body(retired, actual) or prior_source.event_signature != source.event_signature or prior_source.work_id != source.work_id:
+                    raise ValueError()
+                qualified[index] = previous["basis"]
+            if reveal is not None:
+                if type(reveal) is not str or len(reveal) != 32 or any(char not in "0123456789abcdef" for char in reveal) or type(basis["teaser_version"]) is not int or not 0 <= basis["teaser_version"] < version:
+                    raise ValueError()
+                if not qualified[basis["teaser_version"]]["concealed"]:
+                    raise ValueError()
+            elif basis["teaser_version"] is not None or basis["edit_target"] is not None:
+                raise ValueError()
+        elif version:
             if type(basis["reveal"]) is not str or len(basis["reveal"]) != 32 or any(char not in "0123456789abcdef" for char in basis["reveal"]) or len(historical) != 1:
                 raise ValueError()
             origin = basis["origin"]
@@ -81,8 +120,17 @@ def frozen_news(captured, *, acknowledged=False):
             raise ValueError()
         if version:
             cleanup = basis["cleanup_id"]
-            if len(expected) == 1 and cleanup is not None or len(expected) > 1 and (type(cleanup) is not str or len(cleanup) != 32 or any(char not in "0123456789abcdef" for char in cleanup)):
+            if cleanup is not None and (type(cleanup) is not str or len(cleanup) != 32 or any(char not in "0123456789abcdef" for char in cleanup)):
                 raise ValueError()
+            if basis["version"] == 2 and ((len(expected) == 1) != (cleanup is None)):
+                raise ValueError()
+            if basis["version"] == 3 and reveal is not None and ((basis["edit_target"] is None) == (cleanup is None)):
+                raise ValueError()
+        teaser_version = basis.get("teaser_version", 0)
+        teasers = [part for part in historical if part["presentation_version"] == teaser_version]
+        edit = version and (basis["version"] == 2 and len(expected) == 1 or basis.get("edit_target") is not None)
+        if edit and (len(teasers) != 1 or teasers[0]["state"] != "sent" or basis["version"] == 3 and basis["edit_target"] != teasers[0]["part_id"]):
+            raise ValueError()
         metadata = {
             "part_id",
             "ordinal",
@@ -106,16 +154,10 @@ def frozen_news(captured, *, acknowledged=False):
             ids.add(identity)
             body = {key: value for key, value in part.items() if key not in metadata}
             if part["kind"] == "edit":
-                if (
-                    not version
-                    or len(expected) != 1
-                    or type(part.get("target_message_id")) is not int
-                    or part["target_message_id"] != historical[0]["message_ids"][0]
-                    or part.get("target_protect_content") is not historical[0]["protect_content"]
-                ):
+                if not edit or len(expected) != 1 or type(part.get("target_message_id")) is not int or part["target_message_id"] != teasers[0]["message_ids"][0] or part.get("target_protect_content") is not teasers[0]["protect_content"]:
                     raise ValueError()
                 body["kind"] = "text"
-            elif "target_message_id" in part or "target_protect_content" in part or version and len(expected) == 1:
+            elif "target_message_id" in part or "target_protect_content" in part or edit:
                 raise ValueError()
             if type(part["ordinal"]) is not int or part["ordinal"] != ordinal or type(part["presentation_version"]) is not int or part["presentation_version"] != version or not same_body(body, recipe):
                 raise ValueError()
@@ -138,7 +180,7 @@ def frozen_news(captured, *, acknowledged=False):
             elif receipts or "sent_at" in part or acknowledged:
                 raise ValueError()
             if captured.part is not None and same_body(part, captured.part):
-                if unfinished or part["state"] != ("sent" if acknowledged else "sending"):
+                if unfinished or part["state"] != ("sent" if acknowledged else "pending" if pending else "sending"):
                     raise ValueError()
                 selected = recipe
             unfinished |= part["state"] != "sent"
@@ -150,14 +192,15 @@ def frozen_news(captured, *, acknowledged=False):
 
 
 def require_teaser(callback, parent):
-    historical = [part for part in parent.parts if part["presentation_version"] == 0]
+    version = parent.payload["presentation_version"] if parent.payload["work_news_basis"]["concealed"] else parent.payload["work_news_basis"].get("teaser_version", 0)
+    historical = [part for part in parent.parts if part["presentation_version"] == version]
     if (
         callback is None
         or len(historical) != 1
         or historical[0]["state"] != "sent"
         or (callback.group_id, callback.message_id, callback.message_thread_id) != (historical[0].get("callback_group_id"), historical[0]["message_ids"][0], parent.message_thread_id)
         or type(callback.payload.get("presentation_version")) is not int
-        or callback.payload["presentation_version"] != 0
+        or callback.payload["presentation_version"] != version
         or callback.payload.get("presentation_pending") is not False
     ):
         raise ProductSourceRetired()
@@ -219,9 +262,16 @@ class WorkNewsSources:
 
     async def read_part(self, captured):
         async def read():
-            _basis, source, part = frozen_news(captured)
-            if await self.reader.read(captured.link, captured.item) != source:
+            basis, source, part = frozen_news(captured)
+            current = await self.reader.read(captured.link, captured.item)
+            if current.event_signature != source.event_signature:
                 raise ProductSourceRetired()
+            settings = await self.settings.get(captured.link.owner_user_id)
+            if settings is None:
+                raise ProductSourceRetired()
+            if not same_body(asdict(current), asdict(source)) or settings.locale != basis["locale"] or NavigationOrigin().base != basis["public_base_url"]:
+                await self.recovery.refresh(captured)
+                raise DeliveryClaimRetired()
             return part["html"], part["visible_text"]
 
         return await await_drained(read())
@@ -233,7 +283,15 @@ class WorkNewsSources:
             if settings is None:
                 raise ProductSourceRetired()
             zone = await asyncio.to_thread(ZoneInfo, settings.timezone)
-            await current_attention(self.reader, captured.link, projection=_SendProjection(self, captured, source, basis, settings, zone, now, silent))
+            try:
+                await current_attention(self.reader, captured.link, projection=_SendProjection(self, captured, source, basis, settings, zone, now, silent))
+            except ProductSourceRetired:
+                # The failed final fence has admitted no SDK call. Recheck
+                # authority before distinguishing display drift from retirement.
+                current = await self.reader.read(captured.link, captured.item)
+                if current.event_signature == source.event_signature and (not same_body(asdict(current), asdict(source)) or NavigationOrigin().base != basis["public_base_url"]):
+                    raise DeliveryRetry(timedelta(seconds=1)) from None
+                raise
 
         return await await_drained(read())
 
@@ -266,8 +324,10 @@ class _SendProjection(WorkNewsProjection):
             raise DeliveryClaimRetired()
         self.origin.check(self.basis)
         actual = _snapshot(rows[0][self.send_column])
-        if actual.locale != self.basis["locale"] or actual.timezone != self.settings.timezone or preference_skip(self.item, actual, self.now):
+        if preference_skip(self.item, actual, self.now):
             raise ProductSourceRetired()
+        if actual.locale != self.basis["locale"] or actual.timezone != self.settings.timezone:
+            raise DeliveryRetry(timedelta(seconds=1))
         local = self.now.astimezone(self.zone)
         minute, start, end = local.hour * 60 + local.minute, actual.quiet_start_minute, actual.quiet_end_minute
         quiet = actual.quiet_enabled and (minute >= start or minute < end if start > end else start <= minute < end)

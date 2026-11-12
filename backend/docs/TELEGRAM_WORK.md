@@ -804,5 +804,13 @@ final provider snapshot. Protected Show consumes its acknowledged teaser;
 cleanup before sending a multipart notice. Original teaser and consumed Show
 proofs remain qualified, and cleanup/Show retention follows the parent.
 A missing anchor/topic is held as `work-news-refresh-required`; generic repair
-cannot rewrite the source-owned plan. Source-aware refresh/repair and the
-remaining news kinds are still pending. These owners remain uninstalled.
+cannot rewrite the source-owned plan. Source-aware refresh replaces locale,
+protection and URL presentation under the exact claim, preserving the immutable
+event and every historical ACK. V3 keeps a flat per-version list of qualified capsules and
+parts; only unfinished parts retire, and repeated refreshes retain bounded JSON depth.
+Recoverable presentation drift at final SDK admission defers delivery; immutable
+event changes and withdrawn authority still retire it. Explicit repair accepts known General
+failures after all claim fields clear. It never moves a topic or repeats a Work
+operation. Refreshed teasers still require their own actual acknowledged Show;
+a missing edit target is cleared before a complete replacement message. The
+remaining news kinds and installation are still pending.
