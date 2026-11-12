@@ -194,6 +194,24 @@ rosters, result identities and optional route permissions. Digest titles do not
 read file bytes or grant action authority. Delivery and item controllers still
 own whole-batch claims, acknowledgements and complete preview admission.
 
+Digest ACKs must match the detached manifest admitted before the SDK await.
+A conflicting receipt retains the original manifest, parts and returned message
+IDs for reconciliation; it cannot settle a different membership or release the
+original reservations. Retention keeps this evidence and its original members.
+Parent silence is derived from the current member choices, not independently
+trusted from the batch row.
+
+`work_digest_delivery.py` freezes one bounded navigation card and its complete
+pending keyboard. The adapter requires this owner for digest delivery; raw class
+labels and templates do not supply source authority. The final compound read
+rechecks every member plus the parent's claim, callback group, preferences,
+quiet hours and reminder due time. Changed source or presentation choices retire
+the pre-ACK group and release its original members explicitly. Transient retries
+keep membership reserved; typed whole-card ACKs settle members together. An
+admitted digest SDK call drains during shutdown, preserving ambiguous receipts
+and reservations. These plans and sources remain uninstalled; Show/item handling
+and startup integration are still required.
+
 `attention.py` exhausts stable Work/request pages before ranking or applying
 presentation caps. `attention_authority.py` prepares route decisions, then joins
 current account/role limits/binding/connection/grants/policy in a final snapshot.

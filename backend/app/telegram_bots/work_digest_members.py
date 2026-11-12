@@ -87,7 +87,6 @@ class DigestMembers:
 
     async def _routing(self, link, item, locale, claim):
         from app.telegram_bots.work_result_navigation import NavigationOrigin
-        from app.telegram_bots.work_routing import present_routing
         from app.telegram_bots.work_routing_recovery import _RoutingRecoveryProjection, _RoutingSource
 
         if self.routing is None or item.class_ != "question":
@@ -99,8 +98,7 @@ class DigestMembers:
         source = _RoutingSource(value, link, NavigationOrigin().base)
         require_request_origin(previous, source)
         require_event_source(item, source)
-        view = present_routing(value, locale=locale, link=link, public_base_url=source.public_base_url)
-        entry = DigestEntry(item.id, item.class_, "news", first_line=view.parts[0]["visible_text"].splitlines()[0])
+        entry = DigestEntry(item.id, item.class_, {"information": "question", "decision": "decision", "review": "review"}[source.request["purpose"]], objective=source.work["objective"])
         base = _RoutingRecoveryProjection(self.routing.links.session_factory, source)
         return DigestMember(item, entry, source, source.protected, _QuestionProjection(self.routing, link, item, source, claim, base=base))
 

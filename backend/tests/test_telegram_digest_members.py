@@ -124,7 +124,7 @@ async def test_digest_manager_question_qualifies_routing_roster(work_delivery, m
     async with e.db.sessions() as reader:
         item = _item(await reader.get(TelegramOutboxRow, identity))
     member = await DigestMembers(requests=e.reader, routing=plans.reader).read(e.link, item, locale="en")
-    assert member.entry.kind == "news" and member.entry.first_line
+    assert member.entry.kind == "question" and member.entry.objective == "Investigate evidence"
     admission = await prepare_attention(e.reader, e.link)
     await admission(projection=DigestProjection(e.link, [member.projection]))
 

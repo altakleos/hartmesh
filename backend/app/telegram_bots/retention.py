@@ -173,6 +173,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             delivery.payload["status_pin_steps"],
             delivery.payload["work_status_pin"]["presentation_id"].as_string(),
             delivery.payload["status_pin_tail"].as_string(),
+            delivery.payload["digest_dispatch_conflict"],
         ).where(
             or_(
                 delivery.class_ == "digest",
@@ -186,7 +187,31 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
         )
     )
     graph = {}
-    for identity, kind, state, members, reservation, cleanup, origin, outcome_origin, refresh_origin, question_origin, question_anchor, status_origin, status_anchor, pin_root, pin_steps, pin_presentation, pin_tail in records:
+    for (
+        identity,
+        kind,
+        state,
+        members,
+        reservation,
+        cleanup,
+        origin,
+        outcome_origin,
+        refresh_origin,
+        question_origin,
+        question_anchor,
+        status_origin,
+        status_anchor,
+        pin_root,
+        pin_steps,
+        pin_presentation,
+        pin_tail,
+        digest_conflict,
+    ) in records:
+        if digest_conflict is not None:
+            pinned.add(identity)
+            original = digest_conflict.get("payload", {}).get("member_ids") if isinstance(digest_conflict, dict) and isinstance(digest_conflict.get("payload"), dict) else None
+            if isinstance(original, list):
+                graph.setdefault(identity, set()).update(_strings(*original))
         if state in {"pending", "sending"}:
             pinned.add(identity)
             pinned |= _strings(reservation)

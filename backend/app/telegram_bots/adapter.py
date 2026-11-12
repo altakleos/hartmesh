@@ -1909,7 +1909,12 @@ class TelegramBotChannel(TelegramChannel):
         source_key = part.get("source_ref", {}).get("key", "")
         work_part = None
         work_sources = getattr(self._services, "work_request_sources", None)
-        if "work_status_update" in saved.item.payload:
+        if saved.item.class_ == "digest" or "work_digest_basis" in saved.item.payload:
+            work_sources = getattr(self._services, "work_digest_sources", None)
+            if work_sources is None or any(key in saved.item.payload for key in ("work_status_update", "work_question_update", "work_news_basis", "result_notice_basis", "work_request_basis", "work_outcome_basis")):
+                raise PermanentDeliveryError("unsupported-digest-source")
+            work_part = await work_sources.read_part(saved)
+        elif "work_status_update" in saved.item.payload:
             work_sources = getattr(self._services, "work_status_update_sources", None)
             if work_sources is None or any(key in saved.item.payload for key in ("work_question_update", "work_news_basis", "result_notice_basis", "work_request_basis", "work_outcome_basis")):
                 raise PermanentDeliveryError("unsupported-work-status-update")
@@ -2284,7 +2289,7 @@ class TelegramBotChannel(TelegramChannel):
                 else:
                     message = await self.bot.edit_message_text(chat_id=context.chat_id, message_id=target, text=text, parse_mode=None if part.get("plain_fallback") else ParseMode.HTML, reply_markup=markup, rate_limit_args=preview_fence)
             else:
-                message = await self.bot.send_message(
+                request = self.bot.send_message(
                     chat_id=context.chat_id,
                     text=text,
                     parse_mode=None if part.get("plain_fallback") else ParseMode.HTML,
@@ -2295,6 +2300,7 @@ class TelegramBotChannel(TelegramChannel):
                     reply_markup=markup,
                     rate_limit_args=preview_fence,
                 )
+                message = await await_drained(request) if "work_digest_basis" in current.item.payload else await request
         except (LongRetryAfter, RetryAfter) as error:
             self._failure()
             seconds = error.seconds if isinstance(error, LongRetryAfter) else error._retry_after.total_seconds()

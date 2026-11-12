@@ -796,8 +796,12 @@ class CallbackRepository:
                 group = part.get("callback_group_id")
                 rows = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group).order_by(TelegramCallbackRow.id)))
                 try:
-                    work_preview = "work_request_basis" in parent.payload or "work_outcome_basis" in parent.payload or "result_notice_basis" in parent.payload or "work_news_basis" in parent.payload
-                    if "work_news_basis" in parent.payload:
+                    work_preview = bool({"work_digest_basis", "work_request_basis", "work_outcome_basis", "result_notice_basis", "work_news_basis"}.intersection(parent.payload))
+                    if "work_digest_basis" in parent.payload:
+                        from app.telegram_bots.work_digest_delivery import frozen_digest
+
+                        frozen_digest(captured)
+                    elif "work_news_basis" in parent.payload:
                         from app.telegram_bots.work_news_delivery import frozen_news
 
                         frozen_news(captured)

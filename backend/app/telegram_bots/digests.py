@@ -37,6 +37,8 @@ def validate(row):
     data = row.payload
     if type(data) is not dict:
         raise ValueError("invalid-digest-source")
+    if "digest_dispatch_conflict" in data:
+        raise ValueError("digest-reconciliation-required")
     identities, kinds, category = data.get("member_ids"), data.get("member_classes"), data.get("category")
     if (
         row.class_ != "digest"
@@ -260,6 +262,8 @@ async def _retire_controls(writer, parent, groups, now):
 
 
 async def abandon_members(writer, parent, *, now):
+    if "digest_dispatch_conflict" in parent.payload:
+        raise ValueError("digest-reconciliation-required")
     if parent.state == "sent" or any(type(part) is dict and (part.get("state") == "sent" or part.get("sent_at")) for part in parent.parts):
         raise ValueError("digest-already-acknowledged")
     await _retire_controls(writer, parent, {part.get("callback_group_id") for part in parent.parts if type(part) is dict} - {None}, now)
