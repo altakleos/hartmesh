@@ -1899,7 +1899,12 @@ class TelegramBotChannel(TelegramChannel):
         source_key = part.get("source_ref", {}).get("key", "")
         work_part = None
         work_sources = getattr(self._services, "work_request_sources", None)
-        if "work_outcome_basis" in saved.item.payload:
+        if "result_notice_basis" in saved.item.payload:
+            work_sources = getattr(self._services, "result_notice_sources", None)
+            if work_sources is None or "work_request_basis" in saved.item.payload or "work_outcome_basis" in saved.item.payload:
+                raise PermanentDeliveryError("unsupported-result-notice-source")
+            work_part = await work_sources.read_part(saved)
+        elif "work_outcome_basis" in saved.item.payload:
             work_sources = getattr(self._services, "work_outcome_sources", None)
             if work_sources is None or "work_request_basis" in saved.item.payload:
                 raise PermanentDeliveryError("unsupported-work-outcome-source")
@@ -1920,7 +1925,13 @@ class TelegramBotChannel(TelegramChannel):
             if work_sources is None:
                 raise PermanentDeliveryError("unsupported-work-request-source")
             work_part = await work_sources.read_part(saved)
-        elif source_key.startswith(("ask.", "review.", "decide.", "work.request.", "request.route", "request.unrouted")) or source_key in {"concealed.question", "concealed.decision", "concealed.review", "voice.confirm_answer"}:
+        elif source_key.startswith(("ask.", "review.", "decide.", "work.request.", "request.route", "request.unrouted", "result.")) or source_key in {
+            "concealed.question",
+            "concealed.decision",
+            "concealed.review",
+            "concealed.result",
+            "voice.confirm_answer",
+        }:
             # This source family remains dormant regardless of a caller's
             # class label. A reply classification is not source authority.
             raise PermanentDeliveryError("unsupported-work-request-source")
@@ -1981,7 +1992,7 @@ class TelegramBotChannel(TelegramChannel):
             from app.telegram_bots.outbound import send_file_part
 
             return await send_file_part(self, saved, capture)
-        if part["kind"] in {"document", "photo", "album"} and "result_files" in saved.item.payload.get("work_request_basis", {}):
+        if part["kind"] in {"document", "photo", "album"} and ("result_notice_basis" in saved.item.payload or "result_files" in saved.item.payload.get("work_request_basis", {})):
             from app.telegram_bots.work_result_upload import send_result_file
 
             return await send_result_file(self, saved, capture)

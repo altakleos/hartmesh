@@ -35,12 +35,21 @@ async def change_result_part(outbox, captured, *, hashes=None, templates=None, r
     return await await_drained(_change_result_part(outbox, captured, hashes=hashes, templates=templates, reason=reason))
 
 
+def frozen_result(captured, **kwargs):
+    if "result_notice_basis" in captured.item.payload:
+        from app.telegram_bots.result_notice_delivery import frozen_notice
+
+        return frozen_notice(captured, **kwargs)
+    from app.telegram_bots.work_request_source import frozen
+
+    return frozen(captured, **kwargs)
+
+
 async def _change_result_part(outbox, captured, *, hashes=None, templates=None, reason=None):
     from copy import deepcopy
     from types import SimpleNamespace
 
     from app.telegram_bots.producer import DeliveryClaimRetired, _item
-    from app.telegram_bots.work_request_source import frozen
     from app.telegram_bots.work_result_history import qualified_history
     from app.telegram_bots.work_result_ledger import qualify_result_parts, replace_media
     from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
@@ -50,7 +59,7 @@ async def _change_result_part(outbox, captured, *, hashes=None, templates=None, 
         current = outbox._sending(binding, row, link_id=captured.link.id, part_id=captured.part["part_id"], claim_owner=captured.claim_owner, claim_id=captured.claim_id, token_revision=captured.token_revision)
         if current != captured:
             raise DeliveryClaimRetired()
-        basis, source, _part = frozen(current)
+        basis, source, _part = frozen_result(current)
         if "result_files" not in basis:
             raise DeliveryClaimRetired()
         if hashes is not None:
@@ -63,7 +72,7 @@ async def _change_result_part(outbox, captured, *, hashes=None, templates=None, 
                 return False
             selected["result_file_hashes"] = {**previous, **hashes}
             row.parts = parts
-            frozen(SimpleNamespace(link=current.link, item=_item(row), part=selected))
+            frozen_result(SimpleNamespace(link=current.link, item=_item(row), part=selected))
         else:
             replace_media(row, current.part["part_id"], templates, reason=reason)
             carried, hashes = qualified_history(_item(row), source)

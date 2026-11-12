@@ -19,7 +19,12 @@ _HIDDEN = {"kind": "unavailable", "current_contents": "not_checked"}
 def _recipes(proof):
     files = result_files(proof["work"], locale=proof["locale"])
     return [
-        {**part, "source_ref": {"key": "work.request.presentation", "values": {"request_id": proof["request_id"], "part": index}}}
+        {
+            **part,
+            "source_ref": {"key": "result.presentation", "values": {"work_id": proof["work"]["id"], "part": index}}
+            if proof["version"] == 2
+            else {"key": "work.request.presentation", "values": {"request_id": proof["request_id"], "part": index}},
+        }
         for index, part in enumerate(result_media(files, protected=proof["protected"], **result_options(proof["options"])))
     ]
 
@@ -32,9 +37,9 @@ def archive_media(item, source, *, locale, options, earlier=None):
     identities = {part["part_id"] for part in parts}
     ledger["roots"] = [identity for identity in ledger["roots"] if identity in identities]
     proof = {
-        "version": 1,
+        "version": 2 if "result_notice_basis" in item.payload else 1,
         "presentation_version": version,
-        "request_id": source.request["id"],
+        "request_id": item.request_id if "result_notice_basis" in item.payload else source.request["id"],
         "work": {key: deepcopy(source.work[key]) for key in _WORK},
         "locale": locale,
         "protected": source.protected,
@@ -52,7 +57,13 @@ def read_media_history(item, proof, source, *, earlier=None):
     try:
         if type(proof) is not dict or set(proof) != {"version", "presentation_version", "request_id", "work", "locale", "protected", "options", "ledger", "parts"} | ({"navigation"} if "navigation" in proof else set()):
             raise ValueError()
-        if type(proof["version"]) is not int or proof["version"] != 1 or type(proof["protected"]) is not bool or proof["request_id"] != source.request["id"] or set(proof["work"]) != _WORK:
+        if (
+            type(proof["version"]) is not int
+            or proof["version"] != (2 if "result_notice_basis" in item.payload else 1)
+            or type(proof["protected"]) is not bool
+            or proof["request_id"] != (item.request_id if "result_notice_basis" in item.payload else source.request["id"])
+            or set(proof["work"]) != _WORK
+        ):
             raise ValueError()
         old, current = proof["work"], source.work
         qualify_identity(item.payload.get("work_result_identity"), SimpleNamespace(work=old))

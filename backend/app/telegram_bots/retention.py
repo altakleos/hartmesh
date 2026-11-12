@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import String, and_, cast, delete, or_, select, text
+from sqlalchemy import String, and_, cast, delete, func, or_, select, text
 
 from app.telegram_bots.inbox import CALLBACK_PUBLICATION_KEY, callback_publication_pending
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkEventRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow, TelegramPendingFileRow
@@ -108,7 +108,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             delivery.state,
             delivery.payload["member_ids"],
             delivery.payload["digest_id"].as_string(),
-            delivery.payload["work_request_basis"]["cleanup_id"].as_string(),
+            func.coalesce(delivery.payload["result_notice_basis"]["cleanup_id"].as_string(), delivery.payload["work_request_basis"]["cleanup_id"].as_string()),
             delivery.payload["work_request_basis"]["origin"]["anchor_outbox_id"].as_string(),
             delivery.payload["work_outcome_basis"]["origin"]["anchor_outbox_id"].as_string(),
             delivery.payload["work_outcome_basis"]["refresh"]["anchor_outbox_id"].as_string(),

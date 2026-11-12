@@ -24,7 +24,13 @@ from deerflow.spaces.contract import Permission, SpaceDenied
 async def work_exports(work_delivery, tmp_path, monkeypatch, request):
     e = await prepare_file_home(work_delivery, tmp_path, monkeypatch)
     mode = getattr(request, "param", None)
-    if mode in {"review_event", "review_empty_event"}:
+    album = mode == "done_album_event"
+    if album:
+        mode = "done_event"
+    suggestion = mode == "done_suggestion_event"
+    if suggestion:
+        mode = "done_event"
+    if mode in {"review_event", "review_empty_event", "done_event", "waiting_event", "unrouted_event"}:
         from app.telegram_bots.work_event_cursors import WorkEventCursors
         from app.telegram_bots.work_event_intents import WorkEventIntents
         from app.telegram_bots.work_event_reader import WorkEventReader
@@ -33,6 +39,15 @@ async def work_exports(work_delivery, tmp_path, monkeypatch, request):
         projection = WorkEventIntents(links=e.db.links, human=e.human)
         e.event_worker = WorkEventReader(links=e.db.links, project=projection.project)
         mode = mode.removesuffix("_event")
+    if mode == "done":
+        from deerflow.agent_instances.contract import DefinitionSnapshot
+        from deerflow.persistence.agent_instances.model import AgentDefinitionRevisionRow, AgentInstanceRow
+
+        snapshot = DefinitionSnapshot.capture(owner_id=e.live.id, config={"name": "analyst", "work_policy": {"enabled": True, "review_required": False}}, soul="Review documentation.")
+        async with e.db.sessions.begin() as writer:
+            writer.add(AgentDefinitionRevisionRow(revision=snapshot.revision, owner_id=snapshot.owner_id, config=snapshot.config, soul=snapshot.soul))
+            await writer.flush()
+            (await writer.get(AgentInstanceRow, e.link.agent_ref)).definition_revision = snapshot.revision
     e.http_app.state.storage_spaces = e.files
     e.instance = await e.file_service.get(actor=e.actor, instance_id=e.link.agent_ref)
     e.home = await e.files.registry.get(actor=e.instance.principal, space_id=e.home.id)
@@ -40,15 +55,29 @@ async def work_exports(work_delivery, tmp_path, monkeypatch, request):
     await e.files.write(actor=e.instance.principal, space_id=e.home.id, expected_generation=e.home.generation, operation_id=uuid4().hex, path="outputs/result.txt", content=b"verified result", create=True)
     async with e.db.sessions.begin() as writer:
         writer.add(SpaceGrantRow(space_id=e.home.id, principal_kind="human", subject_id=e.actor.subject_id, permissions=int(Permission.READ | Permission.EXPORT)))
+    if mode == "waiting":
+        from app.gateway.auth.models import User
+        from deerflow.persistence.agent_instances.model import AgentInstanceRow
+
+        e.reviewer = await e.live.users.create_user(User(email="result-reviewer@example.com"))
+        async with e.db.sessions.begin() as writer:
+            writer.add(AgentInstanceGrantRow(instance_id=e.instance.id, user_id=str(e.reviewer.id), permissions=7))
+            writer.add(SpaceGrantRow(space_id=e.home.id, principal_kind="human", subject_id=str(e.reviewer.id), permissions=int(Permission.READ)))
+            (await writer.get(AgentInstanceRow, e.instance.id)).supervisor_id = str(e.reviewer.id)
+    if mode == "unrouted":
+        from deerflow.persistence.agent_instances.model import AgentInstanceRow
+
+        async with e.db.sessions.begin() as writer:
+            (await writer.get(AgentInstanceRow, e.instance.id)).supervisor_id = "missing-reviewer"
     e.source_space = e.home
-    if mode in {"external", "review_album"}:
+    if album or mode in {"external", "review_album"}:
         from deerflow.spaces.contract import Custody, MutationMode
 
         e.source_space = await e.files.create(actor=e.actor, name="Shared evidence", custody=Custody.personal(e.actor), mode=MutationMode.NATIVE)
         await e.files.mkdir(actor=e.actor, space_id=e.source_space.id, expected_generation=e.source_space.generation, operation_id=uuid4().hex, path="outputs")
         await e.files.write(actor=e.actor, space_id=e.source_space.id, expected_generation=e.source_space.generation, operation_id=uuid4().hex, path="outputs/result.txt", content=b"external result", create=True)
     sources = [WorkSource(space_id=e.source_space.id, path="outputs/result.txt")]
-    if mode == "review_album":
+    if album or mode == "review_album":
         from test_telegram_output_planning import png_header
 
         sources = []
@@ -57,7 +86,7 @@ async def work_exports(work_delivery, tmp_path, monkeypatch, request):
             sources.append(WorkSource(space_id=space.id, path="outputs/picture.png"))
     if mode == "review_empty":
         sources = []
-    review = {"review_required": True} if mode in {"review", "review_album", "review_empty"} else {}
+    review = {"review_required": True} if mode in {"review", "review_album", "review_empty", "waiting", "unrouted"} else {"review_required": False} if mode == "done" else {}
     record = await e.human.work.delegate(actor=e.actor, instance_id=e.instance.id, request=DelegateWork(operation_id=uuid4().hex, objective="Report the findings", success_criteria="Provide evidence", **review))
     conversations = e.http_app.state.agent_conversations
     chat = await conversations.create(actor=e.actor, instance_id=e.instance.id, creation_id=uuid4().hex)
@@ -68,6 +97,9 @@ async def work_exports(work_delivery, tmp_path, monkeypatch, request):
     run.user_id = e.actor.subject_id
     await scope.bind(execution, run, execution.thread_incarnation)
     current = (await scope.context(execution))["work"]
+    if suggestion:
+        await scope.report(execution, ReportWork(operation_id=uuid4().hex, expected_revision=current["revision"], action="suggest", statement="Review the older evidence next."))
+        current = (await scope.context(execution))["work"]
     await scope.report(execution, ReportWork(operation_id=uuid4().hex, expected_revision=current["revision"], action="outcome", statement="The findings are verified.", sources=sources))
     await scope.finish(execution, run, settled=True)
     e.result = await e.human.work.get(actor=e.actor, instance_id=e.instance.id, work_id=record["id"])

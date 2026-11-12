@@ -53,8 +53,44 @@ provider await; coherent stored URL substitution cannot authorize another origin
 Unavailable-file warnings have no navigation; other file failures reuse durable
 URL-button/plain-address fallback. Historical warning proofs retain their own
 navigation snapshot when the current card changes.
-Non-review result notifications and supervisor installation remain
-outstanding; these initial-delivery components must remain uninstalled.
+These initial-delivery components must remain uninstalled until the remaining
+notification paths and supervisor integration are complete.
+
+`result_notice_sources.py` owns non-review `result.done` and
+`result.waiting_review` facts. Its joined provider-final read binds the exact
+settlement, outcome attempt and requester/creator eligibility to the current
+Work, reviewer, agent name, account/grants and visible Space references. The
+initial displayed outcome metadata must match the raw canonical outcome before
+sealing its opaque signature. Suggestions retain their full canonical event and
+exact recorded attempt provenance, including when the stored suggestion is from
+an earlier attempt. Redaction never substitutes the raw source identity.
+
+`result_notices.py` renders the full statement and optional suggestion, with
+files before the card and no review or activation controls. Titles use the
+existing bounded first-line rule. An unnamed reviewer uses the existing localized
+colleague label; it does not suppress an otherwise valid unrouted-review result.
+`result_notice_delivery.py` preserves the intent's delivery identity and qualifies
+its own closed basis before sharing the result-media ledger and upload leaf.
+The final SDK snapshot also binds the exact sending claim, preferences, quiet
+hours, Show controls and protection. This read-only result path needs current
+Use+Inspect and per-file READ+EXPORT; it does not require a review write ceiling.
+Generic fixed text cannot impersonate this source family.
+
+`result_notice_recovery.py` owns protected Show and source-aware refresh. It consumes the
+actual acknowledged teaser, waits for durable keyboard cleanup, then sends files
+and the complete card. Waiting-review notices retain their forced-silent flag.
+Consumed Show proofs and unfinished cleanup dependencies survive retention.
+Result preview cleanup hashes its parent/version/group identity so its
+deduplication key fits the outbox's 96-character SQL limit on both dialects.
+Locale, visible-source and policy changes rebuild the current presentation while
+preserving actual media ACKs, initial byte hashes and photo-rejection fallback.
+The originating event and raw outcome identity cannot change. Historical media
+proof version 2 binds this family's result recipes; review proofs retain version
+1 and cannot cross families. A protection upgrade requires a fresh Show before
+the remaining content, without relabeling or repeating an earlier upload.
+Explicit repair accepts only known held General failures with no claim fields;
+active/uncertain sends and retained non-General destinations stay untouched.
+These owners remain dormant pending the remaining notification integration.
 
 `work_event_intents.py` projects current recipient/grant/preferences into empty,
 content-free delivery intents in `WorkEventReader`'s pair writer. Ordinary

@@ -12,6 +12,8 @@ FIRST_KEYS: frozenset[str] = frozenset(
         "ask.info",
         "ask.decision",
         "review.ready",
+        "result.done",
+        "result.waiting_review",
         "hello.privacy",
         "agent.deleted",
         "link.conflict",

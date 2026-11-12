@@ -49,7 +49,7 @@ AGENT_LIST_KEYS = frozenset("cmd.other_chat assistants.list assistants.none assi
 
 WORK_REQUEST_KEYS = frozenset(
     (
-        "ask.info ask.decision ask.comment_line review.ready result.files_above concealed.question concealed.decision concealed.review "
+        "ask.info ask.decision ask.comment_line review.ready result.files_above result.done result.waiting_review result.suggestion concealed.result concealed.question concealed.decision concealed.review "
         "request.unrouted request.route_ask request.route_none request.routed ask.type_prompt ask.cant_prompt ask.is_this_answer "
         "decide.confirm decide.confirm_note decide.own_prompt decide.note_prompt review.accept_confirm review.changes_prompt review.changes_confirm voice.confirm_answer voice.transcript_part voice.answer_too_long ask.answer_too_long "
         "ask.saved decide.saved review.changes_recorded ask.saved_echo ask.saved_file ask.saved_next ask.saved_running ask.saved_waiting ask.cant_saved ask.cant_saved_manager decide.saved_next decide.wait decide.comment_saved "
@@ -122,7 +122,7 @@ def test_alert_texts_fit_200_characters():
 
 
 def test_first_keys_are_exact_fixed_notice_subset():
-    assert FIRST_KEYS == POLICY_KEYS | {"ask.info", "ask.decision", "review.ready"} | frozenset(
+    assert FIRST_KEYS == POLICY_KEYS | {"ask.info", "ask.decision", "review.ready", "result.done", "result.waiting_review"} | frozenset(
         {"agent.deleted", "hello.privacy", "link.conflict", "link.conflict_over.plain", "link.conflict_over.chat", "link.conflict_over.custom_agent", "link.back_online", "link.removed", "access.off", "access.back", "delivery.failed"}
     )
 
