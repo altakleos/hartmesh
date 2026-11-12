@@ -1925,11 +1925,13 @@ class TelegramBotChannel(TelegramChannel):
             if work_sources is None:
                 raise PermanentDeliveryError("unsupported-work-request-source")
             work_part = await work_sources.read_part(saved)
-        elif source_key.startswith(("ask.", "review.", "decide.", "work.request.", "request.route", "request.unrouted", "result.")) or source_key in {
+        elif source_key.startswith(("ask.", "review.", "decide.", "work.", "request.route", "request.unrouted", "request.answered", "result.", "decision.recorded", "attempt.stopped", "remind.")) or source_key in {
             "concealed.question",
             "concealed.decision",
             "concealed.review",
             "concealed.result",
+            "concealed.info",
+            "concealed.proposed",
             "voice.confirm_answer",
         }:
             # This source family remains dormant regardless of a caller's

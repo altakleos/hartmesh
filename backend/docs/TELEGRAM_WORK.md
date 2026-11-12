@@ -779,3 +779,20 @@ Reopen's source proof ties all settled members to the original request and fresh
 prompt; the collector still recognizes their retained Work ownership after any
 choice. The single-file recovery path refuses group roots. All Work controllers
 remain dormant; notification production and lifecycle installation remain pending.
+
+
+Colleague news remains dormant. `work_news.py` renders complete escaped
+statements and optional notes; its first line contains only product words and
+bounded navigation names/titles. Protected teasers contain no assignment or
+colleague details. Presentation alone grants no delivery authority: generic
+product replies cannot send these source keys.
+
+`work_news_sources.py` currently owns canonical reads for edit, cancel, reopen,
+accept, changes-requested and decide notifications. The current recipient must
+retain Use+Inspect. Final provider reads join the exact event, current Work,
+original activation/attempt, actor name and delivery, including unclaimed-row
+checks. Historical requester selection never substitutes a later activation.
+The originating event signature stays separate from mutable display facts.
+Work stores one decision statement; render it once as the decision rather than
+inventing a separate choice or duplicating it as a note. Remaining news kinds,
+source-owned materialization, Show, refresh and SDK admission are still pending.

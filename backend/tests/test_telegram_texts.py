@@ -58,9 +58,19 @@ WORK_REQUEST_KEYS = frozenset(
 )
 
 
+WORK_NEWS_KEYS = frozenset(
+    "request.answered decision.recorded decision.note result.accepted result.changes "
+    "work.cancelled work.changed work.reopened attempt.stopped attempt.stopped_changed "
+    "attempt.stopped_withdrawn work.proposed remind.ready_to_resume concealed.info concealed.proposed".split()
+)
+WORK_NEWS_FIRST_KEYS = frozenset(
+    "request.answered decision.recorded result.accepted result.changes work.cancelled work.changed work.reopened attempt.stopped attempt.stopped_changed attempt.stopped_withdrawn work.proposed remind.ready_to_resume".split()
+)
+
+
 def test_text_catalog_locales_have_equal_keys():
     assert set(catalog("en")) == set(catalog("zh-CN"))
-    assert WORK_REQUEST_KEYS | AGENT_LIST_KEYS | STAGE_ONE_KEYS | INSTANCE_FILE_KEYS | POLICY_KEYS | INSTANCE_PRESENTATION_KEYS | LIFECYCLE_KEYS | INSTANCE_FAILURE_KEYS | INSTANCE_AVAILABILITY_KEYS == {
+    assert WORK_NEWS_KEYS | WORK_REQUEST_KEYS | AGENT_LIST_KEYS | STAGE_ONE_KEYS | INSTANCE_FILE_KEYS | POLICY_KEYS | INSTANCE_PRESENTATION_KEYS | LIFECYCLE_KEYS | INSTANCE_FAILURE_KEYS | INSTANCE_AVAILABILITY_KEYS == {
         key for key in catalog("en") if not key.startswith(("label.", "menu."))
     }
     assert catalog("zh_cn") is catalog("zh-CN")
@@ -122,7 +132,7 @@ def test_alert_texts_fit_200_characters():
 
 
 def test_first_keys_are_exact_fixed_notice_subset():
-    assert FIRST_KEYS == POLICY_KEYS | {"ask.info", "ask.decision", "review.ready", "result.done", "result.waiting_review"} | frozenset(
+    assert FIRST_KEYS == WORK_NEWS_FIRST_KEYS | POLICY_KEYS | {"ask.info", "ask.decision", "review.ready", "result.done", "result.waiting_review"} | frozenset(
         {"agent.deleted", "hello.privacy", "link.conflict", "link.conflict_over.plain", "link.conflict_over.chat", "link.conflict_over.custom_agent", "link.back_online", "link.removed", "access.off", "access.back", "delivery.failed"}
     )
 

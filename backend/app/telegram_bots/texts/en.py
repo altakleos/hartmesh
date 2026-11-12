@@ -1,6 +1,21 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "request.answered": '{person} answered the question\n"{objective}"',
+    "decision.recorded": '{person} decided\n"{objective}"\nDecision: {decision}',
+    "decision.note": "Note: {note}",
+    "result.accepted": '{person} accepted the result\n"{objective}"',
+    "result.changes": '{person} asked for changes\n"{objective}"\n"{text}"',
+    "work.cancelled": '{person} withdrew an assignment\n"{objective}"',
+    "work.changed": '{person} changed an assignment\n"{objective}"',
+    "work.reopened": '{person} reopened an assignment\n"{objective}"',
+    "attempt.stopped": 'Stopped: "{objective}"\nStopped by {person} at {time}. Work so far is kept.',
+    "attempt.stopped_changed": 'Stopped: "{objective}"\n{person} changed the assignment, which stopped the work.',
+    "attempt.stopped_withdrawn": 'Stopped: "{objective}"\n{person} withdrew the assignment, which stopped the work.',
+    "work.proposed": "Proposed: a new assignment\nDo: {objective_full}\nDone when: {success_criteria}\nNot started.",
+    "remind.ready_to_resume": 'Ready to resume: "{objective}"\nYour answer is saved, and {name} has not picked this up yet. Nothing starts until you resume.',
+    "concealed.info": "There is news about an assignment.",
+    "concealed.proposed": "A new assignment is proposed.",
     "ask.saved_file": "Saved as your answer: the file {file}, now in {name}'s files.",
     "ask.saved": "Saved.",
     "decide.saved": "Recorded.",

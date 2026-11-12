@@ -1,6 +1,21 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "request.answered": "{person}回答了问题\n“{objective}”",
+    "decision.recorded": "{person}作出了决定\n“{objective}”\n决定：{decision}",
+    "decision.note": "备注：{note}",
+    "result.accepted": "{person}接受了结果\n“{objective}”",
+    "result.changes": "{person}要求修改\n“{objective}”\n“{text}”",
+    "work.cancelled": "{person}撤回了一项任务\n“{objective}”",
+    "work.changed": "{person}修改了一项任务\n“{objective}”",
+    "work.reopened": "{person}重新开启了一项任务\n“{objective}”",
+    "attempt.stopped": "已停止：“{objective}”\n{person}于{time}停止了工作。已有进展已保留。",
+    "attempt.stopped_changed": "已停止：“{objective}”\n{person}修改了任务，因此工作已停止。",
+    "attempt.stopped_withdrawn": "已停止：“{objective}”\n{person}撤回了任务，因此工作已停止。",
+    "work.proposed": "提议：一项新任务\n要做：{objective_full}\n完成标准：{success_criteria}\n尚未开始。",
+    "remind.ready_to_resume": "可以继续：“{objective}”\n你的回答已保存，{name}尚未继续处理。你选择继续之前，工作不会开始。",
+    "concealed.info": "有一项任务的新消息。",
+    "concealed.proposed": "有一项新任务提议。",
     "ask.saved_file": "已保存为你的回答：文件 {file}，现已存入 {name} 的文件中。",
     "ask.saved": "已保存。",
     "decide.saved": "已记录。",
