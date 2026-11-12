@@ -207,3 +207,18 @@ def silent_now(link: BotLink, settings: PersonSettings, config: TelegramBotsConf
     if not in_quiet_hours(moment, settings):
         return False
     return link.last_update_at is None or moment - _aware(link.last_update_at) > timedelta(seconds=config.outbox.recent_act_seconds)
+
+
+def format_time(moment: datetime, settings: PersonSettings, *, now: datetime | None = None, zone: ZoneInfo | None = None) -> str:
+    """Format a notice's time in the reader's calendar; cold zone setup is I/O."""
+    zone = zone if zone is not None else ZoneInfo(settings.timezone)
+    local = _aware(moment).astimezone(zone)
+    today = _aware(now if now is not None else datetime.now(UTC)).astimezone(zone).date()
+    clock = f"{local.hour:02}:{local.minute:02}"
+    if local.date() == today:
+        return clock
+    if settings.locale == "zh-CN":
+        return f"周{'一二三四五六日'[local.weekday()]} {local.month}月{local.day}日，{clock}"
+    weekday = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[local.weekday()]
+    month = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")[local.month - 1]
+    return f"{weekday} {local.day} {month}, {clock}"

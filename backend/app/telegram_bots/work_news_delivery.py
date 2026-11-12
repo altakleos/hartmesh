@@ -21,6 +21,7 @@ from app.telegram_bots.work_news import present_news
 from app.telegram_bots.work_news_sources import WorkNewsProjection, WorkNewsRead
 from app.telegram_bots.work_request_source import cleanup_ready, require_show
 from app.telegram_bots.work_result_navigation import NavigationOrigin
+from app.telegram_bots.work_stop_news import NewsClock
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow, TelegramPersonSettingsRow
 from deerflow.utils.file_io import await_drained
 
@@ -28,7 +29,7 @@ from deerflow.utils.file_io import await_drained
 def recipes(source, basis, identity, link):
     view = present_news(source.key, values=source.values, locale=basis["locale"], protected=source.protected, concealed=basis["concealed"], outbox_id=identity)
     keyboard = [list(line) for line in view.keyboard]
-    if not basis["concealed"] and (source.key in {"decision.recorded", "result.changes"} or source.key == "request.answered" and source.values.get("open_assignment") is True):
+    if not basis["concealed"] and (source.key in {"decision.recorded", "result.changes", "attempt.stopped", "attempt.stopped_changed"} or source.key == "request.answered" and source.values.get("open_assignment") is True):
         address = page_address("web.work", link, work_id=source.work_id, permissions=3, public_base_url=basis["public_base_url"])
         if address:
             keyboard.append([{"label": "label.open_assignment", "url": address}])
@@ -233,11 +234,12 @@ class WorkNewsPlans:
             raise ProductSourceRetired()
         origin = NavigationOrigin()
         admission = await prepare_attention(self.reader, link)
+        clock = await self.reader.prepare_clock(link, item)
         async with self.outbox._writer(link.id) as (writer, binding):
             row = await writer.get(TelegramOutboxRow, identity, with_for_update=True, populate_existing=True)
             if binding is None or any(getattr(binding, field) != getattr(link, field) for field in _SCOPE) or row is None or _item(row) != item:
                 raise DeliveryClaimRetired()
-            await admission(session=writer, projection=WorkNewsProjection(self.reader, link, item, source))
+            await admission(session=writer, projection=WorkNewsProjection(self.reader, link, item, source, clock=clock))
             basis = {"version": 1, "source": asdict(source), "locale": settings.locale, "concealed": source.protected, "public_base_url": origin.base}
             parts, keyboard = recipes(source, basis, identity, link)
             row.parts = self.outbox._parts(parts, 0)
@@ -248,7 +250,7 @@ class WorkNewsPlans:
                 for control in await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group.group_id)):
                     control.payload = {**control.payload, "presentation_pending": True}
             await writer.flush()
-            await admission(session=writer, projection=WorkNewsProjection(self.reader, link, _item(row), source))
+            await admission(session=writer, projection=WorkNewsProjection(self.reader, link, _item(row), source, clock=clock))
             origin.check(basis)
             return True
 
@@ -298,7 +300,7 @@ class WorkNewsSources:
 
 class _SendProjection(WorkNewsProjection):
     def __init__(self, host, captured, source, basis, settings, zone, now, silent):
-        super().__init__(host.reader, captured.link, captured.item, source)
+        super().__init__(host.reader, captured.link, captured.item, source, clock=NewsClock(settings, zone, host.reader.clock))
         self.host, self.captured, self.basis, self.settings, self.zone, self.now, self.silent = host, captured, basis, settings, zone, now, silent
         self.group = captured.item.parts[-1].get("callback_group_id")
         self.origin = NavigationOrigin()

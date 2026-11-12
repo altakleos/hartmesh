@@ -15,6 +15,10 @@ from test_telegram_work_news_recovery import test_news_refresh_before_send_uses_
 from test_telegram_work_news_sources import test_generic_product_reply_cannot_impersonate_colleague_news as refuse
 from test_telegram_work_news_sources import test_news_source_uses_colleague_and_canonical_assignment as read
 from test_telegram_work_source_delivery import work_delivery as work_delivery
+from test_telegram_work_stop_news import test_protected_stopped_news_show_uses_current_local_clock as stopped_show
+from test_telegram_work_stop_news import test_stop_notice_reformats_when_midnight_passes_during_final_preparation as midnight
+from test_telegram_work_stop_news import test_stopped_news_delivers_exact_colleague_cause as stopped
+from test_telegram_work_stop_news import test_stopped_notice_final_clock_and_cause_are_current as stop_clock
 from test_work_attention_pages import work_pages as work_pages
 
 
@@ -62,3 +66,26 @@ async def test_information_answer_delivery(work_delivery):
 @pytest.mark.asyncio
 async def test_information_answer_final_withdrawal(work_delivery, monkeypatch):
     await answer_withdrawal(work_delivery, monkeypatch)
+
+
+@pytest.mark.asyncio
+async def test_colleague_stop_delivery(work_delivery):
+    ZoneInfo.clear_cache()
+    await stopped(work_delivery, "stop")
+
+
+@pytest.mark.asyncio
+async def test_colleague_stop_clock_refresh(work_delivery, monkeypatch):
+    ZoneInfo.clear_cache()
+    await stop_clock(work_delivery, monkeypatch, "timezone", "stop")
+
+
+@pytest.mark.asyncio
+async def test_colleague_stop_midnight(work_delivery, monkeypatch):
+    await midnight(work_delivery, monkeypatch)
+
+
+@pytest.mark.asyncio
+async def test_colleague_stop_show_clock(work_delivery):
+    ZoneInfo.clear_cache()
+    await stopped_show(work_delivery)

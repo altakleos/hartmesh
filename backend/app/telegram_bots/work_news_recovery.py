@@ -29,14 +29,15 @@ class WorkNewsRecovery:
                 raise ProductSourceRetired()
             origin = NavigationOrigin()
             admission = await prepare_attention(self.reader, captured.link)
+            clock = await self.reader.prepare_clock(captured.link, captured.item)
             async with self.outbox._writer(captured.link.id) as (writer, binding):
                 row = await writer.get(TelegramOutboxRow, captured.item.id, with_for_update=True, populate_existing=True)
                 current = self.outbox._sending(binding, row, link_id=captured.link.id, part_id=captured.part["part_id"], claim_owner=captured.claim_owner, claim_id=captured.claim_id, token_revision=captured.token_revision)
                 if current != captured:
                     raise DeliveryClaimRetired()
-                await admission(session=writer, projection=WorkNewsProjection(self.reader, captured.link, captured.item, source))
+                await admission(session=writer, projection=WorkNewsProjection(self.reader, captured.link, captured.item, source, clock=clock))
                 await self._replace(writer, captured.link, row, source, settings, origin)
-                await admission(session=writer, projection=WorkNewsProjection(self.reader, captured.link, _item(row), source))
+                await admission(session=writer, projection=WorkNewsProjection(self.reader, captured.link, _item(row), source, clock=clock))
                 origin.check(row.payload["work_news_basis"])
 
         return await await_drained(perform())
@@ -60,7 +61,7 @@ class WorkNewsRecovery:
                 raise ProductSourceRetired()
             origin = NavigationOrigin()
             admission = await prepare_attention(self.reader, link)
-            composed = _RevealGuard(self, guard, admission, link, item, source)
+            composed = _RevealGuard(self, guard, admission, link, item, source, await self.reader.prepare_clock(link, item))
             async with self.callbacks.writer(link, composed) as writer:
                 row = await writer.get(TelegramOutboxRow, item.id, with_for_update=True, populate_existing=True)
                 if not self._repairable(row) or _item(row) != item:
@@ -95,7 +96,7 @@ class WorkNewsRecovery:
                 raise ProductSourceRetired()
             origin = NavigationOrigin()
             admission = await prepare_attention(self.reader, link)
-            composed = _RevealGuard(self, guard, admission, link, item, source)
+            composed = _RevealGuard(self, guard, admission, link, item, source, await self.reader.prepare_clock(link, item))
             async with self.callbacks.writer(link, composed) as writer:
                 group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=composed, session=writer)
                 row = await writer.get(TelegramOutboxRow, item.id, with_for_update=True, populate_existing=True)
@@ -201,16 +202,16 @@ class WorkNewsRecovery:
 
 
 class _RevealGuard:
-    def __init__(self, host, base, admission, link, item, source):
+    def __init__(self, host, base, admission, link, item, source, clock):
         if not callable(getattr(base, "current", None)):
             raise CallbackRefused()
-        self.host, self.base, self.admission, self.link, self.item, self.source = host, base, admission, link, item, source
+        self.host, self.base, self.admission, self.link, self.item, self.source, self.clock = host, base, admission, link, item, source, clock
 
     async def prepare(self):
         await prepare_publication_guard(self.base)
 
     async def check(self, writer):
         current = await self.base.check(writer)
-        await self.admission(session=writer, projection=WorkNewsProjection(self.host.reader, self.link, self.item, self.source))
+        await self.admission(session=writer, projection=WorkNewsProjection(self.host.reader, self.link, self.item, self.source, clock=self.clock))
         self.base.current()
         return current

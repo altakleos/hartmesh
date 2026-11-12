@@ -821,3 +821,19 @@ comments and unsupplied responses cannot become answer news. The original
 requester gets one silent notice; the responder is excluded. Open assignment
 is a web link only when no attempt is unresolved, rechecked in the final snapshot. Other news kinds
 and installation remain pending.
+
+
+`work_stop_news.py` qualifies colleague Stop, edit and withdrawal notifications
+against the settlement's explicit attempt/run and its original activation. Only
+the latest intervening canonical command can supply the actor, and a person's
+own command sends no colleague notice. The original requester receives it
+silently; Stop/edit offer a web assignment link and withdrawal has no control.
+Command and settlement bodies, revisions and the cause timestamp remain part
+of immutable provenance even after a later attempt starts.
+
+`settings.format_time` uses HH:MM on the recipient's current day and a localized
+day label otherwise. `NewsClock` prepares ZoneInfo off-loop and reads its injected
+clock at each source/provider snapshot, so crossing midnight or changing the
+timezone defers the old presentation for refresh. Untimed edit/withdrawal notices
+leave preference drift to the ordinary final settings fence. These sources remain
+dormant pending installation; progress/status messages are separate.
