@@ -26,8 +26,12 @@ retries, and the full required sequence must finish before controls activate.
 `work_result_upload.py` reserves the entire bounded batch before reads and uses
 the existing SDK upload leaf. Every final upload snapshot combines canonical
 outcome references, all Space operation guards/grants, request, claim and owner.
-Generic text recovery cannot discard this media owner. Protected result Show,
-source-aware refresh/repair (including READ-loss redaction), exact-attempt warning
+Generic text recovery cannot discard this media owner. `work_result_recovery.py`
+owns the first protected Show: qualify the acknowledged teaser and its ledger,
+consume its exact control, then clear that keyboard before any files or the new
+card. A retry or missing teaser uses the durable cleanup receipt; full delivery
+still gates the new controls. This owner refuses refresh of partly sent files.
+Source-aware refresh/repair (including READ-loss redaction), exact-attempt warning
 links, non-review result notifications and event/supervisor installation remain
 outstanding; these initial-delivery components must remain uninstalled.
 

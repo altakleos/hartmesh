@@ -15,6 +15,7 @@ from app.telegram_bots.work_input_refresh import WorkInputRefresh
 from app.telegram_bots.work_interaction_delivery import WorkInteractionPlans
 from app.telegram_bots.work_refusal_recovery import WorkRefusalRecovery
 from app.telegram_bots.work_request_recovery import WorkRequestRecovery
+from app.telegram_bots.work_result_recovery import WorkResultRecovery
 from app.telegram_bots.work_retained_drafts import WorkRetainedDrafts
 from app.telegram_bots.work_review_recovery import WorkReviewRecovery
 from app.telegram_bots.work_routing_admission import WorkRoutingAdmissions
@@ -40,6 +41,7 @@ class WorkCallbacks:
         self.refusals = WorkRefusalRecovery(self.controls)
         self.stale = WorkStaleRecovery(self.controls, self.interactions)
         self.recovery = WorkRequestRecovery(outcomes.plans)
+        self.result_recovery = WorkResultRecovery(outcomes.plans)
         self.drafts = WorkRetainedDrafts(outcomes.plans)
         self.input_refresh = WorkInputRefresh(self.controls)
         self.review_recovery = WorkReviewRecovery(outcomes.plans, controls=self.controls)
@@ -70,6 +72,7 @@ class WorkCallbacks:
                 if (row.link_id, row.binding_generation, row.chat_id) != (link.id, link.binding_generation, link.chat_id):
                     raise CallbackRefused()
                 family = parent.payload.get("work_request_basis", {}).get("version")
+                result_files = "result_files" in parent.payload.get("work_request_basis", {})
             guard = self.services.commands._guard(channel, link)
             scope = {"chat_id": row.chat_id, "message_id": row.message_id, "message_thread_id": row.message_thread_id, "guard": guard}
 
@@ -84,7 +87,7 @@ class WorkCallbacks:
                 elif row.kind in _VIEWS:
                     await self.interactions.open(link, row.id, **scope)
                 elif row.kind == "reveal":
-                    recovery = self.routing_recovery if family in {5, 6} else self.recovery
+                    recovery = self.result_recovery if result_files else self.routing_recovery if family in {5, 6} else self.recovery
                     if recovery is None:
                         raise CallbackRefused()
                     await recovery.reveal(link, row.id, **scope)

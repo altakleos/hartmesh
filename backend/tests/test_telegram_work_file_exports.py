@@ -45,7 +45,9 @@ async def work_exports(work_delivery, tmp_path, monkeypatch, request):
         for space, actor in ((e.home, e.instance.principal), (e.source_space, e.actor)):
             await e.files.write(actor=actor, space_id=space.id, expected_generation=space.generation, operation_id=uuid4().hex, path="outputs/picture.png", content=png_header(2, 2), create=True)
             sources.append(WorkSource(space_id=space.id, path="outputs/picture.png"))
-    review = {"review_required": True} if getattr(request, "param", None) in {"review", "review_album"} else {}
+    if getattr(request, "param", None) == "review_empty":
+        sources = []
+    review = {"review_required": True} if getattr(request, "param", None) in {"review", "review_album", "review_empty"} else {}
     record = await e.human.work.delegate(actor=e.actor, instance_id=e.instance.id, request=DelegateWork(operation_id=uuid4().hex, objective="Report the findings", success_criteria="Provide evidence", **review))
     conversations = e.http_app.state.agent_conversations
     chat = await conversations.create(actor=e.actor, instance_id=e.instance.id, creation_id=uuid4().hex)

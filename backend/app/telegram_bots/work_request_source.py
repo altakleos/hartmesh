@@ -193,7 +193,7 @@ def frozen(captured, *, acknowledged=False):
             presentation = present_review_files(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id, **result_options(basis["result_files"]))
         else:
             presentation = present_request(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id)
-        if reveal is not None and len(presentation.parts) > 1 and cleanup_id is None:
+        if reveal is not None and (len(presentation.parts) > 1 or "result_files" in basis) and cleanup_id is None:
             raise ValueError()
         expected = []
         for index, part in enumerate(presentation.parts):

@@ -117,8 +117,14 @@ class WorkRequestRecovery:
     def _extras(self, source):
         return {}
 
+    def _owns_basis(self, basis):
+        return "result_files" not in basis
+
+    def _separate_reveal(self, reveal, fresh):
+        return reveal is not None and len(fresh) > 1
+
     async def _replace(self, writer, link, row, source, settings, *, reveal=None, force_new=False, choice=None):
-        if "result_files" in row.payload.get("work_request_basis", {}):
+        if not self._owns_basis(row.payload.get("work_request_basis", {})):
             # Result receipts and file ownership require their dedicated
             # recovery transition; ordinary text refresh would erase them.
             raise ProductSourceRetired()
@@ -196,7 +202,7 @@ class WorkRequestRecovery:
         fresh = self.outbox._parts(recipes, version)
         # Telegram cannot add protection to an existing unprotected message.
         # A replacement receives a new anchor only after its complete ACK.
-        multipart_reveal = reveal is not None and len(fresh) > 1
+        multipart_reveal = self._separate_reveal(reveal, fresh)
         if target is not None and not force_new and not multipart_reveal and (not source.protected or target.get("protect_content")):
             fresh[0].update(kind="edit", target_message_id=target["message_ids"][0], target_protect_content=bool(target.get("protect_content")))
         cleanup_groups = set()
