@@ -216,6 +216,18 @@ the visible note. The draft's 24-hour deadline starts at original input acceptan
 and survives preview refreshes. Stale note previews explain the change before
 the complete current review. Closed/replaced-review recovery remains separate.
 
+`work_input_refresh.py` preserves the original V4 input when its displayed review
+changes before admission or the service's CAS rejects it. An exact pending
+`attempt-unresolved` decision can refresh after its old operation is fenced with
+cancellation/conflict; an unchanged preview retries the same saved body.
+Unknown, missing, advanced or altered journals cannot authorize replacement.
+The original prompt/input proof and complete current source share the guarded
+writer with old-control retirement and new publication. Fresh controls await the
+whole preview's ACK and a separate explicit press. Refreshed typed decisions
+carry a closed flag derived from original seen data, so their stale notice is
+revalidated at delivery without replacing the decision or note. No recovery path
+submits a new action automatically; original Act bodies remain immutable.
+
 `work_outcomes.py` renders complete success/refusal/uncertain wording, without
 issuing commands or installing controls. Unknown actions never become a failed
 save. A known attempt-closing refusal keeps the original confirmation; a retained

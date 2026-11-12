@@ -50,6 +50,8 @@ def input_state(data, source):
         value = {"view": "changes", "note": data["text"]}
     elif data["purpose"] in {"decide_own", "decide_note"} and data["request_id"] == source.request["id"]:
         value = {"view": "decision", "decision": data["text"] if data["purpose"] == "decide_own" else data["interaction"]["decision"], "note": None if data["purpose"] == "decide_own" else data["text"]}
+        if not same_body(data["seen"], source.seen):
+            value["refreshed"] = True
     else:
         raise CallbackRefused()
     return interaction_state(value, source)
@@ -145,45 +147,50 @@ class WorkInputPreviews:
                     raise CallbackRefused()
                 prompt_id = mark.route_basis["work_input"]["prompt_id"]
             captured = await self.captures.capture(link, origin, prompt_id=prompt_id, guard=guard)
-            data, identity = captured.route_basis["work_input"], input_identity(captured)
+            data = captured.route_basis["work_input"]
             source, settings = await self.recovery._source(link, request_id or data["request_id"])
             state = input_state(data, source)
             admission = await prepare_attention(self.plans.reader, link)
             composed = _InputGuard(guard, admission, source, captured)
-            digest = hashlib.sha256(json.dumps((source.seen, state, source.protected, settings.locale), sort_keys=True).encode()).hexdigest()[:32]
-            key = f"notice:work-input-preview:{origin.message_id}:{digest}"
             async with self.plans.callbacks.writer(link, composed) as writer:
                 latest = await self.captures.capture(link, origin, prompt_id=prompt_id, guard=composed, session=writer)
                 if not same_body(latest.route_basis, captured.route_basis) or latest.operation_ids != captured.operation_ids:
                     raise CallbackRefused()
-                existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == key))
-                if existing is not None:
-                    if not same_body(existing.payload.get("work_request_basis", {}).get("input"), identity):
-                        raise CallbackRefused()
-                    return existing.id
-                await self._retire_previous(writer, link, identity)
-                parent = await writer.get(TelegramOutboxRow, data["source_outbox_id"], with_for_update=True, populate_existing=True)
-                prompt = await writer.get(TelegramCallbackRow, prompt_id, with_for_update=True, populate_existing=True)
-                group = CallbackGroup(_row(prompt), (_row(prompt),), parent.id, parent.payload["presentation_version"])
-                result = await self.interactions._publish(
-                    writer,
-                    link,
-                    group,
-                    parent,
-                    source,
-                    settings,
-                    state,
-                    key=key,
-                    chat_id=origin.chat_id,
-                    message_id=prompt.message_id,
-                    message_thread_id=origin.message_thread_id,
-                    guard=composed,
-                    input_origin=identity,
-                )
-                await self.captures.inbox.register_delivery([origin], outbox_id=result, primary=False, finish=False, session=writer)
-                return result
+                return await self._publish(writer, link, captured, source, settings, state, guard=composed)
 
         return await await_drained(perform())
+
+    async def _publish(self, writer, link, captured, source, settings, state, *, guard):
+        """Publish already-qualified input inside its owning guarded writer."""
+        data, identity = captured.route_basis["work_input"], input_identity(captured)
+        digest = hashlib.sha256(json.dumps((source.seen, state, source.protected, settings.locale), sort_keys=True).encode()).hexdigest()[:32]
+        key = f"notice:work-input-preview:{captured.message_id}:{digest}"
+        existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == key))
+        if existing is not None:
+            if not same_body(existing.payload.get("work_request_basis", {}).get("input"), identity):
+                raise CallbackRefused()
+            return existing.id
+        await self._retire_previous(writer, link, identity)
+        parent = await writer.get(TelegramOutboxRow, data["source_outbox_id"], with_for_update=True, populate_existing=True)
+        prompt = await writer.get(TelegramCallbackRow, data["prompt_id"], with_for_update=True, populate_existing=True)
+        group = CallbackGroup(_row(prompt), (_row(prompt),), parent.id, parent.payload["presentation_version"])
+        result = await self.interactions._publish(
+            writer,
+            link,
+            group,
+            parent,
+            source,
+            settings,
+            state,
+            key=key,
+            chat_id=captured.chat_id,
+            message_id=prompt.message_id,
+            message_thread_id=captured.message_thread_id,
+            guard=guard,
+            input_origin=identity,
+        )
+        await self.captures.inbox.register_delivery([captured], outbox_id=result, primary=False, finish=False, session=writer)
+        return result
 
     async def _retire_previous(self, writer, link, identity):
         rows = await writer.scalars(
@@ -259,7 +266,10 @@ class _InputProjection(_RecoveryProjection):
             or mark.state == "done"
             or mark.route_complete
             or not same_body(mark.route_basis, self.captured.route_basis)
+            or not same_body(mark.sanitized_input, self.captured.sanitized_input)
             or mark.operation_ids != self.captured.operation_ids
             or mark.binding_generation != self.captured.binding_generation
+            or (mark.route_kind, mark.route_target_id, mark.message_thread_id, mark.update_id) != (self.captured.route_kind, self.captured.route_target_id, self.captured.message_thread_id, self.captured.update_id)
+            or _aware(mark.accepted_at) != _aware(self.captured.accepted_at)
         ):
             raise ProductSourceRetired()
