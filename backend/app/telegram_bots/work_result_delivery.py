@@ -12,15 +12,15 @@ class WorkReviewPlans(WorkRequestPlans):
     def _extras(self, source):
         return {"result_files": {"version": 1, "capacity": self.outbox.config.files.in_memory_max_bytes, "max_bytes": self.outbox.config.files.max_outbound_bytes}}
 
-    def _presentation(self, source, settings, identity):
-        return present_review_files(source, locale=settings.locale, concealed=source.protected, outbox_id=identity, **result_options(self._extras(source)["result_files"]))
+    def _presentation(self, source, settings, identity, *, concealed=None):
+        return present_review_files(source, locale=settings.locale, concealed=source.protected if concealed is None else concealed, outbox_id=identity, **result_options(self._extras(source)["result_files"]))
 
-    async def _freeze(self, writer, link, row, source, settings, *, pending=True):
+    async def _freeze(self, writer, link, row, source, settings, *, pending=True, navigation_origin=None):
         from app.telegram_bots.work_result_identity import result_identity
         from app.telegram_bots.work_result_navigation import capture_navigation
         from deerflow.persistence.agent_instances.work import AgentWorkRow
 
-        identity = await super()._freeze(writer, link, row, source, settings, pending=True)
+        identity = await super()._freeze(writer, link, row, source, settings, pending=True, navigation_origin=navigation_origin)
         work = await writer.get(AgentWorkRow, source.work["id"], populate_existing=True)
         navigation = await capture_navigation(writer, link, source)
         row.payload = {**row.payload, "work_result_ledger": initial_ledger(row.parts), "work_result_identity": result_identity(work), "work_result_navigation": navigation}

@@ -55,10 +55,10 @@ class WorkRoutingPlans(WorkRequestPlans):
             row = await writer.get(TelegramOutboxRow, identity)
             return await self.freeze_routing(writer, link, row, value, settings, public_base_url)
 
-    async def freeze_routing(self, writer, link, row, value, settings, public_base_url):
+    async def freeze_routing(self, writer, link, row, value, settings, public_base_url, *, navigation_origin=None):
         identity, source = row.id, value.source
         request_id = source.request["id"]
-        shown = present_routing(value, locale=settings.locale, link=link, public_base_url=public_base_url, concealed=source.protected, outbox_id=identity)
+        shown = present_routing(value, locale=settings.locale, link=link, public_base_url=public_base_url, concealed=source.protected and navigation_origin is None, outbox_id=identity)
         controls = [list(line) for line in shown.keyboard]
         parts = [
             {**part, "source_ref": {"key": "work.request.presentation", "values": {"request_id": request_id, "part": index}}, **({"stored_keyboard": True} if controls and index == len(shown.parts) - 1 else {})}
@@ -75,6 +75,10 @@ class WorkRoutingPlans(WorkRequestPlans):
             "parts": parts,
             "keyboard": controls,
         }
+        if navigation_origin is not None:
+            from app.telegram_bots.work_navigation_origin import validate_origin
+
+            basis.update(navigation_origin=validate_origin(navigation_origin), concealed=False)
         row = await writer.get(TelegramOutboxRow, identity)
         row.payload = _safe_json({**row.payload, "work_request_basis": basis, "product_keyboard_basis": controls})
         saved = self.outbox._parts(parts, 0)
@@ -127,7 +131,13 @@ class WorkRoutingSources(WorkRequestSources):
         changed = not same_displayed_basis(current.source, source) or settings.locale != basis["locale"] or basis["routing"] != routing
         if changed:
             if self.recovery is not None:
-                await self.recovery.refresh(captured)
+                if "navigation_origin" in basis:
+                    refresh = getattr(self.recovery, "refresh_navigation", None)
+                    if refresh is None:
+                        raise ProductSourceRetired()
+                    await refresh(captured)
+                else:
+                    await self.recovery.refresh(captured)
                 raise DeliveryClaimRetired()
             raise ProductSourceRetired()
         return basis, current.source, part

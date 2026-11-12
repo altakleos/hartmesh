@@ -19,8 +19,11 @@ from deerflow.utils.file_io import await_drained
 
 
 class WorkNewsRecovery:
-    def __init__(self, plans):
+    def __init__(self, plans, *, navigation=None):
         self.plans, self.reader, self.outbox, self.callbacks = plans, plans.reader, plans.outbox, plans.callbacks
+        from app.telegram_bots.work_notice_navigation_recovery import NoticeNavigationRecovery
+
+        self.navigation_recovery = NoticeNavigationRecovery(self, navigation, "work_news_basis")
 
     async def dismiss(self, link, callback_id, *, chat_id, message_id, message_thread_id, guard):
         """Retire an exact acknowledged proposal keyboard, with no Work effect."""
@@ -52,6 +55,9 @@ class WorkNewsRecovery:
         return await await_drained(perform())
 
     async def refresh(self, captured):
+        if "navigation_origin" in captured.item.payload.get("work_news_basis", {}):
+            return await self.navigation_recovery.refresh(captured)
+
         async def perform():
             source = await self.reader.read(captured.link, captured.item)
             settings = await self.plans.settings.get(captured.link.owner_user_id)
@@ -85,6 +91,8 @@ class WorkNewsRecovery:
                 if not self._repairable(row):
                     return None
                 item = _item(row)
+            if "navigation_origin" in item.payload.get("work_news_basis", {}):
+                return await self.navigation_recovery.repair(link, item, guard=guard)
             source = await self.reader.read(link, item)
             settings = await self.plans.settings.get(link.owner_user_id)
             if settings is None:
@@ -144,10 +152,18 @@ class WorkNewsRecovery:
 
         return await await_drained(perform())
 
-    async def _replace(self, writer, link, row, source, settings, origin, *, reveal=None, repair=False):
+    async def _replace(self, writer, link, row, source, settings, origin, *, reveal=None, repair=False, navigation_origin=None):
         from app.telegram_bots.work_news_delivery import frozen_news, recipes, require_teaser
         from app.telegram_bots.work_request_source import require_show
 
+        saved = row.payload.get("work_news_basis", {}).get("navigation_origin")
+        if saved is not None or navigation_origin is not None:
+            from app.telegram_bots.work_actions import same_body
+            from app.telegram_bots.work_navigation_origin import validate_origin
+
+            validate_origin(navigation_origin)
+            if not same_body(saved, navigation_origin) or reveal is not None:
+                raise ProductSourceRetired()
         item = _item(row)
         version = item.payload["presentation_version"]
         current = [part for part in row.parts if part["presentation_version"] == version]
@@ -185,7 +201,7 @@ class WorkNewsRecovery:
             "version": 3,
             "source": asdict(source),
             "locale": settings.locale,
-            "concealed": source.protected and reveal_id is None,
+            "concealed": source.protected and reveal_id is None and navigation_origin is None,
             "public_base_url": origin.base,
             "reveal": reveal_id,
             "teaser_version": version if reveal else basis.get("teaser_version", 0) if reveal_id else None,
@@ -193,6 +209,8 @@ class WorkNewsRecovery:
             "edit_target": None,
             "history": history,
         }
+        if navigation_origin is not None:
+            fresh_basis["navigation_origin"] = navigation_origin
         parts, keyboard = recipes(source, fresh_basis, row.id, link)
         fresh = self.outbox._parts(parts, version + 1)
         if reveal and len(fresh) == 1:
@@ -218,7 +236,7 @@ class WorkNewsRecovery:
                 part["state"] = "retired"
         row.parts = [*old, *fresh]
         row.payload = _safe_json({**row.payload, "presentation_version": version + 1, "work_news_basis": {**fresh_basis, "parts": parts, "keyboard": keyboard}, "product_keyboard_basis": keyboard})
-        row.class_, row.state, row.not_before = "reply" if reveal_id else news_class(source.key), "pending", self.outbox.clock()
+        row.class_, row.state, row.not_before = "reply" if reveal_id or navigation_origin else news_class(source.key), "pending", self.outbox.clock()
         row.sent_at = row.closed_at = row.failed_reason = row.skip_reason = row.degraded_at = None
         row.claim_id = row.claim_owner = row.claimed_at = None
         if keyboard:

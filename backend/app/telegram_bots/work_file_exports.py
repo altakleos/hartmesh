@@ -104,6 +104,20 @@ class _WorkFileProjection:
         return self.delivery.extend(result) if self.delivery is not None else result
 
     def check(self, rows):
+        self._check_source(rows)
+        if self.delivery is not None:
+            self.delivery.check(rows)
+
+    def check_with_permissions(self, rows, held):
+        self._check_source(rows)
+        if self.delivery is not None:
+            qualified = getattr(self.delivery, "check_with_permissions", None)
+            if qualified is not None:
+                qualified(rows, held)
+            else:
+                self.delivery.check(rows)
+
+    def _check_source(self, rows):
         value = self.export
         value._current()
         work, space, permission = rows[0][self.column : self.column + 3]
@@ -131,8 +145,6 @@ class _WorkFileProjection:
         target, policy = rows[0][1], rows[0][3]
         if target.custody == "company" and policy == "protected" and self.protect_content is False:
             raise DeliveryClaimRetired()
-        if self.delivery is not None:
-            self.delivery.check(rows)
 
 
 async def prepare_work_file_export(reader, link, *, work_id, outcome_id, evidence_revision, source_index, current):

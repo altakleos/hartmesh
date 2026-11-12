@@ -1,6 +1,6 @@
 """Current source admission for controls on an acknowledged digest card."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 from sqlalchemy.orm import aliased
@@ -8,6 +8,7 @@ from sqlalchemy.orm import aliased
 from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
 from app.telegram_bots.digests import _members
+from app.telegram_bots.notifications import aware
 from app.telegram_bots.producer import PermanentDeliveryError, ProductSourceRetired, _item
 from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_digest_delivery import frozen_digest, member_proof
@@ -133,4 +134,8 @@ class _NavigationProjection(DigestProjection):
 
 def _same_item(row, expected):
     actual = _item(row)
+    # SQLite returns stored UTC timestamps without tzinfo, while a newly
+    # flushed row can still carry the clock's aware value in the identity map.
+    actual = replace(actual, created_at=aware(actual.created_at) if actual.created_at else None)
+    expected = replace(expected, created_at=aware(expected.created_at) if expected.created_at else None)
     return actual == expected and same_body(actual.payload, expected.payload) and same_body(actual.parts, expected.parts)

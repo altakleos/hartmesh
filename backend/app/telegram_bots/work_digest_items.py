@@ -1,5 +1,6 @@
 """Full source-owned previews from reusable acknowledged digest controls."""
 
+from copy import deepcopy
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -14,19 +15,44 @@ from app.telegram_bots.producer import ProductSourceRetired, _item
 from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_digest_members import claim_of
 from app.telegram_bots.work_digest_navigation import _same_item
+from app.telegram_bots.work_digest_preview_plans import freeze_notice, frozen_preview
 from app.telegram_bots.work_navigation_origin import NavigationOriginProjection, WorkNavigation
-from app.telegram_bots.work_request_source import frozen
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
 
 class DigestItems:
-    def __init__(self, *, digests, requests):
+    def __init__(self, *, digests, requests, reviews=None, routing=None, news=None, results=None):
         self.navigation = WorkNavigation(digests)
         self.digests, self.requests = digests, requests
         self.outbox, self.callbacks = digests.outbox, digests.callbacks
-        if requests.outbox is not self.outbox or requests.callbacks is not self.callbacks:
+        self.reviews, self.routing, self.news, self.results = reviews, routing, news, results
+        if any(owner is not None and (owner.outbox is not self.outbox or owner.callbacks is not self.callbacks) for owner in (requests, reviews, routing, news, results)):
             raise ValueError("digest-items-require-shared-owners")
+
+    async def execute_callback(self, channel, row, *, query_id=None, **_options):
+        if row.kind != "digest_item":
+            return False
+        link = deepcopy(channel.link)
+        guard = channel._services.commands._guard(channel, link)
+        try:
+            await self.open(link, callback_id=row.id, query_id=query_id, chat_id=row.chat_id, message_id=row.message_id, message_thread_id=row.message_thread_id, guard=guard)
+        except ProductSourceRetired:
+            raise CallbackRefused("stale.not_waiting") from None
+        return True
+
+    def _owner(self, member):
+        if "work_request_basis" in member.item.payload:
+            basis = member.item.payload["work_request_basis"]
+            owner = self.routing if basis["version"] in {5, 6} else self.reviews if "result_files" in basis else self.requests
+            family = "work_request_basis"
+        elif "work_news_basis" in member.item.payload:
+            owner, family = self.news, "work_news_basis"
+        else:
+            owner, family = self.results, "result_notice_basis"
+        if owner is None:
+            raise ProductSourceRetired()
+        return family, owner
 
     async def open(self, link, *, callback_id, query_id, chat_id, message_id, message_thread_id, guard):
         async def perform():
@@ -34,9 +60,7 @@ class DigestItems:
             if type(chat_id) is not int or type(message_id) is not int or (chat_id, message_id, message_thread_id) != (link.chat_id, origin.value["message_id"], None):
                 raise CallbackRefused()
             source = origin.member.source
-            basis = origin.member.item.payload.get("work_request_basis")
-            if type(basis) is not dict or basis.get("version") not in {1, 2} or "result_files" in basis or source.request["purpose"] not in {"information", "decision"}:
-                raise ProductSourceRetired()
+            family, planner = self._owner(origin.member)
             settings = await self.digests.settings.get(link.owner_user_id)
             if settings is None or settings.locale != origin.snapshot.locale:
                 raise ProductSourceRetired()
@@ -50,7 +74,7 @@ class DigestItems:
                     if not current_parts:
                         raise ProductSourceRetired()
                     selected = next((part for part in current_parts if part["state"] in {"pending", "sending"}), current_parts[-1])
-                    saved, _source, _part = frozen(SimpleNamespace(link=link, item=_item(existing), part=selected), pending=selected["state"] == "pending", replay=True, acknowledged=selected["state"] == "sent")
+                    saved, _source, _part = frozen_preview(SimpleNamespace(link=link, item=_item(existing), part=selected), pending=selected["state"] == "pending", replay=True, acknowledged=selected["state"] == "sent")
                     if not same_body(saved.get("navigation_origin"), origin.value):
                         raise ProductSourceRetired()
                     return existing.id
@@ -61,11 +85,12 @@ class DigestItems:
                     binding_generation=link.binding_generation,
                     chat_id=link.chat_id,
                     instance_id=link.agent_ref,
-                    work_id=source.work["id"],
-                    request_id=source.request["id"],
+                    work_id=origin.member.item.work_id,
+                    request_id=origin.member.item.request_id,
+                    event_id=origin.member.item.event_id,
                     dedupe_key=key,
                     class_="reply",
-                    payload={"presentation_version": 0},
+                    payload={"presentation_version": 0, **{key: deepcopy(origin.member.item.payload[key]) for key in ("work_event_intent", "work_event_source") if key in origin.member.item.payload}},
                     parts=[],
                     state="pending",
                     silent=True,
@@ -74,12 +99,17 @@ class DigestItems:
                 )
                 writer.add(row)
                 await writer.flush()
-                await self.requests._freeze(writer, link, row, source, settings, pending=True, navigation_origin=origin.value)
+                if family != "work_request_basis":
+                    await freeze_notice(planner, writer, link, row, source, settings, origin.value, family=family)
+                elif planner is self.routing:
+                    await planner.freeze_routing(writer, link, row, source.value, settings, source.public_base_url, navigation_origin=origin.value)
+                else:
+                    await planner._freeze(writer, link, row, source, settings, pending=True, navigation_origin=origin.value)
                 for part in row.parts:
                     if group_id := part.get("callback_group_id"):
                         for control in await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group_id)):
                             control.created_at = group.selected.created_at
-                frozen(SimpleNamespace(link=link, item=_item(row), part=row.parts[-1]), pending=True)
+                frozen_preview(SimpleNamespace(link=link, item=_item(row), part=row.parts[0]), pending=True)
                 composed.preview, composed.created_at = _item(row), group.selected.created_at
                 return row.id
 

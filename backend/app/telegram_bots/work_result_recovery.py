@@ -84,7 +84,7 @@ class WorkResultRecovery(WorkRequestRecovery):
     def _presentation(self, source, settings, link, row, concealed):
         return present_review_files(source, locale=settings.locale, concealed=concealed, outbox_id=row.id, **result_options(self._extras(source)["result_files"]))
 
-    async def _replace(self, writer, link, row, source, settings, *, reveal=None, force_new=False, choice=None, repair=False):
+    async def _replace(self, writer, link, row, source, settings, *, reveal=None, force_new=False, choice=None, repair=False, navigation_origin=None):
         basis = row.payload.get("work_request_basis", {})
         if choice is not None or not self._owns_basis(basis) or reveal is not None and not basis.get("concealed"):
             raise ProductSourceRetired()
@@ -112,7 +112,7 @@ class WorkResultRecovery(WorkRequestRecovery):
                     history.append(proof)
         except (PermanentDeliveryError, ValueError):
             raise ProductSourceRetired() from None
-        await super()._replace(writer, link, row, source, settings, reveal=reveal, force_new=True)
+        await super()._replace(writer, link, row, source, settings, reveal=reveal, force_new=True, navigation_origin=navigation_origin)
         fresh = [part for part in row.parts if part["presentation_version"] == row.payload["presentation_version"]]
         updated = row.payload["work_request_basis"]
         # A refresh before the first Show cleanup finishes cannot bypass it.

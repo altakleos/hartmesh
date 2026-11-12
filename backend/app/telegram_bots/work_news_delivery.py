@@ -64,6 +64,7 @@ def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
             or set(basis)
             != {"version", "source", "locale", "concealed", "public_base_url", "parts", "keyboard"}
             | ({"reveal", "cleanup_id", "origin"} if basis.get("version") == 2 else {"reveal", "cleanup_id", "history", "teaser_version", "edit_target"} if basis.get("version") == 3 else set())
+            | ({"navigation_origin"} if basis.get("version") in {1, 3} and "navigation_origin" in basis else set())
             or type(basis["version"]) is not int
             or basis["version"] not in {1, 2, 3}
         ):
@@ -75,6 +76,13 @@ def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
             raise ValueError()
         version = item.payload["presentation_version"]
         reveal = basis.get("reveal")
+        navigation = basis.get("navigation_origin")
+        if "navigation_origin" in basis:
+            from app.telegram_bots.work_navigation_origin import validate_origin
+
+            validate_origin(navigation)
+            if basis["concealed"] or item.dedupe_key != "notice:work-navigation:" + navigation["query_key"]:
+                raise ValueError()
         if (
             type(item.payload["presentation_version"]) is not int
             or version < 0
@@ -82,10 +90,10 @@ def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
             and version != basis["version"] - 1
             or basis["version"] == 3
             and version < 1
-            or item.class_ != ("reply" if reveal else news_class(source.key))
+            or item.class_ != ("reply" if reveal or navigation else news_class(source.key))
             or type(source.protected) is not bool
             or type(basis["concealed"]) is not bool
-            or basis["concealed"] != (source.protected and reveal is None)
+            or basis["concealed"] != (source.protected and reveal is None and navigation is None)
         ):
             raise ValueError()
         historical = [part for part in item.parts if part["presentation_version"] < version]
@@ -274,12 +282,13 @@ class WorkNewsPlans:
 
 
 class WorkNewsSources:
-    def __init__(self, plans):
+    def __init__(self, plans, *, navigation=None):
         from app.telegram_bots.work_news_recovery import WorkNewsRecovery
 
         self.reader, self.outbox, self.callbacks, self.settings = plans.reader, plans.outbox, plans.callbacks, plans.settings
         self.projection = plans.projection
-        self.recovery = WorkNewsRecovery(plans)
+        self.recovery = WorkNewsRecovery(plans, navigation=navigation)
+        self.navigation = navigation
 
     async def read_part(self, captured):
         async def read():
@@ -304,8 +313,11 @@ class WorkNewsSources:
             if settings is None:
                 raise ProductSourceRetired()
             zone = await asyncio.to_thread(ZoneInfo, settings.timezone)
+            from app.telegram_bots.work_navigation_sources import qualify_navigation
+
+            projection = await qualify_navigation(self.navigation, captured, basis, source, _SendProjection(self, captured, source, basis, settings, zone, now, silent), family="work_news_basis")
             try:
-                await current_attention(self.reader, captured.link, projection=_SendProjection(self, captured, source, basis, settings, zone, now, silent))
+                await current_attention(self.reader, captured.link, projection=projection)
             except ProductSourceRetired:
                 # The failed final fence has admitted no SDK call. Recheck
                 # authority before distinguishing display drift from retirement.
@@ -372,7 +384,7 @@ class _SendProjection:
             local = now.astimezone(self.zone)
             minute = local.hour * 60 + local.minute
             reminder_quiet = actual.quiet_enabled and (minute >= start or minute < end if start > end else start <= minute < end)
-            if not self.basis.get("reveal") and reminder_quiet and actual.summary_enabled:
+            if not self.basis.get("reveal") and not self.basis.get("navigation_origin") and reminder_quiet and actual.summary_enabled:
                 raise ProductSourceRetired("quiet-hours")
         recent = rows[0][0].last_update_at is not None and self.now - aware(rows[0][0].last_update_at) <= timedelta(seconds=self.host.outbox.config.outbox.recent_act_seconds)
         if bool(delivery.silent or self.captured.part.get("silent") or quiet and not recent) != bool(self.silent):

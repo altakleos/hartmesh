@@ -50,6 +50,9 @@ class WorkCallbacks:
         self.followups, self.retries = WorkRoutingFollowupRecovery(outcomes), WorkActionRetries(outcomes)
 
     async def execute_callback(self, channel, row, *, update_id=None, query_id=None):
+        items = getattr(self.services, "work_digest_items", None)
+        if items is not None and await items.execute_callback(channel, row, update_id=update_id, query_id=query_id):
+            return True
         digests = getattr(self.services, "work_digest_views", None)
         if digests is not None and await digests.execute_callback(channel, row, update_id=update_id, query_id=query_id):
             return True

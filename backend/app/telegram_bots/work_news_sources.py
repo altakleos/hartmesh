@@ -130,6 +130,11 @@ class WorkNewsProjection:
         work, event, attempt, activation, person, delivery = rows[0][self.column : self.column + 6]
         intent = self.item.payload.get("work_event_intent", {})
         key = intent.get("key")
+        from app.telegram_bots.work_navigation_sources import delivery_scope
+
+        expected_class, expected_key = delivery_scope(
+            self.item, "work_news_basis", "reply" if self.item.payload.get("work_news_basis", {}).get("reveal") else news_class(key), "remind:" + intent["response_id"] if self.reminder else "event:" + event.id + ":" + news_class(key)
+        )
         answer_signature = self.answer.qualify(rows, event, work, intent) if self.answer else None
         stop_signature, stop_values = self.stop.qualify(rows, event, work, instance, attempt, activation, intent) if self.stop else (None, {})
         proposal_signature, proposal_values = self.proposal.qualify(rows, event, work, instance, attempt, activation, intent) if self.proposal else (None, {})
@@ -197,8 +202,8 @@ class WorkNewsProjection:
             or delivery.state != "sending"
             and any(getattr(delivery, field) is not None for field in ("claim_owner", "claim_id", "claimed_at"))
             or (delivery.link_id, delivery.owner_user_id, delivery.binding_generation, delivery.chat_id, delivery.instance_id, delivery.class_)
-            != (self.link.id, self.link.owner_user_id, self.link.binding_generation, self.link.chat_id, self.link.agent_ref, "reply" if self.item.payload.get("work_news_basis", {}).get("reveal") else news_class(key))
-            or delivery.dedupe_key != ("remind:" + intent["response_id"] if self.reminder else "event:" + event.id + ":" + news_class(key))
+            != (self.link.id, self.link.owner_user_id, self.link.binding_generation, self.link.chat_id, self.link.agent_ref, expected_class)
+            or delivery.dedupe_key != expected_key
             or self.reminder
             and delivery.silent is not True
             or (attempt.id if attempt else None) != intent.get("attempt_id")
