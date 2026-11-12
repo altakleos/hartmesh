@@ -2049,6 +2049,9 @@ Question-update delivery follows web answers, assessments, routing and withdrawa
 It removes the original controls, preserves the question text, and prevents a
 delayed update from overwriting a newer closure. Protected replacements move the
 message target only after Telegram acknowledges them.
+Status-message foundations read the exact attempt and its current progress,
+question or completion. Initial delivery is silent, protected previews wait for
+Show, and Show reads current status. Status edits and pin management remain pending.
 These workers remain uninstalled; remaining notification forms and startup
 integration are still pending.
 Background recovery preserves newer

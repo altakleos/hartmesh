@@ -908,3 +908,19 @@ Display changes refresh a flat presentation history; canonical event changes
 retire. Explicit repair accepts only a held known refresh failure with no claim.
 Pending intents and updates retain their original and moved message evidence.
 This owner remains uninstalled until notification integration is complete.
+
+`work_status.py` reads one admitted attempt through its original activation,
+canonical progress/question events and terminal settlement. Retained run metadata
+must agree with that attempt. A broken blocker/request join cannot become a working
+status. Provider-final snapshots retain current account, role, grant and policy
+checks. `work_status_events.py` qualifies nonhuman reports and human creation
+receipts; JSON revision joins use text comparisons before strict Python validation.
+
+`work_status_delivery.py` composes these reads with the existing Work notice
+plans, complete ACK validation, protected Show and display refresh. Notice delivery
+accepts a source projection owner so status authority stays separate from colleague
+events. Refresh may adopt later progress, but cannot rewrite an already used event.
+Raw status templates require this source owner. Initial status sends are silent,
+including when discretionary notices are disabled, and expose no execution controls.
+This foundation remains dormant; coalesced status edits, exact pin/unpin ownership
+and supervisor installation are separate pending work.

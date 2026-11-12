@@ -9,6 +9,15 @@ _CATALOGS = {"en": MappingProxyType(en.TEXTS), "zh-CN": MappingProxyType(zh_cn.T
 
 FIRST_KEYS: frozenset[str] = frozenset(
     {
+        "status.starting",
+        "status.working",
+        "status.waiting_you",
+        "status.waiting_answer",
+        "status.checking",
+        "status.stopping",
+        "status.stopped",
+        "status.finished",
+        "status.ended",
         "interrupted",
         "interrupted.title_not_started",
         "attempt.failed",

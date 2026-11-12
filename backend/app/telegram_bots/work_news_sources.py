@@ -20,6 +20,7 @@ from app.telegram_bots.work_news import news_class
 from app.telegram_bots.work_proposal_news import ProposalNews
 from app.telegram_bots.work_result_identity import digest
 from app.telegram_bots.work_resume_reminders import ResumeReminder
+from app.telegram_bots.work_status_text import STATUS_KEYS
 from app.telegram_bots.work_stop_news import STOP_KEYS, StopNews, prepare_news_clock
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.agent_instances.work_contract import WorkCommand
@@ -43,6 +44,19 @@ class WorkNewsRead:
     work: dict
     event_signature: str
     signature: str
+
+
+def same_news_origin(previous, current):
+    if (previous.event_signature, previous.work_id) != (current.event_signature, current.work_id):
+        return False
+    if previous.key in STATUS_KEYS or current.key in STATUS_KEYS:
+        if previous.key not in STATUS_KEYS or current.key not in STATUS_KEYS or previous.work.get("attempt_id") != current.work.get("attempt_id"):
+            return False
+        old, new = previous.work.get("event_proofs"), current.work.get("event_proofs")
+        if type(old) is not dict or type(new) is not dict or not old or not new:
+            return False
+        return all(old[identity] == new[identity] for identity in old.keys() & new.keys())
+    return True
 
 
 class WorkNewsReader(AttentionReader):
@@ -84,6 +98,7 @@ class WorkNewsProjection:
 
     def extend(self, query):
         self.column = len(query.column_descriptions)
+        self.delivery_column = self.column + 5
         work, event, attempt, delivery = AgentWorkRow, AgentWorkEventRow, AgentWorkAttemptRow, TelegramOutboxRow
         actor, activation, candidate = aliased(UserRow), aliased(AgentWorkEventRow), aliased(AgentWorkEventRow)
         prior = (

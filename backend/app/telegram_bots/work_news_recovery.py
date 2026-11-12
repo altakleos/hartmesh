@@ -12,7 +12,7 @@ from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
 from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.producer import DeliveryClaimRetired, ProductSourceRetired, _item, _safe_json, keyboard_cleanup_row
 from app.telegram_bots.work_news import news_class
-from app.telegram_bots.work_news_sources import WorkNewsProjection
+from app.telegram_bots.work_news_sources import same_news_origin
 from app.telegram_bots.work_result_navigation import NavigationOrigin
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
@@ -65,9 +65,9 @@ class WorkNewsRecovery:
                 current = self.outbox._sending(binding, row, link_id=captured.link.id, part_id=captured.part["part_id"], claim_owner=captured.claim_owner, claim_id=captured.claim_id, token_revision=captured.token_revision)
                 if current != captured:
                     raise DeliveryClaimRetired()
-                await admission(session=writer, projection=WorkNewsProjection(self.reader, captured.link, captured.item, source, clock=clock))
+                await admission(session=writer, projection=self.plans.projection(self.reader, captured.link, captured.item, source, clock=clock))
                 await self._replace(writer, captured.link, row, source, settings, origin)
-                await admission(session=writer, projection=WorkNewsProjection(self.reader, captured.link, _item(row), source, clock=clock))
+                await admission(session=writer, projection=self.plans.projection(self.reader, captured.link, _item(row), source, clock=clock))
                 origin.check(row.payload["work_news_basis"])
 
         return await await_drained(perform())
@@ -119,7 +119,7 @@ class WorkNewsRecovery:
                 if not basis["concealed"]:
                     raise CallbackRefused()
             source = await self.reader.read(link, item)
-            if source.event_signature != previous.event_signature:
+            if not same_news_origin(previous, source):
                 raise ProductSourceRetired()
             settings = await self.plans.settings.get(link.owner_user_id)
             if settings is None:
@@ -155,7 +155,7 @@ class WorkNewsRecovery:
         if selected is None or repair and not self._repairable(row):
             raise ProductSourceRetired()
         basis, previous, _part = frozen_news(SimpleNamespace(link=link, item=item, part=selected), acknowledged=selected["state"] == "sent", pending=repair)
-        if source.event_signature != previous.event_signature or source.work_id != previous.work_id:
+        if not same_news_origin(previous, source):
             raise ProductSourceRetired()
         reveal_id = reveal.id if reveal else basis.get("reveal")
         proof = await writer.get(TelegramCallbackRow, reveal_id, with_for_update=True, populate_existing=True) if reveal_id else None
@@ -242,6 +242,6 @@ class _RevealGuard:
 
     async def check(self, writer):
         current = await self.base.check(writer)
-        await self.admission(session=writer, projection=WorkNewsProjection(self.host.reader, self.link, self.item, self.source, clock=self.clock))
+        await self.admission(session=writer, projection=self.host.plans.projection(self.host.reader, self.link, self.item, self.source, clock=self.clock))
         self.base.current()
         return current

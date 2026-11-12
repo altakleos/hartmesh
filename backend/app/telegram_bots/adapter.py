@@ -1905,7 +1905,12 @@ class TelegramBotChannel(TelegramChannel):
                 raise PermanentDeliveryError("unsupported-work-question-update")
             work_part = await work_sources.read_part(saved)
         elif "work_news_basis" in saved.item.payload:
-            work_sources = getattr(self._services, "work_news_sources", None)
+            from app.telegram_bots.work_news import news_owner
+
+            owner = news_owner(saved.item.payload)
+            if owner is None:
+                raise PermanentDeliveryError("invalid-work-news-source")
+            work_sources = getattr(self._services, owner, None)
             if work_sources is None or any(key in saved.item.payload for key in ("result_notice_basis", "work_request_basis", "work_outcome_basis")):
                 raise PermanentDeliveryError("unsupported-work-news-source")
             work_part = await work_sources.read_part(saved)
@@ -1935,7 +1940,7 @@ class TelegramBotChannel(TelegramChannel):
             if work_sources is None:
                 raise PermanentDeliveryError("unsupported-work-request-source")
             work_part = await work_sources.read_part(saved)
-        elif source_key.startswith(("ask.", "review.", "decide.", "work.", "request.route", "request.unrouted", "request.answered", "result.", "decision.recorded", "attempt.", "interrupted", "remind.")) or source_key in {
+        elif source_key.startswith(("ask.", "review.", "decide.", "work.", "request.route", "request.unrouted", "request.answered", "result.", "decision.recorded", "attempt.", "interrupted", "remind.", "status.")) or source_key in {
             "concealed.question",
             "concealed.decision",
             "concealed.review",
@@ -1945,6 +1950,7 @@ class TelegramBotChannel(TelegramChannel):
             "concealed.no_result",
             "concealed.interrupted",
             "concealed.not_started",
+            "concealed.progress",
             "voice.confirm_answer",
             "request.assessed",
             "request.withdrawn",

@@ -77,6 +77,8 @@ WORK_NEWS_KEYS |= frozenset(
     ).split()
 )
 WORK_NEWS_FIRST_KEYS |= frozenset("interrupted interrupted.title_not_started attempt.failed attempt.failed.other attempt.stopped_restart attempt.no_result attempt.no_result_excerpt".split())
+WORK_NEWS_FIRST_KEYS |= frozenset("status.starting status.working status.waiting_you status.waiting_answer status.checking status.stopping status.stopped status.finished status.ended".split())
+WORK_NEWS_KEYS |= WORK_NEWS_FIRST_KEYS | {"concealed.progress"}
 
 
 def test_text_catalog_locales_have_equal_keys():
