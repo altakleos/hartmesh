@@ -558,7 +558,34 @@ files or starting a model. Pending collection conservatively pins potential Work
 source outboxes in the same scope until classification; source removal must not
 change a Work reply into ordinary chat.
 
-Group upload, one canonical response, full acknowledgement and explicit closed-group
-recovery still require implementation. Before activation, their final effect must
-reprove the complete member manifest, including absence of newly admitted members.
-All Work controllers remain dormant.
+`work_album_inputs.py` captures a ready cohort in the same guarded writer as
+source-control consumption and its sole Respond operation. The actual quoted root
+keeps Work input V4 and its own single-file raw media; followers use
+`work_album_member`, never a duplicate Work action marker. The closed `work_album`
+capsule binds every immutable actual input, root reply basis and operation. Complete
+captions plus bounded native fallback/collision name growth must fit Statement
+before any file write. An oversized cohort stays retained without uploads.
+
+Native journal V4 uses Work context V2 for a member, including its original input
+digest and frozen group context. Final native admission checks the complete group,
+including newly pending/late members and competing publication/action ownership.
+`work_album_files.py` reads every completed native journal with full scope and target
+proof before one Respond. Its final compact SQL packet revalidates the entire
+journal after provider awaits. No ordinary pending-file context or chat run is
+created. A failed member gets its own File Retry; recovery reconciles missing or
+interrupted siblings as uncertain instead of downloading them automatically.
+
+`work_album_answers.py` owns live submission and metadata recovery. Once a Respond
+journal exists, replay reconciles its fixed body/receipt before any native file
+work, including after Home changes or file-journal collection. Work file V2 freezes
+all actual saved paths and captions. The existing outcome evidence column carries
+root/member proofs without shifting the shared delivery projection. The outcome
+records the original group context and frozen-file digest; a whole ACK must match
+that identity even after SDK I/O. Every original member registers that outcome and
+is sealed together after its final part. Unfinished followers retain their native
+receipts, and root/member SDK redeliveries cannot enter ordinary chat.
+
+Late or conflicting cohorts remain held without another response. Explicit
+closed/ambiguous/overlong group recovery choices remain an activation prerequisite;
+the single-file recovery path refuses group roots. All Work controllers remain
+dormant, with notification production and lifecycle installation still outstanding.

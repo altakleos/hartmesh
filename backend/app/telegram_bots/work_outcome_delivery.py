@@ -252,7 +252,18 @@ async def acknowledge_outcome(session, row):
         identity = basis["input"]
         mark = await session.get(TelegramInboundMarkRow, (identity["link_id"], identity["message_id"], identity["chat_id"]), with_for_update=True, populate_existing=True)
         validate_input(mark, basis, row)
-        mark.route_complete = True
+        expected_album = data.get("file_answer", {}).get("album")
+        if expected_album is not None or "work_album" in mark.route_basis:
+            from app.telegram_bots.work_album_inputs import album_context, inputs_digest, outcome_members
+
+            if type(expected_album) is not dict or set(expected_album) != {"version", "context", "file_sha256"} or type(expected_album["version"]) is not int or expected_album["version"] != 1:
+                raise ProductSourceRetired()
+            if not same_body(expected_album["context"], album_context(mark)) or expected_album["file_sha256"] != inputs_digest(mark.route_basis.get("work_file")):
+                raise ProductSourceRetired()
+            for member in await outcome_members(session, mark):
+                member.route_complete = True
+        else:
+            mark.route_complete = True
     act.continuation = {"version": 1, "work_outcome": {"phase": phase(data["act"]), "outbox_id": row.id}}
 
 
@@ -373,7 +384,12 @@ class WorkOutcomePlans:
                         if parent is not None:
                             await self._retire_controls(writer, link, parent, "work-done", editing=edit["message_id"] if edit else None)
                 if origin is not None:
-                    await self.inbox.register_delivery([InboxRow.from_row(origin)], outbox_id=identity, finish=False, session=writer)
+                    members = [origin]
+                    if "work_album" in origin.route_basis:
+                        from app.telegram_bots.work_album_inputs import outcome_members
+
+                        members = await outcome_members(writer, origin)
+                    await self.inbox.register_delivery([InboxRow.from_row(member) for member in members], outbox_id=identity, finish=False, session=writer)
                 return identity
 
         return await await_drained(perform())

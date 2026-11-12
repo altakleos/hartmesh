@@ -36,7 +36,18 @@ def album_manifest(origin, link):
         if root is not None or sources or origin.route_kind != "turn" or origin.route_target_id != link.agent_ref or "source_outbox_id" in origin.route_basis:
             raise CallbackRefused()
     elif state == "ready":
-        if type(root) is not int or root not in members or len(sources) != 1 or prior or origin.route_kind != "work_file_album" or origin.route_target_id != sources[0] or origin.route_basis.get("source_outbox_id") != sources[0]:
+        if type(root) is not int or root not in members or len(sources) != 1 or prior or origin.route_basis.get("source_outbox_id") != sources[0]:
+            raise CallbackRefused()
+        if "work_album" in origin.route_basis:
+            from app.telegram_bots.work_album_inputs import album_context
+
+            context = album_context(origin)
+            is_root = origin.message_id == root
+            if context["root_message_id"] != root or context["member_ids"] != members or context["source_outbox_id"] != sources[0] or origin.route_target_id != context["request_id"]:
+                raise CallbackRefused()
+            if origin.route_kind != ("work_input" if is_root else "work_album_member") or origin.operation_ids != ([context["operation_id"]] if is_root else []):
+                raise CallbackRefused()
+        elif origin.route_kind != "work_file_album" or origin.route_target_id != sources[0]:
             raise CallbackRefused()
     elif state in {"ambiguous", "late"}:
         if root is not None or not sources or origin.route_kind != "work_file_album" or origin.route_target_id is not None or "source_outbox_id" in origin.route_basis or state == "late" and not prior:
@@ -50,6 +61,11 @@ class WorkFileAlbums:
     def __init__(self, files):
         self.files, self.inputs, self.services = files, files.inputs, files.services
         self.inbox = files.inbox
+
+    async def submit(self, channel, origin):
+        from app.telegram_bots.work_album_answers import WorkAlbumAnswers
+
+        return await WorkAlbumAnswers(self.files).submit(channel, origin)
 
     async def accept(self, link, update, value, profile):
         """The first committed receipt already belongs to durable collection."""
@@ -179,10 +195,11 @@ class WorkFileAlbums:
                     else:
                         sources.add(source)
                         quoted_roots.append(origin)
-            work_owned = bool(sources) or any(origin.route_kind == "work_file_album" for origin in prior)
+            prior_work = any(origin.route_kind == "work_file_album" or "work_album" in origin.route_basis for origin in prior)
+            work_owned = bool(sources) or prior_work
             state, root = "ordinary", None
             if work_owned:
-                if any(origin.route_kind == "work_file_album" for origin in prior):
+                if prior_work:
                     state = "late"
                 elif len(sources) != 1 or unknown or prior or len({origin.sanitized_input.get("prompt_id") for origin in pending}) != 1:
                     state = "ambiguous"

@@ -499,6 +499,7 @@ class ChatTurns:
                     owner = self.services.work_text_inputs.files.albums
                     captured = await owner.capture(joined.channel, joined.link, tuple(joined.origins))
                     if captured.work_owned:
+                        await owner.submit(joined.channel, captured.origins[0])
                         return
                     # Only the collector crosses missing quotes. Non-Work
                     # inputs preserve the original reply/prompt boundaries.

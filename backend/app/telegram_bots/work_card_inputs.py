@@ -123,8 +123,15 @@ class WorkCardInputs:
                 self.inbox._current(link, mark)
                 if origin.link_id != link.id:
                     raise CallbackRefused()
-                data = reply_basis(link, parent, mark, rows, consumed=mark.route_kind is not None)
-                if mark.route_kind is not None:
+                fresh_album = mark.route_kind == "work_file_album"
+                members = None
+                if fresh_album:
+                    from app.telegram_bots.work_album_inputs import captured_members
+
+                    self.inbox._publication_snapshot_matches(mark, origin)
+                    members = await captured_members(self, link, writer, mark)
+                data = reply_basis(link, parent, mark, rows, consumed=mark.route_kind is not None and not fresh_album)
+                if mark.route_kind is not None and not fresh_album:
                     if mark.route_kind != "work_input" or mark.route_target_id != data["request_id"] or not same_body(mark.route_basis.get("work_input"), data) or len(mark.operation_ids) != 1:
                         raise CallbackRefused()
                 else:
@@ -134,8 +141,23 @@ class WorkCardInputs:
                     composed.require_current = data["version"] == 4
                     operation = uuid4().hex
                     basis = {"work_input": data, **({"input_profile": {"version": 2, "kind": "chat_input", "forwarded": False, "origin": None}} if data["version"] == 4 else {})}
+                    if members is not None:
+                        from app.telegram_bots.work_album_inputs import capture_context
+
+                        snapshots, locked = members
+                        capsule = capture_context(snapshots, origin, data, operation)
+                        basis = {**origin.route_basis, **basis, "work_album": capsule}
                     composed.captured = replace(InboxRow.from_row(mark), route_kind="work_input", route_target_id=data["request_id"], route_basis=basis, operation_ids=[operation], state="reply_pending")
-                    await self.inbox.route(InboxRow.from_row(mark), kind="work_input", target_id=data["request_id"], basis=basis, operation_ids=[operation], session=writer)
+                    if members is None:
+                        await self.inbox.route(InboxRow.from_row(mark), kind="work_input", target_id=data["request_id"], basis=basis, operation_ids=[operation], session=writer)
+                    else:
+                        for member in locked:
+                            member.route_target_id = data["request_id"]
+                            if member.message_id == mark.message_id:
+                                member.route_kind, member.route_basis, member.operation_ids = "work_input", basis, [operation]
+                            else:
+                                member.route_kind, member.route_basis = "work_album_member", {**member.route_basis, "work_album": capsule}
+                        await writer.flush()
                     if parent.payload.get("work_request_basis", {}).get("version") != 4:
                         group = CallbackGroup(_row(rows[0]), tuple(_row(row) for row in rows), parent.id, parent.payload["presentation_version"])
                         await self.callbacks.consume_group(group, reason="work-reply", session=writer)
@@ -203,12 +225,18 @@ class _CardGuard:
         self.require_current, self.action = False, None
         self.fresh_capture = False
         self.file_receipt = None
+        self.album_proof = None
 
     async def prepare(self):
         await prepare_publication_guard(self.base)
 
     async def check(self, writer):
         current = await self.base.check(writer)
+        self.album_proof = None
+        if self.captured is not None and "work_album" in self.captured.route_basis:
+            from app.telegram_bots.work_album_inputs import AlbumInputProof
+
+            self.album_proof = AlbumInputProof(writer.get_bind().dialect.name == "sqlite", self.captured, complete="work_action_id" in self.captured.route_basis)
         held, _target = await self.admission(session=writer, projection=_CardProjection(self) if self.captured is not None else None)
         if "agents:write" not in held:
             raise AgentDenied("The reply is unavailable")
@@ -235,14 +263,22 @@ class _CardProjection:
         )
 
         if self.guard.file_receipt is not None:
+            from app.telegram_bots.work_album_files import AlbumFileBundle
             from deerflow.persistence.agent_instances.model import AgentInstanceRow
             from deerflow.persistence.spaces.model import SpaceRow
 
-            file = aliased(TelegramActRow)
-            query = query.add_columns(file, SpaceRow.generation).join(file, file.id == self.guard.file_receipt[0].id).join(SpaceRow, SpaceRow.id == AgentInstanceRow.home_id)
+            if isinstance(self.guard.file_receipt, AlbumFileBundle):
+                query = query.add_columns(self.guard.file_receipt.expression(), SpaceRow.generation).join(SpaceRow, SpaceRow.id == AgentInstanceRow.home_id)
+            else:
+                file = aliased(TelegramActRow)
+                query = query.add_columns(file, SpaceRow.generation).join(file, file.id == self.guard.file_receipt[0].id).join(SpaceRow, SpaceRow.id == AgentInstanceRow.home_id)
+        if self.guard.album_proof is not None:
+            query = query.add_columns(self.guard.album_proof.expression())
         return query
 
     def check(self, rows):
+        if self.guard.album_proof is not None:
+            self.guard.album_proof.check(rows[0][-1])
         if self.guard.file_receipt is not None:
             from app.telegram_bots.work_file_inputs import validate_file_response
 

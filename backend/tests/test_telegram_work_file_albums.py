@@ -15,6 +15,12 @@ from app.telegram_bots.turns import ChatTurns
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramInboundMarkRow, TelegramPendingFileRow
 
 
+async def hold_work_submission(*args, **kwargs):
+    # These cases qualify collection up to its handoff. Complete native/Work
+    # submission is exercised by test_telegram_work_album_answers.
+    return True
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("quoted_first", [True, False])
 async def test_album_quote_on_later_member_precedes_any_ordinary_file_effect(
@@ -28,6 +34,7 @@ async def test_album_quote_on_later_member_precedes_any_ordinary_file_effect(
         services.pending_files = await pending_service(e, services.file_puts)
         turns = ChatTurns(services)
         services.turns = turns
+        monkeypatch.setattr(services.work_text_inputs.files.albums, "submit", hold_work_submission)
         owned.append(turns)
         # Drive the real joined-input flush after the two actual SDK updates,
         # without a wall-clock race with the ordinary one-second quiet window.
@@ -147,6 +154,7 @@ async def test_non_work_album_preserves_ordinary_reply_boundaries_and_file_recei
         services.pending_files = await pending_service(e, services.file_puts)
         turns = ChatTurns(services)
         services.turns = turns
+        monkeypatch.setattr(services.work_text_inputs.files.albums, "submit", hold_work_submission)
         owned.append(turns)
         monkeypatch.setattr(turns, "_arm_join", lambda key, joined: None)
         admit = turns._admit_origins
@@ -259,6 +267,7 @@ async def test_first_album_acceptance_and_collection_route_commit_together(work_
         services = e.channel._services
         turns = ChatTurns(services)
         services.turns = turns
+        monkeypatch.setattr(services.work_text_inputs.files.albums, "submit", hold_work_submission)
         owned.append(turns)
         monkeypatch.setattr(turns, "_arm_join", lambda key, joined: None)
         route = services.outbox.inbox.route

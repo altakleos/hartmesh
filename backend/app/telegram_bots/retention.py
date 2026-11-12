@@ -183,6 +183,7 @@ async def _sweep_acts(sessions, now):
                 mark.route_complete.is_(False),
                 or_(
                     and_(cast(mark.route_basis["work_input"]["version"].as_string(), String) == "4", cast(TelegramActRow.continuation["version"].as_string(), String) == "4"),
+                    and_(mark.route_kind == "work_album_member", cast(TelegramActRow.continuation["version"].as_string(), String) == "4", cast(TelegramActRow.continuation["work"]["version"].as_string(), String) == "2"),
                     and_(mark.route_kind == "work_file_new", cast(TelegramActRow.continuation["version"].as_string(), String) == "3"),
                 ),
             )

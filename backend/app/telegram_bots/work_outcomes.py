@@ -77,7 +77,8 @@ def present_outcome(act, *, purpose, permissions, attempt_status, locale, values
         if file_answer is None:
             html = render("ask.saved_echo", locale, text=shown.echo) + "\n\n" + html
         else:
-            prefix = render("ask.saved_file", locale, file=file_answer["file"], name=values["name"])
+            names = file_answer["files"] if "files" in file_answer else [file_answer["file"]]
+            prefix = "\n".join(render("ask.saved_file", locale, file=name, name=values["name"]) for name in names)
             if file_answer["caption"]:
                 prefix += "\n\n" + render("ask.saved_echo", locale, text=file_answer["caption"])
             html = prefix + "\n\n" + html

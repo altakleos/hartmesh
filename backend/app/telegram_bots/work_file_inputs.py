@@ -20,6 +20,11 @@ def file_response_text(captured, receipt):
 
 
 def validate_file_response(link, captured, expected, actual, instance, home_generation):
+    from app.telegram_bots.work_album_files import AlbumFileBundle
+
+    if isinstance(expected, AlbumFileBundle):
+        expected.check(actual, instance, home_generation)
+        return
     if actual is None:
         raise CallbackRefused()
     file = _file_journal(actual)
@@ -55,6 +60,10 @@ def validate_file_response(link, captured, expected, actual, instance, home_gene
 
 
 async def read_file_response(link, captured, *, session):
+    if "work_album" in captured.route_basis:
+        from app.telegram_bots.work_album_files import read_album_files
+
+        return await read_album_files(link, captured, session=session)
     file = captured.route_basis["work_input"]["files"][0]
     row = await session.get(TelegramActRow, file_act_id(link, file), with_for_update=True, populate_existing=True)
     if row is None or row.state != "done" or not same_body(_file_journal(row), file) or row.continuation.get("work", {}).get("input_sha256") != work_input_digest(captured):
@@ -64,20 +73,42 @@ async def read_file_response(link, captured, *, session):
 
 
 def freeze_file_answer(receipt):
+    from app.telegram_bots.work_album_files import AlbumFileBundle
+
+    if isinstance(receipt, AlbumFileBundle):
+        return receipt.freeze()
     row, text = receipt
     return {"version": 1, "act_id": row.id, "operation_id": row.operation_ids[-1], "target": thaw(row.continuation["target"]), "result": thaw(row.result), "text": text}
 
 
 def saved_file_text(captured):
-    from app.telegram_bots.file_puts import _file_result
+    if "work_album" in captured.route_basis:
+        from app.telegram_bots.work_album_files import saved_album_text
 
+        return saved_album_text(captured)
     data = captured.route_basis.get("work_file")
     if type(data) is not dict or set(data) != {"version", "act_id", "operation_id", "target", "result", "text"} or type(data["version"]) is not int or data["version"] != 1:
         raise CallbackRefused()
-    import re
     from types import SimpleNamespace
 
     from app.telegram_bots.inbox import chat_input_parts
+
+    validate_saved_file_reference(data)
+    actual_text, files = chat_input_parts(captured)
+    work = captured.route_basis["work_input"]
+    if len(files) != 1 or not same_body(files, work["files"]) or data["act_id"] != file_act_id(SimpleNamespace(id=captured.link_id), files[0]) or work["text"] != (_TEXT.validate_python(actual_text) if actual_text.strip() else None):
+        raise CallbackRefused()
+    caption = work["text"]
+    text = _TEXT.validate_python((caption + "\n\n" if caption else "") + data["result"]["path"])
+    if data["text"] != text:
+        raise CallbackRefused()
+    return text
+
+
+def validate_saved_file_reference(data):
+    import re
+
+    from app.telegram_bots.file_puts import _file_result
 
     _file_result(data["result"])
     target = data["target"]
@@ -91,15 +122,6 @@ def saved_file_text(captured):
         or any(type(target[key]) is not int or target[key] < 1 for key in ("instance_generation", "home_generation"))
     ):
         raise CallbackRefused()
-    actual_text, files = chat_input_parts(captured)
-    work = captured.route_basis["work_input"]
-    if len(files) != 1 or not same_body(files, work["files"]) or data["act_id"] != file_act_id(SimpleNamespace(id=captured.link_id), files[0]) or work["text"] != (_TEXT.validate_python(actual_text) if actual_text.strip() else None):
-        raise CallbackRefused()
-    caption = work["text"]
-    text = _TEXT.validate_python((caption + "\n\n" if caption else "") + data["result"]["path"])
-    if data["text"] != text:
-        raise CallbackRefused()
-    return text
 
 
 class WorkFileInputs:
@@ -121,7 +143,7 @@ class WorkFileInputs:
             if message.media_group_id is not None:
                 async with self.services.callbacks.writer(link, guard) as writer:
                     mark = await writer.get(TelegramInboundMarkRow, (link.id, message.message_id, message.chat_id))
-                    if mark is not None and mark.route_kind == "work_file_album":
+                    if mark is not None and (mark.route_kind == "work_file_album" or "work_album" in mark.route_basis):
                         self.inbox._current(link, mark)
                         return True
                 return False  # The shared ingress joins the whole album before classification.
@@ -159,6 +181,8 @@ class WorkFileInputs:
         async with self.services.callbacks.writer(link, guard) as writer:
             mark = (await self.inbox._rows(writer, [origin]))[0]
             self.inbox._current(link, mark)
+            if "work_album" in mark.route_basis:
+                raise CallbackRefused()  # Group choices must retain every member.
             if mark.route_complete:
                 return True
             # An admitted/unknown response retains its immutable receipt owner.
@@ -185,7 +209,13 @@ class WorkFileInputs:
             mark = await writer.get(TelegramInboundMarkRow, (link.id, receipt.message_id, link.chat_id))
             if mark is None:
                 raise CallbackRefused()
-            WorkFileWriteProjection(link, receipt).check([(mark,)], allow_complete=True)
+            if receipt.continuation["work"]["version"] == 2:
+                from app.telegram_bots.work_album_inputs import album_context, album_input_digest
+
+                if not same_body(album_context(mark), receipt.continuation["work"]["album"]) or album_input_digest(mark) != receipt.continuation["work"]["input_sha256"]:
+                    raise CallbackRefused()
+            else:
+                WorkFileWriteProjection(link, receipt).check([(mark,)], allow_complete=True)
             if mark.route_complete:
                 return True
             captured = InboxRow.from_row(mark)
@@ -200,11 +230,17 @@ class WorkFileInputs:
         async with self.services.callbacks.writer(link, guard) as writer:
             mark = (await self.inbox._rows(writer, [origin]))[0]
             self.inbox._current(link, mark)
-            if mark.route_kind != "work_file_new" and (mark.route_kind != "work_input" or mark.route_basis.get("work_input", {}).get("version") != 4):
+            album = mark.route_kind == "work_file_album" or "work_album" in mark.route_basis
+            if not album and mark.route_kind != "work_file_new" and (mark.route_kind != "work_input" or mark.route_basis.get("work_input", {}).get("version") != 4):
                 return False
             if mark.route_complete:
                 return True
             captured = InboxRow.from_row(mark)
+
+        if album:
+            from app.telegram_bots.work_album_answers import WorkAlbumAnswers
+
+            return await WorkAlbumAnswers(self).submit(channel, captured, recover=True)
 
         if captured.route_kind == "work_file_new":
             from app.telegram_bots.work_file_handoff import recover_file_message
