@@ -206,9 +206,13 @@ def frozen(captured, *, acknowledged=False):
         if basis["parts"] != expected or basis["keyboard"] != [list(line) for line in presentation.keyboard] or captured.item.payload.get("product_keyboard_basis") != basis["keyboard"]:
             raise ValueError()
         if "result_files" in basis:
+            from app.telegram_bots.work_result_history import qualified_history
+            from app.telegram_bots.work_result_identity import qualify_identity
             from app.telegram_bots.work_result_ledger import qualify_result_parts
 
-            recipe = qualify_result_parts(captured.item, expected, selected=captured.part, acknowledged=acknowledged)
+            qualify_identity(captured.item.payload.get("work_result_identity"), source)
+            carried, hashes = qualified_history(captured.item, source)
+            recipe = qualify_result_parts(captured.item, expected, selected=captured.part, acknowledged=acknowledged, carried=carried, known_hashes=hashes)
             return basis, source, recipe
         index = captured.part["source_ref"]["values"]["part"]
         if type(index) is not int or not 0 <= index < len(expected):

@@ -2547,7 +2547,11 @@ class OutboxSender:
                 parts = deepcopy(saved.parts)
                 sending = next(value for value in parts if value["part_id"] == part["part_id"])
                 sending["state"] = "sending"
-                sending["protect_content"] = bool(sending.get("protect_content") or decision.protect_content)
+                if "result_files" not in saved.payload.get("work_request_basis", {}):
+                    sending["protect_content"] = bool(sending.get("protect_content") or decision.protect_content)
+                # A frozen result plan owns its protection transition, including
+                # a new Show teaser. Its adapter rejects weaker protection before
+                # SDK dispatch; rewriting the recipe here would destroy its proof.
                 sending["dispatched_at"] = self.outbox.clock().isoformat()
                 saved.parts = parts
                 required_protection = sending["protect_content"]
@@ -2745,12 +2749,14 @@ class OutboxSender:
                 from types import SimpleNamespace
 
                 from app.telegram_bots.work_request_source import frozen
+                from app.telegram_bots.work_result_history import qualified_history
                 from app.telegram_bots.work_result_ledger import qualify_result_parts, replace_unavailable
 
                 original = next(part for part in row.parts if part["part_id"] == part_id)
-                basis, _source, _recipe = frozen(SimpleNamespace(link=BotLink.from_row(binding), item=_item(row), part=original))
+                basis, source, _recipe = frozen(SimpleNamespace(link=BotLink.from_row(binding), item=_item(row), part=original))
                 replace_unavailable(row, part_id, key=error.source_ref["key"])
-                qualify_result_parts(_item(row), basis["parts"])
+                carried, hashes = qualified_history(_item(row), source)
+                qualify_result_parts(_item(row), basis["parts"], carried=carried, known_hashes=hashes)
                 self._pending(row)
                 return
             if row.payload.get("reply_basis", {}).get("version") in {6, 7}:

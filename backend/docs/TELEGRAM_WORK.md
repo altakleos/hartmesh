@@ -30,8 +30,20 @@ Generic text recovery cannot discard this media owner. `work_result_recovery.py`
 owns the first protected Show: qualify the acknowledged teaser and its ledger,
 consume its exact control, then clear that keyboard before any files or the new
 card. A retry or missing teaser uses the durable cleanup receipt; full delivery
-still gates the new controls. This owner refuses refresh of partly sent files.
-Source-aware refresh/repair (including READ-loss redaction), exact-attempt warning
+still gates the new controls. Refresh creates a new card version and uses
+`work_result_history.py` to qualify the original media recipes, rewrite ancestry,
+byte hashes and actual historical receipts. Carry events retire covered fresh
+roots without inventing sent parts. Unfinished files retain their byte identity
+and photo rejection fallback; the new card uses current redaction and locale.
+Historical ACKs retain their actual protection flags and need no current Space
+grant. An opaque canonical outcome/source fingerprint is captured from the raw
+Work row and checked again in the provider-final recovery and SDK projections;
+redaction cannot substitute another hidden source. History must cover actual
+past receipts and remembered hashes, and every current plan must carry all known
+ACKs exactly once. Compare historical JSON with strict Boolean/integer identity.
+A protection upgrade creates a new teaser before any further content;
+the generic sender must not overwrite a frozen result's protection recipe.
+Failed-transport repair, exact-attempt warning
 links, non-review result notifications and event/supervisor installation remain
 outstanding; these initial-delivery components must remain uninstalled.
 

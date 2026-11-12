@@ -2027,7 +2027,9 @@ checks the original outcome and the recipient's current file permissions.
 Initial review-file delivery keeps files before the complete card, preserves
 acknowledged files through card retries, and waits for the whole delivery before
 enabling controls. Protected result Show clears its teaser button before sending
-protected files and a new card. Changed-source recovery, failure links and
+protected files and a new card. A changed review resumes unfinished files and
+refreshes the card without uploading acknowledged files again, including after
+a language or file-access change. Failed-transport repair, failure links and
 notification startup integration remain pending.
 Background recovery preserves newer
 request previews. Complete first-tap previews now have
