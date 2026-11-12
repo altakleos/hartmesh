@@ -9,7 +9,7 @@ from app.telegram_bots.work_interaction_delivery import acknowledged_source
 from app.telegram_bots.work_request_source import same_displayed_basis
 from deerflow.agent_instances.contract import AgentConflict
 from deerflow.agent_instances.human_input_contract import Respond
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
 
@@ -55,6 +55,8 @@ class WorkInputAdmissions:
                 existing = await reader.get(TelegramActRow, identity)
                 parent = await reader.get(TelegramOutboxRow, data["source_outbox_id"])
                 shown = acknowledged_source(link, parent)
+            if "work_action_id" in captured.route_basis and (captured.route_basis["work_action_id"] != identity or existing is None):
+                raise CallbackRefused()
             if existing is None:
                 current, _settings = await self.controls.recovery._source(link, data["request_id"])
                 if not same_displayed_basis(shown, current):
@@ -69,7 +71,9 @@ class WorkInputAdmissions:
                 latest = await self.captures.capture(link, original, prompt_id=prompt_id, guard=composed, session=writer)
                 if latest.operation_ids != captured.operation_ids or not same_body(latest.route_basis, captured.route_basis):
                     raise CallbackRefused()
-                return await self.controls.acts._stage_work_act(
+                if "work_action_id" in latest.route_basis and (latest.route_basis["work_action_id"] != identity or await writer.get(TelegramActRow, identity, with_for_update=True, populate_existing=True) is None):
+                    raise CallbackRefused()
+                result = await self.controls.acts._stage_work_act(
                     link,
                     kind=kind,
                     request_id=data["request_id"],
@@ -78,5 +82,8 @@ class WorkInputAdmissions:
                     owner=owner,
                     session=writer,
                 )
+                mark = await writer.get(TelegramInboundMarkRow, (captured.link_id, captured.message_id, captured.chat_id), populate_existing=True)
+                mark.route_basis = {**mark.route_basis, "work_action_id": identity}
+                return result
 
         return await await_drained(perform())

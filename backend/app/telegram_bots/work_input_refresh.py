@@ -23,10 +23,10 @@ class WorkInputRefresh:
         async def perform():
             async with self.plans.outbox.sessions() as reader:
                 callback = await reader.get(TelegramCallbackRow, callback_id)
-                if callback is None or callback.link_id != link.id or callback.kind not in {"decide_confirm", "changes_confirm", "changes_open"}:
+                if callback is None or callback.link_id != link.id or callback.kind not in {"decide_confirm", "changes_confirm", "changes_open", "back", "decide_note"}:
                     raise CallbackRefused()
                 request_id = callback.target_id
-                kind = "decide" if callback.kind == "decide_confirm" else "changes_requested"
+                kind = {"decide_confirm": "decide", "changes_confirm": "changes_requested", "changes_open": "changes_requested"}.get(callback.kind)
             source, settings = await self.previews.recovery._source(link, request_id)
             admission = await prepare_attention(self.plans.reader, link)
             composed = _RefreshGuard(guard, admission, source, callback_id, kind)

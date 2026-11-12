@@ -2027,8 +2027,14 @@ routing saves answers and unchanged changes notes once, retains changed review
 notes for confirmation, and previews typed decisions before an explicit tap.
 Retained review notes keep their original 24-hour deadline across refreshes.
 Edit note and Discard retire the old confirmation without submitting it.
+Back and Add a note on a typed decision also retire its old input, so recovery
+cannot reopen the superseded confirmation.
 Further review changes preserve the retained text for a fresh complete preview
 and another explicit confirmation. Unknown operations keep their original journal.
+An unsubmitted note whose review closes can show a replacement review for another
+explicit confirmation, or retire its old controls with a closed notice.
+The same recovery follows a conclusively rejected save; it preserves the original
+operation and never repeats a save whose result remains unknown.
 Assignments continue to be managed on the web.
 
 Instance site-permission cards require current Manage access when planned, sent

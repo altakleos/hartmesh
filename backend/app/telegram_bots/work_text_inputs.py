@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.telegram_bots.callbacks import CallbackRefused, Prompts, normalize_callback_topic
 from app.telegram_bots.inbox import InboxRow
+from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_input_admission import WorkInputAdmissions
 from app.telegram_bots.work_input_capture import WorkInputCaptures
 from app.telegram_bots.work_input_previews import WorkInputPreviews, blocked_input_actions, input_identity
@@ -93,6 +94,10 @@ class WorkTextInputs:
             return True
         try:
             staged = await self.admissions.stage(link, captured, guard=guard)
+        except ProductSourceRetired:
+            if data["purpose"] == "request_changes" and await self.callbacks.review_recovery.recover(link, captured, guard=guard):
+                return True
+            raise
         except AgentConflict:
             if data["purpose"] != "request_changes":
                 raise
@@ -107,7 +112,11 @@ class WorkTextInputs:
             else:
                 result = await self.callbacks.acts.reconcile_receipt(staged.id)
             if result.kind == "changes_requested" and result.state == "conflict":
-                await self.previews.open(link, captured, guard=guard)
+                try:
+                    await self.previews.open(link, captured, guard=guard, conclusive_act=result)
+                except ProductSourceRetired:
+                    if not await self.callbacks.review_recovery.recover(link, captured, guard=guard, conclusive_act=result):
+                        raise
             else:
                 await self.callbacks._observe(link, result.id, guard=guard)
         except Exception as error:

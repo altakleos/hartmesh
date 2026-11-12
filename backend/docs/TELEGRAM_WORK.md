@@ -228,6 +228,26 @@ carry a closed flag derived from original seen data, so their stale notice is
 revalidated at delivery without replacing the decision or note. No recovery path
 submits a new action automatically; original Act bodies remain immutable.
 
+`work_review_recovery.py` handles a captured changes note when its original review
+has closed. A current pending review on the same Work can reuse the original note
+only in a complete V4 replacement preview with a new explicit confirmation. The
+replacement flag is derived from original and current request identities; the
+original input time still fixes expiry. With no replacement, old controls retire
+and a fixed closed/withdrawn notice settles the input without an action. Closure
+state/revisions and the unchanged input share the final joined read, including
+after settlement; drift rolls the entire transition back. Reserved confirmations
+may enter only after an exact conclusive conflict: the full shown group, original
+confirm control, Act scope and immutable command must agree. Unknown, pending,
+missing or altered journals stay held. A known non-effect confirmation whose
+review closed first checks its original operation and CAS; receipt reconciliation
+still comes first. Direct text closure after admission uses the same recovery
+only after its immutable operation conclusively conflicts.
+Direct text admission records `route_basis.work_action_id` atomically with its
+Act, preserving the captured `work_input`. Missing marked journals cannot be
+reconstructed by input replay. Preview authority also checks orphaned V4 control
+reservations, so restarting from the input cannot bypass a missing confirmation
+journal. These existence probes use opaque text identities on both SQL dialects.
+
 `work_outcomes.py` renders complete success/refusal/uncertain wording, without
 issuing commands or installing controls. Unknown actions never become a failed
 save. A known attempt-closing refusal keeps the original confirmation; a retained
@@ -362,5 +382,17 @@ cannot create another confirmation. No model run or Work activation is started.
 
 This owner and its startup recovery are not installed by the supervisor yet.
 Direct replies to question cards without a typing prompt, untied text, comments,
-voice/files, expired or replaced prompts, retained-note editing/discard and
-closed/replaced-review recovery remain separate required input flows.
+voice/files and expired or replaced prompts remain separate required input flows.
+
+
+Input-owned navigation settles a V4 decision's original input on Back or Add a
+note, just as review Edit/Discard settles a retained note. The old typed value
+stays visible and immutable; a new prompt owns a separate input and any eventual
+confirmation. The transition's final joined read rechecks original input and
+blocked actions even after its own settlement. Back/Add note/Edit also recheck
+the displayed source and current permissions. Discard does not require the old
+review to remain pending. A changed unreserved decision keeps the original text
+in a complete fresh preview instead of applying navigation to an unseen basis.
+Back/Add note remain available while actions are paused, including their
+unreserved stale refresh. An admitted unresolved confirmation continues to own
+recovery.
