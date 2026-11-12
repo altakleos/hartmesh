@@ -1088,3 +1088,12 @@ that gate again after asynchronous source preparation. A denied source defers
 only its own link. The supervisor must supply its cause/readiness/shutdown gate
 and invoke this owner at `SUMMARY_TICK_SECONDS`; the scheduler sends nothing
 and never starts Work.
+
+`summary_recovery.py` refreshes an unacknowledged plan through its source owner.
+It preserves the daily key, selection cutoff, original control age and retired
+presentation history. A changed complete selection, locale or protection never
+reuses stale buttons. A selection that becomes empty closes without a send.
+The final combined source/claim/group/settings checks surround replacement;
+held repair additionally fences the exact failure disposition and cannot take
+an active claim. SDK-manifest conflicts remain quarantined. Summary navigation
+and runtime installation are still separate requirements.

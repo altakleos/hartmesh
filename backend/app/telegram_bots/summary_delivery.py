@@ -1,6 +1,7 @@
 """Daily summary persistence and source-owned delivery, dormant until installed."""
 
 import asyncio
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
@@ -12,7 +13,7 @@ from sqlalchemy.orm import aliased
 from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
 from app.telegram_bots.notifications import aware, preference_skip
 from app.telegram_bots.pages import page_address
-from app.telegram_bots.producer import DeliveryClaimRetired, PermanentDeliveryError, ProductSourceRetired, _item, _safe_json
+from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryRetry, PermanentDeliveryError, ProductSourceRetired, _item, _safe_json
 from app.telegram_bots.settings import SettingsRepository, _snapshot
 from app.telegram_bots.summary import due_date
 from app.telegram_bots.summary_sources import SummaryRead
@@ -68,14 +69,17 @@ def _validate_sections(value):
             seen.add(key)
 
 
-def frozen_summary(captured, *, pending=False, acknowledged=False):
+def frozen_summary(captured, *, pending=False, acknowledged=False, _history=True):
     try:
         item, basis, link = captured.item, captured.item.payload["summary_basis"], captured.link
-        if type(basis) is not dict or set(basis) != {"version", "date", "as_of", "since", "sections", "protected", "concealed", "locale", "timezone", "summary_minute", "public_base_url", "parts", "keyboard"}:
+        version = item.payload["presentation_version"]
+        if type(basis) is not dict or set(basis) != {"version", "date", "as_of", "since", "sections", "protected", "concealed", "locale", "timezone", "summary_minute", "public_base_url", "parts", "keyboard"} | (
+            {"history"} if basis.get("version") == 2 else set()
+        ):
             raise ValueError()
         if (
             type(basis["version"]) is not int
-            or basis["version"] != 1
+            or basis["version"] not in {1, 2}
             or date.fromisoformat(basis["date"]).isoformat() != basis["date"]
             or datetime.fromisoformat(basis["as_of"]).utcoffset() is None
             or datetime.fromisoformat(basis["since"]).utcoffset() is None
@@ -93,8 +97,9 @@ def frozen_summary(captured, *, pending=False, acknowledged=False):
             or basis["concealed"] is not basis["protected"]
             or type(basis["summary_minute"]) is not int
             or not 0 <= basis["summary_minute"] < 1440
-            or type(item.payload["presentation_version"]) is not int
-            or item.payload["presentation_version"] != 0
+            or type(version) is not int
+            or version < 0
+            or (basis["version"] == 1) != (version == 0)
             or item.class_ != "summary"
             or item.dedupe_key != "summary:" + basis["date"]
             or (item.link_id, item.owner_user_id, item.binding_generation, item.chat_id, item.instance_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id, link.agent_ref)
@@ -103,17 +108,33 @@ def frozen_summary(captured, *, pending=False, acknowledged=False):
             raise ValueError()
         _validate_sections(basis["sections"])
         expected, keyboard = recipes(basis, link, item.id)
-        if not same_body(expected, basis["parts"]) or not same_body(keyboard, basis["keyboard"]) or not same_body(keyboard, item.payload["product_keyboard_basis"]) or len(item.parts) != len(expected):
+        if not same_body(expected, basis["parts"]) or not same_body(keyboard, basis["keyboard"]) or not same_body(keyboard, item.payload["product_keyboard_basis"]) or len(item.parts) != (version if _history else 0) + len(expected):
+            raise ValueError()
+        if basis["version"] == 2:
+            if type(basis["history"]) is not list or len(basis["history"]) != (version if _history else 0):
+                raise ValueError()
+            if _history:
+                for index, record in enumerate(basis["history"]):
+                    if type(record) is not dict or set(record) != {"basis", "part"} or any(record["basis"][key] != basis[key] for key in ("date", "as_of", "since")):
+                        raise ValueError()
+                    old = replace(item, payload={**item.payload, "summary_basis": record["basis"], "product_keyboard_basis": record["basis"]["keyboard"], "presentation_version": index}, parts=[record["part"]])
+                    frozen_summary(SimpleNamespace(link=link, item=old, part=None), pending=record["part"]["state"] == "pending", _history=False)
+                    if not same_body(item.parts[index], {**record["part"], "state": "retired"}):
+                        raise ValueError()
+        if any(len({part[key] for part in item.parts}) != len(item.parts) for key in ("part_id", "callback_group_id")):
             raise ValueError()
         if not expected:
             if item.state != "skipped" or captured.part is not None:
                 raise ValueError()
             return basis, None
-        part = item.parts[0]
+        part = item.parts[-1]
         metadata = {"part_id", "ordinal", "presentation_version", "state", "message_ids", "sent_at", "dispatched_at", "plain_fallback", "url_button_fallback", "invalid_token_verification_pending", "callback_group_id"}
         if (
             not same_body({key: value for key, value in part.items() if key not in metadata}, expected[0])
-            or any(type(part[key]) is not int or part[key] != 0 for key in ("ordinal", "presentation_version"))
+            or type(part["ordinal"]) is not int
+            or part["ordinal"] != 0
+            or type(part["presentation_version"]) is not int
+            or part["presentation_version"] != version
             or any(type(part.get(key)) is not str or len(part[key]) != 32 or any(character not in "0123456789abcdef" for character in part[key]) for key in ("part_id", "callback_group_id"))
             or part["state"] != ("sent" if acknowledged else "pending" if pending else "sending")
             or captured.part is not None
@@ -164,14 +185,14 @@ class SummaryPlans:
                     return existing.id
                 previous = await reader.scalar(
                     select(TelegramOutboxRow)
-                    .where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.class_ == "summary", TelegramOutboxRow.created_at < now, cast(TelegramOutboxRow.payload["summary_basis"]["version"].as_string(), String) == "1")
+                    .where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.class_ == "summary", TelegramOutboxRow.created_at < now, cast(TelegramOutboxRow.payload["summary_basis"]["version"].as_string(), String).in_(("1", "2")))
                     .order_by(TelegramOutboxRow.created_at.desc())
                     .limit(1)
                 )
             beginning = now - timedelta(days=1)
             if previous is not None:
                 try:
-                    part = previous.parts[-1] if previous.parts else None
+                    part = next((part for part in previous.parts if part["presentation_version"] == previous.payload["presentation_version"]), None)
                     frozen_summary(SimpleNamespace(link=link, item=_item(previous), part=part), pending=part is not None and part["state"] == "pending", acknowledged=part is not None and part["state"] == "sent")
                 except (PermanentDeliveryError, KeyError, TypeError, IndexError):
                     pass
@@ -237,8 +258,8 @@ class SummaryPlans:
 
 
 class _SummaryWriteProjection:
-    def __init__(self, plans, source, basis, zone, *, captured=None, silent=True, now=None):
-        self.source = source
+    def __init__(self, plans, source, basis, zone, *, captured=None, silent=True, now=None, require_due=True):
+        self.source, self.require_due = source, require_due
         self.plans, self.basis, self.zone = plans, basis, zone
         self.item, self.captured, self.silent, self.now = captured.item if captured else None, captured, silent, now or source.as_of
         self.origin = NavigationOrigin()
@@ -248,7 +269,7 @@ class _SummaryWriteProjection:
         settings, delivery, control = TelegramPersonSettingsRow, aliased(TelegramOutboxRow), aliased(TelegramCallbackRow)
         query = query.add_columns(settings).join(settings, settings.owner_user_id == self.source.link.owner_user_id)
         if self.item is not None:
-            groups = [part["callback_group_id"] for part in self.item.parts if "callback_group_id" in part]
+            groups = [part["callback_group_id"] for part in self.item.parts if "callback_group_id" in part and part["presentation_version"] == self.item.payload["presentation_version"]]
             query = query.add_columns(delivery, control).join(delivery, delivery.id == self.item.id).outerjoin(control, control.group_id.in_(groups))
         return query
 
@@ -259,7 +280,7 @@ class _SummaryWriteProjection:
         settings = _snapshot(rows[0][self.delivery_column])
         if (settings.locale, settings.timezone, settings.summary_minute) != (self.basis["locale"], self.basis["timezone"], self.basis["summary_minute"]) or not settings.summary_enabled:
             raise ProductSourceRetired()
-        if self.captured is None and due_date(self.source.as_of, settings, self.zone) != self.basis["date"]:
+        if self.require_due and self.captured is None and due_date(self.source.as_of, settings, self.zone) != self.basis["date"]:
             raise ProductSourceRetired()
         if self.item is None:
             return
@@ -273,7 +294,7 @@ class _SummaryWriteProjection:
                 raise DeliveryClaimRetired()
         elif claim_of(row) != (None, None, None):
             raise DeliveryClaimRetired()
-        if not row.parts:
+        if not any(part["presentation_version"] == row.payload["presentation_version"] for part in row.parts):
             return
         controls = list({control.id: control for record in rows if (control := record[self.delivery_column + 2]) is not None}.values())
         try:
@@ -289,21 +310,49 @@ class _SummaryWriteProjection:
 class SummarySources:
     def __init__(self, plans):
         self.plans = plans
+        from app.telegram_bots.summary_recovery import SummaryRecovery
+
+        self.recovery = SummaryRecovery(plans)
+
+    async def prepare(self, captured):
+        from app.telegram_bots.summary_recovery import current_summary, unchanged_summary
+
+        basis, part = frozen_summary(captured)
+        source, fresh, zone = await current_summary(self.plans, captured.link, basis)
+        if not unchanged_summary(basis, fresh):
+            raise _SummaryChanged()
+        return source, basis, part, zone
 
     async def read_part(self, captured):
-        basis, part = frozen_summary(captured)
-        source = source_from_basis(self.plans.reader, captured.link, basis)
-        await source.authorize()
-        return part["html"], part["visible_text"]
+        async def perform():
+            try:
+                _source, _basis, part, _zone = await self.prepare(captured)
+            except _SummaryChanged:
+                await self.recovery.refresh(captured)
+                raise DeliveryClaimRetired() from None
+            return part["html"], part["visible_text"]
+
+        return await await_drained(perform())
 
     async def authorize(self, captured, *, silent, now):
         async def perform():
-            basis, _part = frozen_summary(captured)
-            source = source_from_basis(self.plans.reader, captured.link, basis)
-            zone = await asyncio.to_thread(ZoneInfo, basis["timezone"])
-            await source.authorize(projection=_SummaryWriteProjection(self.plans, source, basis, zone, captured=captured, silent=silent, now=now))
+            try:
+                source, basis, _part, zone = await self.prepare(captured)
+                await source.authorize(projection=_SummaryWriteProjection(self.plans, source, basis, zone, captured=captured, silent=silent, now=now))
+            except _SummaryChanged:
+                raise DeliveryRetry(timedelta(seconds=1)) from None
+            except ProductSourceRetired:
+                try:
+                    await self.prepare(captured)
+                except _SummaryChanged:
+                    raise DeliveryRetry(timedelta(seconds=1)) from None
+                raise
 
         return await await_drained(perform())
+
+
+class _SummaryChanged(Exception):
+    pass
 
 
 async def acknowledge_summary(session, row):
