@@ -2015,6 +2015,10 @@ Stop for assignments remain on the web. Stopping targets the selected attempt;
 a newer attempt cannot inherit an earlier cancellation request. An acknowledgement
 of the request is separate from confirmed settlement.
 
+Capacity counts include every occupied place. Running-assignment details require
+access to inspect the corresponding assistant or employee; missing start dates
+or requesters stay unknown.
+
 An assignment proposal retained in a Telegram conversation appears as a read-only
 card when opened in the browser. It shows the objective, success criteria and
 any mentioned deadline, with a link to Work. Confirmation belongs to the original

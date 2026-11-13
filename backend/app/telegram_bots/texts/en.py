@@ -1,6 +1,7 @@
 """English fixed texts for managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "start.superseded": "This Start request is no longer current. Open the assignment to review it.",
     "start.changed": "This assignment changed. The current version is below.",
     "start.already": "{name} is already working on this.",
     "start.not_settled": "{name}'s last work on this is still being closed. Resume when the status says Interrupted or Stopped.",
@@ -18,6 +19,10 @@ TEXTS: dict[str, str] = {
     "start.refused.storage-busy": '{name}\'s files are being changed right now. Start "{objective}" again in a few minutes.',
     "start.wait_seconds": "{n} seconds",
     "start.wait_two_minutes": "two minutes",
+    "busy.work_limit_over": '"{objective}" is saved. {n} assignments are running, above the current limit of {maximum}. A message arrives in this chat when this one can start.',
+    "busy.work_limit_which_no_time": '{other} is working on "{objective}", started by {person}.',
+    "busy.work_limit_which_no_person": '{other} is working on "{objective}", started at {time}.',
+    "busy.work_limit_which_basic": '{other} is working on "{objective}".',
     "busy.work_limit": '"{objective}" is saved. Another assignment is running, and only one can run at a time here. A message arrives in this chat when this one can start.',
     "busy.work_limit_many": '"{objective}" is saved. {n} assignments are running, the most that can run at once here. A message arrives in this chat when this one can start.',
     "busy.work_limit_which": '{other} is working on "{objective}", started at {time} by {person}.',

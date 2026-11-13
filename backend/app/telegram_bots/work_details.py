@@ -55,7 +55,7 @@ class WorkDetailRead:
 
 
 class WorkDetailsReader(AttentionReader):
-    async def detail(self, link, work_id):
+    async def detail(self, link, work_id, *, ignore_activation=None):
         async def perform():
             basis = await self._current(link)
             actor = PrincipalRef("human", link.owner_user_id)
@@ -63,7 +63,7 @@ class WorkDetailsReader(AttentionReader):
             request = await HumanInput(self.work).get(actor=actor, request_id=record["human_input_request_id"], can_write="agents:write" in basis[0]) if record["human_input_request_id"] else None
             thread_id = (record.get("attempt") or {}).get("thread_id")
             reusable = await AgentConversations(self.work.agents).allowed(actor=actor, thread_id=thread_id, permission=AgentPermission.USE | AgentPermission.INSPECT) if thread_id else False
-            projection = WorkDetailProjection(self, link, record, request, reusable=reusable)
+            projection = WorkDetailProjection(self, link, record, request, reusable=reusable, ignore_activation=ignore_activation)
             await current_attention(self, link, projection=projection)
             return projection.source
 

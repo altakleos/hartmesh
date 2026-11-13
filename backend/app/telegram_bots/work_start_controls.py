@@ -16,7 +16,7 @@ def displayed_start(link, parent, callback):
     original = acknowledged_view(link, parent, callback.payload.get("presentation_version"))
     source = original.payload["work_news_basis"]["source"]
     preview = source["key"] in {"execution.activate", "execution.stop"} and source.get("work", {}).get("notice", {}).get("preview") is True
-    if (source["key"] != "view.detail" and not preview) or callback.kind != "work_start" or callback.target_kind != "work":
+    if (source["key"] not in {"view.detail", "capacity.offer"} and not preview) or callback.kind != "work_start" or callback.target_kind != "work" or original.payload["work_news_basis"]["concealed"]:
         raise CallbackRefused()
     detail = source["work"]["detail"]["record"]
     if (callback.target_id, callback.payload.get("work_id"), callback.payload.get("assignment_revision")) != (detail["id"], detail["id"], detail["assignment_revision"]) or type(callback.payload.get("assignment_revision")) is not int:
@@ -58,7 +58,9 @@ class WorkStartAdmissions:
                     if anchor_signature(original) != signature or any(row.payload.get("work_action_id") != callback_id for row in rows):
                         raise CallbackRefused()
                 return await self.acts.stage_activation(link, operation_id=callback_id, work_id=displayed["id"], assignment_revision=displayed["assignment_revision"])
-            fresh = await self.plans.reader.detail(link, displayed["id"])
+            offered = original.payload["work_news_basis"]["source"]
+            waiting_id = offered["work"]["waiting_act"]["id"] if offered["key"] == "capacity.offer" else None
+            fresh = await self.plans.reader.detail(link, displayed["id"], **({"ignore_activation": waiting_id} if waiting_id else {}))
             if any(not same_body(fresh.record.get(key), displayed.get(key)) for key in ("id", "objective", "success_criteria", "assignment_revision", "due_at")):
                 raise AgentConflict("Review the current assignment", reason="work-changed")
             controls = work_buttons(
@@ -82,6 +84,10 @@ class WorkStartAdmissions:
                     for row in rows:
                         row.payload = {**row.payload, "work_action_id": act.id}
                     await writer.flush()
+                if waiting_id is not None:
+                    from app.telegram_bots.work_capacity_offers import transfer_offer
+
+                    await transfer_offer(writer, link, actual, callback_id, now=self.outbox.clock())
                 await detail_current(session=writer)
                 guard.current()
 

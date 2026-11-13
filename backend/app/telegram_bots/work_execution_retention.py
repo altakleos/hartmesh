@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.telegram_bots.acts import _snapshot
 from app.telegram_bots.producer import ProductSourceRetired
@@ -65,12 +65,16 @@ def closed_stop(root, journals, attempts, events):
 
 async def execution_dependencies(session):
     """Conservative same-binding evidence pins; never renew callback age."""
-    deliveries = list(await session.scalars(select(TelegramOutboxRow).where(TelegramOutboxRow.payload["work_execution_intent"]["act_id"].as_string().is_not(None))))
+    deliveries = list(
+        await session.scalars(
+            select(TelegramOutboxRow).where(or_(TelegramOutboxRow.payload["work_execution_intent"]["act_id"].as_string().is_not(None), TelegramOutboxRow.payload["capacity_offer_intent"]["act_id"].as_string().is_not(None)))
+        )
+    )
     if not deliveries:
         return set(), set(), set()
     links = {row.id: row for row in await session.scalars(select(TelegramBotLinkRow))}
     controls = {row.id: row for row in await session.scalars(select(TelegramCallbackRow))}
-    identities = {row.payload["work_execution_intent"]["act_id"] for row in deliveries if type(row.payload["work_execution_intent"]["act_id"]) is str}
+    identities = {intent["act_id"] for row in deliveries if type((intent := row.payload.get("work_execution_intent", row.payload.get("capacity_offer_intent")))["act_id"]) is str}
     journals = {}
     ordered = sorted(identities)
     for start in range(0, len(ordered), 500):
@@ -98,7 +102,7 @@ async def execution_dependencies(session):
         link = links.get(delivery.link_id)
         if link is None or (delivery.owner_user_id, delivery.chat_id, delivery.binding_generation, delivery.instance_id) != (link.owner_user_id, link.chat_id, link.binding_generation, link.agent_ref):
             continue
-        intent = delivery.payload["work_execution_intent"]
+        intent = delivery.payload.get("work_execution_intent", delivery.payload.get("capacity_offer_intent"))
         journal, control = journals.get(intent["act_id"]), controls.get(intent["act_id"])
         parent = await session.get(TelegramOutboxRow, control.payload.get("anchor_outbox_id")) if control else None
         closed = False

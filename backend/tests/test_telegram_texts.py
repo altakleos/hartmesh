@@ -108,7 +108,8 @@ EXECUTION_KEYS = frozenset(
     (
         "start.changed start.already start.not_settled start.needs_review start.closed start.brief_changed start.settings_changing start.source_missing "
         "start.busy_wait start.busy_gave_up start.cancelled start.cancel_unconfirmed start.refused.run-limit start.refused.restarting start.refused.storage-busy "
-        "start.wait_seconds start.wait_two_minutes busy.work_limit busy.work_limit_many busy.work_limit_which busy.place_free assign.no_work denied.start stop.not_yours stop.unconfirmed"
+        "start.wait_seconds start.wait_two_minutes busy.work_limit busy.work_limit_many busy.work_limit_which busy.place_free assign.no_work denied.start stop.not_yours stop.unconfirmed "
+        "start.superseded busy.work_limit_over busy.work_limit_which_no_time busy.work_limit_which_no_person busy.work_limit_which_basic"
     ).split()
 )
 

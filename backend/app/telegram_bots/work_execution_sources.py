@@ -117,6 +117,22 @@ def qualify_stop_receipt(event, act):
 
 
 class WorkExecutionReader(WorkViewReader):
+    def __init__(self, *, capacity=None, **kwargs):
+        super().__init__(**kwargs)
+        self.capacity = capacity
+
+    async def prepare_clock(self, link, item):
+        clock = await super().prepare_clock(link, item)
+        if self.capacity is not None:
+            async with self.links.session_factory() as reader:
+                act = await reader.get(TelegramActRow, item.payload["work_execution_intent"]["act_id"])
+                waiting = act is not None and act.kind == "activate" and act.state == "waiting" and act.reason == "work-limit"
+            if waiting:
+                from app.telegram_bots.work_capacity_sources import CapacityClock
+
+                return CapacityClock(clock.settings, clock.zone, clock.now, await self.capacity.read(link))
+        return clock
+
     async def inspect(self, link, item):
         async def perform():
             intent = item.payload.get("work_execution_intent")
@@ -145,6 +161,12 @@ class WorkExecutionProjection:
         self.expected_act = None
         self.detail = detail or detail_read(source.work["detail"])
         self.projection = WorkDetailProjection(reader, link, self.detail.record, self.detail.request, reusable=self.detail.can_reuse_conversation, expected=self.detail)
+        self.capacity = getattr(clock, "capacity", None)
+        self.capacity_projection = None
+        if self.capacity is not None:
+            from app.telegram_bots.work_capacity_reads import CapacityProjection
+
+            self.capacity_projection = CapacityProjection(link, self.capacity.capacity, expected=self.capacity)
 
     def extend(self, query):
         result = self.projection.extend(query)
@@ -163,7 +185,7 @@ class WorkExecutionProjection:
         )
         operation = case((act.kind == "stop", act.body["attempt_id"].as_string()), else_=None)
         supervisor = aliased(UserRow)
-        return (
+        result = (
             result.add_columns(delivery, act, callback, parent, control, original, child, event, settings, requester.email, supervisor.email)
             .join(delivery, delivery.id == self.item.id)
             .join(act, act.id == self.item.payload["work_execution_intent"]["act_id"])
@@ -177,12 +199,15 @@ class WorkExecutionProjection:
             .outerjoin(requester, requester.id == original.requester_id)
             .outerjoin(supervisor, supervisor.id == AgentInstanceRow.supervisor_id)
         )
+        return self.capacity_projection.extend(result) if self.capacity_projection is not None else result
 
     def check(self, rows):
         raise ProductSourceRetired()
 
     def check_with_permissions(self, rows, held):
         self.projection.check_with_permissions(rows, held)
+        if self.capacity_projection is not None:
+            self.capacity_projection.check(rows)
         delivery, journal, callback, parent, _control, original, child, event, settings, person, supervisor = rows[0][self.delivery_column : self.delivery_column + 11]
         if (
             _item(delivery) != self.item
@@ -247,6 +272,17 @@ class WorkExecutionProjection:
             supervisor=supervisor,
             time=format_time(aware(original.settled_at), self.clock.settings, now=self.clock.now(), zone=self.clock.zone) if original is not None and original.settled_at is not None else "",
         )
+        if notice.key == "busy.work_limit" and self.capacity is not None:
+            from app.telegram_bots.render import render
+            from app.telegram_bots.work_capacity_text import waiting_html
+
+            values["capacity_html"] = waiting_html(
+                self.capacity.capacity,
+                objective=record["objective"],
+                locale=settings.locale,
+                people={self.capacity.capacity.running[0].requester_id: self.capacity.person} if self.capacity.capacity.running else {},
+                time=lambda value: format_time(value, self.clock.settings, now=self.clock.now(), zone=self.clock.zone),
+            ) or render("busy.place_free", settings.locale, objective=record["objective"])
 
         def date(value):
             return datetime.fromisoformat(value).astimezone(self.clock.zone).strftime("%Y-%m-%d %H:%M") if value else None

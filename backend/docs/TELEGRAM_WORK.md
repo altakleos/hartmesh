@@ -1414,3 +1414,40 @@ settled receipts expire under the existing retention policy.
 The runtime must still install these owners and their observer, dispatch and
 repair routes. Public command/menu activation, capacity offers and remaining
 assignment workflows are separate integration work.
+
+## Capacity notices and free-place offers
+
+`WorkCapacityReader` reads the authenticated owner route over HTTP. Global counts
+stay advisory; it never reconstructs the resident budget or chooses extra
+occupants locally. Only the first displayed route entry is requalified against
+current Inspect, Work objective, instance name and requester identity. Missing
+or falsey task dates and requesters stay unknown. Captured caller, target and
+binding identity fence borrowed reuse, including connection conflict epochs.
+Own Work-limit replies render those current facts, with honest partial wording
+and an over-current-limit form when an administrator lowers the budget.
+
+`WorkCapacityOffers` arbitrates one advisory offer across bots and people using
+a PostgreSQL transaction advisory lock or SQLite's immediate writer. Never
+automatically retry or launch a capacity wait. Never-offered waits precede repeat
+offers; original intent creation order breaks ties. A pending delivery keeps its
+place, and the configured hold begins from its latest retained SDK ACK. Later
+offers close obsolete keyboards; final source reads admit only the latest global
+offer. An internal monotone queue timestamp orders replacements even when the
+host clock has not advanced; actual task dates are untouched. A never-published,
+empty and unclaimed retired notice leaves no human offer to hold. The capacity
+value comes from that waiting intent's actual HTTP owner,
+and canonical activation checks the budget again after a fresh human Start.
+
+Each `free:<act_id>:<ordinal>` delivery is a service notification, preserving
+quiet-hour sound rules under every notification preference. Protected company
+Work first shows the ordinary information teaser and explicit Show. A full,
+current objective and success criteria precede Start; multipart controls belong
+only to the final acknowledged part. Start atomically supersedes the old known
+capacity wait and saves the new immutable Act with the whole control group's
+reservation. Unknown original launch promises and missing markers cannot enter
+this transfer. A late source failure rolls the entire transfer back. Original
+intent/ACK and offer ordinals remain retained while waiting; retention never
+renews expired buttons or treats an offer as permission to execute.
+
+These owners still require the supervisor's event/minute observer and public
+button routing during runtime integration. The public menu remains unchanged.

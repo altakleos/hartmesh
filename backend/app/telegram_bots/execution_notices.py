@@ -29,6 +29,7 @@ _START_REASONS = {
     "run-limit": "start.refused.run-limit",
     "restarting": "start.refused.restarting",
     "storage-busy": "start.refused.storage-busy",
+    "superseded": "start.superseded",
 }
 
 

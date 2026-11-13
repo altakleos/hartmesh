@@ -12,7 +12,8 @@ def present_execution(source, basis, link):
     notice, act = source.work["notice"], source.work["act"]
     locale = basis["locale"]
     wait = render_plain("start.wait_two_minutes", locale) if source.work["wait_seconds"] == 120 else render_plain("start.wait_seconds", locale, n=source.work["wait_seconds"])
-    html = render(notice["key"], locale, **source.values, wait=wait, product=source.work["product"])
+    html = source.values.get("capacity_html") if notice["key"] == "busy.work_limit" else None
+    html = html or render(notice["key"], locale, **source.values, wait=wait, product=source.work["product"])
     keyboard = []
     if notice["cancel"] or notice["retry"]:
         keyboard.append([dict(label="label.cancel" if notice["cancel"] else "label.retry_action", kind="cancel_wait" if notice["cancel"] else "act_check", target_kind="act", target_id=act["id"], payload={"act_id": act["id"]})])

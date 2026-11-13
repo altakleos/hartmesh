@@ -28,7 +28,11 @@ from deerflow.utils.file_io import await_drained
 
 
 def recipes(source, basis, identity, link):
-    if source.key in {"execution.activate", "execution.stop"}:
+    if source.key == "capacity.offer":
+        from app.telegram_bots.work_capacity_sources import present_capacity_offer
+
+        view = present_capacity_offer(source, basis, identity, link)
+    elif source.key in {"execution.activate", "execution.stop"}:
         from app.telegram_bots.work_execution_text import present_execution
 
         view = present_execution(source, basis, link)
@@ -347,7 +351,8 @@ class WorkNewsSources:
             zone = await asyncio.to_thread(ZoneInfo, settings.timezone)
             from app.telegram_bots.work_navigation_sources import qualify_navigation
 
-            projection = await qualify_navigation(self.navigation, captured, basis, source, _SendProjection(self, captured, source, basis, settings, zone, now, silent), family="work_news_basis")
+            clock = await self.reader.prepare_clock(captured.link, captured.item)
+            projection = await qualify_navigation(self.navigation, captured, basis, source, _SendProjection(self, captured, source, basis, settings, zone, now, silent, clock=clock), family="work_news_basis")
             try:
                 await current_attention(self.reader, captured.link, projection=projection)
             except ProductSourceRetired:
@@ -362,8 +367,8 @@ class WorkNewsSources:
 
 
 class _SendProjection:
-    def __init__(self, host, captured, source, basis, settings, zone, now, silent):
-        self.projection = host.projection(host.reader, captured.link, captured.item, source, clock=NewsClock(settings, zone, host.reader.clock))
+    def __init__(self, host, captured, source, basis, settings, zone, now, silent, *, clock=None):
+        self.projection = host.projection(host.reader, captured.link, captured.item, source, clock=clock or NewsClock(settings, zone, host.reader.clock))
         self.link, self.item, self.source = captured.link, captured.item, source
         self.host, self.captured, self.basis, self.settings, self.zone, self.now, self.silent = host, captured, basis, settings, zone, now, silent
         self.group = captured.item.parts[-1].get("callback_group_id")
