@@ -97,7 +97,6 @@ import {
 } from "@/core/turn-progress";
 import { cn } from "@/lib/utils";
 
-
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { useMaybeBrowserView } from "../browser-view";
 import { CopyButton } from "../copy-button";

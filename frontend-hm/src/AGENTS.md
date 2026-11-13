@@ -213,7 +213,6 @@ fallback. Batch followup receipts invalidate existing thread/history/input queri
 rendering or refresh never launches work. Confirmed background cancellation first
 cancels older list/detail reads so they cannot restore a stale running card.
 
-
 Assignment proposal artifacts render as passive `assistant:assignment-card` groups
 only in instance conversations. Validate version, tool identity and bounded draft
 fields; keep the result among steps and the card terminal. Plain-text details and
