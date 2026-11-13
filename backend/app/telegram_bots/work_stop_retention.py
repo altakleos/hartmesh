@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from app.telegram_bots.work_actions import request_for, same_body
 from app.telegram_bots.work_stop_retries import parent_of, validate_child
-from deerflow.persistence.agent_instances.work import AgentWorkEventRow
+from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow
 from deerflow.persistence.telegram_bots.model import TelegramActRow
 
 
@@ -20,7 +20,9 @@ def closed_scope(row):
         return row.state == "refused" and row.reason == "no-running-attempt" and row.attempts == 0 and not row.operation_ids and parent_of(row) is None
     if (
         not isinstance(scope, Mapping)
-        or set(scope) != {"attempt_id", "thread_id", "run_id", "state", "attempts", "not_before"}
+        or set(scope) - {"ended_from"} != {"attempt_id", "thread_id", "run_id", "state", "attempts", "not_before"}
+        or "ended_from" in scope
+        and (scope["state"] != "ended" or scope["ended_from"] not in {"ready", "uncertain"})
         or scope["attempt_id"] != request.attempt_id
         or scope["state"] not in {"settled", "ended"}
         or type(scope["thread_id"]) is not str
@@ -37,6 +39,20 @@ def closed_scope(row):
     if scope["state"] == "settled" and row.state != "done":
         return False
     return True
+
+
+def original_settled(row, original):
+    """Logical closure alone cannot retire an unresolved physical promise."""
+    scope = row.stop_dispatch
+    return (
+        original is not None
+        and original.id == scope["attempt_id"]
+        and original.work_id == row.work_id
+        and original.status in {"succeeded", "failed", "cancelled"}
+        and original.settled_at is not None
+        and original.thread_id == scope["thread_id"]
+        and (scope["run_id"] is None or original.run_id == scope["run_id"])
+    )
 
 
 async def expired_stop_groups(session, *, cutoff, pending_outcome):
@@ -80,6 +96,9 @@ async def expired_stop_groups(session, *, cutoff, pending_outcome):
                     continue
             elif row.state == "done":
                 if event is None or (event.work_id, event.action, event.actor_kind, event.actor_id) != (row.work_id, "stop", "human", row.owner_user_id) or not same_body(event.request, row.body):
+                    continue
+                original = await session.get(AgentWorkAttemptRow, row.stop_dispatch["attempt_id"])
+                if not original_settled(row, original):
                     continue
             elif event is not None:
                 continue

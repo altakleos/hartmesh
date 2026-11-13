@@ -19,6 +19,7 @@ from sqlalchemy import and_, or_, select
 from app.telegram_bots.authority import AccessOff, CeilingRefused, require
 from app.telegram_bots.links import BotLink
 from app.telegram_bots.work_delegate_actions import DelegateActionMethods
+from app.telegram_bots.work_management_actions import ManagementActionMethods
 from app.telegram_bots.work_start_actions import ActivationActionMethods
 from app.telegram_bots.work_stop_actions import StopActionMethods
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied, Refusal
@@ -34,7 +35,7 @@ from deerflow.utils.file_io import await_drained
 
 _ACT_SCOPE = ("link_id", "owner_user_id", "bot_id", "binding_generation", "telegram_user_id", "chat_id", "instance_id", "work_id", "request_id", "kind", "message_id")
 
-WORK_ACT_KINDS = frozenset({"respond", "decide", "accept", "changes_requested", "route", "stop", "activate", "delegate"})
+WORK_ACT_KINDS = frozenset({"respond", "decide", "accept", "changes_requested", "route", "stop", "activate", "delegate", "edit", "cancel"})
 _SCOPE = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "binding_generation", "token_revision", "telegram_user_id", "chat_id", "connection_id")
 
 
@@ -60,7 +61,7 @@ def request_for(kind, body, *, identity=None):
     return request
 
 
-class WorkActionMethods(StopActionMethods, ActivationActionMethods, DelegateActionMethods):
+class WorkActionMethods(ManagementActionMethods, StopActionMethods, ActivationActionMethods, DelegateActionMethods):
     """Methods mixed into the existing Acts journal; no independent lifecycle."""
 
     @asynccontextmanager
@@ -83,7 +84,7 @@ class WorkActionMethods(StopActionMethods, ActivationActionMethods, DelegateActi
         current = await self.links.get(link.id)
         if current is None or any(getattr(current, field) != getattr(link, field) for field in _SCOPE) or current.agent_kind != "instance" or current.state != "connected" or current.health != "ok":
             raise AgentDenied("The bot binding is no longer current")
-        if writable and kind in {"decide", "accept"} and current.acts_paused_since is not None:
+        if writable and kind in {"decide", "accept", "edit", "cancel"} and current.acts_paused_since is not None:
             raise AgentDenied("Actions are temporarily paused", reason="actions-paused")
         if await self.authority.instance_send_policy(current, require_use=True, require_inspect=True) in {"off", "restoring"}:
             raise AgentDenied("The bot policy is unavailable")
@@ -179,6 +180,8 @@ class WorkActionMethods(StopActionMethods, ActivationActionMethods, DelegateActi
         return result
 
     async def _work_outcome(self, captured, *, state, reason=None, result=None):
+        if captured.kind in {"edit", "cancel"}:
+            return await self._management_outcome(captured, state=state, reason=reason, result=result)
         if captured.kind == "delegate" and state == "done":
             return await self._finish_delegate(captured, result)
         if captured.kind == "activate":
@@ -224,6 +227,8 @@ class WorkActionMethods(StopActionMethods, ActivationActionMethods, DelegateActi
     async def _attempt_work(self, act, *, explicit=False, attempt_current=lambda: True):
         from app.telegram_bots.acts import _snapshot, _utc
 
+        if act.kind in {"edit", "cancel"}:
+            return await self._attempt_management(act, explicit=explicit, attempt_current=attempt_current)
         if act.kind == "stop":
             return await self._run_stop_chain(act, explicit=explicit, attempt_current=attempt_current)
         if act.kind == "activate":

@@ -333,7 +333,7 @@ async def sweep_pending_files(sessions, now: datetime, *, ttl_hours: int) -> int
     return await _sweep(sessions, delete(TelegramPendingFileRow).where(TelegramPendingFileRow.created_at <= _aware(now) - timedelta(hours=ttl_hours)))
 
 
-async def _sweep_acts(sessions, now):
+async def _sweep_acts(sessions, now, *, draft_ttl_hours=24):
     from app.telegram_bots.file_puts import settled_file_journal
 
     async with _writer(sessions) as session:
@@ -352,8 +352,11 @@ async def _sweep_acts(sessions, now):
 
         _execution_groups, _execution_anchors, execution_acts = await execution_dependencies(session)
         pending_outcome = or_(pending_outcome, TelegramActRow.id.in_(sorted(execution_acts)))
+        from app.telegram_bots.work_management_retention import expire_management
+
+        management = await expire_management(session, now, draft_ttl_hours=draft_ttl_hours, pending_outcome=pending_outcome)
         expired = (~pending_outcome, TelegramActRow.created_at < now - timedelta(days=ACT_RETENTION_DAYS), TelegramActRow.state.in_(_SETTLED_ACTS), TelegramActRow.stop_dispatch.is_(None))
-        ordinary = await session.execute(delete(TelegramActRow).where(*expired, TelegramActRow.kind.not_in(("file_put", "stop", "activate", "delegate")), TelegramActRow.continuation.is_(None)))
+        ordinary = await session.execute(delete(TelegramActRow).where(*expired, TelegramActRow.kind.not_in(("file_put", "stop", "activate", "delegate", "edit", "cancel")), TelegramActRow.continuation.is_(None)))
         mark = TelegramInboundMarkRow
         work_file_input = (
             select(mark.message_id)
@@ -412,7 +415,11 @@ async def _sweep_acts(sessions, now):
         from app.telegram_bots.work_actions import WORK_ACT_KINDS
         from app.telegram_bots.work_outcome_delivery import delivery_receipt
 
-        outcomes = list(await session.scalars(select(TelegramActRow).where(*expired, TelegramActRow.kind.in_(WORK_ACT_KINDS - {"stop", "activate", "delegate"}), TelegramActRow.continuation.is_not(None)).with_for_update(skip_locked=True)))
+        outcomes = list(
+            await session.scalars(
+                select(TelegramActRow).where(*expired, TelegramActRow.kind.in_(WORK_ACT_KINDS - {"stop", "activate", "delegate", "edit", "cancel"}), TelegramActRow.continuation.is_not(None)).with_for_update(skip_locked=True)
+            )
+        )
         settled = []
         for row in outcomes:
             try:
@@ -430,7 +437,7 @@ async def _sweep_acts(sessions, now):
         stop_ids = await expired_stop_groups(session, cutoff=now - timedelta(days=ACT_RETENTION_DAYS), pending_outcome=pending_outcome)
         for start in range(0, len(stop_ids), _BATCH):
             await session.execute(delete(TelegramActRow).where(TelegramActRow.id.in_(stop_ids[start : start + _BATCH])))
-        return ordinary.rowcount + len(identities) + len(settled) + len(stop_ids)
+        return ordinary.rowcount + len(identities) + len(settled) + len(stop_ids) + management
 
 
 def _live_followup_input(mark, now, callback_max_age_days):
@@ -504,7 +511,7 @@ async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int, dra
         for start in range(0, len(eligible), _BATCH):
             inbound += (await session.execute(delete(mark).where(tuple_(mark.link_id, mark.message_id, mark.chat_id).in_(eligible[start : start + _BATCH])))).rowcount
     outbox = await _sweep_outbox(sessions, now, callback_max_age_days, draft_ttl_hours)
-    acts = await _sweep_acts(sessions, now)
+    acts = await _sweep_acts(sessions, now, draft_ttl_hours=draft_ttl_hours)
     async with _writer(sessions) as session:
         acts += await expire_assignments(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
     events = await _sweep(sessions, delete(TelegramBotLinkEventRow).where(TelegramBotLinkEventRow.created_at < now - timedelta(days=LINK_EVENT_RETENTION_DAYS)))

@@ -69,17 +69,20 @@ async def test_settled_and_acknowledged_stop_evidence_expires_normally(work_deli
 
 
 @pytest.mark.asyncio
-async def test_ended_follow_up_with_unsettled_original_keeps_its_journal(work_delivery, monkeypatch):
-    from unittest.mock import AsyncMock
-
-    from app.telegram_bots.authority import CeilingRefused
+async def test_legacy_ended_follow_up_with_unsettled_original_keeps_its_journal(work_delivery):
+    from app.telegram_bots.acts import _snapshot
     from app.telegram_bots.work_execution_retention import execution_dependencies
 
     e = work_delivery
     plans, act, attempt_id, manager = await stop_notice(e)
-    with monkeypatch.context() as patch:
-        patch.setattr("app.telegram_bots.work_stop_actions.require", AsyncMock(side_effect=CeilingRefused()))
-        act = await e.acts.resume_stop_dispatch(act)
+    # Earlier versions could end an acknowledged follow-up after a ceiling
+    # withdrawal. Keep that persisted legacy shape as a retention fixture;
+    # current recovery preserves requested instead of erasing the ACK.
+    async with e.db.sessions.begin() as writer:
+        row = await writer.get(TelegramActRow, act.id)
+        row.stop_dispatch = {**row.stop_dispatch, "state": "ended"}
+        await writer.flush()
+        act = _snapshot(row)
     assert act.stop_dispatch["state"] == "ended"
     async with e.db.sessions() as reader:
         original = await reader.get(AgentWorkAttemptRow, attempt_id)
