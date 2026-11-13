@@ -438,7 +438,10 @@ class TelegramSupervisor:
         return {identity: record for identity, (_, record) in self._startup_records.items()}
 
     def _pending_copy_decision(self) -> bool:
-        return self._copy_decision is None or self.notifications is not None and not self.notifications.ingress_ready
+        return self._copy_decision is None
+
+    def _pending_ingress(self) -> bool:
+        return self._pending_copy_decision() or self.notifications is not None and not self.notifications.ingress_ready
 
     async def _wait_send_release(self) -> bool:
         await self._send_event.wait()
@@ -932,7 +935,11 @@ class TelegramSupervisor:
         def control_allowed(mode):
             if not current_pair():
                 return False
-            return not self._pending_copy_decision() and not self._stopping if mode == "confirm" else self._send_ready and not self._stopping
+            if mode == "confirm":
+                # Shutdown confirms only fully admitted offsets; startup recovery
+                # must finish first, but stopping must not suppress that receipt.
+                return self._copy_decision is False and not self._pending_ingress()
+            return self._send_ready and not self._stopping
 
         async def drop_complete():
             return intent is None or await InstancePolicy(self.links.session_factory).complete_discard(captured, intent, check_current=current_pair)

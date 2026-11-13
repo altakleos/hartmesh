@@ -41,12 +41,13 @@ async def test_default_supervisor_seeds_before_releasing_updates(work_pages, mon
         assert host.links.work_baseline_seeder is not None
         async with e.db.sessions() as reader:
             assert (await reader.get(TelegramBotLinkRow, e.link.id)).work_baseline_generation is None
-        assert host._pending_copy_decision() is True
+        assert host._pending_ingress() is True
         assert not tasks
         original = host.notifications.recover_inputs
 
         async def recover(phase, **options):
-            assert host.send_allowed() and host._pending_copy_decision()
+            assert host.send_allowed() and host._pending_ingress()
+            assert not host._pending_copy_decision()
             assert not tasks
             await original(phase, **options)
             recovered.append(True)
@@ -55,7 +56,7 @@ async def test_default_supervisor_seeds_before_releasing_updates(work_pages, mon
         host._polls[e.link.id] = HeldPoll()
         await host._coordinate_copy_start()
         assert released and host.sender.proactive is True
-        assert host._pending_copy_decision() is False
+        assert host._pending_ingress() is False
         selected = {name: (callback, interval, options) for callback, interval, name, options in tasks}
         assert {"work-events", "summaries", "work-acts", "notification-recovery"} <= selected.keys()
         assert selected["work-events"][2]["refused_too"] is True
