@@ -28,7 +28,12 @@ from deerflow.utils.file_io import await_drained
 
 
 def recipes(source, basis, identity, link):
-    view = present_news(source.key, values=source.values, locale=basis["locale"], protected=source.protected, concealed=basis["concealed"], outbox_id=identity)
+    if source.key in {"view.list", "view.detail"}:
+        from app.telegram_bots.work_view_sources import present_view
+
+        view = present_view(source, basis, link)
+    else:
+        view = present_news(source.key, values=source.values, locale=basis["locale"], protected=source.protected, concealed=basis["concealed"], outbox_id=identity)
     keyboard = [list(line) for line in view.keyboard]
     if not basis["concealed"] and source.key in ATTEMPT_KEYS and source.values.get("open_files"):
         address = page_address("web.files", link, permissions=3, public_base_url=basis["public_base_url"])
@@ -57,7 +62,7 @@ def recipes(source, basis, identity, link):
 
 def conceal_news(source):
     """Only a current source-qualified chat activation bypasses its teaser."""
-    return source.protected and not (source.key.startswith("status.") and source.work.get("activation_act_id"))
+    return source.protected and source.key not in {"view.list", "view.detail"} and not (source.key.startswith("status.") and source.work.get("activation_act_id"))
 
 
 def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):

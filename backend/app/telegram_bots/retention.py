@@ -145,6 +145,10 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
     """The ids and ``reply:`` keys of outbox rows a live control or unfinished delivery needs."""
     generations = dict((await session.execute(select(TelegramBotLinkRow.id, TelegramBotLinkRow.binding_generation))).all())
     pinned: set[str] = {anchor for _prompt, anchor in await settings_prompt_dependencies(session) if type(anchor) is str}
+    from app.telegram_bots.work_start_retention import reserved_starts
+
+    _groups, start_anchors = await reserved_starts(session)
+    pinned.update(start_anchors)
     anchors: set[str] = set()
     callback = TelegramCallbackRow
     for row in await session.execute(select(callback.link_id, callback.binding_generation, callback.target_kind, callback.target_id, callback.payload, callback.expires_at, callback.consumed_at, callback.created_at)):
@@ -191,7 +195,10 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             )
         )
     )
-    navigation_anchor = func.coalesce(*(delivery.payload[family]["navigation_origin"]["anchor_outbox_id"].as_string() for family in ("work_request_basis", "work_news_basis", "result_notice_basis")))
+    navigation_anchor = func.coalesce(
+        *(delivery.payload[family]["navigation_origin"]["anchor_outbox_id"].as_string() for family in ("work_request_basis", "work_news_basis", "result_notice_basis")),
+        delivery.payload["work_view_intent"]["origin"]["anchor_outbox_id"].as_string(),
+    )
     view_parent = func.coalesce(delivery.payload["summary_stop_basis"]["anchor_id"].as_string(), delivery.payload["work_digest_view_basis"]["parent_id"].as_string(), delivery.payload["summary_view_basis"]["parent_id"].as_string())
     # Compact dependency edges preserve complete digests behind live controls.
     records = await session.execute(

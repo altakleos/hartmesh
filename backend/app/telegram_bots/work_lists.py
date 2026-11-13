@@ -125,12 +125,14 @@ class WorkListMethods:
             # fixed by the original snapshot; current state only changes rows.
             collected = await self.collect(link, as_of=self.clock())
             current = {record["id"]: record for record in collected["work"]}
-            visible = [current[item] for item in captured["work_ids"] if item in current]
             position = captured["cursors"][cursor]
-            pages = max(1, math.ceil(len(visible) / WORK_LIST_LINES))
+            pages = len(captured["cursors"])
             if position >= pages:
                 raise ValueError("work-list-page-unavailable")
-            records = visible[position * WORK_LIST_LINES : (position + 1) * WORK_LIST_LINES]
+            # Fixed original slots prevent a deletion on another page from
+            # moving unseen rows across a cursor boundary.
+            slots = captured["work_ids"][position * WORK_LIST_LINES : (position + 1) * WORK_LIST_LINES]
+            records = [current[identity] for identity in slots if identity in current]
             ids = {record["id"] for record in records}
             tokens = {value: key for key, value in captured["cursors"].items()}
             expected = identity, captured, horizon, expires
@@ -148,6 +150,7 @@ class WorkListMethods:
                 "previous": tokens.get(position - 1),
                 "next": tokens.get(position + 1) if position + 1 < pages else None,
                 "work": records,
+                "positions": {identity: position * WORK_LIST_LINES + index + 1 for index, identity in enumerate(slots) if identity in current},
                 "requests": [request for request in collected["requests"] if request["work_id"] in ids],
                 "pending": [request for request in collected["pending"] if request["work_id"] in ids],
                 "routing": [request for request in collected["routing"] if request["work_id"] in ids],

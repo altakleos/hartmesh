@@ -26,59 +26,77 @@ class ActivationActionMethods:
         """Prepare once, then replay only the original saved activation body."""
 
         async def perform():
-            from app.telegram_bots.work_actions import _ACT_SCOPE
-
             async with self._work_serial(operation_id):
-                await self._work_link(link)
-                if type(assignment_revision) is not int or not 1 <= assignment_revision <= 2**31 - 1:
-                    raise ValueError("invalid-assignment-revision")
-                async with self.session_factory() as reader:
-                    saved = await reader.get(TelegramActRow, operation_id)
-                    if saved is not None:
-                        expected = dict(
-                            link_id=link.id,
-                            owner_user_id=link.owner_user_id,
-                            bot_id=link.bot_id,
-                            binding_generation=link.binding_generation,
-                            telegram_user_id=link.telegram_user_id,
-                            chat_id=link.chat_id,
-                            instance_id=link.agent_ref,
-                            work_id=work_id,
-                            request_id=None,
-                            kind="activate",
-                            message_id=None,
-                        )
-                        if any(getattr(saved, key) != expected[key] for key in _ACT_SCOPE) or saved.body.get("expected_assignment_revision") != assignment_revision:
-                            raise ValueError("act-source-conflict")
-                        from app.telegram_bots.acts import _snapshot
-
-                        act = _snapshot(saved)
-                    else:
-                        act = None
-                if act is None:
-                    await require(link.owner_user_id, "agents:read", "agents:write", "runs:create")
-                    actor = PrincipalRef("human", link.owner_user_id)
-                    record = await self.work.get(actor=actor, instance_id=link.agent_ref, work_id=work_id)
-                    if record["assignment_revision"] != assignment_revision:
-                        raise AgentConflict("The displayed assignment changed", reason="work-changed")
-                    _startable(record)
-                    conversations = self.authority.app.state.agent_conversations
-                    thread_id = (record.get("attempt") or {}).get("thread_id")
-                    if thread_id is None or not all([await conversations.allowed(actor=actor, thread_id=thread_id, permission=permission) for permission in (AgentPermission.USE, AgentPermission.INSPECT)]):
-                        await require(link.owner_user_id, "threads:write")
-                        conversation = await conversations.create(
-                            actor=actor,
-                            instance_id=link.agent_ref,
-                            creation_id=operation_id,
-                            display_name=record["objective"][:80],
-                            metadata={"channel_source": {"type": "im_channel", "provider": "telegram", "connection_id": link.connection_id}, "work_id": work_id},
-                        )
-                        thread_id = conversation["thread_id"]
-                    body = ActivateWork(operation_id=operation_id, expected_revision=record["revision"], expected_assignment_revision=assignment_revision, thread_id=thread_id)
-                    act = await self._save_work_act(link, kind="activate", request_id=None, work_id=work_id, request=body)
+                act = await self._stage_activation(link, operation_id=operation_id, work_id=work_id, assignment_revision=assignment_revision)
                 return await self._attempt_activation(act, explicit=True)
 
         return await await_drained(perform())
+
+    async def stage_activation(self, link, *, operation_id, work_id, assignment_revision, admission=None):
+        """Save intent without launching, borrowing a fresh callback admission.
+
+        Conversation preparation happens before the journal writer. The trusted
+        admission hook can join a callback receipt to that writer and veto both.
+        An exact saved replay only observes its original intent.
+        """
+
+        async def perform():
+            async with self._work_serial(operation_id):
+                return await self._stage_activation(link, operation_id=operation_id, work_id=work_id, assignment_revision=assignment_revision, admission=admission)
+
+        return await await_drained(perform())
+
+    async def _stage_activation(self, link, *, operation_id, work_id, assignment_revision, admission=None):
+        from app.telegram_bots.work_actions import _ACT_SCOPE
+
+        await self._work_link(link)
+        if type(assignment_revision) is not int or not 1 <= assignment_revision <= 2**31 - 1:
+            raise ValueError("invalid-assignment-revision")
+        async with self.session_factory() as reader:
+            saved = await reader.get(TelegramActRow, operation_id)
+            if saved is not None:
+                expected = dict(
+                    link_id=link.id,
+                    owner_user_id=link.owner_user_id,
+                    bot_id=link.bot_id,
+                    binding_generation=link.binding_generation,
+                    telegram_user_id=link.telegram_user_id,
+                    chat_id=link.chat_id,
+                    instance_id=link.agent_ref,
+                    work_id=work_id,
+                    request_id=None,
+                    kind="activate",
+                    message_id=None,
+                )
+                if any(getattr(saved, key) != expected[key] for key in _ACT_SCOPE) or saved.body.get("expected_assignment_revision") != assignment_revision:
+                    raise ValueError("act-source-conflict")
+                from app.telegram_bots.acts import _snapshot
+
+                act = _snapshot(saved)
+            else:
+                act = None
+        if act is None:
+            await require(link.owner_user_id, "agents:read", "agents:write", "runs:create")
+            actor = PrincipalRef("human", link.owner_user_id)
+            record = await self.work.get(actor=actor, instance_id=link.agent_ref, work_id=work_id)
+            if record["assignment_revision"] != assignment_revision:
+                raise AgentConflict("The displayed assignment changed", reason="work-changed")
+            _startable(record)
+            conversations = self.authority.app.state.agent_conversations
+            thread_id = (record.get("attempt") or {}).get("thread_id")
+            if thread_id is None or not all([await conversations.allowed(actor=actor, thread_id=thread_id, permission=permission) for permission in (AgentPermission.USE, AgentPermission.INSPECT)]):
+                await require(link.owner_user_id, "threads:write")
+                conversation = await conversations.create(
+                    actor=actor,
+                    instance_id=link.agent_ref,
+                    creation_id=operation_id,
+                    display_name=record["objective"][:80],
+                    metadata={"channel_source": {"type": "im_channel", "provider": "telegram", "connection_id": link.connection_id}, "work_id": work_id},
+                )
+                thread_id = conversation["thread_id"]
+            body = ActivateWork(operation_id=operation_id, expected_revision=record["revision"], expected_assignment_revision=assignment_revision, thread_id=thread_id)
+            act = await self._save_work_act(link, kind="activate", request_id=None, work_id=work_id, request=body, admission=admission)
+        return act
 
     async def _activation_outcome(self, captured, *, state, reason=None, result=None, answered=False):
         from app.telegram_bots.acts import _snapshot
