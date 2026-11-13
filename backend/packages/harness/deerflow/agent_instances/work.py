@@ -400,7 +400,7 @@ class AgentWork:
         await session.flush()
         return snapshot
 
-    async def delegate(self, *, actor, instance_id, request: DelegateWork):
+    async def delegate(self, *, actor, instance_id, request: DelegateWork, admission=None):
         request = DelegateWork.model_validate(request.model_dump(exclude_unset=True))
         await self.agents._human(actor)
 
@@ -423,6 +423,8 @@ class AgentWork:
                     raise AgentConflict("The adopted policy requires review", reason="review-required")
                 self._responsibility(policy, request.responsibility)
                 await self._admit_sources(session, actor, parent, request.sources)
+                if admission is not None:
+                    await admission(session)
                 row = AgentWorkRow(
                     id=uuid4().hex,
                     instance_id=instance_id,
@@ -442,7 +444,10 @@ class AgentWork:
                 )
                 session.add(row)
                 snapshot = await self._event(session, actor, row, request, "delegate")
-                return await self._project(session, actor, parent, snapshot)
+                result = await self._project(session, actor, parent, snapshot)
+                if admission is not None:
+                    await admission(session)
+                return result
 
         return await await_drained(perform())
 

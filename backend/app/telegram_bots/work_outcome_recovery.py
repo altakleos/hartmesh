@@ -75,7 +75,7 @@ class WorkOutcomeRecovery:
                 act.binding_generation == link.binding_generation,
                 # Execution primitives acquire their dedicated Work-owned
                 # delivery integration before chat controls can expose them.
-                act.kind.in_(WORK_ACT_KINDS - {"stop", "activate"}),
+                act.kind.in_(WORK_ACT_KINDS - {"stop", "activate", "delegate"}),
             )
             if horizon is None:
                 horizon = await reader.scalar(query.with_only_columns(func.max(act.id)))
