@@ -865,6 +865,9 @@ class TelegramBotChannel(TelegramChannel):
         await self.send_text(key, source_id=f"press:{row.id}:{update_id}", reply_to=row.message_id, thread=row.message_thread_id, _captured_link=link)
 
     async def execute_callback(self, row, *, query_id=None, update_id=None):
+        summaries = getattr(self._services, "summary_preferences", None)
+        if summaries is not None and await summaries.execute_callback(self, row):
+            return
         settings_prompts = getattr(self._services, "settings_prompts", None)
         if settings_prompts is not None and await settings_prompts.execute_callback(self, row, query_id=query_id, update_id=update_id):
             return
@@ -1916,7 +1919,12 @@ class TelegramBotChannel(TelegramChannel):
         source_key = part.get("source_ref", {}).get("key", "")
         work_part = None
         work_sources = getattr(self._services, "work_request_sources", None)
-        if "summary_view_basis" in saved.item.payload:
+        if "summary_stop_basis" in saved.item.payload:
+            work_sources = getattr(self._services, "summary_preferences", None)
+            if work_sources is None:
+                raise PermanentDeliveryError("unsupported-summary-preference-source")
+            work_part = await work_sources.read_part(saved)
+        elif "summary_view_basis" in saved.item.payload:
             work_sources = getattr(self._services, "summary_view_sources", None)
             if work_sources is None or any(
                 key in saved.item.payload
@@ -2082,7 +2090,9 @@ class TelegramBotChannel(TelegramChannel):
                 raise DeliveryClaimRetired()
             model_part = await reader.read_part(saved)
         stored_keyboard = None
-        if part.get("stored_keyboard"):
+        if "summary_stop_basis" in saved.item.payload:
+            stored_keyboard = await work_sources.keyboard(saved)
+        elif part.get("stored_keyboard"):
             if model_part is not None and not model_part.human_input or getattr(self._services, "callbacks", None) is None:
                 raise DeliveryClaimRetired()
             stored_keyboard = await self._services.callbacks.read_keyboard(saved)
@@ -2197,7 +2207,8 @@ class TelegramBotChannel(TelegramChannel):
         if stored_keyboard is not None:
             # Group consumption can change during rendering without changing the
             # outbox part. Never dispatch the earlier buffered controls afterward.
-            if await self._services.callbacks.read_keyboard(latest) != stored_keyboard or not self._callback_current(latest.link):
+            latest_keyboard = await work_sources.keyboard(latest) if "summary_stop_basis" in latest.item.payload else await self._services.callbacks.read_keyboard(latest)
+            if latest_keyboard != stored_keyboard or not self._callback_current(latest.link):
                 raise DeliveryClaimRetired()
         current = latest
         if current.item.dedupe_key.startswith(("notice:chat-stream:", "notice:preparation-capacity:", "notice:chat-wait:")) and (turns is None or turns.preview_allowed(self, current.item) is not True):
@@ -2350,7 +2361,7 @@ class TelegramBotChannel(TelegramChannel):
                     reply_markup=markup,
                     rate_limit_args=preview_fence,
                 )
-                message = await await_drained(request) if {"summary_basis", "summary_view_basis", "work_digest_basis", "work_digest_view_basis"}.intersection(current.item.payload) else await request
+                message = await await_drained(request) if {"summary_stop_basis", "summary_basis", "summary_view_basis", "work_digest_basis", "work_digest_view_basis"}.intersection(current.item.payload) else await request
         except (LongRetryAfter, RetryAfter) as error:
             self._failure()
             seconds = error.seconds if isinstance(error, LongRetryAfter) else error._retry_after.total_seconds()

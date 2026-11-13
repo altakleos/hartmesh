@@ -1752,6 +1752,18 @@ class Outbox:
                     return False
                 stored_urls = any("url" in button for line in keyboard for button in line)
             summary_edit = False
+            if "summary_stop_basis" in current.item.payload:
+                from app.telegram_bots.summary_preferences import frozen_stop
+
+                anchor = await session.get(TelegramOutboxRow, current.item.payload["summary_stop_basis"].get("anchor_id"))
+                if anchor is None:
+                    return False
+                try:
+                    keyboard = frozen_stop(current, _item(anchor))
+                    stored_urls = any("url" in button for line in keyboard for button in line)
+                    summary_edit = True
+                except PermanentDeliveryError:
+                    return False
             if current.part["kind"] == "edit" and "summary_view_basis" in current.item.payload:
                 from app.telegram_bots.summary_views import frozen_view
 
@@ -2575,7 +2587,7 @@ class OutboxSender:
                 sending["dispatched_at"] = self.outbox.clock().isoformat()
                 saved.parts = parts
                 required_protection = sending["protect_content"]
-                source_dispatch = _item(saved) if {"settings_prompt_basis", "summary_view_basis", "summary_basis", "work_digest_basis", "work_digest_view_basis"}.intersection(saved.payload) else None
+                source_dispatch = _item(saved) if {"summary_stop_basis", "settings_prompt_basis", "summary_view_basis", "summary_basis", "work_digest_basis", "work_digest_view_basis"}.intersection(saved.payload) else None
             if self._stopping:
                 return
             try:
@@ -2653,7 +2665,7 @@ class OutboxSender:
                         # The SDK acknowledged the captured card, not a manifest
                         # rewritten during its await. Retain both the dispatched
                         # proof and reservations for explicit reconciliation.
-                        family = "settings" if "settings_prompt_basis" in source_dispatch.payload else "summary" if {"summary_basis", "summary_view_basis"}.intersection(source_dispatch.payload) else "digest"
+                        family = "settings" if "settings_prompt_basis" in source_dispatch.payload else "summary" if {"summary_stop_basis", "summary_basis", "summary_view_basis"}.intersection(source_dispatch.payload) else "digest"
                         saved.payload = {**saved.payload, family + "_dispatch_conflict": {"payload": source_dispatch.payload, "parts": source_dispatch.parts, "message_ids": message_ids, "acknowledged_at": self.outbox.clock().isoformat()}}
                         saved.state, saved.failed_reason, saved.closed_at = "failed", "invalid-" + family + "-receipt", self.outbox.clock()
                         saved.claim_owner = saved.claim_id = saved.claimed_at = None
@@ -2744,6 +2756,12 @@ class OutboxSender:
             await self.outbox.inbox.settle_deliveries(link_id=link_id, session=writer)
 
     async def _replace(self, binding: BotLink, row: OutboxItem, claim: str, *, reason: str) -> None:
+        if "summary_stop_basis" in row.payload:
+            async with self.outbox._writer(binding.id) as (writer, _binding):
+                saved = await writer.get(TelegramOutboxRow, row.id, with_for_update=True)
+                if self.outbox._fenced(saved, generation=binding.binding_generation, owner=self.run_id, claim=claim):
+                    await self._skip(writer, saved, "superseded")
+            return
         if "summary_view_basis" in row.payload:
             async with self.outbox._writer(binding.id) as (writer, _binding):
                 saved = await writer.get(TelegramOutboxRow, row.id, with_for_update=True)
@@ -2925,6 +2943,16 @@ class OutboxSender:
                 await acknowledge_view(session, row)
             except (ValueError, TypeError, KeyError, PermanentDeliveryError, ProductSourceRetired):
                 row.state, row.failed_reason, row.closed_at = "failed", "invalid-summary-view-receipt", now
+                row.claim_owner = row.claim_id = row.claimed_at = None
+                await session.flush()
+                return
+        if "summary_stop_basis" in row.payload:
+            from app.telegram_bots.summary_preferences import acknowledge_stop
+
+            try:
+                await acknowledge_stop(session, row)
+            except (ValueError, TypeError, KeyError, PermanentDeliveryError, ProductSourceRetired):
+                row.state, row.failed_reason, row.closed_at = "failed", "invalid-summary-stop-receipt", now
                 row.claim_owner = row.claim_id = row.claimed_at = None
                 await session.flush()
                 return

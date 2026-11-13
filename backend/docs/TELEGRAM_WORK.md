@@ -1139,3 +1139,17 @@ Preference mutations compose exact delivered-control custody with the final publ
 `settings_prompts.py` optionally owns custom quiet-hour ForceReply prompts. Only the actual source-qualified ACK exposes the prompt. Plain answers retain the original prompt identity before the atomic settings writer; interrupted capture recovers to explicit closed-prompt choices. Reopening discards the held answer and requires a fresh response. Typed `off` is invalid: disabling quiet hours is a saved menu choice. Joined publication projections fence account, binding, prompt and input custody; final SDK admission and ACK retain prompt ownership. The existing input recovery owner invokes this optional handler before ordinary restart messages.
 
 `rejected_notices.py` prepares one service notice per rejected bot/token revision through another healthy same-owner/account bot. Prefer ordinary chat; otherwise use the most recently active unprotected eligible link. The owner settings lock serializes deduplication across recipients. Final publication and SDK snapshots bind the rejected source and recipient authority; repaired/replaced credentials supersede delivery. This optional planner is installed with the proactive sender.
+
+`summary_preferences.py` optionally handles the acknowledged summary Stop control.
+The person's shared preference, consumed Stop control, settings Act and required
+edit commit together. The edit retains the original summary and other callback
+IDs; navigation still checks their original age, ACK and current source. Both
+ordinary summaries and protected Show views retain their original protection.
+Historical summary text stays historical when Work changes. Stopping only needs
+the current account and original control ownership. Full-body delivery separately
+requires current Inspect permission; if that permission is lost, persist a one-way
+redaction before a plain off confirmation clears the private body and controls.
+The committed settings receipt, account, claim and controls are checked at the SDK
+boundary; the admitted edit drains cancellation.
+A missing edit target is superseded without sending a new summary. Supervisor
+installation remains separate.
