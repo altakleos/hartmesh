@@ -95,6 +95,10 @@ The route delegates orchestration to `gateway.work_execution.activate_work`;
 trusted in-process callers check their human owner's ceilings first and use the
 same binding/replay admission. `activate_work_run` retains launch/cancellation
 ownership and the shared `ACTIVATION_MESSAGE`.
+Trusted callers can compose a borrowed-writer `admission` guard for fresh
+reservations. The host checks it before writes and before commit; exact replay
+retains the original promise. `activation_receipt` is read-only and does not
+treat an unresolved runless reservation as completed run admission.
 Manager edits/cancellation of unresolved Work additionally require runs cancel and
 retry the persisted exact stop intent. Human-input replies never invoke activation.
 `dispatch_work_stop` reports pending/requested/settled for the original attempt,

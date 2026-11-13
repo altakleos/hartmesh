@@ -144,7 +144,7 @@ class WorkExecution:
         await self.work._admit_sources(session, execution.requester, parent, [WorkSource.model_validate(s) for s in await self._sources(session, row)])
         return policy
 
-    async def reserve(self, *, execution, work_id, request: ActivateWork, before_admit: Callable[[str], None] | None = None, on_rollback: Callable[[], None] | None = None):
+    async def reserve(self, *, execution, work_id, request: ActivateWork, before_admit: Callable[[str], None] | None = None, on_rollback: Callable[[], None] | None = None, admission=None):
         request = ActivateWork.model_validate(request.model_dump())
         if request.thread_id != execution.thread_id or not execution.execution_allowed:
             raise AgentDenied("Activation requires the admitted conversation", reason="conversation-mismatch")
@@ -160,6 +160,8 @@ class WorkExecution:
                     if attempt.requester_id != execution.requester.subject_id or attempt.request != request.model_dump(mode="json"):
                         raise AgentConflict("Activation identity belongs to another request", reason="operation-mismatch")
                     return WorkAttempt(self, row.id, attempt.id, attempt.run_id, attempt.status not in UNRESOLVED)
+                if admission is not None:
+                    await admission(session)
                 await self._admit(session, execution, parent, row)
                 if (row.revision, row.assignment_revision) != (request.expected_revision, request.expected_assignment_revision):
                     raise AgentConflict("Work changed; reload before activation", reason="work-changed")
@@ -188,6 +190,8 @@ class WorkExecution:
                 session.add(attempt)
                 self._advance(row)
                 await self.work._event(session, execution.requester, row, request, "activate")
+                if admission is not None:
+                    await admission(session)
                 return WorkAttempt(self, row.id, attempt.id)
 
         return await await_drained(perform())
@@ -220,6 +224,28 @@ class WorkExecution:
         """Host-only retry lookup; it does not admit the actor or request."""
         async with self._sf() as session:
             return await session.scalar(select(AgentWorkAttemptRow.id).where(AgentWorkAttemptRow.work_id == work_id, AgentWorkAttemptRow.activation_id == activation_id)) is not None
+
+    async def activation_receipt(self, *, actor, instance_id, work_id, request: ActivateWork):
+        """Observe the exact admitted attempt without launching a runless promise.
+
+        A reservation event alone cannot settle a caller's activation journal:
+        its original starting attempt may still need the host launch recovery.
+        Current Inspect and the original actor/body remain mandatory.
+        """
+        request = ActivateWork.model_validate(request.model_dump())
+        async with self._sf() as session:
+            parent, _ = await self.work._parent(session, actor, instance_id, DELEGATE)
+            receipt = await self.work._receipt(session, actor, parent, request, work_id)
+            if receipt is None:
+                return None
+            attempt = await session.scalar(select(AgentWorkAttemptRow).where(AgentWorkAttemptRow.work_id == work_id, AgentWorkAttemptRow.activation_id == request.operation_id))
+            if attempt is None or attempt.requester_id != actor.subject_id or attempt.request != request.model_dump(mode="json"):
+                raise AgentConflict("Activation receipt binding changed", reason="operation-mismatch")
+            if attempt.run_id is None and attempt.status in UNRESOLVED:
+                return None
+            row = await self.work._row(session, instance_id, work_id)
+            result = await self.work._project(session, actor, parent, self.work._snapshot(row), attempt=attempt)
+            return {**result, "activation_receipt": {"operation_id": request.operation_id, "attempt_id": attempt.id}}
 
     @staticmethod
     async def _workspace_attachment(session, parent, attachment_id, *, host_id=None, generation=None):

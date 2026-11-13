@@ -336,3 +336,10 @@ headroom and scoped command cancellation.
 `AgentWork.count_active` owns a drained SQL read of durable unresolved attempts,
 with current Inspect in the aggregate itself. It has no page cap and does not
 use process-local resident capacity as a count of assignments.
+
+`WorkExecution.reserve` accepts a prepared borrowed-writer `admission` for fresh
+reservations, checked before writes and before commit under existing lock order.
+Exact replay keeps its original retained promise and bypasses fresh-effect guards.
+`activation_receipt` qualifies the exact actor/body/attempt without launching;
+an unresolved runless reservation needs original helper recovery, not a done
+journal. A cancelled caller may observe receipts but cannot initiate that recovery.

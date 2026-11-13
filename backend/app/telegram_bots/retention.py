@@ -333,7 +333,7 @@ async def _sweep_acts(sessions, now):
             .exists()
         )
         expired = (~pending_outcome, TelegramActRow.created_at < now - timedelta(days=ACT_RETENTION_DAYS), TelegramActRow.state.in_(_SETTLED_ACTS), TelegramActRow.stop_dispatch.is_(None))
-        ordinary = await session.execute(delete(TelegramActRow).where(*expired, TelegramActRow.kind.not_in(("file_put", "stop")), TelegramActRow.continuation.is_(None)))
+        ordinary = await session.execute(delete(TelegramActRow).where(*expired, TelegramActRow.kind.not_in(("file_put", "stop", "activate")), TelegramActRow.continuation.is_(None)))
         mark = TelegramInboundMarkRow
         work_file_input = (
             select(mark.message_id)
@@ -392,7 +392,7 @@ async def _sweep_acts(sessions, now):
         from app.telegram_bots.work_actions import WORK_ACT_KINDS
         from app.telegram_bots.work_outcome_delivery import delivery_receipt
 
-        outcomes = list(await session.scalars(select(TelegramActRow).where(*expired, TelegramActRow.kind.in_(WORK_ACT_KINDS), TelegramActRow.kind != "stop", TelegramActRow.continuation.is_not(None)).with_for_update(skip_locked=True)))
+        outcomes = list(await session.scalars(select(TelegramActRow).where(*expired, TelegramActRow.kind.in_(WORK_ACT_KINDS - {"stop", "activate"}), TelegramActRow.continuation.is_not(None)).with_for_update(skip_locked=True)))
         settled = []
         for row in outcomes:
             try:

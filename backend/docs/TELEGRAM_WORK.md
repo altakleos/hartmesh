@@ -354,7 +354,40 @@ pause. Recipient refusal never disables the actor's account. Canonical receipt
 recovery happens before this fresh-effect gate and never repeats the command. Review commands
 use the complete displayed basis and captured Work CAS. The bounded worker only
 retries admitted service calls with no conclusive refusal, never settings, files,
-network or transcription. No action here starts an assignment.
+network or transcription. Current chat controls do not start an assignment.
+
+`work_start_actions.py` journals explicit activation requests without installing
+chat controls or status/capacity delivery. A fresh intent checks the displayed
+assignment revision before creating its own idempotent Work conversation. An
+authorized earlier attempt conversation can be reused; the ordinary bot chat
+conversation is never selected. Every retry uses the saved `ActivateWork` body
+through the shared Gateway helper, preserving host capacity, retained promises,
+storage admission and run ownership.
+
+`WorkExecution.reserve(admission=...)` borrows the host writer before a fresh
+reservation and again before commit. The prepared Telegram projection joins the
+exact pending Act with current bot/account/grant/policy facts after provider
+waits, requires the owner's write/create ceilings, and retains bot then Act locks.
+Exact reservation replay bypasses this fresh-effect guard. Its original promise
+still belongs to the host; cancellation of an already entered call is uncertain
+until an exact receipt is observed.
+
+`WorkExecution.activation_receipt` reads the original actor/body and exact
+activation attempt. An unresolved runless reservation is not a completed
+activation: ordinary recovery re-enters the shared helper under the same body
+and conversation. A cancellation fence permits only receipt reads, never that
+launch recovery. Conclusive busy waits retry at the queue cadence and deadline;
+Work capacity waits and other conclusive start refusals never auto-retry. Unknown
+calls use the existing one-hour/attempt bound. A closed `activation_retry`
+checkpoint counts conclusive refusals separately from the monotone admission
+counter, so known busy replies do not exhaust the unknown-response budget.
+Cancel commits its fence without
+waiting for the in-flight call, preserves unknown admission, and allows a late
+known receipt to settle it. Source-owned outcomes, capacity offers, stale
+conversation/execution child recovery and chat controls remain separate pieces.
+Existing request-owned outcome recovery excludes execution primitives. Retention
+preserves activation journals pending their complete delivery/continuation owner;
+unknown or still-runless admissions cannot fall through legacy closed-act deletion.
 
 `work_stop_actions.py` supplies Stop journal primitives without installing chat
 controls. The exact Work command and captured original attempt/thread/run are

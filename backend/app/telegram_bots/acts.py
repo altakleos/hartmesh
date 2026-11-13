@@ -1,6 +1,6 @@
 """Settings actions share one custody, preference and presentation transaction.
 
-Runtime Work actions retain immutable requests and receipts. Additional Stop
+Runtime Work actions retain immutable requests and receipts. Stop and activation
 journal primitives share this owner; their chat controls remain uninstalled.
 """
 
