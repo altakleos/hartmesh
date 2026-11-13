@@ -400,6 +400,25 @@ class GatewayClientOwner:
             raise ChannelExecutionProtocolError()
         return await self._get_gateway_json(owner_user_id, f"/api/agent-instances/{instance_id}/grants", before_dispatch=before_dispatch)
 
+    async def get_work_capacity(self, owner_user_id: str, *, instance_id: str, before_dispatch) -> dict:
+        """Read global capacity through the route's owner-specific redaction."""
+        if type(instance_id) is not str or not re.fullmatch(r"[0-9a-f]{32}", instance_id):
+            raise ChannelExecutionProtocolError()
+        result = await self._get_gateway_json(owner_user_id, f"/api/agent-instances/{instance_id}/work", params={"limit": 1}, before_dispatch=before_dispatch)
+        capacity = result.get("work_capacity")
+        if (
+            type(capacity) is not dict
+            or set(capacity) != {"max", "in_use", "running"}
+            or type(capacity["max"]) is not int
+            or capacity["max"] < 1
+            or type(capacity["in_use"]) is not int
+            or capacity["in_use"] < 0
+            or type(capacity["running"]) is not list
+            or any(type(item) is not dict for item in capacity["running"])
+        ):
+            raise ChannelExecutionProtocolError()
+        return capacity
+
     async def _get_gateway_json(self, owner_user_id, path, *, before_dispatch, params=None):
         if not callable(before_dispatch):
             raise ChannelExecutionProtocolError()

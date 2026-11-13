@@ -170,6 +170,10 @@ class WorkActionMethods(StopActionMethods, ActivationActionMethods):
         return result
 
     async def _work_outcome(self, captured, *, state, reason=None, result=None):
+        if captured.kind == "activate":
+            if state == "done":
+                return await self._complete_activation(captured, result)
+            return await self._activation_outcome(captured, state=state, reason=reason, result=result)
         from app.telegram_bots.acts import _snapshot
 
         async with self.outbox._writer(captured.link_id) as (session, link):

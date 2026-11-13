@@ -1,6 +1,6 @@
 """Saved explicit activation intents over the existing Gateway admission owner.
 
-These journal APIs await their source-owned chat controls and status delivery.
+Chat controls and capacity offers install these journal APIs separately.
 """
 
 from collections.abc import Mapping
@@ -84,7 +84,7 @@ class ActivationActionMethods:
         from app.telegram_bots.acts import _snapshot
         from app.telegram_bots.work_actions import _ACT_SCOPE, same_body
 
-        async with self.outbox._writer(captured.link_id) as (writer, _link):
+        async with self.outbox._writer(captured.link_id) as (writer, link):
             saved = await writer.get(TelegramActRow, captured.id, with_for_update=True, populate_existing=True)
             if saved is None:
                 raise ValueError("unsupported-work-act")
@@ -103,8 +103,20 @@ class ActivationActionMethods:
             saved.state, saved.reason, saved.result, saved.updated_at = state, reason, result, self.outbox.clock()
             if answered:
                 saved.continuation = {"version": 1, "activation_retry": {"answered": min(captured.attempts, answered_calls(captured) + 1)}}
+            if state == "done":
+                from app.telegram_bots.work_start_status import seed_activation_status
+
+                await seed_activation_status(self, writer, link, saved, result)
             await writer.flush()
             return _snapshot(saved)
+
+    async def _complete_activation(self, act, result):
+        try:
+            return await self._activation_outcome(act, state="done", result=result)
+        except Exception:
+            # Host admission already succeeded. A source/journal failure must
+            # preserve receipt recovery and let unrelated Acts make progress.
+            return await self._work_record(act.id)
 
     async def _attempt_activation(self, act, *, explicit=False, attempt_current=lambda: True):
         from app.gateway.work_execution import activate_work
@@ -121,7 +133,7 @@ class ActivationActionMethods:
                     return await self._activation_outcome(act, state="uncertain")
                 return await self._work_record(act.id)
             if receipt is not None:
-                return await self._activation_outcome(act, state="done", result=receipt)
+                return await self._complete_activation(act, receipt)
         if act.cancel_requested_at is not None or act.state in {"done", "conflict", "refused"} or act.state == "waiting" and act.reason == "work-limit":
             return act
         now = self.outbox.clock()
@@ -161,7 +173,6 @@ class ActivationActionMethods:
                 await owner(link.owner_user_id, writer)
             admission = await activation_admission(self, link, act, attempt_current=attempt_current)
             result = await activate_work(internal_request(self.authority.app, link.owner_user_id), instance_id=act.instance_id, work_id=act.work_id, body=body, admission=admission)
-            return await self._activation_outcome(act, state="done", result=result)
         except AgentConflict as exc:
             return await self._activation_outcome(act, state="conflict", reason=exc.reason or "work-changed", answered=True)
         except Refusal as exc:
@@ -176,6 +187,8 @@ class ActivationActionMethods:
             if self.outbox.clock() - act.first_attempt_at >= timedelta(hours=1) or act.attempts - answered_calls(act) >= self.outbox.config.acts.max_attempts:
                 return await self._activation_outcome(act, state="uncertain")
             return await self._work_record(act.id)
+        else:
+            return await self._complete_activation(act, result)
 
     async def cancel_activation(self, act_id):
         """Fence future attempts without waiting for an in-flight provider call."""
@@ -209,7 +222,7 @@ class ActivationActionMethods:
             # Only observe. Even a runless exact reservation must never be
             # handed back to the launching helper after this fence.
             receipt = await self.receipt_for(result)
-            return await self._activation_outcome(result, state="done", result=receipt) if receipt is not None else result
+            return await self._complete_activation(result, receipt) if receipt is not None else result
 
         return await await_drained(perform())
 

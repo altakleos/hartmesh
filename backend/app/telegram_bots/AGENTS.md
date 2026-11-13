@@ -124,13 +124,12 @@ those chats. Instance/custom bots do not acquire these ordinary-chat commands.
 Work and message preference contracts:
 [Work delivery guide](../../docs/TELEGRAM_WORK.md). Read it before changing
 `attention*`, `notification*`, `digest*`, `summary*`, `rejected*`, `*settings*`, `work_*` or sender/callback integration.
-Result media and event proofs: see the Work guide.
 
 `commands.py` handles fixed navigation and language settings only. A command closes
 only a typing prompt; `/new` and `/stop` also end the forms and cards in scope.
 
 `acts.py` atomically commits settings, exact old/new values, completed Act,
-consumed group and replacement controls. Stop journals and follow-ups:
+consumed group and replacement controls. Execution journals, atomic status seeds and follow-ups:
 [Work guide](../../docs/TELEGRAM_WORK.md).
 `SettingsRepository.update(session=...)` borrows the owning engine/writer without
 committing.

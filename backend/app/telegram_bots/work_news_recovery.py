@@ -153,7 +153,7 @@ class WorkNewsRecovery:
         return await await_drained(perform())
 
     async def _replace(self, writer, link, row, source, settings, origin, *, reveal=None, repair=False, navigation_origin=None):
-        from app.telegram_bots.work_news_delivery import frozen_news, recipes, require_teaser
+        from app.telegram_bots.work_news_delivery import conceal_news, frozen_news, recipes, require_teaser
         from app.telegram_bots.work_request_source import require_show
 
         saved = row.payload.get("work_news_basis", {}).get("navigation_origin")
@@ -201,7 +201,7 @@ class WorkNewsRecovery:
             "version": 3,
             "source": asdict(source),
             "locale": settings.locale,
-            "concealed": source.protected and reveal_id is None and navigation_origin is None,
+            "concealed": conceal_news(source) and reveal_id is None and navigation_origin is None,
             "public_base_url": origin.base,
             "reveal": reveal_id,
             "teaser_version": version if reveal else basis.get("teaser_version", 0) if reveal_id else None,
