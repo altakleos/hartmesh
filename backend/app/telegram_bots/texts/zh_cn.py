@@ -1,6 +1,7 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "start.superseded": "这次开始请求已失效。请打开任务查看当前内容。",
     "start.changed": "这个任务已更改。下方是当前版本。",
     "start.already": "{name}已经在处理这个任务。",
     "start.not_settled": "{name}上一次处理这个任务的工作尚未结束。状态显示“已中断”或“已停止”后再继续。",
@@ -18,6 +19,10 @@ TEXTS: dict[str, str] = {
     "start.refused.storage-busy": "{name}的文件正在更改。请几分钟后重新开始“{objective}”。",
     "start.wait_seconds": "{n}秒",
     "start.wait_two_minutes": "两分钟",
+    "busy.work_limit_over": "“{objective}”已保存。当前有{n}个任务正在运行，超过目前的{maximum}个任务上限。此任务可以开始时，会在此聊天中通知你。",
+    "busy.work_limit_which_no_time": "{other}正在处理“{objective}”，由{person}开始。",
+    "busy.work_limit_which_no_person": "{other}正在处理“{objective}”，开始于{time}。",
+    "busy.work_limit_which_basic": "{other}正在处理“{objective}”。",
     "busy.work_limit": "“{objective}”已保存。目前有另一个任务正在进行，这里一次只能处理一个任务。有空位时，这个聊天会收到消息。",
     "busy.work_limit_many": "“{objective}”已保存。目前同时进行的{n}个任务已达到上限。有空位时，这个聊天会收到消息。",
     "busy.work_limit_which": "{other}正在处理“{objective}”，由{person}于{time}开始。",
