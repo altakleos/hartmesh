@@ -133,6 +133,11 @@ export interface Translations {
     | "wrong_recipient",
     string
   >;
+  assignmentCard: {
+    title: (name: string) => string;
+    deadline: string;
+    note: (name: string) => string;
+  };
   agentWork: {
     execution: (name: string) => string;
     openConversation: string;
@@ -1550,6 +1555,7 @@ export interface Translations {
     executeCommand: string;
     presentFiles: string;
     showWebPage: string;
+    proposeAssignment: string;
     needYourHelp: string;
     useTool: (toolName: string) => string;
     searchForRelatedInfo: string;
@@ -2461,6 +2467,7 @@ export interface Translations {
       voiceOff: (values: { provider: string }) => string;
     };
     webPage: {
+      work: string;
       memory: string;
       conversations: string;
       addAssistant: string;

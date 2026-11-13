@@ -212,3 +212,9 @@ bounded previews. Active-run timers use the server start with a local loading-ed
 fallback. Batch followup receipts invalidate existing thread/history/input queries;
 rendering or refresh never launches work. Confirmed background cancellation first
 cancels older list/detail reads so they cannot restore a stale running card.
+
+Assignment proposal artifacts render as passive `assistant:assignment-card` groups
+only in instance conversations. Validate version, tool identity and bounded draft
+fields; keep the result among steps and the card terminal. Plain-text details and
+the Work link offer no mutation or Telegram-draft state. Full adapter contract:
+[Work guide](../../backend/docs/TELEGRAM_WORK.md).

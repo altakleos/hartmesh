@@ -127,6 +127,12 @@ export function createZhCN(product: string): Translations {
         other: "已更新",
       },
     },
+    assignmentCard: {
+      title: (name) => `${name} 提议的任务`,
+      deadline: "提及的截止时间",
+      note: (name) =>
+        `此提议来自与 ${name} 的 Telegram 对话，请在那里确认或放弃。此消息没有保存或启动任务。已确认的任务会显示在“工作”页签。`,
+    },
     agentWork: {
       stopPending: (name) => `正在停止${name}的工作，可能需要一分钟。`,
       stopNothing: (name) => `没有需要停止的工作：${name}已经停止处理此任务。`,
@@ -1822,6 +1828,7 @@ export function createZhCN(product: string): Translations {
       executeCommand: "执行命令",
       presentFiles: "展示文件",
       showWebPage: "提供页面链接",
+      proposeAssignment: "提议任务",
       needYourHelp: "需要你的协助",
       useTool: (toolName: string) => `使用 “${toolName}” 工具`,
       searchFor: (query: string) => `搜索 “${query}”`,
@@ -2937,6 +2944,7 @@ export function createZhCN(product: string): Translations {
           `这里尚未开启语音消息。当这里设置的某个 AI 模型直接来自 OpenAI 或 Google 时，${provider} 可以开启。`,
       },
       webPage: {
+        work: "工作",
         memory: "打开记忆",
         conversations: "打开对话列表",
         addAssistant: "添加 AI 助理",

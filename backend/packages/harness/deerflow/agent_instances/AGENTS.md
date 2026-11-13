@@ -92,8 +92,14 @@ loop before model/tool calls, including isolated child loops and worker threads.
 `chat_tools.show_web_page` emits one of twelve page keys in a `web_page` artifact,
 never an address or reader authority. Agent-only pages require host `AgentExecution`;
 custom-agent chats cannot offer memory. Clients resolve links and recheck access.
-The tool returns a plain `ToolMessage` so the conversation continues.
-`chat_tools(execution)` registers it for normal instance conversations in lead
+The page tool returns a plain `ToolMessage` so the conversation continues.
+`propose_assignment` is an artifact-only primitive: bounded strict draft fields,
+aware optional due date and the newest visible human message's card marks. A
+supported card ends the turn with one issuing-message-scoped ToolMessage; missing support or
+Just answer returns model guidance and continues. It creates no Work/thread/run,
+performs no service call and grants no authority. Registration/card marks belong
+to the adapter integration; normal assembly does not yet offer this primitive.
+`chat_tools(execution)` registers `show_web_page` for normal instance conversations in lead
 assembly, before tool authorization; Work attempts and subagents do not receive it.
 
 Workspace refusal types in `contract.py` use the existing `Refusal` HTTP envelope.
@@ -343,3 +349,10 @@ Exact replay keeps its original retained promise and bypasses fresh-effect guard
 `activation_receipt` qualifies the exact actor/body/attempt without launching;
 an unresolved runless reservation needs original helper recovery, not a done
 journal. A cancelled caller may observe receipts but cannot initiate that recovery.
+
+When the authorized tool set includes `propose_assignment`, assembly includes
+`AssignmentProposalMiddleware` before Clarification. It isolates one supported
+proposal from sibling effects and conditionally ends the real agent loop before
+another model call. A bare Command END does not override create_agent's outgoing
+tool edge. Fallback and Just answer keep normal model continuation. Artifact and
+exact current-turn issuer/call/draft proof gate termination; old cards do not.

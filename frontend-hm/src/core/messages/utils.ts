@@ -1,5 +1,6 @@
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
+import { extractAssignmentCard } from "./chat-tools";
 import { extractHumanInputRequest } from "./human-input";
 
 interface GenericMessageGroup<T = string> {
@@ -20,12 +21,15 @@ interface AssistantClarificationGroup extends GenericMessageGroup<"assistant:cla
 
 interface AssistantSubagentGroup extends GenericMessageGroup<"assistant:subagent"> {}
 
+interface AssistantAssignmentGroup extends GenericMessageGroup<"assistant:assignment-card"> {}
+
 export type MessageGroup =
   | HumanMessageGroup
   | AssistantProcessingGroup
   | AssistantMessageGroup
   | AssistantPresentFilesGroup
   | AssistantClarificationGroup
+  | AssistantAssignmentGroup
   | AssistantSubagentGroup;
 
 const HIDDEN_CONTROL_MESSAGE_NAMES = new Set([
@@ -91,7 +95,8 @@ export function getMessageGroups(
       if (
         group.type !== "human" &&
         group.type !== "assistant" &&
-        group.type !== "assistant:clarification"
+        group.type !== "assistant:clarification" &&
+        group.type !== "assistant:assignment-card"
       ) {
         return group;
       }
@@ -118,6 +123,13 @@ export function getMessageGroups(
         groups.push({
           id: message.id,
           type: "assistant:clarification",
+          messages: [message],
+        });
+      } else if (extractAssignmentCard(message)) {
+        lastOpenGroup()?.messages.push(message);
+        groups.push({
+          id: message.id,
+          type: "assistant:assignment-card",
           messages: [message],
         });
       } else if (hasPresentFiles(message)) {
@@ -153,7 +165,7 @@ export function getMessageGroups(
           // result from the UI. Attach to the most recent group instead so the
           // user can still see what the agent did.
           const lastGroup = groups[groups.length - 1];
-          if (lastGroup) {
+          if (lastGroup && lastGroup.type !== "assistant:assignment-card") {
             lastGroup.messages.push(message);
           } else {
             // Leading orphan: `groups` is empty when this tool message

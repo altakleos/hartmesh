@@ -133,6 +133,12 @@ export function createEnUS(product: string): Translations {
         other: "Updated",
       },
     },
+    assignmentCard: {
+      title: (name) => `Assignment proposed by ${name}`,
+      deadline: "Deadline mentioned",
+      note: (name) =>
+        `This proposal was made in the Telegram chat with ${name} and is confirmed or discarded there. This message saved and started nothing. A confirmed assignment is on the Work tab.`,
+    },
     agentWork: {
       stopPending: (name) => `Stopping ${name}. This can take up to a minute.`,
       stopNothing: (name) =>
@@ -1946,6 +1952,7 @@ export function createEnUS(product: string): Translations {
       executeCommand: "Execute command",
       presentFiles: "Present files",
       showWebPage: "Offer a link to a page",
+      proposeAssignment: "Propose an assignment",
       needYourHelp: "Need your help",
       useTool: (toolName: string) => `Use "${toolName}" tool`,
       searchFor: (query: string) => `Search for "${query}"`,
@@ -3134,6 +3141,7 @@ export function createEnUS(product: string): Translations {
           `Voice notes are not switched on here. They can be switched on by ${provider} when one of the AI models set up here comes directly from OpenAI or Google.`,
       },
       webPage: {
+        work: "Work",
         memory: "Open Memory",
         conversations: "Open conversations",
         addAssistant: "Add AI assistant",

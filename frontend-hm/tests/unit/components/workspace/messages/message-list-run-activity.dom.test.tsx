@@ -159,3 +159,71 @@ describe("MessageList live run timer", () => {
     expect(screen.getByTestId("run-duration").textContent).toContain("42s");
   });
 });
+
+describe("MessageList historical assignment proposals", () => {
+  it.each([
+    [
+      { kind: "agent", id: "a".repeat(32), name: "Analyst", permissions: 3 },
+      true,
+    ],
+    [{ kind: "chat" }, false],
+    [{ kind: "custom_agent", name: "custom" }, false],
+  ] as const)(
+    "renders only for an instance conversation: %j",
+    (target, shown) => {
+      const messages = [
+        { id: "human", type: "human", content: "Review this" },
+        {
+          id: "step",
+          type: "ai",
+          content: "",
+          tool_calls: [{ id: "call", name: "propose_assignment", args: {} }],
+        },
+        {
+          id: "proposal",
+          type: "tool",
+          name: "propose_assignment",
+          tool_call_id: "call",
+          content: "MODEL ONLY",
+          artifact: {
+            assignment_card: {
+              version: 1,
+              kind: "assignment_card",
+              tool_call_id: "call",
+              draft: {
+                objective: "Review the guide",
+                success_criteria: "Verified gaps",
+                due_text: null,
+                due_at: null,
+              },
+            },
+          },
+        },
+      ] as unknown as Message[];
+      render(
+        <I18nContext.Provider
+          value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+        >
+          <MessageList
+            threadId="historical"
+            agentTarget={target}
+            thread={
+              {
+                messages,
+                isLoading: false,
+                isThreadLoading: false,
+                values: {},
+                getMessagesMetadata: () => undefined,
+              } as unknown as React.ComponentProps<typeof MessageList>["thread"]
+            }
+          />
+        </I18nContext.Provider>,
+      );
+      expect(Boolean(screen.queryByTestId("assignment-card"))).toBe(shown);
+      expect(screen.queryByText("MODEL ONLY")).toBeNull();
+      expect(
+        screen.queryAllByRole("button", { name: /Start|Save|Confirm/ }),
+      ).toHaveLength(0);
+    },
+  );
+});

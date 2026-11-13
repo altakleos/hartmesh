@@ -503,6 +503,7 @@ def build_middlewares(
     skill_authorization=None,
     extensions=None,
     subagent_execution_capacity: int | None = None,
+    assignment_proposals: bool = False,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -792,6 +793,11 @@ def build_middlewares(
     if safety_config.enabled:
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
 
+    if assignment_proposals:
+        from deerflow.agents.middlewares.assignment_proposal_middleware import AssignmentProposalMiddleware
+
+        middlewares.append(AssignmentProposalMiddleware())
+
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
 
@@ -967,6 +973,7 @@ def _qualify_inventory_profile(graph, *, state_schema, middlewares, tools, mode,
     from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
     from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
     from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+    from deerflow.agents.middlewares.assignment_proposal_middleware import AssignmentProposalMiddleware
     from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
@@ -1001,6 +1008,7 @@ def _qualify_inventory_profile(graph, *, state_schema, middlewares, tools, mode,
     qualified_types = {
         ArtifactCaptureMiddleware,
         ArtifactResolutionMiddleware,
+        AssignmentProposalMiddleware,
         ClarificationMiddleware,
         CompletedSubagentUsageMiddleware,
         DanglingToolCallMiddleware,
@@ -1655,6 +1663,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         authorization_provider=_authz_provider,
         skill_authorization=skill_authorization,
         subagent_execution_capacity=subagent_execution_capacity,
+        assignment_proposals=any(tool.name == "propose_assignment" for tool in authorized_tools),
     )
     if instance_execution:
         from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware

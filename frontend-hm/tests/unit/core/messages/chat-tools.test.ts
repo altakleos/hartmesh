@@ -94,3 +94,76 @@ describe("getWebPageLinksByGroupIndex", () => {
     expect(getWebPageLinksByGroupIndex([human, answer]).size).toBe(0);
   });
 });
+
+const proposal = (draft: object = {}, card: object = {}): Message =>
+  ({
+    type: "tool",
+    name: "propose_assignment",
+    tool_call_id: "proposal-call",
+    content: "For the model",
+    artifact: {
+      assignment_card: {
+        version: 1,
+        kind: "assignment_card",
+        tool_call_id: "proposal-call",
+        draft: {
+          objective: "Review <the> guide",
+          success_criteria: "Report verified gaps",
+          due_text: null,
+          due_at: null,
+          ...draft,
+        },
+        ...card,
+      },
+    },
+  }) as unknown as Message;
+
+describe("extractAssignmentCard", () => {
+  it("reads a complete version-one proposal without treating it as saved Work", async () => {
+    const { extractAssignmentCard } =
+      await import("@/core/messages/chat-tools");
+    expect(extractAssignmentCard(proposal())).toEqual({
+      objective: "Review <the> guide",
+      success_criteria: "Report verified gaps",
+      due_text: null,
+      due_at: null,
+    });
+    expect(
+      extractAssignmentCard(
+        proposal({ due_text: "Friday", due_at: "2026-12-04T18:00:00-05:00" }),
+      )?.due_text,
+    ).toBe("Friday");
+    expect(
+      extractAssignmentCard(proposal({ objective: "😀".repeat(4096) }))
+        ?.objective,
+    ).toHaveLength(8192);
+  });
+
+  it("refuses invalid envelopes, text, dates and mismatched tool identities", async () => {
+    const { extractAssignmentCard } =
+      await import("@/core/messages/chat-tools");
+    for (const draft of [
+      { objective: "" },
+      { objective: " " },
+      { success_criteria: "x".repeat(4097) },
+      { due_text: "x".repeat(121) },
+      { due_at: "2026-12-01T18:00:00" },
+      { due_at: "not a date" },
+      { unknown: true },
+    ]) {
+      expect(extractAssignmentCard(proposal(draft))).toBeNull();
+    }
+    for (const card of [
+      { version: 2 },
+      { kind: "work" },
+      { tool_call_id: "another-call" },
+      { draft: { objective: "Only an objective" } },
+    ]) {
+      expect(extractAssignmentCard(proposal({}, card))).toBeNull();
+    }
+    expect(extractAssignmentCard(text)).toBeNull();
+    expect(
+      extractAssignmentCard({ ...proposal(), name: "bash" } as Message),
+    ).toBeNull();
+  });
+});
