@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.57] - 2026-11-13
+
 ### Telegram delivery
 
 - Enable notifications from connected AI assistants and AI employees for new
@@ -32,15 +34,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Configuration and deployment
 
-- No new configuration keys. Existing bots receive the updated `/settings`
-  command description at their next start.
+- No new configuration keys. `telegram_bots.outbox.digest_threshold` now accepts
+  1–10, with the existing default of 3. Lower custom values above 10 before
+  upgrading. Existing bots receive the updated `/settings` command description
+  at their next start.
 - The first start establishes a notification baseline and sends no unsolicited
   individual messages about questions or results from before the upgrade. The
   first summary can include waiting questions and work completed or interrupted
   in the last 24 hours.
-- Keep Telegram disabled when returning to a release without these notification
-  handlers while saved notification controls or inputs remain unsettled. Retain
-  the database and upgrade again to reconcile them.
+- Before returning to an earlier Telegram-capable release, set
+  `HARTMESH_TELEGRAM=off`. Use that release only temporarily: its retention
+  sweeps still run and understand only its older records. Enable Telegram again
+  only after upgrading to this release, or restore the pre-upgrade snapshot.
 - Work documentation records stable HTTP 409 reason codes and how the latest
   request-for-changes note accompanies later attempts until acceptance,
   withdrawal or reopening.
