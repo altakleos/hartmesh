@@ -84,7 +84,16 @@ def snapshot_draft(link, row):
         ):
             raise ValueError()
         draft, original = DraftAssignment.model_validate(body["draft"]), DraftAssignment.model_validate(body["original"])
-        if row.state not in {"draft", "refused"} or row.attempts != 0 or row.first_attempt_at is not None:
+        if (
+            row.state not in {"draft", "refused"}
+            or row.attempts != 0
+            or row.first_attempt_at is not None
+            or row.stop_dispatch is not None
+            or row.cancel_requested_at is not None
+            or row.state == "draft"
+            and not row.operation_ids
+            and row.continuation is not None
+        ):
             raise ValueError()
         return AssignmentDraft(row.id, row.state, draft, original, body["source"], body["due_note"], aware(row.created_at), digest([row.id, draft_scope(link), body, row.state, row.operation_ids]))
     except (ValueError, TypeError, KeyError, AttributeError):
@@ -247,5 +256,7 @@ class DraftProjection:
                 or row.first_attempt_at != self.saved.first_attempt_at
                 or row.cancel_requested_at != self.saved.cancel_requested_at
                 or not same_body(row.operation_ids, self.saved.operation_ids)
+                or not same_body(row.continuation, self.saved.continuation)
+                or not same_body(row.stop_dispatch, self.saved.stop_dispatch)
             ):
                 raise ProductSourceRetired()

@@ -66,7 +66,7 @@ def qualify_execution_origin(link, act, callback, parent, controls):
     try:
         if act.kind not in {"activate", "stop"} or callback is None or parent is None or callback.id != act.id:
             raise ValueError()
-        if (parent.link_id, parent.owner_user_id, parent.binding_generation, parent.chat_id, parent.instance_id, parent.work_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id, link.agent_ref, act.work_id) or (
+        if (parent.link_id, parent.owner_user_id, parent.binding_generation, parent.chat_id, parent.instance_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id, link.agent_ref) or (
             callback.link_id,
             callback.binding_generation,
             callback.chat_id,
@@ -78,6 +78,10 @@ def qualify_execution_origin(link, act, callback, parent, controls):
         if not same_body(parsed.model_dump(mode="json", exclude_unset=True), act.body):
             raise ValueError()
         original, *basis = (displayed_start if act.kind == "activate" else displayed_stop)(link, parent, callback)
+        source = original.payload["work_news_basis"]["source"]
+        expected_parent_work = None if act.kind == "activate" and source["key"] == "assignment.card" and source["work"]["phase"] == "saved" else act.work_id
+        if parent.work_id != expected_parent_work:
+            raise ValueError()
         if act.kind == "activate":
             if basis[0]["id"] != act.work_id or basis[0]["assignment_revision"] != parsed.expected_assignment_revision:
                 raise ValueError()

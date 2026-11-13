@@ -1315,9 +1315,46 @@ admitted child retains its own attempt window after the parent's window ends.
 and again before commit, alongside canonical policy and authority checks. Exact
 receipt replay stays read-only. A successful Save-and-Start journal records its
 authorized activation continuation with the delegation receipt; it does not yet
-dispatch it. Card/prompt publication, callback admission, continuation execution
-and runtime installation remain separate owners. Private draft/request rows are
+dispatch it. Card publication and callback admission use the owners below;
+prompt, continuation and runtime installation remain separate work. Private draft/request rows are
 never executable through the generic action worker or human-input outcome owner.
+
+`AssignmentPlans` and `AssignmentReader` own full source-qualified draft cards
+and their Save outcomes through the existing Work notice sender. All canonical
+objective/criteria text precedes final-part controls; consent binds every ordered
+ACK and the actual message/topic, complete callback group, immutable draft and
+current owner/Use/Inspect/route ceilings. Explicit cards stay full under protected
+policy and retain `protect_content`. Save/Start journals, all group markers and a
+separate private-root admission witness commit together. The effect's domain
+writer repeats this proof. Internal helpers cannot downgrade a callback-owned
+operation: root, callback and presentation witnesses distinguish it independently.
+Incomplete legacy metadata can observe exact receipts but cannot admit effects.
+
+The same outbox reply evolves through Saving, unconfirmed/refused, and a canonical
+Saved preview. Its top-level Work ID remains unset; the created Work is qualified
+by the original actor/body/event receipt and current full detail. A successful
+no-date child and its parent settle together, including lost child replies and an
+already-completed parent; existing activation continuation phases are preserved.
+Observers prove custody before receipt lookup and again in the settlement writer.
+They never call the mutation/retry path. Fresh Start from Saved uses the complete
+current assignment revision and a distinct explicit operation. A later attempt
+renders its current Work status rather than repeating “saved and not started”.
+
+Own Cancel fences future save/child attempts without claiming rollback. A lost
+post-commit receipt read retains that fence and unconfirmed result. Explicit Retry
+keeps the original body, operation and effective child's displayed attempt count;
+an older child count can only reconcile a receipt. Same-message edits use complete
+ACK history and preserved protection; incompatible replacements first clear the
+actual old keyboard. Unknown or malformed custody stays held.
+
+`assignment_retention.py` pins only the exact root, journals, original/criteria
+inputs, complete ACK histories and control groups needed by live controls or an
+unfinished effect/continuation. Unconfirmed work survives normal history sweeps;
+unadmitted drafts expire using the configured original age. Settled families with
+no live dependencies expire after the existing 400-day Act retention. Root witnesses
+without their operation marker remain unknown and cannot become a fresh draft.
+These owners remain dormant until runtime installation. Typed assignment prompts,
+draft editing/discard/Just answer and Save-and-Start dispatch remain separate work.
 
 Proposal ToolMessage IDs include the issuing AI message's scope so reused
 provider tool-call IDs cannot overwrite earlier cards; replay of the same call

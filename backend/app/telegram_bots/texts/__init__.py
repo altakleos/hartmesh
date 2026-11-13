@@ -62,6 +62,10 @@ FIRST_KEYS: frozenset[str] = frozenset(
         "policy.off",
         "policy.on",
         "policy.on_protected",
+        "assign.card_title",
+        "assign.card_title_proposed",
+        "assign.started_line",
+        "assign.saved_line",
     }
 )
 

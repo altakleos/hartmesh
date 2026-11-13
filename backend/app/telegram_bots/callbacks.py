@@ -881,6 +881,11 @@ class CallbackRepository:
                 execution_groups, execution_anchors, _execution_acts = await execution_dependencies(session)
                 start_groups.update(execution_groups)
                 start_anchors.update(execution_anchors)
+                from app.telegram_bots.assignment_retention import assignment_dependencies
+
+                assignments = await assignment_dependencies(session, now, max_age_days=self.config.callbacks.max_age_days, draft_ttl_hours=self.config.callbacks.draft_ttl_hours)
+                start_groups.update(assignments.groups)
+                start_anchors.update(assignments.deliveries)
                 pending_groups.update(start_groups)
                 # A live Retry reads its predecessor's immutable callback-owned
                 # input, even after the predecessor's delivery has completed.

@@ -156,10 +156,15 @@ class WorkNewsRecovery:
         from app.telegram_bots.work_news_delivery import conceal_news, frozen_news, recipes, require_teaser
         from app.telegram_bots.work_request_source import require_show
 
-        if direct_edit and source.key not in {"execution.activate", "execution.stop"}:
+        if direct_edit and source.key not in {"execution.activate", "execution.stop", "assignment.card"}:
             raise ProductSourceRetired()
         resumable_skip = unclaimed and row.state == "skipped" and row.skip_reason == "superseded"
-        if unclaimed and (source.key not in {"execution.activate", "execution.stop"} or row.state not in {"pending", "sent"} and not resumable_skip or any(getattr(row, key) is not None for key in ("claim_owner", "claim_id", "claimed_at"))):
+        if unclaimed and (
+            source.key not in {"execution.activate", "execution.stop", "assignment.card"}
+            or row.state not in {"pending", "sent"}
+            and not resumable_skip
+            or any(getattr(row, key) is not None for key in ("claim_owner", "claim_id", "claimed_at"))
+        ):
             raise ProductSourceRetired()
 
         saved = row.payload.get("work_news_basis", {}).get("navigation_origin")
@@ -180,7 +185,7 @@ class WorkNewsRecovery:
         if not same_news_origin(previous, source):
             raise ProductSourceRetired()
         direct_anchor = None
-        if source.key in {"execution.activate", "execution.stop"}:
+        if source.key in {"execution.activate", "execution.stop", "assignment.card"}:
             if direct_edit and row.state == "sent" and len(current) == 1:
                 direct_anchor = current[0]
             elif basis.get("direct_edit") is not None:

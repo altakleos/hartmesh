@@ -12,7 +12,7 @@ from deerflow.agent_instances.contract import AgentConflict, AgentDenied, Refusa
 from deerflow.agent_instances.work import INSPECT
 from deerflow.agent_instances.work_contract import DelegateWork
 from deerflow.persistence.agent_instances.work import AgentWorkEventRow
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow
 from deerflow.spaces.contract import PrincipalRef
 from deerflow.utils.file_io import await_drained
 
@@ -42,12 +42,15 @@ def delegate_source(act):
     from app.telegram_bots.work_actions import thaw
 
     value = thaw(act.continuation)
-    if type(value) is not dict or set(value) not in ({"version", "delegate_source"}, {"version", "delegate_source", "activation_continuation"}) or type(value["version"]) is not int or value["version"] != 1:
+    if type(value) is not dict or set(value) - {"delegate_origin", "activation_continuation"} != {"version", "delegate_source"} or type(value["version"]) is not int or value["version"] != 1:
         raise ValueError("invalid-delegate-source")
     source = value["delegate_source"]
     if (
         type(source) is not dict
-        or set(source) != {"draft_id", "draft_signature", "authorized_at", "start", "due_text", "parent_id"}
+        or set(source) - {"origin_kind"} != {"draft_id", "draft_signature", "authorized_at", "start", "due_text", "parent_id"}
+        or source.get("origin_kind", "legacy") not in {"internal", "callback", "legacy"}
+        or source.get("origin_kind") == "internal"
+        and "delegate_origin" in value
         or type(source["start"]) is not bool
         or type(source["draft_id"]) is not str
         or len(source["draft_id"]) != 32
@@ -61,7 +64,7 @@ def delegate_source(act):
         or datetime.fromisoformat(source["authorized_at"]).utcoffset() is None
     ):
         raise ValueError("invalid-delegate-source")
-    return source
+    return {**source, "origin_kind": source.get("origin_kind", "legacy")}
 
 
 def draft_body_signature(link, row):
@@ -70,6 +73,27 @@ def draft_body_signature(link, row):
     from app.telegram_bots.work_result_identity import digest
 
     return digest([row.id, draft_scope(link), thaw(row.body)])
+
+
+def qualify_delegate_receipt(act, event, result):
+    """Qualify a canonical created-Work receipt independently of journal phase."""
+    from app.telegram_bots.work_actions import same_body, thaw
+
+    receipt = thaw(result)
+    try:
+        if (
+            type(receipt) is not dict
+            or event is None
+            or (event.instance_id, event.operation_id, event.work_id, event.action, event.actor_kind, event.actor_id) != (act.instance_id, act.id, receipt["id"], "delegate", "human", act.owner_user_id)
+            or not same_body(event.request, act.body)
+            or type(event.result) is not dict
+            or any(not same_body(event.result.get(key), receipt.get(key)) for key in ("id", "instance_id", "creator_id", "objective", "success_criteria", "due_at", "revision", "assignment_revision"))
+            or (receipt["instance_id"], receipt["creator_id"]) != (act.instance_id, act.owner_user_id)
+        ):
+            raise ValueError()
+    except (KeyError, TypeError, AttributeError):
+        raise ValueError("invalid-delegate-receipt") from None
+    return receipt
 
 
 def require_delegate_scope(link, act):
@@ -106,6 +130,68 @@ def qualify_no_due(parent, child):
 
 
 class DelegateActionMethods:
+    async def reconcile_delegation(self, act_id, *, admission):
+        """Receipt-only settlement under the caller's exact borrowed-writer custody."""
+
+        async def perform():
+            async with self._work_serial(act_id):
+                act = await self._work_record(act_id)
+                if act.kind != "delegate" or private_draft(act) or delegate_source(act)["parent_id"] is not None:
+                    raise ValueError("unsupported-work-act")
+                receipt = await self.receipt_for(act)
+                if receipt is None or act.state == "done" and not act.operation_ids:
+                    return act
+                return await self._finish_delegate(act, receipt, admission=admission)
+
+        return await await_drained(perform())
+
+    async def cancel_delegation(self, act_id, *, admission=None):
+        """Fence the original save and its child without waiting for provider I/O."""
+
+        async def perform():
+            from app.telegram_bots.acts import _snapshot
+            from app.telegram_bots.work_actions import _ACT_SCOPE, _SCOPE, same_body
+
+            captured = await self._work_record(act_id)
+            if captured.kind != "delegate" or private_draft(captured) or delegate_source(captured)["parent_id"] is not None:
+                raise ValueError("unsupported-work-act")
+            link = await self.links.get(captured.link_id)
+            require_delegate_scope(link, captured)
+            await self._work_link(link)
+            owner = await self.authority.prepare_live_owner(captured.owner_user_id)
+            async with self.outbox._writer(link.id) as (writer, binding):
+                if binding is None or any(getattr(binding, key) != getattr(link, key) for key in _SCOPE) or binding.state != "connected" or binding.health != "ok":
+                    raise AgentDenied("The bot binding changed", reason="not-visible")
+                saved = await writer.get(TelegramActRow, captured.id, with_for_update=True, populate_existing=True)
+                if saved is None or any(getattr(saved, key) != getattr(captured, key) for key in _ACT_SCOPE) or not same_body(saved.body, captured.body):
+                    raise ValueError("act-source-conflict")
+                if admission is not None:
+                    await admission(writer, None)
+                members = [saved]
+                if saved.operation_ids:
+                    child = await writer.get(TelegramActRow, saved.operation_ids[0], with_for_update=True, populate_existing=True)
+                    if child is None:
+                        raise ValueError("missing-delegate-child")
+                    qualify_no_due(_snapshot(saved), _snapshot(child))
+                    members.append(child)
+                for member in members:
+                    if member.cancel_requested_at is None:
+                        member.cancel_requested_at = member.updated_at = self.outbox.clock()
+                        if member.state != "done":
+                            member.state, member.reason = ("refused", "cancelled") if member.attempts == 0 else ("uncertain", "cancel-unconfirmed")
+                await writer.flush()
+                result = _snapshot(saved)
+                await owner(result.owner_user_id, writer)
+                if admission is not None:
+                    await admission(writer, result)
+            try:
+                receipt = await self.receipt_for(result)
+            except Exception:
+                return result
+            return await self._finish_delegate(result, receipt) if receipt is not None else result
+
+        return await await_drained(perform())
+
     async def stage_delegate(self, link, draft_act_id, *, operation_id, start=False, admission=None):
         async def perform():
             async with self._work_serial(operation_id):
@@ -160,18 +246,29 @@ class DelegateActionMethods:
                 raise ValueError("draft-source-conflict")
             if root.operation_ids:
                 raise ValueError("draft-already-admitted")
+            from app.telegram_bots.assignment_lineage import require_fresh_draft
+
+            await require_fresh_draft(writer, link, draft_act_id, internal=admission is None)
             await self._stage_work_act(link, kind="delegate", request_id=None, work_id=None, request=body, owner=owner, session=writer)
             saved = await writer.get(TelegramActRow, operation_id, populate_existing=True)
             saved.continuation = {
                 "version": 1,
-                "delegate_source": {"draft_id": root.id, "draft_signature": draft_body_signature(link, root), "authorized_at": self.outbox.clock().isoformat(), "start": start, "due_text": shown.original.due_text, "parent_id": None},
+                "delegate_source": {
+                    "draft_id": root.id,
+                    "draft_signature": draft_body_signature(link, root),
+                    "authorized_at": self.outbox.clock().isoformat(),
+                    "start": start,
+                    "due_text": shown.original.due_text,
+                    "parent_id": None,
+                    "origin_kind": "internal",
+                },
             }
             root.operation_ids = [saved.id]
             await writer.flush()
             act = _snapshot(saved)
             if admission is not None:
                 await admission(writer, act)
-            return act
+            return _snapshot(saved)
 
     async def _delegate_receipt(self, act):
         from app.telegram_bots.work_actions import request_for
@@ -194,7 +291,7 @@ class DelegateActionMethods:
                 return {"delegate_child_id": child.id, "receipt": receipt}
         return None
 
-    async def _finish_delegate(self, act, result):
+    async def _finish_delegate(self, act, result, *, admission=None):
         from app.telegram_bots.acts import _snapshot
         from app.telegram_bots.work_actions import _ACT_SCOPE, same_body, thaw
 
@@ -202,11 +299,25 @@ class DelegateActionMethods:
             saved = await writer.get(TelegramActRow, act.id, with_for_update=True, populate_existing=True)
             if saved is None or any(getattr(saved, key) != getattr(act, key) for key in _ACT_SCOPE) or not same_body(saved.body, act.body):
                 raise ValueError("act-source-conflict")
-            if saved.state == "done" or saved.attempts != act.attempts:
+            was_done = saved.state == "done"
+            if was_done and not saved.operation_ids or not was_done and saved.attempts != act.attempts:
                 return _snapshot(saved)
+            if admission is not None:
+                await admission(writer, None)
             source = delegate_source(_snapshot(saved))
+            if saved.operation_ids:
+                if type(result) is not dict or set(result) != {"delegate_child_id", "receipt"} or list(saved.operation_ids) != [result["delegate_child_id"]]:
+                    raise ValueError("invalid-delegate-child-receipt")
+                child = await writer.get(TelegramActRow, result["delegate_child_id"], with_for_update=True, populate_existing=True)
+                if child is None:
+                    raise ValueError("missing-delegate-child")
+                qualify_no_due(_snapshot(saved), _snapshot(child))
+                event = await writer.scalar(select(AgentWorkEventRow).where(AgentWorkEventRow.instance_id == saved.instance_id, AgentWorkEventRow.operation_id == child.id))
+                known = qualify_delegate_receipt(_snapshot(child), event, result["receipt"])
+                if child.state != "done" or not same_body(child.result, known):
+                    child.state, child.reason, child.result, child.updated_at = "done", None, known, self.outbox.clock()
             saved.state, saved.reason, saved.result, saved.updated_at = "done", None, thaw(result), self.outbox.clock()
-            if source["start"] and source["parent_id"] is None:
+            if not was_done and source["start"] and source["parent_id"] is None:
                 record = result.get("receipt", result)
                 if record.get("instance_id") != act.instance_id or record.get("creator_id") != act.owner_user_id or type(record.get("assignment_revision")) is not int:
                     raise ValueError("invalid-delegate-receipt")
@@ -222,7 +333,10 @@ class DelegateActionMethods:
                     },
                 }
             await writer.flush()
-            return _snapshot(saved)
+            completed = _snapshot(saved)
+            if admission is not None:
+                await admission(writer, completed)
+            return completed
 
     async def _stage_no_due(self, act):
         from app.telegram_bots.acts import _snapshot
@@ -246,6 +360,8 @@ class DelegateActionMethods:
                 await self._stage_work_act(link, kind="delegate", request_id=None, work_id=None, request=body, owner=owner, session=writer)
                 child = await writer.get(TelegramActRow, body.operation_id, populate_existing=True)
                 child.continuation = {"version": 1, "delegate_source": {**delegate_source(act), "parent_id": act.id, "start": False}}
+                if "delegate_origin" in act.continuation:
+                    child.continuation = {**child.continuation, "delegate_origin": dict(act.continuation["delegate_origin"])}
                 parent.operation_ids = [child.id]
                 await writer.flush()
             child = await writer.get(TelegramActRow, body.operation_id, populate_existing=True)
@@ -271,6 +387,10 @@ class DelegateActionMethods:
         retry = explicit and act.state in {"refused", "conflict"} and act.reason in {"agent-not-active", "work-off", "lifecycle-pending", "denied", "grant-required", "not-visible", "storage-busy"}
         if act.state == "done" or act.cancel_requested_at is not None or act.state in {"refused", "conflict"} and not retry:
             return act
+        if delegate_source(act)["origin_kind"] == "legacy":
+            # Older incomplete metadata may observe a canonical receipt, but
+            # cannot supply new effect authority after an upgrade.
+            return await self._work_outcome(act, state="uncertain")
         if act.operation_ids:
             try:
                 child = await self._work_record(act.operation_ids[0])
@@ -391,28 +511,55 @@ async def prepare_delegate_admission(acts, link, act, *, attempt_current):
 class DelegateProjection:
     def __init__(self, link, act, root, attempt_current):
         from app.telegram_bots.assignment_drafts import DraftProjection
+        from app.telegram_bots.work_actions import same_body
 
         self.link, self.act, self.root, self.attempt_current = link, act, root, attempt_current
         self.draft = DraftProjection(link, root.body["origin"], saved=root)
         self.source = delegate_source(act)
+        from app.telegram_bots.assignment_lineage import DelegateFamily
+
+        self.family = DelegateFamily(root.id, self.source["parent_id"] or act.id)
+        if act.stop_dispatch is not None:
+            raise AuthorityUnavailable()
+        if not same_body(self.source["due_text"], root.body["original"]["due_text"]):
+            raise AuthorityUnavailable()
+        witness = root.continuation
+        if witness is not None:
+            if not same_body(witness, {"version": 1, "assignment_admission": act.continuation.get("delegate_origin")}) or self.source["origin_kind"] != "callback":
+                raise AuthorityUnavailable()
+        elif self.source["origin_kind"] != "internal":
+            raise AuthorityUnavailable()
+        self.consent = None
+        if self.source["origin_kind"] == "callback":
+            from app.telegram_bots.assignment_consent import DelegationConsent
+
+            self.consent = DelegationConsent(link, act)
+        elif self.source["origin_kind"] != "internal":
+            raise AuthorityUnavailable()
 
     def extend(self, query):
         result = self.draft.extend(query)
         self.column = len(result.column_descriptions)
-        action, parent, event = aliased(TelegramActRow), aliased(TelegramActRow), aliased(AgentWorkEventRow)
-        return (
-            result.add_columns(action, parent, event)
+        action, parent, event, callback, presentation = aliased(TelegramActRow), aliased(TelegramActRow), aliased(AgentWorkEventRow), aliased(TelegramCallbackRow), aliased(TelegramOutboxRow)
+        result = (
+            result.add_columns(action, parent, event, callback, presentation)
             .join(action, action.id == self.act.id)
             .outerjoin(parent, parent.id == self.source["parent_id"])
             .outerjoin(event, and_(event.instance_id == self.act.instance_id, event.operation_id == self.source["parent_id"]))
+            .outerjoin(callback, callback.id == (self.source["parent_id"] or self.act.id))
+            .outerjoin(presentation, and_(presentation.link_id == self.link.id, presentation.binding_generation == self.link.binding_generation, presentation.payload["assignment_intent"]["draft_id"].as_string() == self.root.id))
         )
+        result = self.family.extend(result)
+        return self.consent.extend(result) if self.consent is not None else result
 
     def check_with_permissions(self, rows, held):
         from app.telegram_bots.acts import _snapshot
         from app.telegram_bots.work_actions import _ACT_SCOPE, same_body
 
         self.draft.check_with_permissions(rows, held)
-        saved, parent, event = rows[0][self.column : self.column + 3]
+        saved, parent, event, callback, presentation = rows[0][self.column : self.column + 5]
+        if (callback is not None or presentation is not None) and self.source["origin_kind"] != "callback":
+            raise AuthorityUnavailable()
         if not self.attempt_current() or "agents:write" not in held:
             raise CeilingRefused()
         if (
@@ -423,6 +570,7 @@ class DelegateProjection:
             or any(getattr(saved, key) != getattr(self.act, key) for key in _ACT_SCOPE)
             or not same_body(saved.body, self.act.body)
             or not same_body(saved.continuation, self.act.continuation)
+            or not same_body(saved.stop_dispatch, self.act.stop_dispatch)
             or list(self.root.operation_ids) != [self.source["parent_id"] or self.act.id]
         ):
             raise AuthorityUnavailable()
@@ -430,6 +578,10 @@ class DelegateProjection:
             if parent is None or parent.state not in {"pending", "uncertain"} or parent.cancel_requested_at is not None or event is not None:
                 raise AuthorityUnavailable()
             qualify_no_due(_snapshot(parent), _snapshot(saved))
+        self.family.check(rows, parent if parent is not None else saved)
+        if self.consent is not None:
+            root = rows[0][self.draft.column + 2]
+            self.consent.check(rows, root, _snapshot(parent) if parent is not None else _snapshot(saved), _snapshot(saved) if parent is not None else None)
         if "due_at" in saved.body and rows[0][2] & 6 != 6:
             raise AgentDenied("A due date requires current management access", reason="manage-required")
         if not self.attempt_current():

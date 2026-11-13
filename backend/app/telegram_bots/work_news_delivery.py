@@ -28,7 +28,11 @@ from deerflow.utils.file_io import await_drained
 
 
 def recipes(source, basis, identity, link):
-    if source.key == "capacity.offer":
+    if source.key == "assignment.card":
+        from app.telegram_bots.assignment_cards import present_assignment
+
+        view = present_assignment(source, basis, link)
+    elif source.key == "capacity.offer":
         from app.telegram_bots.work_capacity_sources import present_capacity_offer
 
         view = present_capacity_offer(source, basis, identity, link)
@@ -70,7 +74,7 @@ def recipes(source, basis, identity, link):
 
 def conceal_news(source):
     """Only a current source-qualified chat activation bypasses its teaser."""
-    return source.protected and source.key not in {"view.list", "view.detail", "execution.activate", "execution.stop"} and not (source.key.startswith("status.") and source.work.get("activation_act_id"))
+    return source.protected and source.key not in {"view.list", "view.detail", "execution.activate", "execution.stop", "assignment.card"} and not (source.key.startswith("status.") and source.work.get("activation_act_id"))
 
 
 def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
@@ -174,7 +178,7 @@ def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
         direct = basis.get("direct_edit")
         if "direct_edit" in basis:
             if (
-                source.key not in {"execution.activate", "execution.stop"}
+                source.key not in {"execution.activate", "execution.stop", "assignment.card"}
                 or reveal is not None
                 or navigation is not None
                 or basis["concealed"]
