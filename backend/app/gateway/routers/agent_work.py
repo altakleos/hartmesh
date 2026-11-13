@@ -116,16 +116,6 @@ async def command_work(instance_id: str, work_id: str, body: WorkCommand, reques
 @require_permission("agents", "read")
 @require_permission("runs", "create")
 async def activate_work(instance_id: str, work_id: str, body: ActivateWork, request: Request):
-    from app.gateway.agent_conversations import execution_for_run
-    from app.gateway.work_execution import activate_work_run
-    from deerflow.agent_instances.contract import AgentDenied
-    from deerflow.agent_instances.work_execution import WorkExecution
+    from app.gateway.work_execution import activate_work as activate
 
-    work = AgentWork(await _service(request))
-    service = WorkExecution(work)
-    replay = await service.activation_exists(work_id, body.operation_id)
-    execution = await execution_for_run(request, body.thread_id, require_ready=not replay)
-    if execution is None or execution.instance.id != instance_id:
-        raise AgentDenied("Activation requires this AI employee's bound conversation")
-    scope = await activate_work_run(request, service, execution, work_id, body)
-    return {**await work.get(actor=execution.requester, instance_id=instance_id, work_id=work_id), "activation_receipt": {"operation_id": body.operation_id, "attempt_id": scope.attempt_id}}
+    return await activate(request, instance_id=instance_id, work_id=work_id, body=body)

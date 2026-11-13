@@ -12,6 +12,7 @@ legacy-channel closure; an absent environment key means on. See
 
 Keep bot network, supervisor and router startup outside configuration loading.
 Use socket-free transports and synthetic credentials in offline tests.
+Use `authority.internal_request` only after live owner ceilings and bot-scope checks.
 
 `work_text_inputs.py` routes plain text for shown Work prompts and,
 through `work_card_text.py`, explicit card replies. Complete prompt previews

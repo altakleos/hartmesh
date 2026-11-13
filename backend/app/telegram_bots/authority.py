@@ -127,6 +127,22 @@ async def require(owner_user_id: str, *needed: str, prepared_config: AppConfig |
     return permissions
 
 
+def internal_request(app, owner_user_id: str):
+    """Build a trusted Gateway request attributed to the bound human owner.
+
+    This carries identity, not the owner's route ceilings. Callers must require
+    those ceilings and current bot authority before admitting an operation.
+    """
+    from types import SimpleNamespace
+
+    from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, get_internal_user
+
+    if not isinstance(owner_user_id, str) or not owner_user_id.strip() or owner_user_id != owner_user_id.strip():
+        raise ValueError("An internal request requires an exact human owner")
+    return SimpleNamespace(app=app, headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id}, state=SimpleNamespace(user=get_internal_user(), auth_source=AUTH_SOURCE_INTERNAL), cookies={})
+
+
 class TelegramAuthority:
     """One collaborator shared by claim, part and final raw-dispatch checks.
 
