@@ -29,7 +29,7 @@ original deadline words in due_text, or null if no deadline was mentioned.
 Do not save, start, delegate or claim to complete anything."""
 
 
-async def draft_assignment(words: str, *, agent_name: str, settings: PersonSettings, config: TelegramBotsConfig, previous: DraftAssignment | None = None, now: datetime | None = None) -> DraftAssignment | None:
+async def draft_assignment(words: str, *, agent_name: str, settings: PersonSettings, config: TelegramBotsConfig, previous: DraftAssignment | None = None, now: datetime | None = None, before_dispatch=None) -> DraftAssignment | None:
     if type(words) is not str:
         raise ValueError("invalid-assignment-words")
     if len(words) > config.assign.max_chars:
@@ -45,6 +45,8 @@ async def draft_assignment(words: str, *, agent_name: str, settings: PersonSetti
             async with asyncio.timeout(config.assign.timeout_seconds):
                 zone = await asyncio.to_thread(ZoneInfo, settings.timezone)
                 app_config = await asyncio.to_thread(get_app_config)
+                if before_dispatch is not None:
+                    await before_dispatch()
                 text = await run_oneshot_llm(
                     system_instruction=ASSIGN_SYSTEM,
                     user_content=json.dumps(

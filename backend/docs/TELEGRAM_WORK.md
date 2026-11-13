@@ -1291,8 +1291,33 @@ JSON/schema, provider faults or timeout return no draft for the explicit
 done-when fallback. Caller cancellation drains the owned call within its timeout.
 `prepare_due_date` drops nonfuture dates and removes future dates without current
 Manage+Inspect, retaining the mentioned words; this advisory step grants no
-command authority. Saving/delegation and Just answer publication remain separate
-adapter workflows.
+command authority. Just answer publication remains separate adapter work.
+
+`assignment_requests.py` owns one durable extraction claim per actual Inbox input.
+It stores a private version-2 delegate/draft row and its input route before the
+one-shot call; claiming persists before provider dispatch. Only the claim owner
+may choose a fallback. Recovery of an interrupted claim asks for explicit criteria
+without another model call. A late answer cannot replace a completed fallback.
+Manual criteria routing, optional prompt admission and replacement of the request
+with the complete draft share one writer. Both input records retain their exact
+scope and content digests and are joined again on private source/effect reads.
+
+`assignment_drafts.py` prepares the complete immutable private draft under current
+adopted Work policy, Use+Inspect and owner ceilings. It creates no Work, thread,
+run or workspace. Its 24-hour age is checked across provider waits and inside
+the writer. `Acts.stage_delegate` binds a distinct operation to those stored
+words and reserves the private root atomically; it does not launch work. The
+service journal checks exact receipts before mutable effect guards. Losing Manage
+on a date permits one persisted, deterministic no-date child after a proved
+non-effect refusal; the deadline words remain criteria without truncation. An
+admitted child retains its own attempt window after the parent's window ends.
+`AgentWork.delegate(admission=...)` checks trusted caller custody before writes
+and again before commit, alongside canonical policy and authority checks. Exact
+receipt replay stays read-only. A successful Save-and-Start journal records its
+authorized activation continuation with the delegation receipt; it does not yet
+dispatch it. Card/prompt publication, callback admission, continuation execution
+and runtime installation remain separate owners. Private draft/request rows are
+never executable through the generic action worker or human-input outcome owner.
 
 Proposal ToolMessage IDs include the issuing AI message's scope so reused
 provider tool-call IDs cannot overwrite earlier cards; replay of the same call

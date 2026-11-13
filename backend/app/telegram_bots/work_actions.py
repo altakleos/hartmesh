@@ -18,13 +18,14 @@ from sqlalchemy import and_, or_, select
 
 from app.telegram_bots.authority import AccessOff, CeilingRefused, require
 from app.telegram_bots.links import BotLink
+from app.telegram_bots.work_delegate_actions import DelegateActionMethods
 from app.telegram_bots.work_start_actions import ActivationActionMethods
 from app.telegram_bots.work_stop_actions import StopActionMethods
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied, Refusal
 from deerflow.agent_instances.human_input import HumanInput
 from deerflow.agent_instances.human_input_contract import RequestCommand, Respond
 from deerflow.agent_instances.work import INSPECT
-from deerflow.agent_instances.work_contract import WorkCommand
+from deerflow.agent_instances.work_contract import DelegateWork, WorkCommand
 from deerflow.agent_instances.work_execution_contract import ActivateWork
 from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
 from deerflow.persistence.telegram_bots.model import TelegramActRow
@@ -33,7 +34,7 @@ from deerflow.utils.file_io import await_drained
 
 _ACT_SCOPE = ("link_id", "owner_user_id", "bot_id", "binding_generation", "telegram_user_id", "chat_id", "instance_id", "work_id", "request_id", "kind", "message_id")
 
-WORK_ACT_KINDS = frozenset({"respond", "decide", "accept", "changes_requested", "route", "stop", "activate"})
+WORK_ACT_KINDS = frozenset({"respond", "decide", "accept", "changes_requested", "route", "stop", "activate", "delegate"})
 _SCOPE = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "binding_generation", "token_revision", "telegram_user_id", "chat_id", "connection_id")
 
 
@@ -53,13 +54,13 @@ def same_body(left, right):
 def request_for(kind, body, *, identity=None):
     if kind not in WORK_ACT_KINDS:
         raise ValueError("unsupported-work-act")
-    request = (Respond if kind == "respond" else RequestCommand if kind == "route" else ActivateWork if kind == "activate" else WorkCommand).model_validate(thaw(body))
-    if identity is not None and request.operation_id != identity or kind not in {"respond", "activate"} and request.action != kind:
+    request = (Respond if kind == "respond" else RequestCommand if kind == "route" else ActivateWork if kind == "activate" else DelegateWork if kind == "delegate" else WorkCommand).model_validate(thaw(body))
+    if identity is not None and request.operation_id != identity or kind not in {"respond", "activate", "delegate"} and request.action != kind:
         raise ValueError("act-source-conflict")
     return request
 
 
-class WorkActionMethods(StopActionMethods, ActivationActionMethods):
+class WorkActionMethods(StopActionMethods, ActivationActionMethods, DelegateActionMethods):
     """Methods mixed into the existing Acts journal; no independent lifecycle."""
 
     @asynccontextmanager
@@ -113,6 +114,8 @@ class WorkActionMethods(StopActionMethods, ActivationActionMethods):
         ):
             raise AgentDenied("The action's binding is no longer current")
         await self._work_link(link)
+        if act.kind == "delegate":
+            return await self._delegate_receipt(act)
         if act.kind == "stop" and act.operation_ids:
             return await self._stop_chain_receipt(act)
         actor = PrincipalRef("human", link.owner_user_id)
@@ -176,6 +179,8 @@ class WorkActionMethods(StopActionMethods, ActivationActionMethods):
         return result
 
     async def _work_outcome(self, captured, *, state, reason=None, result=None):
+        if captured.kind == "delegate" and state == "done":
+            return await self._finish_delegate(captured, result)
         if captured.kind == "activate":
             if state == "done":
                 return await self._complete_activation(captured, result)
@@ -223,6 +228,8 @@ class WorkActionMethods(StopActionMethods, ActivationActionMethods):
             return await self._run_stop_chain(act, explicit=explicit, attempt_current=attempt_current)
         if act.kind == "activate":
             return await self._attempt_activation(act, explicit=explicit, attempt_current=attempt_current)
+        if act.kind == "delegate":
+            return await self._attempt_delegate(act, explicit=explicit, attempt_current=attempt_current)
         try:
             request_for(act.kind, act.body, identity=act.id)
         except ValueError:
