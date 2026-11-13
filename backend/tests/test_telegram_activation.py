@@ -214,7 +214,9 @@ async def test_late_binding_replacement_refuses_physical_stop(actions):
 
     manager.get.side_effect = fetched
     result = await e.acts.stop(e.link, operation_id=operation(), work_id=e.work["id"], attempt_id=attempt_id)
-    assert result.state == "done" and result.stop_dispatch["state"] == "ended"
+    # The retired binding cannot write a later follow-up disposition. Preserve
+    # its original scope while the final native guard refuses cancellation.
+    assert result.state == "done" and result.stop_dispatch["state"] == "ready"
     manager.cancel.assert_not_awaited()
 
 

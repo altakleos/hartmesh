@@ -44,3 +44,29 @@ async def test_ended_followup_history_needs_authoritative_original_settlement(ac
     await sweep_rows(e.db.sessions, e.acts.outbox.clock() + timedelta(days=401), callback_max_age_days=180)
     async with e.db.sessions() as reader:
         assert (await reader.get(TelegramActRow, result.id) is None) is settled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["stop", "cancel"])
+@pytest.mark.parametrize("phase", ["ready", "requested", "uncertain"])
+async def test_original_settlement_closes_history_after_binding_retirement(actions, kind, phase):
+    e = actions
+    attempt_id, _record, manager = await seeded_attempt(e)
+    if phase == "ready":
+        manager.get.return_value = None
+    elif phase == "uncertain":
+        manager.cancel.side_effect = OSError("Synthetic unknown cancellation")
+    result = await e.acts.stop(e.link, operation_id=operation(), work_id=e.work["id"], attempt_id=attempt_id) if kind == "stop" else await e.acts.cancel(e.link, operation_id=operation(), work_id=e.work["id"])
+    if phase == "uncertain":
+        result = await e.acts.resume_stop_dispatch(result)
+        result = await e.acts.resume_stop_dispatch(result)
+    assert result.state == "done" and result.stop_dispatch["state"] == phase
+    await e.db.links.unbind(e.link, actor_id=e.link.owner_user_id)
+    async with e.db.sessions.begin() as writer:
+        original = await writer.get(AgentWorkAttemptRow, attempt_id)
+        original.status, original.settled_at = "cancelled", datetime.now(UTC)
+    calls = manager.cancel.await_count
+    await sweep_rows(e.db.sessions, e.acts.outbox.clock() + timedelta(days=401), callback_max_age_days=180)
+    async with e.db.sessions() as reader:
+        assert await reader.get(TelegramActRow, result.id) is None
+    assert manager.cancel.await_count == calls

@@ -74,7 +74,7 @@ def closed_command(row, events, attempts):
     if (
         not isinstance(scope, Mapping)
         or set(scope) - {"ended_from"} != {"attempt_id", "thread_id", "run_id", "state", "attempts", "not_before"}
-        or scope["state"] not in {"settled", "ended"}
+        or scope["state"] not in {"settled", "ended", "ready", "requested", "uncertain"}
         or "ended_from" in scope
         and (scope["state"] != "ended" or scope["ended_from"] not in {"ready", "uncertain"})
         or type(scope["attempts"]) is not int

@@ -1565,6 +1565,11 @@ authorize another cancellation. Newly ended, unrequested follow-ups retain a
 provenance marker and need a fresh explicit check before physical dispatch.
 Legacy ended scopes with unknown provenance stay held. Exact original settlement
 also gates history expiry, including ended scopes.
+After binding retirement, the old owner leaves its journal unchanged. Retention
+can still qualify that original attempt's terminal status and settlement, with
+the exact captured thread/run and canonical command, even when the retained
+follow-up marker remains ready, requested or uncertain. An unresolved original
+keeps the complete history; the sweep issues no cancellation or journal repair.
 
 `work_management_retention.py` qualifies complete reciprocal edit families and
 standalone withdrawal journals. It locks bindings before journals, batches SQL

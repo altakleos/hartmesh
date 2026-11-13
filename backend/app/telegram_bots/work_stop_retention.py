@@ -11,7 +11,7 @@ from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, Agent
 from deerflow.persistence.telegram_bots.model import TelegramActRow
 
 
-def closed_scope(row):
+def closed_scope(row, *, allow_pending=False):
     request = request_for("stop", row.body, identity=row.id)
     scope = row.stop_dispatch
     if scope is None:
@@ -24,7 +24,7 @@ def closed_scope(row):
         or "ended_from" in scope
         and (scope["state"] != "ended" or scope["ended_from"] not in {"ready", "uncertain"})
         or scope["attempt_id"] != request.attempt_id
-        or scope["state"] not in {"settled", "ended"}
+        or scope["state"] not in ({"settled", "ended", "ready", "requested", "uncertain"} if allow_pending else {"settled", "ended"})
         or type(scope["thread_id"]) is not str
         or not scope["thread_id"]
         or scope["run_id"] is not None
@@ -36,7 +36,7 @@ def closed_scope(row):
     if scope["not_before"] is not None:
         if type(scope["not_before"]) is not str or datetime.fromisoformat(scope["not_before"]).utcoffset() is None:
             return False
-    if scope["state"] == "settled" and row.state != "done":
+    if scope["state"] != "ended" and row.state != "done":
         return False
     return True
 
@@ -83,7 +83,7 @@ async def expired_stop_groups(session, *, cutoff, pending_outcome):
                     referenced_by.setdefault(child_id, set()).add(identity)
     for row in rows:
         try:
-            if not closed_scope(row):
+            if not closed_scope(row, allow_pending=True):
                 continue
             child = parent_of(_snapshot(row))
             if row.continuation is not None and child is None and delivery_receipt(row.continuation) is None and not transferred(row):
