@@ -7,21 +7,39 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBot
 
 
 def closed_start(control, journal, binding, attempt):
-    """One receipt predicate for source controls and conservative retention."""
+    """The displayed revision and reservation must own the exact activation."""
+    from app.telegram_bots.work_actions import request_for
+
+    try:
+        if journal is None or journal.id != control.id or control.payload.get("work_action_id") != journal.id or type(control.payload.get("assignment_revision")) is not int:
+            return False
+        body = request_for("activate", journal.body, identity=journal.id)
+        return body.expected_assignment_revision == control.payload["assignment_revision"] and closed_activation(journal, binding, attempt, work_id=control.target_id)
+    except (TypeError, KeyError, ValueError, AttributeError):
+        return False
+
+
+def closed_activation(journal, binding, attempt, *, work_id):
+    """Exact original activation outcome, independent of callback lifetime."""
     from app.telegram_bots.work_actions import request_for, same_body
     from deerflow.agent_instances.work import UNRESOLVED
 
     try:
-        if journal is None or journal.id != control.id or control.payload.get("work_action_id") != journal.id or journal.kind != "activate" or journal.state not in {"done", "refused", "conflict"}:
+        if journal is None or journal.kind != "activate" or journal.state not in {"done", "refused", "conflict"}:
             return False
         body = request_for("activate", journal.body, identity=journal.id)
-        if (
-            (journal.link_id, journal.owner_user_id, journal.bot_id, journal.binding_generation, journal.telegram_user_id, journal.chat_id, journal.instance_id, journal.work_id, journal.request_id, journal.message_id)
-            != (binding.id, binding.owner_user_id, binding.bot_id, binding.binding_generation, binding.telegram_user_id, binding.chat_id, binding.agent_ref, control.target_id, None, None)
-            or type(control.payload.get("assignment_revision")) is not int
-            or body.expected_assignment_revision != control.payload["assignment_revision"]
-            or not same_body(journal.body, body.model_dump(mode="json"))
-        ):
+        if (journal.link_id, journal.owner_user_id, journal.bot_id, journal.binding_generation, journal.telegram_user_id, journal.chat_id, journal.instance_id, journal.work_id, journal.request_id, journal.message_id) != (
+            binding.id,
+            binding.owner_user_id,
+            binding.bot_id,
+            binding.binding_generation,
+            binding.telegram_user_id,
+            binding.chat_id,
+            binding.agent_ref,
+            work_id,
+            None,
+            None,
+        ) or not same_body(journal.body, body.model_dump(mode="json")):
             return False
         if attempt is not None and (
             (attempt.work_id, attempt.activation_id, attempt.requester_id, attempt.thread_id) != (journal.work_id, journal.id, journal.owner_user_id, body.thread_id) or not same_body(attempt.request, body.model_dump(mode="json"))
