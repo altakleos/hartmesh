@@ -129,8 +129,9 @@ Result media and event proofs: see the Work guide.
 `commands.py` handles fixed navigation and language settings only. A command closes
 only a typing prompt; `/new` and `/stop` also end the forms and cards in scope.
 
-`acts.py` commits a saved settings choice, its exact old/new preference, completed
-Act, consumed group and replacement controls in one guarded writer.
+`acts.py` atomically commits settings, exact old/new values, completed Act,
+consumed group and replacement controls. Stop journals and follow-ups:
+[Work guide](../../docs/TELEGRAM_WORK.md).
 `SettingsRepository.update(session=...)` borrows the owning engine/writer without
 committing.
 `plan_product_keyboard` freezes descriptions with the original product basis and

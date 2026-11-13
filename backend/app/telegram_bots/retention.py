@@ -333,7 +333,7 @@ async def _sweep_acts(sessions, now):
             .exists()
         )
         expired = (~pending_outcome, TelegramActRow.created_at < now - timedelta(days=ACT_RETENTION_DAYS), TelegramActRow.state.in_(_SETTLED_ACTS), TelegramActRow.stop_dispatch.is_(None))
-        ordinary = await session.execute(delete(TelegramActRow).where(*expired, TelegramActRow.kind != "file_put", TelegramActRow.continuation.is_(None)))
+        ordinary = await session.execute(delete(TelegramActRow).where(*expired, TelegramActRow.kind.not_in(("file_put", "stop")), TelegramActRow.continuation.is_(None)))
         mark = TelegramInboundMarkRow
         work_file_input = (
             select(mark.message_id)
@@ -392,7 +392,7 @@ async def _sweep_acts(sessions, now):
         from app.telegram_bots.work_actions import WORK_ACT_KINDS
         from app.telegram_bots.work_outcome_delivery import delivery_receipt
 
-        outcomes = list(await session.scalars(select(TelegramActRow).where(*expired, TelegramActRow.kind.in_(WORK_ACT_KINDS), TelegramActRow.continuation.is_not(None)).with_for_update(skip_locked=True)))
+        outcomes = list(await session.scalars(select(TelegramActRow).where(*expired, TelegramActRow.kind.in_(WORK_ACT_KINDS), TelegramActRow.kind != "stop", TelegramActRow.continuation.is_not(None)).with_for_update(skip_locked=True)))
         settled = []
         for row in outcomes:
             try:
@@ -405,7 +405,12 @@ async def _sweep_acts(sessions, now):
                 settled.append(row.id)
         for start in range(0, len(settled), _BATCH):
             await session.execute(delete(TelegramActRow).where(TelegramActRow.id.in_(settled[start : start + _BATCH])))
-        return ordinary.rowcount + len(identities) + len(settled)
+        from app.telegram_bots.work_stop_retention import expired_stop_groups
+
+        stop_ids = await expired_stop_groups(session, cutoff=now - timedelta(days=ACT_RETENTION_DAYS), pending_outcome=pending_outcome)
+        for start in range(0, len(stop_ids), _BATCH):
+            await session.execute(delete(TelegramActRow).where(TelegramActRow.id.in_(stop_ids[start : start + _BATCH])))
+        return ordinary.rowcount + len(identities) + len(settled) + len(stop_ids)
 
 
 def _live_followup_input(mark, now, callback_max_age_days):

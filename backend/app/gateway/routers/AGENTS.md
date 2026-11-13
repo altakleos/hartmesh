@@ -100,6 +100,9 @@ retry the persisted exact stop intent. Human-input replies never invoke activati
 `dispatch_work_stop` reports pending/requested/settled for the original attempt,
 rechecking stop authority and captured thread/run guards after host reads. Only
 authoritative Work settlement ends follow-up; no-run and host ACKs do not.
+Trusted callers may supply `before_dispatch` to qualify caller custody with the
+immutable original attempt after host reads. It cannot replace the target; final
+request ceilings and host identity checks still follow it.
 
 Artifact range validators and bytes come from one opened file. POSIX streams
 the descriptor. Windows copies only the selected response bytes into a
