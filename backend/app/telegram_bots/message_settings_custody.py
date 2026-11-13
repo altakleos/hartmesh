@@ -9,14 +9,16 @@ from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_digest_members import claim_of
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow
 
+_SETTINGS_KEYS = {"settings.state", "settings.state_basic", "settings.messages_choose", "settings.quiet_choose", "settings.summary_choose", "settings.language_choose"}
 
-async def require_settings_group(writer, group, *, acknowledged=True):
+
+async def require_settings_group(writer, group, *, acknowledged=True, source_keys=_SETTINGS_KEYS, publication=False):
     parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id, with_for_update=True, populate_existing=True)
     rows = list(await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group.selected.group_id).with_for_update().execution_options(populate_existing=True)))
-    validate_settings_group(parent, rows, group, acknowledged=acknowledged)
+    validate_settings_group(parent, rows, group, acknowledged=acknowledged, source_keys=source_keys, publication=publication)
 
 
-def validate_settings_group(parent, rows, group, *, acknowledged=True):
+def validate_settings_group(parent, rows, group, *, acknowledged=True, source_keys=_SETTINGS_KEYS, publication=False):
     if parent is None or type(parent.payload.get("presentation_version", 0)) is not int or parent.payload.get("presentation_version", 0) != group.presentation_version:
         raise CallbackRefused()
     parts = [part for part in parent.parts if type(part.get("presentation_version")) is int and part.get("presentation_version") == group.presentation_version and part.get("callback_group_id") == group.selected.group_id]
@@ -26,7 +28,13 @@ def validate_settings_group(parent, rows, group, *, acknowledged=True):
     _validate_rows(parent, rows)
     originals = {row.id: row for row in group.rows}
     fields = ("link_id", "chat_id", "binding_generation", "message_thread_id", "message_id", "kind", "target_kind", "target_id")
-    if set(originals) != {row.id for row in rows} or any(any(getattr(row, name) != getattr(originals[row.id], name) for name in fields) or not same_body(row.payload, originals[row.id].payload) for row in rows):
+
+    def payload(row):
+        from app.telegram_bots.inbox import CALLBACK_PUBLICATION_KEY
+
+        return {key: value for key, value in row.payload.items() if not (publication and key == CALLBACK_PUBLICATION_KEY)}
+
+    if set(originals) != {row.id for row in rows} or any(any(getattr(row, name) != getattr(originals[row.id], name) for name in fields) or not same_body(payload(row), payload(originals[row.id])) for row in rows):
         raise CallbackRefused()
     if any(row.message_id != group.selected.message_id for row in rows):
         raise CallbackRefused()
@@ -44,7 +52,7 @@ def validate_settings_group(parent, rows, group, *, acknowledged=True):
             or part["message_ids"] != [group.selected.message_id]
             or datetime.fromisoformat(part["sent_at"]).utcoffset() is None
             or part.get("stored_keyboard") is not True
-            or part.get("source_ref", {}).get("key") not in {"settings.state", "settings.state_basic", "settings.messages_choose", "settings.quiet_choose", "settings.summary_choose", "settings.language_choose"}
+            or part.get("source_ref", {}).get("key") not in source_keys
         ):
             raise ValueError()
     except (KeyError, TypeError, ValueError):

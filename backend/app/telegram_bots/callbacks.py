@@ -953,7 +953,9 @@ class CallbackRepository:
                 from app.telegram_bots.work_request_source import require_show
 
                 by_id = {row.id: row for row in rows}
-                show_proofs = set()
+                from app.telegram_bots.retention import settings_prompt_dependencies
+
+                show_proofs = {identity for identity, _anchor in await settings_prompt_dependencies(session)}
                 # Closed-input recovery needs the original purpose until its
                 # explicit choice and any fresh prompt have actually settled.
                 for mark in await session.scalars(

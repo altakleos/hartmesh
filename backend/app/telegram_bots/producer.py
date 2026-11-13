@@ -2574,7 +2574,7 @@ class OutboxSender:
                 sending["dispatched_at"] = self.outbox.clock().isoformat()
                 saved.parts = parts
                 required_protection = sending["protect_content"]
-                source_dispatch = _item(saved) if {"summary_view_basis", "summary_basis", "work_digest_basis", "work_digest_view_basis"}.intersection(saved.payload) else None
+                source_dispatch = _item(saved) if {"settings_prompt_basis", "summary_view_basis", "summary_basis", "work_digest_basis", "work_digest_view_basis"}.intersection(saved.payload) else None
             if self._stopping:
                 return
             try:
@@ -2652,7 +2652,7 @@ class OutboxSender:
                         # The SDK acknowledged the captured card, not a manifest
                         # rewritten during its await. Retain both the dispatched
                         # proof and reservations for explicit reconciliation.
-                        family = "summary" if {"summary_basis", "summary_view_basis"}.intersection(source_dispatch.payload) else "digest"
+                        family = "settings" if "settings_prompt_basis" in source_dispatch.payload else "summary" if {"summary_basis", "summary_view_basis"}.intersection(source_dispatch.payload) else "digest"
                         saved.payload = {**saved.payload, family + "_dispatch_conflict": {"payload": source_dispatch.payload, "parts": source_dispatch.parts, "message_ids": message_ids, "acknowledged_at": self.outbox.clock().isoformat()}}
                         saved.state, saved.failed_reason, saved.closed_at = "failed", "invalid-" + family + "-receipt", self.outbox.clock()
                         saved.claim_owner = saved.claim_id = saved.claimed_at = None
@@ -2662,6 +2662,15 @@ class OutboxSender:
                 acknowledged.pop("invalid_token_verification_pending", None)
                 acknowledged.update(state="sent", message_ids=message_ids, protect_content=required_protection, sent_at=self.outbox.clock().isoformat())
                 saved.parts = parts
+                if "settings_prompt_basis" in saved.payload:
+                    from app.telegram_bots.settings_prompts import acknowledge_prompt
+
+                    try:
+                        await acknowledge_prompt(session, saved, acknowledged)
+                    except ProductSourceRetired:
+                        saved.state, saved.failed_reason, saved.closed_at = "failed", "invalid-settings-receipt", self.outbox.clock()
+                        saved.claim_owner = saved.claim_id = saved.claimed_at = None
+                        return
                 if saved.payload.get("reply_basis", {}).get("version") in {5, 7} or saved.payload.get("work_request_basis", {}).get("version") == 3:
                     from app.telegram_bots.callbacks import CallbackRepository, Prompts
 

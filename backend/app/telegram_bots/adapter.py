@@ -865,6 +865,9 @@ class TelegramBotChannel(TelegramChannel):
         await self.send_text(key, source_id=f"press:{row.id}:{update_id}", reply_to=row.message_id, thread=row.message_thread_id, _captured_link=link)
 
     async def execute_callback(self, row, *, query_id=None, update_id=None):
+        settings_prompts = getattr(self._services, "settings_prompts", None)
+        if settings_prompts is not None and await settings_prompts.execute_callback(self, row, query_id=query_id, update_id=update_id):
+            return
         work_callbacks = getattr(self._services, "work_callbacks", None)
         if work_callbacks is not None and await work_callbacks.execute_callback(self, row, update_id=update_id, query_id=query_id):
             return
@@ -1110,6 +1113,10 @@ class TelegramBotChannel(TelegramChannel):
             skill = await self._on_other_slash(update, context)
             if not skill:
                 return
+        settings_prompts = getattr(self._services, "settings_prompts", None)
+        if not skill and settings_prompts is not None and await settings_prompts.handle_text(self, update, captured_link=self._admission(update).link):
+            self._classified(update)
+            return
         work_inputs = getattr(self._services, "work_text_inputs", None)
         if not skill and work_inputs is not None and await work_inputs.files.handle(self, update, captured_link=self._admission(update).link):
             self._classified(update)
@@ -2151,7 +2158,12 @@ class TelegramBotChannel(TelegramChannel):
         if part.get("force_reply"):
             from telegram import ForceReply
 
-            if (model_part is None or not model_part.human_input) and work_part is None or stored_keyboard is not None or button is not None or part["kind"] != "text":
+            settings_prompt = "settings_prompt_basis" in saved.item.payload
+            if settings_prompt:
+                from app.telegram_bots.settings_prompts import authorize_prompt
+
+                await authorize_prompt(self._services, saved)
+            if (model_part is None or not model_part.human_input) and work_part is None and not settings_prompt or stored_keyboard is not None or button is not None or part["kind"] != "text":
                 raise PermanentDeliveryError("invalid-human-input-markup")
             markup = ForceReply(selective=True)
         elif (model_part is not None and model_part.human_input or work_part is not None) and part["kind"] == "edit" and markup is None:
@@ -2299,6 +2311,19 @@ class TelegramBotChannel(TelegramChannel):
                     raise DeliveryClaimRetired()
 
             preview_fence = LiveRequestFence(check_notification_part)
+        if "settings_prompt_basis" in current.item.payload:
+            previous_fence = preview_fence
+
+            async def check_settings_prompt():
+                from app.telegram_bots.settings_prompts import authorize_prompt
+
+                if previous_fence is not None:
+                    await previous_fence.check()
+                await authorize_prompt(self._services, current)
+                if not self._callback_current(current.link) or not self._send_allowed():
+                    raise DeliveryClaimRetired()
+
+            preview_fence = LiveRequestFence(check_settings_prompt)
         try:
             if part["kind"] == "edit":
                 target = part.get("target_message_id")

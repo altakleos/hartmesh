@@ -117,10 +117,34 @@ async def status_cleanup_anchors(session):
     return pinned | {identity for identity, attempt, _pending in roots if attempt in active}
 
 
+async def settings_prompt_dependencies(session):
+    """Unsettled quiet-hour capture/choice retains only its original scope."""
+    mark, prompt, link = TelegramInboundMarkRow, TelegramCallbackRow, TelegramBotLinkRow
+    identity = func.coalesce(mark.route_basis["settings_prompt_id"].as_string(), mark.route_basis["human_input_ui"]["held_prompt_id"].as_string())
+    return (
+        await session.execute(
+            select(prompt.id, prompt.payload["anchor_outbox_id"].as_string())
+            .join(mark, mark.link_id == prompt.link_id)
+            .join(link, link.id == mark.link_id)
+            .where(
+                mark.state != "done",
+                prompt.id == identity,
+                prompt.kind == "prompt",
+                prompt.payload["purpose"].as_string() == "quiet_times",
+                prompt.binding_generation == mark.binding_generation,
+                mark.binding_generation == link.binding_generation,
+                prompt.chat_id == mark.chat_id,
+                mark.chat_id == link.chat_id,
+                prompt.message_thread_id.is_not_distinct_from(mark.message_thread_id),
+            )
+        )
+    ).all()
+
+
 async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int) -> set[str]:
     """The ids and ``reply:`` keys of outbox rows a live control or unfinished delivery needs."""
     generations = dict((await session.execute(select(TelegramBotLinkRow.id, TelegramBotLinkRow.binding_generation))).all())
-    pinned: set[str] = set()
+    pinned: set[str] = {anchor for _prompt, anchor in await settings_prompt_dependencies(session) if type(anchor) is str}
     anchors: set[str] = set()
     callback = TelegramCallbackRow
     for row in await session.execute(select(callback.link_id, callback.binding_generation, callback.target_kind, callback.target_id, callback.payload, callback.expires_at, callback.consumed_at, callback.created_at)):
@@ -177,6 +201,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             delivery.payload["status_pin_tail"].as_string(),
             delivery.payload["digest_dispatch_conflict"],
             delivery.payload["summary_dispatch_conflict"],
+            delivery.payload["settings_dispatch_conflict"],
             view_parent,
             navigation_anchor,
         ).where(
@@ -214,6 +239,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
         pin_tail,
         digest_conflict,
         summary_conflict,
+        settings_conflict,
         digest_parent,
         navigation_anchor,
     ) in records:
@@ -221,7 +247,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
             graph.setdefault(identity, set()).update(_strings(navigation_anchor))
         if digest_parent:
             graph.setdefault(identity, set()).update(_strings(digest_parent))
-        if summary_conflict is not None:
+        if summary_conflict is not None or settings_conflict is not None:
             pinned.add(identity)
         if digest_conflict is not None:
             pinned.add(identity)
