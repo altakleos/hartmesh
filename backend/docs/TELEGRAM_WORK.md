@@ -1247,3 +1247,25 @@ redaction before a plain off confirmation clears the private body and controls.
 The committed settings receipt, account, claim and controls are checked at the SDK
 boundary; the admitted edit drains cancellation.
 A missing edit target is superseded without sending a new summary.
+
+
+## Assignment inventory and view primitives
+
+`AttentionReader.open_list` scans the complete owner-visible Work inventory
+before storing its ordered Work IDs. A server-owned, owner/bot/generation-scoped
+`work_list_snapshot` holds opaque page cursors for ten rows per page. Later pages
+retain that membership and ordering while reading current assignment, question
+and recipient state. A new list includes assignments created since the previous
+snapshot. Deleted or invisible records disappear; new actionable questions on
+listed assignments are included. Snapshot expiry and the exact saved cursor
+payload share the final provider-boundary authority read. Page controls inherit
+the original snapshot's expiry.
+
+`work_views.py` renders complete escaped objectives and success criteria before
+any last-part controls. Pure button descriptions intersect current Use/Inspect,
+Manage, route ceilings, assignment/attempt state, recipient eligibility and
+mandate/lifecycle facts. Fresh Start requires conversation-write authority unless
+a caller has independently qualified a reusable earlier Work conversation.
+These primitives install no command, publication owner or execution controller.
+The existing web controls remain the user-facing execution entry points until
+those adapter owners are installed.
