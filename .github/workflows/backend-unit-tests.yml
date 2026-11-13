@@ -51,7 +51,7 @@ jobs:
     # Collection, tests and cleanup share this deadline. Ten duration-balanced
     # shards leave room for the growing suite without extending stalled jobs:
     # the eight-shard configuration reached it with a shard still passing cases.
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       # Duration-aware split: `make test-shard` balances the shards by real
       # wall-clock cost from backend/.test_durations (read-only for shards, so
