@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+from dataclasses import dataclass
+from typing import Literal
 
 from sqlalchemy import select
 
@@ -152,21 +154,80 @@ async def run_cancel_allowed(request):
     return "runs:cancel" in permissions
 
 
-async def dispatch_work_stop(request, work, *, actor, instance_id, work_id, expected_attempt_id=None):
+@dataclass(frozen=True)
+class StopDispatchResult:
+    state: Literal["pending", "requested", "settled"]
+    attempt_id: str
+    thread_id: str | None
+    run_id: str | None
+
+
+async def dispatch_work_stop(request, work, *, actor, instance_id, work_id, expected_attempt_id=None, expected_thread_id=None, expected_run_id=None):
     """Retry the recorded exact stop intent; a cancellation receipt is not settlement."""
-    current = await work.get(actor=actor, instance_id=instance_id, work_id=work_id)
-    attempt = current["attempt"]
-    if expected_attempt_id is not None and (attempt is None or attempt["id"] != expected_attempt_id):
-        return
-    if not attempt or attempt["status"] != "stopping" or not attempt["run_id"]:
-        return
+    from deerflow.agent_instances.work import UNRESOLVED
+    from deerflow.runtime.runs.manager import CancelOutcome
+
+    if not await run_cancel_allowed(request):
+        raise AgentDenied("Changing active Work requires the run cancellation capability")
+    if expected_attempt_id is None:
+        current = await work.get(actor=actor, instance_id=instance_id, work_id=work_id)
+        if not current["attempt"] or current["attempt"]["status"] != "stopping":
+            return None
+        expected_attempt_id = current["attempt"]["id"]
+
+    async def original():
+        return await work.attempt_for_stop(actor=actor, instance_id=instance_id, work_id=work_id, attempt_id=expected_attempt_id)
+
+    def result(attempt, state="pending"):
+        return StopDispatchResult(state, expected_attempt_id, attempt["thread_id"] if attempt else expected_thread_id, attempt["run_id"] if attempt else expected_run_id)
+
+    def check(attempt):
+        if (expected_thread_id is not None and attempt["thread_id"] != expected_thread_id) or (expected_run_id is not None and attempt["run_id"] != expected_run_id):
+            raise AgentDenied("Work stop binding is unavailable")
+
+    def settled(attempt):
+        return attempt["status"] not in UNRESOLVED and attempt["settled_at"] is not None
+
+    attempt = await original()
+    if attempt is None:
+        return result(None)
+    check(attempt)
+    if settled(attempt):
+        return result(attempt, "settled")
+    if attempt["status"] != "stopping" or not attempt["run_id"]:
+        return result(attempt)
     manager = get_run_manager(request)
     record = await manager.get(attempt["run_id"], raise_on_store_error=True)
     if record is None:
-        return
-    if record.thread_id != attempt["thread_id"] or (record.metadata or {}).get("agent_work_attempt_id") != attempt["id"]:
+        return result(attempt)
+
+    def check_record():
+        if record.run_id != attempt["run_id"] or record.thread_id != attempt["thread_id"] or not isinstance(record.metadata, dict) or record.metadata.get("agent_work_attempt_id") != attempt["id"]:
+            raise AgentDenied("Work stop binding is unavailable")
+
+    check_record()
+    # Host reads may await a store or provider. Recheck the original attempt's
+    # grants and binding afterward; a successor must never inherit this intent.
+    if not await run_cancel_allowed(request):
+        raise AgentDenied("Changing active Work requires the run cancellation capability")
+    fresh = await original()
+    if fresh is None:
+        return result(attempt)
+    check(fresh)
+    if (fresh["thread_id"], fresh["run_id"]) != (attempt["thread_id"], attempt["run_id"]):
         raise AgentDenied("Work stop binding is unavailable")
-    await manager.cancel(record.run_id)
+    if settled(fresh):
+        return result(fresh, "settled")
+    if fresh["status"] != "stopping":
+        return result(fresh)
+    # Request ceilings are an in-memory upper bound. Check that bound without
+    # another provider await after the final SQL authority snapshot.
+    context = get_auth_context(request)
+    if context is not None and not context.has_permission("runs", "cancel"):
+        raise AgentDenied("Changing active Work requires the run cancellation capability")
+    check_record()
+    outcome = await manager.cancel(attempt["run_id"])
+    return result(fresh, "requested" if outcome in {CancelOutcome.cancelled, CancelOutcome.requested, CancelOutcome.taken_over} else "pending")
 
 
 async def contain_orphaned_work(app, recovered_runs):

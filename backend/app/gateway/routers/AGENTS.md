@@ -97,6 +97,9 @@ same binding/replay admission. `activate_work_run` retains launch/cancellation
 ownership and the shared `ACTIVATION_MESSAGE`.
 Manager edits/cancellation of unresolved Work additionally require runs cancel and
 retry the persisted exact stop intent. Human-input replies never invoke activation.
+`dispatch_work_stop` reports pending/requested/settled for the original attempt,
+rechecking stop authority and captured thread/run guards after host reads. Only
+authoritative Work settlement ends follow-up; no-run and host ACKs do not.
 
 Artifact range validators and bytes come from one opened file. POSIX streams
 the descriptor. Windows copies only the selected response bytes into a

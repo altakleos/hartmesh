@@ -185,6 +185,9 @@ Manage plus Inspect, or Use plus Inspect for the exact attempt requester, with
 `stopping`, then `cancelled` on a confirmed nonsuccessful run end; a run already
 finishing successfully can still succeed. Its workspace stays available;
 Resume is a new explicit activation. `no-running-attempt` refuses a stale Stop.
+Cancellation follow-up reads the original attempt, including a run bound later;
+it never substitutes a successor. A missing run or cancellation acknowledgment
+does not establish settlement. Current stop grants and route ceilings still apply.
 
 Access, supervisor and brief changes close the workspace and end work in flight.
 `only_if_idle` instead refuses a busy change with `work-in-flight` and its run IDs.

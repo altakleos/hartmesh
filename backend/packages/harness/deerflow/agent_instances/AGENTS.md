@@ -260,6 +260,8 @@ accept new stops. Both HTTP and human-input plugin callers pass the validated
 attempt id to cancellation dispatch; never cancel a newer attempt on replay.
 Stopping preserves the assignment. Confirmed nonsuccess becomes cancelled;
 uncertain cleanup stays uncertain and success may win.
+`attempt_for_stop` is a drained read of one original Work attempt under current
+Manage+Inspect or its requester's Use+Inspect. Missing evidence never means settled.
 
 Runtime network rules live in `runtime.py`; sandbox middleware calls its three
 helpers. Work/unattended/subagent calls deny and mark their own tool result;

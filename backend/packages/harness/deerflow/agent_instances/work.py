@@ -267,6 +267,51 @@ class AgentWork:
         state = await self.agents.execution_probe(parent.id) if self.agents.execution_probe is not None else None
         return self._execution_projection(record, state)
 
+    async def attempt_for_stop(self, *, actor, instance_id, work_id, attempt_id):
+        """Read only the original attempt under current cancellation rights.
+
+        This view does not project mutable assignment contents, select a latest
+        attempt, probe execution readiness or reserve any work.
+        """
+
+        async def read():
+            async with self._sf() as session:
+                await self._parent(session, actor, instance_id, INSPECT)
+                await self._row(session, instance_id, work_id)
+                found = (
+                    await session.execute(
+                        select(AgentWorkAttemptRow, AgentInstanceGrantRow.permissions)
+                        .join(AgentWorkRow, AgentWorkRow.id == AgentWorkAttemptRow.work_id)
+                        .join(AgentInstanceGrantRow, AgentInstanceGrantRow.instance_id == AgentWorkRow.instance_id)
+                        .where(
+                            AgentWorkAttemptRow.id == attempt_id,
+                            AgentWorkRow.id == work_id,
+                            AgentWorkRow.instance_id == instance_id,
+                            AgentInstanceGrantRow.user_id == actor.subject_id,
+                            AgentInstanceGrantRow.permissions.between(1, 7),
+                        )
+                    )
+                ).one_or_none()
+                if found is None:
+                    return None
+                attempt, permissions = found
+                held = AgentPermission(permissions)
+                if held & INSPECT != INSPECT or not (held & MANAGE == MANAGE or held & DELEGATE == DELEGATE and attempt.requester_id == actor.subject_id):
+                    raise AgentDenied("Stopping an attempt requires Manage or its requester")
+                return {
+                    "id": attempt.id,
+                    "work_id": attempt.work_id,
+                    "requester_id": attempt.requester_id,
+                    "thread_id": attempt.thread_id,
+                    "run_id": attempt.run_id,
+                    "status": attempt.status,
+                    "assignment_revision": attempt.assignment_revision,
+                    "instance_generation": attempt.instance_generation,
+                    "settled_at": _date(attempt.settled_at) if attempt.settled_at else None,
+                }
+
+        return await await_drained(read())
+
     async def history(self, *, actor, instance_id, work_id, limit=50, offset=0):
         self._pagination(limit, offset)
         async with self._sf() as session:
