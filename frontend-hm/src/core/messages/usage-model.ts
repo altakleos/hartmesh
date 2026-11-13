@@ -298,6 +298,10 @@ function describeToolCall(
     return t.toolCalls.showWebPage;
   }
 
+  if (toolCall.name === "propose_assignment") {
+    return t.toolCalls.proposeAssignment;
+  }
+
   if (toolCall.name === "ask_clarification") {
     return t.toolCalls.needYourHelp;
   }

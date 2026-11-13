@@ -935,6 +935,14 @@ function ToolCall({
         icon={MessageCircleQuestionMarkIcon}
       ></ChainOfThoughtStep>
     );
+  } else if (name === "propose_assignment") {
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        label={resolveLabel(t.toolCalls.proposeAssignment)}
+        icon={ListTodoIcon}
+      />
+    );
   } else if (name === "show_web_page") {
     return (
       <ChainOfThoughtStep

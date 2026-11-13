@@ -1,4 +1,5 @@
 import type { Message } from "@langchain/langgraph-sdk";
+import { z } from "zod";
 
 import { isWebPageKey, type WebPageKey } from "@/core/telegram-bots/web-pages";
 
@@ -54,4 +55,40 @@ export function getWebPageLinksByGroupIndex(
   });
   endTurn();
   return links;
+}
+
+const statement = (maximum: number) =>
+  z
+    .string()
+    .trim()
+    .refine((value) => [...value].length >= 1 && [...value].length <= maximum);
+const assignmentDraft = z
+  .object({
+    objective: statement(4096),
+    success_criteria: statement(4096),
+    due_text: statement(120).nullable().default(null),
+    due_at: z.iso.datetime({ offset: true }).nullable().default(null),
+  })
+  .strict();
+export type AssignmentDraft = z.infer<typeof assignmentDraft>;
+
+/** A passive proposal artifact. It carries no saved Work identity or authority. */
+export function extractAssignmentCard(
+  message: Message,
+): AssignmentDraft | null {
+  if (message.type !== "tool" || message.name !== "propose_assignment")
+    return null;
+  const artifact: unknown = Reflect.get(message, "artifact");
+  const card = isRecord(artifact) ? artifact.assignment_card : null;
+  if (
+    !isRecord(card) ||
+    card.version !== 1 ||
+    card.kind !== "assignment_card" ||
+    typeof card.tool_call_id !== "string" ||
+    !card.tool_call_id ||
+    card.tool_call_id !== message.tool_call_id
+  )
+    return null;
+  const parsed = assignmentDraft.safeParse(card.draft);
+  return parsed.success ? parsed.data : null;
 }

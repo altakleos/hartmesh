@@ -239,3 +239,11 @@ Scope / known provider compatibility limits (#8038, #8037 review):
 - All-empty lists become `content=""`; this middleware replaces
   messages in place rather than dropping turns, and an empty user turn can still
   be rejected. No upstream Gateway / IM empty-turn handling is assumed.
+
+
+`AssignmentProposalMiddleware` isolates a supported current-turn proposal from
+sibling tools and uses a conditional before-model jump to end after its exact
+successful artifact. Missing support, Just answer and malformed calls continue.
+Assembly installs it only with the authorized proposal tool, before Clarification;
+the latter retains priority. Preserve issuer-scoped IDs and actual create_agent
+sync/async tests; Command END alone does not override outgoing tool routing.

@@ -1269,3 +1269,35 @@ a caller has independently qualified a reusable earlier Work conversation.
 These primitives install no command, publication owner or execution controller.
 The existing web controls remain the user-facing execution entry points until
 those adapter owners are installed.
+
+
+## Assignment proposal artifacts
+
+`chat_tools.propose_assignment` validates a strict proposal and reads only the
+newest visible human message's `shows_cards` / `assignment_card_response` marks.
+A supported proposal returns one stable `assignment_card` tool artifact and
+ends the turn. Unsupported cards and Just answer continue the conversation
+with fixed model guidance. The primitive has no database, thread, run, service
+or model effect. Its tool registration, Telegram draft conversion and card
+marks remain adapter integration work. Web history validates the artifact and
+renders only passive details and a Work link in an instance conversation.
+
+`assign.draft_assignment` reuses that strict schema for one bounded non-graph
+model call. The constant extraction instruction carries no user-controlled
+values; words, agent name, prior draft and local date/time zone travel together
+as JSON user data. Oversized words are rejected before a model call. Invalid
+JSON/schema, provider faults or timeout return no draft for the explicit
+done-when fallback. Caller cancellation drains the owned call within its timeout.
+`prepare_due_date` drops nonfuture dates and removes future dates without current
+Manage+Inspect, retaining the mentioned words; this advisory step grants no
+command authority. Saving/delegation and Just answer publication remain separate
+adapter workflows.
+
+Proposal ToolMessage IDs include the issuing AI message's scope so reused
+provider tool-call IDs cannot overwrite earlier cards; replay of the same call
+keeps its original ID. The companion `AssignmentProposalMiddleware` isolates
+supported proposals and conditionally ends the actual create_agent loop before
+another model call. The artifact is matched to the current visible human turn
+and exact issuing call/draft. Missing support, Just answer, malformed proposals
+and earlier-turn cards cannot end a new turn. Assembly adds the companion only
+when the authorized tool set contains the proposal tool.

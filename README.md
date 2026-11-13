@@ -2013,6 +2013,11 @@ an eligible colleague. Decisions and acceptance require explicit confirmation;
 answering a question never starts or resumes an assignment. Start, Resume and
 Stop for assignments remain on the web.
 
+An assignment proposal retained in a Telegram conversation appears as a read-only
+card when opened in the browser. It shows the objective, success criteria and
+any mentioned deadline, with a link to Work. Confirmation belongs to the original
+Telegram card; displaying the proposal saves and starts nothing.
+
 Notifications follow current access and the employee's Telegram policy. Protected
 notifications reveal their details only after Show, and their files remain
 protected. Digests combine related notices, progress messages follow the current

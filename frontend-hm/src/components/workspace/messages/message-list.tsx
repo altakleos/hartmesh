@@ -29,7 +29,10 @@ import { useConversationFiles } from "@/components/workspace/chats/conversation-
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { getArtifactArchiveCandidatesByGroupIndex } from "@/core/messages/artifact-archive";
-import { getWebPageLinksByGroupIndex } from "@/core/messages/chat-tools";
+import {
+  extractAssignmentCard,
+  getWebPageLinksByGroupIndex,
+} from "@/core/messages/chat-tools";
 import {
   buildConversationChapters,
   CONVERSATION_OUTLINE_MIN_TURNS,
@@ -94,12 +97,14 @@ import {
 } from "@/core/turn-progress";
 import { cn } from "@/lib/utils";
 
+
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { useMaybeBrowserView } from "../browser-view";
 import { CopyButton } from "../copy-button";
 import { useMaybeSidecar } from "../sidecar/context";
 import { Tooltip } from "../tooltip";
 
+import { AssignmentCard } from "./assignment-card";
 import { ConversationOutline } from "./conversation-outline";
 import {
   HumanInputCard,
@@ -1320,6 +1325,16 @@ export function MessageList({
                       )}
                   </div>,
                 );
+              } else if (group.type === "assistant:assignment-card") {
+                const message = group.messages[0];
+                const draft = message ? extractAssignmentCard(message) : null;
+                return draft && agentTarget?.kind === "agent"
+                  ? withRunDuration(
+                      group,
+                      groupIndex,
+                      <AssignmentCard draft={draft} target={agentTarget} />,
+                    )
+                  : null;
               } else if (group.type === "assistant:clarification") {
                 const message = group.messages[0];
                 if (!message) {
