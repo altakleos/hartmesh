@@ -51,6 +51,11 @@ async def authorize_notification(host, captured, *, silent, now):
                 .join(AgentInstanceGrantRow, and_(AgentInstanceGrantRow.instance_id == AgentInstanceRow.id, AgentInstanceGrantRow.user_id == bot.owner_user_id))
                 .outerjoin(TelegramInstancePolicyRow, TelegramInstancePolicyRow.instance_id == AgentInstanceRow.id)
             )
+        from app.telegram_bots.rejected_notices import RejectedProjection, owns
+
+        rejected = RejectedProjection(captured.link, captured.item) if owns(captured.item) else None
+        if rejected is not None:
+            query = rejected.extend(query)
         async with host.links.session_factory() as reader:
             facts = (await reader.execute(query)).all()
         if not facts:
@@ -81,7 +86,7 @@ async def authorize_notification(host, captured, *, silent, now):
         if agents is not None:
             from app.telegram_bots.policy import POLICIES, pending_discard
 
-            instance, permissions, policy = facts[0][6:]
+            instance, permissions, policy = facts[0][6:9]
             policy = "allowed" if instance.custody == "personal" or policy is None else policy
             needed = 1 if row.class_ == "service" else 3  # Use; Work content also requires Inspect.
             if (
@@ -97,6 +102,10 @@ async def authorize_notification(host, captured, *, silent, now):
                 or pending_discard(current) is not None
                 or getattr(getattr(host.authority.app, "state", None), "agent_instances", None) is not agents
             ):
+                raise DeliveryClaimRetired()
+        if rejected is not None:
+            rejected.check(facts)
+            if agents is not None and policy == "protected":
                 raise DeliveryClaimRetired()
         actual = _snapshot(saved_settings)
         if actual.timezone != preferences.timezone or preference_skip(latest.item, actual, now):

@@ -1,6 +1,7 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "link.token_rejected_other": "{name} 的机器人已停止。\nTelegram 不再接受该机器人的令牌。请在网页版 {product} 中粘贴新令牌。",
     "settings.state": "{body}",
     "settings.overview": "AI 助手和 AI 员工会主动通知你：{value}。\n{quiet}\n晨间摘要时间 {time}：{enabled}。\n语言：{language}。\n这些设置适用于你与所有 AI 助手和 AI 员工的聊天。时区可在 {product} 网页端更改。",
     "settings.quiet_on": "免打扰时间：{start} 至 {end}（{zone}）。这段时间的消息不会发出声音，除非你在过去 30 分钟内在该聊天中发过消息或点击过按钮。",

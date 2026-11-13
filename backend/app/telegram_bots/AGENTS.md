@@ -120,7 +120,7 @@ those chats. Instance/custom bots do not acquire these ordinary-chat commands.
 
 Work and message preference contracts:
 [Work delivery guide](../../docs/TELEGRAM_WORK.md). Read it before changing
-`attention*`, `notification*`, `digest*`, `summary*`, `*settings*`, `work_*` or sender/callback integration.
+`attention*`, `notification*`, `digest*`, `summary*`, `rejected*`, `*settings*`, `work_*` or sender/callback integration.
 Result media and event proofs: see the Work guide.
 
 `commands.py` handles fixed navigation and language settings only. A command closes

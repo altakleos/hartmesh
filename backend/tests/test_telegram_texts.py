@@ -79,7 +79,7 @@ WORK_NEWS_KEYS |= frozenset(
 WORK_NEWS_FIRST_KEYS |= frozenset("interrupted interrupted.title_not_started attempt.failed attempt.failed.other attempt.stopped_restart attempt.no_result attempt.no_result_excerpt".split())
 WORK_NEWS_FIRST_KEYS |= frozenset("status.starting status.working status.waiting_you status.waiting_answer status.checking status.stopping status.stopped status.finished status.ended".split())
 WORK_NEWS_KEYS |= WORK_NEWS_FIRST_KEYS | {"concealed.progress"}
-WORK_NEWS_FIRST_KEYS |= {"digest.header", "digest.header_news"}
+WORK_NEWS_FIRST_KEYS |= {"digest.header", "digest.header_news", "link.token_rejected_other"}
 WORK_NEWS_KEYS |= WORK_NEWS_FIRST_KEYS | set("concealed.digest concealed.digest_news summary.item.question summary.item.decision summary.item.review summary.button.question summary.button.decision summary.button.review".split())
 
 WORK_NEWS_KEYS |= frozenset(

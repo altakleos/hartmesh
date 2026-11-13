@@ -2009,9 +2009,12 @@ class TelegramBotChannel(TelegramChannel):
             # This source family remains dormant regardless of a caller's
             # class label. A reply classification is not source authority.
             raise PermanentDeliveryError("unsupported-work-request-source")
+        from app.telegram_bots.rejected_notices import owns as rejected_notice
+
         if (
             saved.item.class_ != "reply"
             and work_part is None
+            and not rejected_notice(saved.item)
             and (
                 set(saved.item.payload) - {"presentation_version", "notification_reserved_at"}
                 or set(part.get("source_ref", {})) != {"key", "values"}

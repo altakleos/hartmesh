@@ -47,6 +47,7 @@ FIRST_KEYS: frozenset[str] = frozenset(
         "hello.privacy",
         "agent.deleted",
         "link.conflict",
+        "link.token_rejected_other",
         "link.conflict_over.plain",
         "link.conflict_over.chat",
         "link.conflict_over.custom_agent",

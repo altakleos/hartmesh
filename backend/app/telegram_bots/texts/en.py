@@ -1,6 +1,7 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "link.token_rejected_other": "The bot for {name} stopped.\nTelegram no longer accepts that bot’s token. Paste a new token in {product} on the web.",
     "settings.state": "{body}",
     "settings.overview": (
         "Your AI assistants and AI employees write first about: {value}.\n"
