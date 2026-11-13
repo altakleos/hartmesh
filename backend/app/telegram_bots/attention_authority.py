@@ -4,6 +4,7 @@ import asyncio
 
 from sqlalchemy import and_, or_, select
 
+from app.telegram_bots.attention_scope import scoped_projection
 from app.telegram_bots.authority import AuthorityUnavailable, CeilingRefused, _PreparedLiveOwner
 from app.telegram_bots.policy import POLICIES, pending_discard
 from deerflow.agent_instances.contract import AgentDenied
@@ -63,6 +64,7 @@ async def prepare_attention(host, captured, *, require_inspect=True):
     base_query = query
 
     async def check(*, projection=None, session=None):
+        projection = scoped_projection(projection)
         query = projection.extend(base_query) if projection is not None else base_query
 
         async def snapshot(held=None):

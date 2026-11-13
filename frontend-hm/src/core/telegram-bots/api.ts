@@ -288,9 +288,11 @@ export function removeTelegramBot(id: string): Promise<void> {
 
 export function saveTelegramSettings(
   change: Partial<Settings>,
+  signal?: AbortSignal,
 ): Promise<Settings> {
   return call("/settings", {
     method: "PUT",
+    signal,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(change),
   });

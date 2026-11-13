@@ -10,6 +10,7 @@ from app.telegram_bots.callbacks import CallbackRefused, _row
 from app.telegram_bots.file_puts import _file_journal, file_act_id, retain_captionless_file, work_input_digest
 from app.telegram_bots.inbox import InboxRow, chat_input_parts
 from app.telegram_bots.work_actions import same_body
+from app.telegram_bots.work_input_lifetime import input_current
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramInboundMarkRow
 from deerflow.utils.file_io import await_drained
 
@@ -143,12 +144,12 @@ async def send_file_as_new(host, channel, link, row, *, update_id, guard, recove
             saved = []
             for file in files:
                 if recover:
-                    receipt = await host.services.file_puts.reconcile_input(link, origin, file, origins=None, authority=host.services.authority, current=lambda: channel._callback_current(link))
+                    receipt = await host.services.file_puts.reconcile_input(link, origin, file, origins=None, authority=host.services.authority, current=lambda: input_current(channel, link, guard))
                 else:
                     receipt = await channel._own_instance_file(link, origin, file)
                 if receipt.state not in {"done", "refused", "uncertain"}:
                     raise CallbackRefused()
-                await FileOutcomes(host.services).plan(channel, link, origin, file)
+                await FileOutcomes(host.services).plan(channel, link, origin, file, current=lambda: input_current(channel, link, guard))
                 if receipt.state == "done":
                     saved.append((origin, file))
             if not _text.strip():
@@ -163,7 +164,7 @@ async def send_file_as_new(host, channel, link, row, *, update_id, guard, recove
                     await host.prompts.close(link, link.chat_id, row.message_thread_id, reason="navigation", guard=guard, session=writer)
 
                 if saved:
-                    await FileOutcomes(host.services).question(channel, link, saved, _settle=settle)
+                    await FileOutcomes(host.services).question(channel, link, saved, current=lambda: input_current(channel, link, guard), _settle=settle)
                 else:
                     async with host.callbacks.writer(link, guard) as writer:
                         await settle(writer)
@@ -182,7 +183,7 @@ async def send_file_as_new(host, channel, link, row, *, update_id, guard, recove
                 )
                 await host.prompts.close(link, link.chat_id, row.message_thread_id, reason="navigation", guard=guard, session=writer)
         guard.current()
-        await host.services.turns.accept_staged(channel, stage)
+        await host.services.turns.accept_staged(channel, stage, admission_current=lambda: input_current(channel, link, guard))
         return True
 
     return await await_drained(perform())

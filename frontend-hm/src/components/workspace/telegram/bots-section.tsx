@@ -22,6 +22,7 @@ import {
 } from "@/core/telegram-bots/instance-hooks";
 import { instanceConnectBlock } from "@/core/telegram-bots/instance-state";
 import {
+  MESSAGE_SETTINGS_SHOWN,
   rowOf,
   sectionNoticeOf,
   targetRowsOf,
@@ -282,7 +283,11 @@ export function TelegramBotsSection() {
         </section>
       ) : null}
       {data?.settings ? (
-        <TelegramSettingsBlock settings={data.settings} />
+        <TelegramSettingsBlock
+          key={JSON.stringify([user?.id, user?.system_role])}
+          settings={data.settings}
+          showMessageSettings={MESSAGE_SETTINGS_SHOWN}
+        />
       ) : null}
       {reader.admin ? <TelegramAdminBlock /> : null}
       {dialog?.kind === "token" ? (

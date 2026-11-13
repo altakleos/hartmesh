@@ -143,7 +143,7 @@ class TelegramSupervisor:
         self.copy_guard = copy_guard
         self.thread_client, self.threads = thread_client, None
         self.publication_authority = self.publications = self.model_source = None
-        self.turns = None
+        self.turns = self.notifications = None
         self.forms = self.human_inputs = self.voice_notes = self.profile_sync = None
         self._token_locks = AsyncKeyedLockTable()
         self.file_bytes_budget = FileBytesBudget(config.files.in_memory_max_bytes)
@@ -263,6 +263,10 @@ class TelegramSupervisor:
                 self._refuse("channel-service-failed")
                 return
             self.links = self.links or BotLinkRepository(self.session_factory, connections, self.config)
+            from app.telegram_bots.notification_runtime import NotificationRuntime
+
+            self.notifications = NotificationRuntime(self)
+            self.notifications.baselines.install_binding_hook()
             # Freeze membership and original conflict facts before check returns
             # and the Gateway admits routes that can create/start other links.
             initial = await self.links.list_all()
@@ -434,7 +438,7 @@ class TelegramSupervisor:
         return {identity: record for identity, (_, record) in self._startup_records.items()}
 
     def _pending_copy_decision(self) -> bool:
-        return self._copy_decision is None
+        return self._copy_decision is None or self.notifications is not None and not self.notifications.ingress_ready
 
     async def _wait_send_release(self) -> bool:
         await self._send_event.wait()
@@ -449,7 +453,7 @@ class TelegramSupervisor:
         if self._copy_decision is None and self._cohort_complete and not self.copy_guard.can_still_be_broad_conflict(self._startup_links, self._copy_results()):
             self._copy_decision = False
         self._copy_wake.set()
-        return self._copy_decision is not False
+        return self._copy_decision is not False or self.notifications is not None and not self.notifications.ingress_ready
 
     async def _wait_copy_change(self, delay: float | None) -> None:
         if delay is None:
@@ -485,6 +489,10 @@ class TelegramSupervisor:
         if self._copy_decision:
             await self._latch_copy_conflict()
             return
+        if self.notifications is not None:
+            initialized = await self.notifications.initialize(lambda: self._copy_decision is False and not self._stopping and self._cause is None)
+            if not initialized:
+                return
         await self._recover_startup_publications()
         if self._stopping or self._cause is not None:
             return
@@ -492,16 +500,6 @@ class TelegramSupervisor:
             await self.turns.recover_startup()
         if self._stopping or self._cause is not None:
             return
-        # Transfer every suffix promptly; failed admission remains its poller's
-        # job and never blocks another link or the sender's startup.
-        current_polls = set(self._polls.values())
-        for retired in self._startup_polls - current_polls:
-            retired.discard_held()
-        self._startup_polls.clear()
-        for poll in tuple(current_polls):
-            if poll.pending_drop:
-                poll.discard_held()
-            await poll.release_held()
         attempts = 0
         while not self._stopping:
             try:
@@ -517,10 +515,33 @@ class TelegramSupervisor:
                 await self._sleep(1)
         if self._stopping or self._cause is not None:
             return
+        self.sender.proactive = True
         self._send_ready = True
+        if self.notifications is not None:
+            deadline = asyncio.get_running_loop().time() + 30
+            await self.notifications.recover_inputs(lambda: self.send_allowed() and asyncio.get_running_loop().time() < deadline)
+            if not self.send_allowed():
+                return
+            self.notifications.ingress_ready = True
+        # Transfer every suffix promptly; failed admission remains its poller's
+        # job and never blocks another link or the sender's startup.
+        current_polls = set(self._polls.values())
+        for retired in self._startup_polls - current_polls:
+            retired.discard_held()
+        self._startup_polls.clear()
+        for poll in tuple(current_polls):
+            if poll.pending_drop:
+                poll.discard_held()
+            await poll.release_held()
         self._send_event.set()
         for poll in tuple(self._polls.values()):
             poll.wake()
+        if self.notifications is not None:
+            if self.notifications.events is not None:
+                self._periodic(self.notifications.events.tick, self.config.producer.poll_seconds, "work-events", refused_too=True)
+                self._periodic(self.notifications.summaries.tick, 60, "summaries")
+                self._periodic(self.notifications.tick_acts, 5, "work-acts")
+            self._periodic(self.notifications.tick_maintenance, 5, "notification-recovery")
         self._periodic(self._tick_sender, 1, "sender")
         self._periodic(self.reconcile, self.config.reconcile_interval_seconds, "reconcile")
         self._periodic(self._tick_recovery, self.config.reconcile_interval_seconds, "publication-recovery")
@@ -584,6 +605,8 @@ class TelegramSupervisor:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if self.notifications is not None:
+            await self.notifications.stop()
         if self.sender is not None:
             await self.sender.stop()
         polls = set(self._polls.values()) | self._startup_polls
@@ -839,6 +862,9 @@ class TelegramSupervisor:
                     # Before that decision another copy may own the rows, and startup closes them after it.
                     if not fresh_start and self.turns is not None and self._copy_decision is False:
                         await self.turns.recover_link(channel)
+                        if self.notifications is not None and self.notifications.ingress_ready:
+                            deadline = asyncio.get_running_loop().time() + 30
+                            await self.notifications.recover_inputs(lambda: self.channel(link.id) is channel and asyncio.get_running_loop().time() < deadline, link_id=link.id)
                     self._start_poll(channel, poll)
             except BaseException:
                 if channel is not None:
@@ -906,7 +932,7 @@ class TelegramSupervisor:
         def control_allowed(mode):
             if not current_pair():
                 return False
-            return self._copy_decision is False if mode == "confirm" else self._send_ready and not self._stopping
+            return not self._pending_copy_decision() and not self._stopping if mode == "confirm" else self._send_ready and not self._stopping
 
         async def drop_complete():
             return intent is None or await InstancePolicy(self.links.session_factory).complete_discard(captured, intent, check_current=current_pair)
@@ -1164,7 +1190,10 @@ class TelegramSupervisor:
 
     async def _tick_sender(self) -> None:
         if not self._stopping and self._cause is None and self._send_ready:
-            await self.sender.tick()
+            if self.notifications is not None:
+                await self.notifications.before_send()
+            if not self._stopping and self._cause is None and self._send_ready:
+                await self.sender.tick()
 
     def channel(self, link_id: str) -> TelegramBotChannel | None:
         return self._channels.get(link_id)
@@ -1398,7 +1427,7 @@ class TelegramSupervisor:
             )
             render_key, paused = key, channel.link.acts_paused_since is not None
             if key == "link.conflict_over":
-                render_key += (".chat" if link.agent_kind == "lead_agent" else ".custom_agent") if paused else ".plain"
+                render_key += {"lead_agent": ".chat", "instance": ".agent", "custom_agent": ".custom_agent"}[link.agent_kind] if paused else ".plain"
             button = await self._settings_button(link) if key == "link.conflict" or key == "link.conflict_over" and paused else None
             values = {"product": product_name(self._app_config)}
             if key in {"access.agent_off", "agent.paused", "agent.retired", "agent.deleted"}:
@@ -1698,6 +1727,8 @@ class TelegramSupervisor:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if self.notifications is not None:
+            await self.notifications.stop()
         if self.sender is not None:
             await self.sender.stop()
         if self._retirements:

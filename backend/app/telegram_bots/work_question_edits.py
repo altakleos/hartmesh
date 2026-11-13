@@ -11,6 +11,7 @@ from sqlalchemy.orm import aliased
 
 from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
+from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.producer import _PART_IDENTITY, _TRANSPORT_RECEIPTS, DeliveryClaimRetired, DeliveryRetry, ProductSourceRetired, _item
 from app.telegram_bots.render import render
 from app.telegram_bots.split import split_html, visible_text
@@ -213,6 +214,27 @@ def validate_update(row, *, acknowledged=False):
     return basis
 
 
+def retired_without_delivery(link, row, source):
+    intent = row.payload.get("work_event_intent", {})
+    return (
+        (row.link_id, row.owner_user_id, row.binding_generation, row.chat_id, row.instance_id, row.work_id, row.request_id)
+        == (link.id, link.owner_user_id, link.binding_generation, link.chat_id, link.agent_ref, source["work_id"], source["request_id"])
+        and row.state == "skipped"
+        and row.skip_reason == "superseded"
+        and row.dedupe_key == f"event:{row.event_id}:question"
+        and not row.parts
+        and row.message_id is None
+        and all(getattr(row, field) is None for field in ("claim_owner", "claim_id", "claimed_at"))
+        and type(intent.get("version")) is int
+        and intent["version"] == 1
+        and intent.get("key") in {"ask.info", "ask.decision", "review.ready", "request.unrouted"}
+        and type(intent.get("request_revision")) is int
+        and intent["request_revision"] == source["request_revision"]
+        and type(intent.get("assignment_revision")) is int
+        and intent["assignment_revision"] == source["assignment_revision"]
+    )
+
+
 class WorkQuestionEdits:
     def __init__(self, plans):
         self.plans, self.reader, self.outbox, self.settings = plans, plans.reader, plans.outbox, plans.settings
@@ -256,6 +278,16 @@ class WorkQuestionEdits:
             )
             matching = [parent for parent in parents if parent.payload.get("work_request_basis", {}).get("source", {}).get("seen", {}).get("request_revision") == source["request_revision"]]
             if not matching:
+                # A conclusively retired raw question has no Telegram message
+                # to edit. Missing or ambiguous anchors must remain held.
+                relevant = [parent for parent in parents if parent.payload.get("work_event_intent", {}).get("request_revision") == source["request_revision"]]
+                if relevant and all(retired_without_delivery(link, parent, source) for parent in relevant):
+                    row.state, row.skip_reason, row.closed_at = "skipped", "superseded", self.outbox.clock()
+                    await writer.flush()
+                    # Recapture authority and the complete original intent in
+                    # the same transaction after changing only disposition.
+                    await admission(session=writer, projection=QuestionUpdateProjection(link, _item(row), clock, source=source))
+                    return True
                 if any(parent.state in {"pending", "sending", "failed"} for parent in parents):
                     return False
                 raise ProductSourceRetired()
@@ -342,17 +374,23 @@ class WorkQuestionEdits:
         await writer.flush()
         await admission(session=writer, projection=_EditProjection(self, link, _item(row), clock))
 
-    async def repair(self, link, identity):
+    async def repair(self, link, identity, *, guard=None):
         async def write():
+            if guard is not None:
+                await prepare_publication_guard(guard)
             clock = await self.clock(link)
             admission = await prepare_attention(self.reader, link)
             async with self.outbox._writer(link.id) as (writer, binding):
+                if guard is not None:
+                    await guard.check(writer)
                 row = await writer.get(TelegramOutboxRow, identity, with_for_update=True, populate_existing=True)
                 if row is None or not self.outbox._binding(binding, link) or row.state != "failed" or row.failed_reason != "work-question-refresh-required":
                     raise ProductSourceRetired()
                 if row.claim_owner is not None or row.claim_id is not None or row.claimed_at is not None:
                     raise DeliveryClaimRetired()
                 await self._refresh(writer, row, link, clock, admission)
+                if guard is not None:
+                    await guard.check(writer)
                 return True
 
         return await await_drained(write())

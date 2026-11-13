@@ -9,51 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram delivery
 
-- Prepare durable capture of accepted text against acknowledged Work prompts.
-  Captured notes retain their original review and remain unsubmitted; prompt
-  closure and inbox ownership commit together. Captured answers, cannot-answer
-  reasons and unchanged change requests can be admitted once against their
-  original revisions; stale notes stay unsubmitted. Chat submission stays disabled.
+- Enable notifications from connected AI assistants and AI employees for new
+  questions, results and problems, with protected Show, complete result files,
+  digests, progress updates and optional daily summaries.
+- Answer questions, decide, accept results, request changes and route questions
+  through acknowledged controls. Decisions and acceptance require confirmation;
+  these actions never start or resume assignments. Assignment execution stays
+  on the web.
+- Expose shared message preferences, quiet hours and morning-summary settings
+  on the web and through `/settings`. Quiet hours silence unsolicited messages
+  with the recent-chat exception. Replies to the person's messages still arrive.
+- Recover saved text, review notes, files and albums using their original
+  identities. Source-aware Retry replaces missing messages without reuploading
+  acknowledged files or repeating uncertain actions.
+- Install notification workers after the startup ownership check and event
+  baseline, before releasing held updates. Shutdown drains admitted operations;
+  ordinary restarts retain unread events and pending delivery.
 
-- Keep acknowledged Work previews usable when only execution-probe metadata
-  changes. Complete displayed content, revisions, response IDs and protection
-  still have to match before a confirmation can be admitted.
+### Schema changes
 
-- Prepare complete Work confirmation and prompt views that retain the displayed
-  request basis and unsubmitted text. First-tap menus and confirmations have
-  durable, source-checked reply delivery with acknowledged origin and keyboard
-  cleanup. Deferred typing prompts retain that basis and become visible only
-  after the final ACK. Acknowledged answer choices and second-tap decisions or
-  acceptances reserve one immutable operation for receipt-backed recovery.
-  Changed reviews after a conclusive temporary refusal receive a fresh complete
-  preview; unknown action outcomes cannot be superseded.
-  Chat action and text/voice handlers remain uninstalled.
+- No database schema changes since v2.2.0+hartmesh.56.
 
-- Prepare receipt-backed question routing and current eligible-recipient reads.
-  Routing grants no access and starts no work; chat controls remain disabled.
+### Configuration and deployment
 
-- Prepare immutable digest reservations with shared delivery ownership, original
-  member expiry, one-notification budgets and retained source dependencies.
-  Digest rendering and chat controls remain disabled.
-
-- Prepare durable Work preview refresh, protected reveal and missing-message
-  recovery. Refresh retains uncertain action journals, rechecks current authority,
-  clears superseded keyboards and delivers complete content before controls.
-  These services remain uninstalled pending notification integration.
-
-- Add opt-in source authorization for saved Work previews at the raw send
-  boundary, including complete preview ordering and current file-reference
-  access. Supervisor startup keeps Work delivery disabled.
-
-- Prepare complete saved Work question, decision and review previews, including
-  all comments and concealed teasers. Their chat delivery remains disabled.
-
-- Prepare receipt-backed human Work actions for Telegram, including immutable
-  retries and transaction-bound custody checks. Chat controls remain disabled.
-
-- Prepare notification preferences, quiet-message classes and durable optional-news
-  budgets. Proactive delivery remains disabled until its interaction handlers are
-  available; existing reply delivery keeps its transport and authority checks.
+- No new configuration keys. Existing bots receive the updated `/settings`
+  command description at their next start.
+- The first start establishes a notification baseline and sends no unsolicited
+  individual messages about questions or results from before the upgrade. The
+  first summary can include waiting questions and work completed or interrupted
+  in the last 24 hours.
+- Keep Telegram disabled when returning to a release without these notification
+  handlers while saved notification controls or inputs remain unsettled. Retain
+  the database and upgrade again to reconcile them.
+- Work documentation records stable HTTP 409 reason codes and how the latest
+  request-for-changes note accompanies later attempts until acceptance,
+  withdrawal or reopening.
 
 ### Persistent agents
 

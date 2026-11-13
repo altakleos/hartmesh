@@ -269,6 +269,36 @@ async def acknowledge_outcome(session, row):
         else:
             mark.route_complete = True
     act.continuation = {"version": 1, "work_outcome": {"phase": phase(data["act"]), "outbox_id": row.id}}
+    from app.telegram_bots.producer import OutboxSender
+
+    old = aliased(TelegramOutboxRow)
+    repairs = list(
+        await session.scalars(
+            select(TelegramCallbackRow)
+            .join(old, old.id == TelegramCallbackRow.target_id)
+            .where(
+                TelegramCallbackRow.link_id == row.link_id,
+                TelegramCallbackRow.binding_generation == row.binding_generation,
+                TelegramCallbackRow.kind == "delivery_retry",
+                TelegramCallbackRow.target_kind == "outbox",
+                TelegramCallbackRow.consumed_at.is_(None),
+                old.link_id == row.link_id,
+                old.owner_user_id == row.owner_user_id,
+                old.binding_generation == row.binding_generation,
+                old.chat_id == row.chat_id,
+                old.work_id == row.work_id,
+                old.request_id == row.request_id,
+                old.state == "skipped",
+                old.skip_reason == "superseded",
+                old.failed_reason == "work-outcome-refresh-required",
+                old.payload["outcome_repair_successor"].as_string() == row.id,
+                old.payload["work_outcome_basis"]["context"]["act"]["id"].as_string() == act.id,
+            )
+            .with_for_update(of=TelegramCallbackRow)
+        )
+    )
+    for control in repairs:
+        await OutboxSender._end_retry(session, control, row, datetime.fromisoformat(row.parts[-1]["sent_at"]))
 
 
 class WorkOutcomePlans:
@@ -381,6 +411,11 @@ class WorkOutcomePlans:
                     for control in await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group.group_id)):
                         control.payload = {**control.payload, "presentation_pending": True}
                 row.parts = saved_parts
+                # Keep the original failed delivery and its Retry warning tied
+                # to the replacement through interruption and final ACK.
+                for old in previous:
+                    if old.failed_reason == "work-outcome-refresh-required":
+                        old.payload = {**old.payload, "outcome_repair_successor": identity}
                 if read.act.state == "done":
                     if original is not None:
                         parent_id = original.payload.get("anchor_outbox_id")

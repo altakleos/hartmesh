@@ -1,5 +1,7 @@
 # Managed Telegram bots
 
+Runtime: [Work guide](../../docs/TELEGRAM_WORK.md).
+
 `config.py` validates optional `AppConfig.model_extra["telegram_bots"]` without
 starting services. Nested models forbid unknown keys and coercion; absence returns
 defaults with `enabled=False`. Keep the deployment-wide adapter separate.
@@ -11,20 +13,20 @@ legacy-channel closure; an absent environment key means on. See
 Keep bot network, supervisor and router startup outside configuration loading.
 Use socket-free transports and synthetic credentials in offline tests.
 
-Optional `work_text_inputs.py` routes plain text for shown Work prompts and,
+`work_text_inputs.py` routes plain text for shown Work prompts and,
 through `work_card_text.py`, explicit card replies. Complete prompt previews
 accept a reply to any part. Known spent/closed/input-owned Work presentations
 retain input ownership for recovery; they cannot fall through to ordinary chat.
 `work_card_inputs.py` owns explicit replies to complete Work cards: immutable
 `work_input` version2 proof, consumed source group and one Respond Act. Comments
-never decide or accept. Supervisor installation remains separate. Confirmation-card comments preserve the
+never decide or accept. Confirmation-card comments preserve the
 original unsubmitted draft; closed inputs offer explicit recovery choices. Final writer proof binds the original input across its own writes. A card's
 complete presentation must have been dispatched before the input was accepted;
 a delayed host ACK does not invalidate an explicit reply.
 `work_file_inputs.py` owns single-file answers (input/journal V4), immutable native
 receipts and named-file ACKs. `work_file_handoff.py` transfers explicit Send-as-new
 choices before chat publication. `work_file_albums.py` collects; `work_album_*`
-owns group capture, receipts, recovery choices and whole ACK. Controllers remain dormant;
+owns group capture, receipts, recovery choices and whole ACK. Runtime installs controllers;
 see [Work guidance](../../docs/TELEGRAM_WORK.md).
 `work_untied_inputs.py` asks before saving unquoted text after the last acknowledged
 Work question, after ordinary clarification routing. Its durable `work_answer`
@@ -50,17 +52,17 @@ Input admission stores its operation marker with the Act. Orphaned input markers
 or V4 control reservations block every fresh preview/recovery entry point.
 Capture precedes admission; stored-input resume never reconstructs an Update or
 retries an unknown action. Typed decision confirmations own their original input
-until outcome delivery. Supervisor installation and broader input routing remain deferred.
+until outcome delivery.
 
 `work_comment_cards.py` supplies receipt-owned outcome V5: saved comments return
 a full current decision/review with fresh controls, while legacy plain outcome
 ACKs remain readable. Further replies own distinct Respond operations. Request
 previews and full comment outcomes share `work_source_spaces.py` for final joined
 Space READ checks; comment publication uses that proof too. Multipart recovery
-preserves the original operation and ACKs. Supervisor installation remains pending.
+preserves the original operation and ACKs.
 
 The optional `work_callbacks.py` dispatcher composes existing Work owners; the
-supervisor does not install it yet. Result notices, events and repair:
+runtime installs it. Result notices, events and repair:
 [Work guidance](../../docs/TELEGRAM_WORK.md). Stale callbacks refresh only
 unreserved controls or exact conclusive conflicts; retained input has its own owner. Known
 non-effect confirmation refusals use `work_refusal_recovery.py` before retry.
@@ -69,7 +71,7 @@ outcome and original Act body, then serializes one attempt for that displayed
 attempt count. Delivery ACK and both kinds of shown controls share
 `acknowledged_parts`; keep full typed receipts before any control authority.
 Work outcomes fence superseded controls, receipts and current source/claims.
-Its dormant receipt observer never calls the explicit action-retry path. Routing
+Its receipt observer never calls the explicit action-retry path. Routing
 results edit only their command’s exact ACKed selection; missing/incompatible
 anchors rematerialize current receipt content without another command.
 A receipt-owned V3 outcome can carry a manager’s wrong-person routing choices.

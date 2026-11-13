@@ -13,6 +13,7 @@ from app.telegram_bots.work_actions import same_body, thaw
 from app.telegram_bots.work_album_guard import AlbumGuard, normalized
 from app.telegram_bots.work_album_inputs import album_input_digest, input_packet
 from app.telegram_bots.work_album_recovery import cohort, recovery_basis, recovery_context, recovery_inputs
+from app.telegram_bots.work_input_lifetime import input_current
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
@@ -238,12 +239,12 @@ async def send_album_as_new(owner, channel, link, row, *, update_id, guard, reco
             for origin in origins:
                 file = thaw(origin.sanitized_input["files"][0])
                 if recover:
-                    receipt = await owner.services.file_puts.reconcile_input(link, origin, file, origins=None, authority=owner.services.authority, current=lambda: channel._callback_current(link))
+                    receipt = await owner.services.file_puts.reconcile_input(link, origin, file, origins=None, authority=owner.services.authority, current=lambda: input_current(channel, link, actual_guard))
                 else:
                     receipt = await channel._own_instance_file(link, origin, file)
                 if receipt.state not in {"done", "refused", "uncertain"}:
                     raise CallbackRefused()
-                await FileOutcomes(owner.services).plan(channel, link, origin, file)
+                await FileOutcomes(owner.services).plan(channel, link, origin, file, current=lambda: input_current(channel, link, actual_guard))
                 if receipt.state == "done":
                     saved.append((origin, file))
             if not any(chat_input_parts(origin)[0].strip() for origin in origins):
@@ -261,7 +262,7 @@ async def send_album_as_new(owner, channel, link, row, *, update_id, guard, reco
                     await actual_guard.check(writer)
 
                 if saved:
-                    await FileOutcomes(owner.services).question(channel, link, saved, _settle=settle, _explicit_group=origins)
+                    await FileOutcomes(owner.services).question(channel, link, saved, current=lambda: input_current(channel, link, actual_guard), _settle=settle, _explicit_group=origins)
                 else:
                     async with owner.callbacks.writer(link, actual_guard) as writer:
                         await settle(writer)
@@ -279,7 +280,7 @@ async def send_album_as_new(owner, channel, link, row, *, update_id, guard, reco
                 actual_guard.expect([InboxRow.from_row(mark) for mark in marks])
                 actual_guard.allow_finish = False
         actual_guard.current()
-        await owner.services.turns.accept_staged(channel, stage)
+        await owner.services.turns.accept_staged(channel, stage, admission_current=lambda: input_current(channel, link, actual_guard))
         return True
 
     return await await_drained(perform())

@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.telegram_bots.callbacks import CallbackRefused, Prompts, normalize_callback_topic
 from app.telegram_bots.inbox import InboxRow
 from app.telegram_bots.work_card_inputs import WorkCardInputs
+from app.telegram_bots.work_input_lifetime import input_current
 from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
@@ -113,7 +114,7 @@ class WorkCardText:
             staged = await self.cards.stage(link, origin, guard=guard)
             if staged.attempts == 0:
                 expected = {"id": staged.id, "kind": staged.kind, "body": staged.body, "attempts": staged.attempts}
-                result = await self.callbacks.acts.check(staged.id, expected=expected, attempt_current=lambda: channel._callback_current(link))
+                result = await self.callbacks.acts.check(staged.id, expected=expected, attempt_current=lambda: input_current(channel, link, guard))
             else:
                 result = await self.callbacks.acts.reconcile_receipt(staged.id)
             await self.callbacks._observe(link, result.id, guard=guard)

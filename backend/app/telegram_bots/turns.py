@@ -327,13 +327,13 @@ class ChatTurns:
         held = (link.id, row.message_id) in self._origins or any(saved.message_id == row.message_id for saved in kept)
         return not held and not row.route_complete and row.turn_id is None and row.outbox_id is None and (row.route_kind is None or row.accepted_at >= self._started_at)
 
-    async def accept_staged(self, channel, stage):
+    async def accept_staged(self, channel, stage, *, admission_current=None):
         """Admit one actual durable answer as an indivisible FIFO input."""
         async with self._entry(channel):
             link = deepcopy(channel.link)
 
             def current():
-                return not self._closed and channel not in self._retired and self.services.channel(link.id) is channel and channel._callback_current(link)
+                return (admission_current is None or admission_current() is True) and not self._closed and channel not in self._retired and self.services.channel(link.id) is channel and channel._callback_current(link)
 
             guard = _Guard(self.services, channel, link, current, repair=True)
             if not current():

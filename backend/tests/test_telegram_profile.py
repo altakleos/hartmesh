@@ -176,7 +176,7 @@ async def test_chat_menu_is_assistants_employees_new_stop_settings_help(db, monk
         assert await e.sync.push(e.link)
         menu = sent(e, "setMyCommands")["commands"]
         assert [command["command"] for command in menu] == ["assistants", "employees", "new", "stop", "settings", "help"]
-        assert menu[4]["description"] == "Language"
+        assert menu[4]["description"] == "Messages and language"
     finally:
         await e.channel.stop()
 

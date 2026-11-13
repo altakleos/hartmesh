@@ -2708,6 +2708,8 @@ export function createZhCN(product: string): Translations {
           notYou: "不是你的 Telegram 账号？",
           locale: ({ language, timezone }) =>
             `机器人消息使用${language}；时间使用 ${timezone}。`,
+          quiet: ({ start, end }) =>
+            `有事需要你处理时，AI 助理和 AI 员工可能会主动发消息：${start} 到 ${end} 静音送达，但你在过去 30 分钟内发过消息或按过按钮的聊天除外。`,
           change: "更改",
           profileLater: `名称和头像暂时无法设置。${product} 会再次尝试。`,
           next: ({ nextName }) => `下一个：${nextName}`,
@@ -2772,7 +2774,7 @@ export function createZhCN(product: string): Translations {
         conflictWebhook: `此机器人已连接到其他服务，因此没有内容到达 ${product}。`,
         afterConflict: {
           agent: ({ time }) =>
-            `另一个程序于 ${time} 开始使用此机器人的令牌。现已停止，机器人已恢复回复。允许被阻止网站的操作仍暂停，直到你点击“那是我”或更换令牌。`,
+            `另一个程序于 ${time} 开始使用此机器人的令牌。现已停止，机器人已恢复回复。作出决定、接受结果和允许被阻止网站的操作仍暂停，直到你点击“那是我”或更换令牌。`,
           chat: ({ time }) =>
             `另一个程序在 ${time} 开始使用此机器人的令牌。现在已停止，机器人恢复回答。在你按下“那是我”或更换令牌之前，此机器人上仍暂停允许访问被阻止的网站。`,
           custom_agent: ({ time }) =>
@@ -2891,7 +2893,32 @@ export function createZhCN(product: string): Translations {
           label: "时区",
           body: "在你连接第一个机器人时取自此浏览器。",
         },
-        inChat: "在任意机器人中使用 /settings 也可以更改语言。",
+        intro:
+          "这些设置适用于你的所有 Telegram 机器人。对你发送的消息的回复始终会送达。",
+        notify: {
+          label: "AI 助理和 AI 员工可以主动向你发送哪些消息",
+          all: "问题、结果和故障",
+          questions: "仅需要你回答的问题",
+          none: "不主动发送",
+        },
+        quiet: {
+          label: "静音时段",
+          body: ({ start, end }) =>
+            `从 ${start} 到 ${end}，消息会静音送达，但你在过去 30 分钟内发过消息或按过按钮的聊天除外。消息不会被延迟。`,
+          from: "从",
+          to: "到",
+          same: "两个时间必须不同。",
+        },
+        summary: {
+          label: "晨间摘要",
+          body: ({ time }) =>
+            `每天 ${time}，有事要报告的 AI 助理和 AI 员工会静音发送一条摘要：已完成的工作和等待你处理的事项。没有内容时不会发送。`,
+          at: "时间",
+        },
+        mute: "要让某个机器人静音，请在 Telegram 中将该聊天设为静音。",
+        badTime: "请使用 21:00 这样的时间格式。",
+        inChat:
+          "在任何机器人聊天中使用 /settings 也能修改这些设置，但时区除外。",
         saved: "已保存。",
         failed: "无法保存。请重试。",
       },

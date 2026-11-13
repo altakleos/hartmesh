@@ -11,6 +11,7 @@ from app.telegram_bots.producer import ProductSourceRetired, _item
 from app.telegram_bots.work_card_text import WorkCardText
 from app.telegram_bots.work_input_admission import WorkInputAdmissions
 from app.telegram_bots.work_input_capture import WorkInputCaptures
+from app.telegram_bots.work_input_lifetime import input_current
 from app.telegram_bots.work_input_previews import WorkInputPreviews, blocked_input_actions, input_identity
 from app.telegram_bots.work_typing import PURPOSES, shown_prompt_messages
 from app.telegram_bots.work_voice_inputs import WorkVoiceInputs
@@ -89,13 +90,13 @@ class WorkTextInputs:
             return False
         return await self.untied.handle(channel, update, link=link)
 
-    async def resume(self, channel, origin):
+    async def resume(self, channel, origin, *, recovery_guard=None):
         """Resume the stored route; caller copies supply only lookup identity."""
 
         async def perform():
             link = deepcopy(channel.link)
-            guard = self.services.commands._guard(channel, link)
-            if await self.files.resume(channel, origin):
+            guard = recovery_guard or self.services.commands._guard(channel, link)
+            if await self.files.resume(channel, origin, recovery_guard=guard):
                 return True
             if await self.untied.resume(channel, link, origin, guard=guard):
                 return True
@@ -144,7 +145,7 @@ class WorkTextInputs:
         try:
             if staged.attempts == 0:
                 expected = {"id": staged.id, "kind": staged.kind, "body": staged.body, "attempts": staged.attempts}
-                result = await self.callbacks.acts.check(staged.id, expected=expected, attempt_current=lambda: channel._callback_current(link))
+                result = await self.callbacks.acts.check(staged.id, expected=expected, attempt_current=lambda: input_current(channel, link, guard))
             else:
                 result = await self.callbacks.acts.reconcile_receipt(staged.id)
             if result.kind == "changes_requested" and result.state == "conflict":

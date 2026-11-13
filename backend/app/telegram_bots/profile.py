@@ -14,7 +14,7 @@ from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
-PROFILE_VERSION = 2
+PROFILE_VERSION = 3
 ALL_PARTS = frozenset({"name", "descriptions", "commands", "picture"})
 _MENUS = {"lead_agent": ("assistants", "employees", "new", "stop", "settings", "help"), "custom_agent": ("new", "stop", "help"), "instance": ("new", "stop", "settings", "help")}
 _TEXTS = {"lead_agent": "chat", "custom_agent": "custom_agent", "instance": "agent"}

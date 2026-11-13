@@ -177,6 +177,20 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
     pinned.update(await session.scalars(select(delivery.id).where(delivery.request_id.is_not(None), unresolved_album)))
     pinned.update(await session.scalars(question_cleanup_anchors()))
     pinned.update(await status_cleanup_anchors(session))
+    successor = aliased(TelegramOutboxRow)
+    pinned.update(
+        await session.scalars(
+            select(delivery.id)
+            .join(successor, successor.id == delivery.payload["outcome_repair_successor"].as_string())
+            .where(
+                successor.link_id == delivery.link_id,
+                successor.owner_user_id == delivery.owner_user_id,
+                successor.binding_generation == delivery.binding_generation,
+                successor.chat_id == delivery.chat_id,
+                successor.state.in_(("pending", "sending", "failed")),
+            )
+        )
+    )
     navigation_anchor = func.coalesce(*(delivery.payload[family]["navigation_origin"]["anchor_outbox_id"].as_string() for family in ("work_request_basis", "work_news_basis", "result_notice_basis")))
     view_parent = func.coalesce(delivery.payload["summary_stop_basis"]["anchor_id"].as_string(), delivery.payload["work_digest_view_basis"]["parent_id"].as_string(), delivery.payload["summary_view_basis"]["parent_id"].as_string())
     # Compact dependency edges preserve complete digests behind live controls.
