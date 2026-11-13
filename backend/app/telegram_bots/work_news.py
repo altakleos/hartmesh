@@ -31,7 +31,17 @@ NEWS_KEYS = (
 def news_class(key):
     if key == "capacity.offer":
         return "service"
-    return "reply" if key in {"view.list", "view.detail", "execution.activate", "execution.stop"} else "progress" if key in STATUS_KEYS else "reminder" if key == "remind.ready_to_resume" else "interrupt" if key in ATTEMPT_KEYS else "info"
+    return (
+        "reply"
+        if key in {"view.list", "view.detail", "execution.activate", "execution.stop", "assignment.card"}
+        else "progress"
+        if key in STATUS_KEYS
+        else "reminder"
+        if key == "remind.ready_to_resume"
+        else "interrupt"
+        if key in ATTEMPT_KEYS
+        else "info"
+    )
 
 
 def news_owner(payload):
@@ -43,6 +53,8 @@ def news_owner(payload):
         return "work_execution_sources"
     if basis["source"]["key"] == "capacity.offer":
         return "work_capacity_sources"
+    if basis["source"]["key"] == "assignment.card":
+        return "assignment_sources"
     return "work_view_sources" if basis["source"]["key"] in {"view.list", "view.detail"} else "work_status_sources" if basis["source"]["key"].startswith("status.") else "work_news_sources"
 
 

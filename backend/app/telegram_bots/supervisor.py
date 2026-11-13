@@ -1690,7 +1690,7 @@ class TelegramSupervisor:
         if self.session_factory is None:
             return {"inbound": 0, "outbox": 0, "acts": 0, "events": 0}
         began = self._time()
-        counts = await await_drained(sweep_rows(self.session_factory, now or self._clock(), callback_max_age_days=self.config.callbacks.max_age_days))
+        counts = await await_drained(sweep_rows(self.session_factory, now or self._clock(), callback_max_age_days=self.config.callbacks.max_age_days, draft_ttl_hours=self.config.callbacks.draft_ttl_hours))
         self._event("retention_sweep", **counts, took_ms=round((self._time() - began) * 1000))
         return counts
 

@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import String, and_, cast, delete, func, or_, select, text
+from sqlalchemy import String, and_, cast, delete, func, or_, select, text, tuple_
 from sqlalchemy.orm import aliased
 
 from app.telegram_bots.inbox import CALLBACK_PUBLICATION_KEY, callback_publication_pending
@@ -141,7 +141,7 @@ async def settings_prompt_dependencies(session):
     ).all()
 
 
-async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int) -> set[str]:
+async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int, draft_ttl_hours: int = 24) -> set[str]:
     """The ids and ``reply:`` keys of outbox rows a live control or unfinished delivery needs."""
     generations = dict((await session.execute(select(TelegramBotLinkRow.id, TelegramBotLinkRow.binding_generation))).all())
     pinned: set[str] = {anchor for _prompt, anchor in await settings_prompt_dependencies(session) if type(anchor) is str}
@@ -153,6 +153,10 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
 
     _execution_groups, execution_anchors, _execution_acts = await execution_dependencies(session)
     pinned.update(execution_anchors)
+    from app.telegram_bots.assignment_retention import assignment_dependencies
+
+    assignments = await assignment_dependencies(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
+    pinned.update(assignments.deliveries)
     anchors: set[str] = set()
     callback = TelegramCallbackRow
     for row in await session.execute(select(callback.link_id, callback.binding_generation, callback.target_kind, callback.target_id, callback.payload, callback.expires_at, callback.consumed_at, callback.created_at)):
@@ -305,14 +309,14 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
     return pinned
 
 
-async def _sweep_outbox(sessions, now: datetime, callback_max_age_days: int) -> int:
+async def _sweep_outbox(sessions, now: datetime, callback_max_age_days: int, draft_ttl_hours: int = 24) -> int:
     async with _writer(sessions) as session:
         # A row someone holds is in use; it waits for the next sweep.
         settled = select(TelegramOutboxRow.id, TelegramOutboxRow.dedupe_key).where(TelegramOutboxRow.closed_at < now - timedelta(days=OUTBOX_RETENTION_DAYS), TelegramOutboxRow.state.not_in(("pending", "sending")))
         candidates = dict((await session.execute(settled.with_for_update(skip_locked=True))).all())
         if not candidates:
             return 0
-        pinned = await _pinned_deliveries(session, now, callback_max_age_days)
+        pinned = await _pinned_deliveries(session, now, callback_max_age_days, draft_ttl_hours)
         expired = sorted(identity for identity, key in candidates.items() if identity not in pinned and key not in pinned)
         for start in range(0, len(expired), _BATCH):
             await session.execute(delete(TelegramOutboxRow).where(TelegramOutboxRow.id.in_(expired[start : start + _BATCH])))
@@ -349,7 +353,7 @@ async def _sweep_acts(sessions, now):
         _execution_groups, _execution_anchors, execution_acts = await execution_dependencies(session)
         pending_outcome = or_(pending_outcome, TelegramActRow.id.in_(sorted(execution_acts)))
         expired = (~pending_outcome, TelegramActRow.created_at < now - timedelta(days=ACT_RETENTION_DAYS), TelegramActRow.state.in_(_SETTLED_ACTS), TelegramActRow.stop_dispatch.is_(None))
-        ordinary = await session.execute(delete(TelegramActRow).where(*expired, TelegramActRow.kind.not_in(("file_put", "stop", "activate")), TelegramActRow.continuation.is_(None)))
+        ordinary = await session.execute(delete(TelegramActRow).where(*expired, TelegramActRow.kind.not_in(("file_put", "stop", "activate", "delegate")), TelegramActRow.continuation.is_(None)))
         mark = TelegramInboundMarkRow
         work_file_input = (
             select(mark.message_id)
@@ -408,7 +412,7 @@ async def _sweep_acts(sessions, now):
         from app.telegram_bots.work_actions import WORK_ACT_KINDS
         from app.telegram_bots.work_outcome_delivery import delivery_receipt
 
-        outcomes = list(await session.scalars(select(TelegramActRow).where(*expired, TelegramActRow.kind.in_(WORK_ACT_KINDS - {"stop", "activate"}), TelegramActRow.continuation.is_not(None)).with_for_update(skip_locked=True)))
+        outcomes = list(await session.scalars(select(TelegramActRow).where(*expired, TelegramActRow.kind.in_(WORK_ACT_KINDS - {"stop", "activate", "delegate"}), TelegramActRow.continuation.is_not(None)).with_for_update(skip_locked=True)))
         settled = []
         for row in outcomes:
             try:
@@ -472,13 +476,36 @@ def _live_followup_input(mark, now, callback_max_age_days):
     )
 
 
-async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int) -> dict[str, int]:
+async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int, draft_ttl_hours: int = 24) -> dict[str, int]:
     now = _aware(now)
     mark = TelegramInboundMarkRow
     open_act = select(TelegramActRow.id).where(TelegramActRow.link_id == mark.link_id, TelegramActRow.chat_id == mark.chat_id, TelegramActRow.message_id == mark.message_id, TelegramActRow.state.not_in(_SETTLED_ACTS))
     # A mark is done only once every delivery it lists is sent or skipped.
-    inbound = await _sweep(sessions, delete(mark).where(mark.closed_at < now - timedelta(days=INBOUND_RETENTION_DAYS), mark.state == "done", ~open_act.exists(), ~_live_followup_input(mark, now, callback_max_age_days)))
-    outbox = await _sweep_outbox(sessions, now, callback_max_age_days)
+    from app.telegram_bots.assignment_retention import assignment_dependencies, expire_assignments
+
+    async with _writer(sessions) as session:
+        assignments = await assignment_dependencies(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
+        candidates = list(
+            (
+                await session.execute(
+                    select(mark.link_id, mark.message_id, mark.chat_id)
+                    .where(
+                        mark.closed_at < now - timedelta(days=INBOUND_RETENTION_DAYS),
+                        mark.state == "done",
+                        ~open_act.exists(),
+                        ~_live_followup_input(mark, now, callback_max_age_days),
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+            ).all()
+        )
+        eligible = sorted(set(candidates) - assignments.inputs)
+        inbound = 0
+        for start in range(0, len(eligible), _BATCH):
+            inbound += (await session.execute(delete(mark).where(tuple_(mark.link_id, mark.message_id, mark.chat_id).in_(eligible[start : start + _BATCH])))).rowcount
+    outbox = await _sweep_outbox(sessions, now, callback_max_age_days, draft_ttl_hours)
     acts = await _sweep_acts(sessions, now)
+    async with _writer(sessions) as session:
+        acts += await expire_assignments(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
     events = await _sweep(sessions, delete(TelegramBotLinkEventRow).where(TelegramBotLinkEventRow.created_at < now - timedelta(days=LINK_EVENT_RETENTION_DAYS)))
     return {"inbound": inbound, "outbox": outbox, "acts": acts, "events": events}

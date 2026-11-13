@@ -113,11 +113,19 @@ EXECUTION_KEYS = frozenset(
     ).split()
 )
 
+ASSIGNMENT_KEYS = frozenset(
+    (
+        "assign.prompt assign.ask_done assign.too_long assign.card assign.due assign.card_title assign.card_title_proposed assign.due_note assign.edit_prompt "
+        "assign.replaced assign.started_line assign.saved_line assign.discarded assign.answering assign.just_answer_message assign.draft_failed stale.draft assign.saving assign.not_saved assign.save_cancelled assign.save_unconfirmed"
+    ).split()
+)
+
 
 def test_text_catalog_locales_have_equal_keys():
     assert set(catalog("en")) == set(catalog("zh-CN"))
     assert (
-        EXECUTION_KEYS
+        ASSIGNMENT_KEYS
+        | EXECUTION_KEYS
         | WORK_VIEW_KEYS
         | WORK_NEWS_KEYS
         | WORK_REQUEST_KEYS
@@ -192,7 +200,17 @@ def test_alert_texts_fit_200_characters():
 
 
 def test_first_keys_are_exact_fixed_notice_subset():
-    assert FIRST_KEYS == WORK_NEWS_FIRST_KEYS | POLICY_KEYS | {"ask.info", "ask.decision", "review.ready", "result.done", "result.waiting_review"} | frozenset(
+    assert FIRST_KEYS == WORK_NEWS_FIRST_KEYS | POLICY_KEYS | {
+        "ask.info",
+        "ask.decision",
+        "review.ready",
+        "result.done",
+        "result.waiting_review",
+        "assign.card_title",
+        "assign.card_title_proposed",
+        "assign.started_line",
+        "assign.saved_line",
+    } | frozenset(
         {
             "agent.deleted",
             "hello.privacy",

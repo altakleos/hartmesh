@@ -16,9 +16,15 @@ def displayed_start(link, parent, callback):
     original = acknowledged_view(link, parent, callback.payload.get("presentation_version"))
     source = original.payload["work_news_basis"]["source"]
     preview = source["key"] in {"execution.activate", "execution.stop"} and source.get("work", {}).get("notice", {}).get("preview") is True
-    if (source["key"] not in {"view.detail", "capacity.offer"} and not preview) or callback.kind != "work_start" or callback.target_kind != "work" or original.payload["work_news_basis"]["concealed"]:
+    saved_assignment = source["key"] == "assignment.card" and source.get("work", {}).get("phase") == "saved"
+    if (source["key"] not in {"view.detail", "capacity.offer"} and not preview and not saved_assignment) or callback.kind != "work_start" or callback.target_kind != "work" or original.payload["work_news_basis"]["concealed"]:
         raise CallbackRefused()
     detail = source["work"]["detail"]["record"]
+    if saved_assignment:
+        from app.telegram_bots.assignment_journals import created_work
+
+        if created_work(source, link) != detail["id"]:
+            raise CallbackRefused()
     if (callback.target_id, callback.payload.get("work_id"), callback.payload.get("assignment_revision")) != (detail["id"], detail["id"], detail["assignment_revision"]) or type(callback.payload.get("assignment_revision")) is not int:
         raise CallbackRefused()
     return original, detail
