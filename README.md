@@ -2018,6 +2018,8 @@ card when opened in the browser. It shows the objective, success criteria and
 any mentioned deadline, with a link to Work. Confirmation belongs to the original
 Telegram card; displaying the proposal saves and starts nothing.
 
+![Assignment proposal in a synthetic conversation](docs/images/assignment-proposal.png)
+
 Notifications follow current access and the employee's Telegram policy. Protected
 notifications reveal their details only after Show, and their files remain
 protected. Digests combine related notices, progress messages follow the current
