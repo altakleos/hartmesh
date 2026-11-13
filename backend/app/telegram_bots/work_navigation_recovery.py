@@ -47,7 +47,7 @@ class WorkNavigationRecovery(WorkRequestRecovery):
             return await super()._refresh(captured)
         origin = await self.navigation.restore(captured.link, basis["navigation_origin"])
         source, settings = await self._source(captured.link, captured.item.request_id, intent=captured.item.payload.get("work_event_intent"))
-        require_request_origin(origin.member.source, source)
+        require_request_origin(origin.target.source, source)
         admission = await prepare_attention(self.reader, captured.link)
         async with self.outbox._writer(captured.link.id) as (writer, binding):
             row = await writer.get(TelegramOutboxRow, captured.item.id, with_for_update=True)
@@ -100,7 +100,7 @@ class WorkNavigationRecovery(WorkRequestRecovery):
                 basis, _previous, _part = frozen(SimpleNamespace(link=link, item=item, part=selected), pending=True, replay=True)
             origin = await self.navigation.restore(link, basis["navigation_origin"])
             source, settings = await self._source(link, item.request_id, intent=item.payload.get("work_event_intent"))
-            require_request_origin(origin.member.source, source)
+            require_request_origin(origin.target.source, source)
             admission = await prepare_attention(self.reader, link)
             composed = _RefreshGuard(self, guard, origin, source, item, admission)
             async with self.callbacks.writer(link, composed) as writer:
@@ -129,7 +129,7 @@ class WorkNavigationRecovery(WorkRequestRecovery):
                 basis, _source, _part = frozen(SimpleNamespace(link=link, item=item, part=item.parts[-1]), acknowledged=True, replay=True)
             origin = await self.navigation.restore(link, basis["navigation_origin"])
             source, settings = await self._source(link, item.request_id, intent=item.payload.get("work_event_intent"))
-            require_request_origin(origin.member.source, source)
+            require_request_origin(origin.target.source, source)
             admission = await prepare_attention(self.reader, link)
             composed = _RefreshGuard(self, guard, origin, source, item, admission)
             async with self.callbacks.writer(link, composed) as writer:
@@ -180,7 +180,7 @@ class _NavigationRepairProjection(NavigationOriginProjection):
         if not _same_item(row, self.item) or claim_of(row) != self.claim:
             raise ProductSourceRetired()
         controls = {value.id: value for result in rows if (value := result[self.repair_column + 1]) is not None}
-        origin_column = self.column + 2 if self.origin_column is None else self.origin_column + 1
+        origin_column = self.callback_column
         original = next(result[origin_column] for result in rows if result[origin_column] is not None and result[origin_column].id == self.navigation.value["callback_id"])
         try:
             _validate_rows(row, list(controls.values()), allow_pending=True)

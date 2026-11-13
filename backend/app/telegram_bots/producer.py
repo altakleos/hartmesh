@@ -1750,11 +1750,20 @@ class Outbox:
                 except ValueError:
                     return False
                 stored_urls = any("url" in button for line in keyboard for button in line)
+            summary_edit = False
+            if current.part["kind"] == "edit" and "summary_view_basis" in current.item.payload:
+                from app.telegram_bots.summary_views import frozen_view
+
+                try:
+                    frozen_view(current)
+                    summary_edit = True
+                except PermanentDeliveryError:
+                    return False
             scope = ("owner_user_id", "agent_kind", "agent_ref", "bot_id", "connection_id", "binding_generation", "telegram_user_id", "chat_id", "token_revision")
             if (
                 current.part != captured.part
                 or current.part.get("url_button_fallback")
-                or current.part["kind"] not in ({"text", "edit"} if pages else {"text"})
+                or current.part["kind"] not in ({"text", "edit"} if pages or summary_edit else {"text"})
                 or not ("url_button" in current.part or stored_urls or pages)
                 or current.item.message_thread_id != captured.item.message_thread_id
                 or any(getattr(current.link, field) != getattr(captured.link, field) for field in scope)
@@ -2555,7 +2564,7 @@ class OutboxSender:
                 parts = deepcopy(saved.parts)
                 sending = next(value for value in parts if value["part_id"] == part["part_id"])
                 sending["state"] = "sending"
-                if not {"summary_basis", "work_digest_basis", "work_news_basis", "work_question_update", "work_status_update", "work_status_pin", "result_notice_basis"}.intersection(
+                if not {"summary_view_basis", "summary_basis", "work_digest_basis", "work_news_basis", "work_question_update", "work_status_update", "work_status_pin", "result_notice_basis"}.intersection(
                     saved.payload
                 ) and "result_files" not in saved.payload.get("work_request_basis", {}):
                     sending["protect_content"] = bool(sending.get("protect_content") or decision.protect_content)
@@ -2565,7 +2574,7 @@ class OutboxSender:
                 sending["dispatched_at"] = self.outbox.clock().isoformat()
                 saved.parts = parts
                 required_protection = sending["protect_content"]
-                source_dispatch = _item(saved) if {"summary_basis", "work_digest_basis", "work_digest_view_basis"}.intersection(saved.payload) else None
+                source_dispatch = _item(saved) if {"summary_view_basis", "summary_basis", "work_digest_basis", "work_digest_view_basis"}.intersection(saved.payload) else None
             if self._stopping:
                 return
             try:
@@ -2643,7 +2652,7 @@ class OutboxSender:
                         # The SDK acknowledged the captured card, not a manifest
                         # rewritten during its await. Retain both the dispatched
                         # proof and reservations for explicit reconciliation.
-                        family = "summary" if "summary_basis" in source_dispatch.payload else "digest"
+                        family = "summary" if {"summary_basis", "summary_view_basis"}.intersection(source_dispatch.payload) else "digest"
                         saved.payload = {**saved.payload, family + "_dispatch_conflict": {"payload": source_dispatch.payload, "parts": source_dispatch.parts, "message_ids": message_ids, "acknowledged_at": self.outbox.clock().isoformat()}}
                         saved.state, saved.failed_reason, saved.closed_at = "failed", "invalid-" + family + "-receipt", self.outbox.clock()
                         saved.claim_owner = saved.claim_id = saved.claimed_at = None
@@ -2725,6 +2734,13 @@ class OutboxSender:
             await self.outbox.inbox.settle_deliveries(link_id=link_id, session=writer)
 
     async def _replace(self, binding: BotLink, row: OutboxItem, claim: str, *, reason: str) -> None:
+        if "summary_view_basis" in row.payload:
+            async with self.outbox._writer(binding.id) as (writer, _binding):
+                saved = await writer.get(TelegramOutboxRow, row.id, with_for_update=True)
+                if self.outbox._fenced(saved, generation=binding.binding_generation, owner=self.run_id, claim=claim):
+                    self._pending(saved)
+                    saved.state, saved.failed_reason, saved.closed_at = "failed", "summary-view-refresh-required", self.outbox.clock()
+            return
         if "work_digest_view_basis" in row.payload:
             async with self.outbox._writer(binding.id) as (writer, _binding):
                 saved = await writer.get(TelegramOutboxRow, row.id, with_for_update=True)
@@ -2889,6 +2905,16 @@ class OutboxSender:
                 await acknowledge_view(session, row)
             except (ValueError, TypeError, KeyError, PermanentDeliveryError, ProductSourceRetired):
                 row.state, row.failed_reason, row.closed_at = "failed", "invalid-digest-view-receipt", now
+                row.claim_owner = row.claim_id = row.claimed_at = None
+                await session.flush()
+                return
+        if "summary_view_basis" in row.payload:
+            from app.telegram_bots.summary_views import acknowledge_view
+
+            try:
+                await acknowledge_view(session, row)
+            except (ValueError, TypeError, KeyError, PermanentDeliveryError, ProductSourceRetired):
+                row.state, row.failed_reason, row.closed_at = "failed", "invalid-summary-view-receipt", now
                 row.claim_owner = row.claim_id = row.claimed_at = None
                 await session.flush()
                 return

@@ -801,8 +801,14 @@ class CallbackRepository:
                 group = part.get("callback_group_id")
                 rows = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group).order_by(TelegramCallbackRow.id)))
                 try:
-                    work_preview = bool({"summary_basis", "work_digest_view_basis", "work_digest_basis", "work_request_basis", "work_outcome_basis", "result_notice_basis", "work_news_basis"}.intersection(parent.payload))
-                    if "summary_basis" in parent.payload:
+                    work_preview = bool(
+                        {"summary_view_basis", "summary_basis", "work_digest_view_basis", "work_digest_basis", "work_request_basis", "work_outcome_basis", "result_notice_basis", "work_news_basis"}.intersection(parent.payload)
+                    )
+                    if "summary_view_basis" in parent.payload:
+                        from app.telegram_bots.summary_views import frozen_view
+
+                        frozen_view(captured)
+                    elif "summary_basis" in parent.payload:
                         from app.telegram_bots.summary_delivery import frozen_summary
 
                         frozen_summary(captured)
@@ -973,7 +979,7 @@ class CallbackRepository:
                         show_proofs.add(prompt.id)
                 parent = TelegramOutboxRow
                 references = [(parent.id, parent.payload[key][field].as_string()) for key, field in (("work_request_basis", "reply_origin"), ("result_notice_basis", "reveal"), ("work_news_basis", "reveal"))]
-                references.append((parent.payload["work_digest_view_basis"]["parent_id"].as_string(), parent.payload["work_digest_view_basis"]["callback_id"].as_string()))
+                references.extend((parent.payload[family]["parent_id"].as_string(), parent.payload[family]["callback_id"].as_string()) for family in ("work_digest_view_basis", "summary_view_basis"))
                 for anchor_id, proof_id in references:
                     for saved in await session.execute(select(anchor_id.label("id"), parent.link_id, parent.chat_id, parent.binding_generation, proof_id.label("proof_id")).where(proof_id.is_not(None), anchor_id.is_not(None))):
                         try:

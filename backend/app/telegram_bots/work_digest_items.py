@@ -22,8 +22,8 @@ from deerflow.utils.file_io import await_drained
 
 
 class DigestItems:
-    def __init__(self, *, digests, requests, reviews=None, routing=None, news=None, results=None):
-        self.navigation = WorkNavigation(digests)
+    def __init__(self, *, digests, requests, reviews=None, routing=None, news=None, results=None, summaries=None):
+        self.navigation = WorkNavigation(digests, summaries=summaries, requests=requests, reviews=reviews)
         self.digests, self.requests = digests, requests
         self.outbox, self.callbacks = digests.outbox, digests.callbacks
         self.reviews, self.routing, self.news, self.results = reviews, routing, news, results
@@ -41,26 +41,24 @@ class DigestItems:
             raise CallbackRefused("stale.not_waiting") from None
         return True
 
-    def _owner(self, member):
-        if "work_request_basis" in member.item.payload:
-            basis = member.item.payload["work_request_basis"]
-            owner = self.routing if basis["version"] in {5, 6} else self.reviews if "result_files" in basis else self.requests
-            family = "work_request_basis"
-        elif "work_news_basis" in member.item.payload:
-            owner, family = self.news, "work_news_basis"
+    def _owner(self, target):
+        if target.family == "work_request_basis":
+            owner = self.routing if target.routing else self.reviews if target.review else self.requests
+        elif target.family == "work_news_basis":
+            owner = self.news
         else:
-            owner, family = self.results, "result_notice_basis"
+            owner = self.results
         if owner is None:
             raise ProductSourceRetired()
-        return family, owner
+        return target.family, owner
 
     async def open(self, link, *, callback_id, query_id, chat_id, message_id, message_thread_id, guard):
         async def perform():
             origin = await self.navigation.read(link, callback_id=callback_id, query_id=query_id)
             if type(chat_id) is not int or type(message_id) is not int or (chat_id, message_id, message_thread_id) != (link.chat_id, origin.value["message_id"], None):
                 raise CallbackRefused()
-            source = origin.member.source
-            family, planner = self._owner(origin.member)
+            source = origin.target.source
+            family, planner = self._owner(origin.target)
             settings = await self.digests.settings.get(link.owner_user_id)
             if settings is None or settings.locale != origin.snapshot.locale:
                 raise ProductSourceRetired()
@@ -85,12 +83,12 @@ class DigestItems:
                     binding_generation=link.binding_generation,
                     chat_id=link.chat_id,
                     instance_id=link.agent_ref,
-                    work_id=origin.member.item.work_id,
-                    request_id=origin.member.item.request_id,
-                    event_id=origin.member.item.event_id,
+                    work_id=origin.target.work_id,
+                    request_id=origin.target.request_id,
+                    event_id=origin.target.event_id,
                     dedupe_key=key,
                     class_="reply",
-                    payload={"presentation_version": 0, **{key: deepcopy(origin.member.item.payload[key]) for key in ("work_event_intent", "work_event_source") if key in origin.member.item.payload}},
+                    payload={"presentation_version": 0, **deepcopy(origin.target.intent or {})},
                     parts=[],
                     state="pending",
                     silent=True,

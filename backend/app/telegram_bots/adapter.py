@@ -1909,7 +1909,15 @@ class TelegramBotChannel(TelegramChannel):
         source_key = part.get("source_ref", {}).get("key", "")
         work_part = None
         work_sources = getattr(self._services, "work_request_sources", None)
-        if "summary_basis" in saved.item.payload:
+        if "summary_view_basis" in saved.item.payload:
+            work_sources = getattr(self._services, "summary_view_sources", None)
+            if work_sources is None or any(
+                key in saved.item.payload
+                for key in ("summary_basis", "work_digest_view_basis", "work_digest_basis", "work_status_update", "work_question_update", "work_news_basis", "result_notice_basis", "work_request_basis", "work_outcome_basis")
+            ):
+                raise PermanentDeliveryError("unsupported-summary-view-source")
+            work_part = await work_sources.read_part(saved)
+        elif "summary_basis" in saved.item.payload:
             work_sources = getattr(self._services, "summary_sources", None)
             if work_sources is None or any(
                 key in saved.item.payload for key in ("work_digest_view_basis", "work_digest_basis", "work_status_update", "work_question_update", "work_news_basis", "result_notice_basis", "work_request_basis", "work_outcome_basis")
@@ -2301,7 +2309,7 @@ class TelegramBotChannel(TelegramChannel):
                     message = await self.bot.edit_message_reply_markup(chat_id=context.chat_id, message_id=target, reply_markup=clear_markup, rate_limit_args=preview_fence)
                 else:
                     request = self.bot.edit_message_text(chat_id=context.chat_id, message_id=target, text=text, parse_mode=None if part.get("plain_fallback") else ParseMode.HTML, reply_markup=markup, rate_limit_args=preview_fence)
-                    message = await await_drained(request) if "work_digest_view_basis" in current.item.payload else await request
+                    message = await await_drained(request) if {"summary_view_basis", "work_digest_view_basis"}.intersection(current.item.payload) else await request
             else:
                 request = self.bot.send_message(
                     chat_id=context.chat_id,
@@ -2314,7 +2322,7 @@ class TelegramBotChannel(TelegramChannel):
                     reply_markup=markup,
                     rate_limit_args=preview_fence,
                 )
-                message = await await_drained(request) if {"work_digest_basis", "work_digest_view_basis"}.intersection(current.item.payload) else await request
+                message = await await_drained(request) if {"summary_basis", "summary_view_basis", "work_digest_basis", "work_digest_view_basis"}.intersection(current.item.payload) else await request
         except (LongRetryAfter, RetryAfter) as error:
             self._failure()
             seconds = error.seconds if isinstance(error, LongRetryAfter) else error._retry_after.total_seconds()
