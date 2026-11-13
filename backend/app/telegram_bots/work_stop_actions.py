@@ -21,39 +21,56 @@ ACT_AUTOMATIC_WINDOW_SECONDS = 3600
 class StopActionMethods(StopRetryMethods):
     async def stop(self, link, *, operation_id, work_id, attempt_id):
         async def perform():
-            from app.telegram_bots.acts import _snapshot
-            from app.telegram_bots.work_actions import request_for
-            from app.telegram_bots.work_authority import prepare_work_owner
-
             async with self._work_serial(operation_id):
-                await self._work_link(link, kind="stop", writable=True)
-                await require(link.owner_user_id, "agents:read", "agents:write", "runs:cancel")
-                async with self.session_factory() as reader:
-                    saved = await reader.get(TelegramActRow, operation_id)
-                    act = _snapshot(saved) if saved is not None else None
-                if act is not None:
-                    if (act.link_id, act.work_id, act.kind, act.body.get("attempt_id")) != (link.id, work_id, "stop", attempt_id):
-                        raise ValueError("act-source-conflict")
-                    request_for("stop", act.body, identity=operation_id)
-                else:
-                    current = await self.work.get(actor=PrincipalRef("human", link.owner_user_id), instance_id=link.agent_ref, work_id=work_id)
-                    attempt = current["attempt"]
-                    body = WorkCommand(operation_id=operation_id, expected_revision=current["revision"], expected_assignment_revision=current["assignment_revision"], action="stop", attempt_id=attempt_id)
-                    scope = None
-                    if attempt is not None and attempt["id"] == attempt_id and attempt["status"] in {"starting", "running"}:
-                        scope = {"attempt_id": attempt_id, "thread_id": attempt["thread_id"], "run_id": attempt["run_id"], "state": "awaiting_command", "attempts": 0, "not_before": None}
-                    owner = await prepare_work_owner(self.authority, link.owner_user_id)
-                    async with self.outbox._writer(link.id) as (writer, _current):
-                        await self._stage_work_act(link, kind="stop", request_id=None, work_id=work_id, request=body, owner=owner, session=writer)
-                        row = await writer.get(TelegramActRow, operation_id, populate_existing=True)
-                        row.stop_dispatch = scope
-                        if scope is None:
-                            row.state, row.reason = "refused", "no-running-attempt"
-                        await writer.flush()
-                        act = _snapshot(row)
+                act = await self._stage_stop(link, operation_id=operation_id, work_id=work_id, attempt_id=attempt_id)
                 return await self._run_stop_chain(act, explicit=True)
 
         return await await_drained(perform())
+
+    async def stage_stop(self, link, *, operation_id, work_id, attempt_id, admission=None):
+        """Admit an exact Stop intent without issuing its command or dispatch."""
+
+        async def perform():
+            async with self._work_serial(operation_id):
+                return await self._stage_stop(link, operation_id=operation_id, work_id=work_id, attempt_id=attempt_id, admission=admission)
+
+        return await await_drained(perform())
+
+    async def _stage_stop(self, link, *, operation_id, work_id, attempt_id, admission=None):
+        from app.telegram_bots.acts import _snapshot
+        from app.telegram_bots.work_actions import request_for
+        from app.telegram_bots.work_authority import prepare_work_owner
+
+        await self._work_link(link, kind="stop", writable=True)
+        await require(link.owner_user_id, "agents:read", "agents:write", "runs:cancel")
+        async with self.session_factory() as reader:
+            saved = await reader.get(TelegramActRow, operation_id)
+            act = _snapshot(saved) if saved is not None else None
+        if act is not None:
+            if (act.link_id, act.work_id, act.kind, act.body.get("attempt_id")) != (link.id, work_id, "stop", attempt_id):
+                raise ValueError("act-source-conflict")
+            request_for("stop", act.body, identity=operation_id)
+        else:
+            current = await self.work.get(actor=PrincipalRef("human", link.owner_user_id), instance_id=link.agent_ref, work_id=work_id)
+            attempt = current["attempt"]
+            body = WorkCommand(operation_id=operation_id, expected_revision=current["revision"], expected_assignment_revision=current["assignment_revision"], action="stop", attempt_id=attempt_id)
+            scope = None
+            if attempt is not None and attempt["id"] == attempt_id and attempt["status"] in {"starting", "running"}:
+                scope = {"attempt_id": attempt_id, "thread_id": attempt["thread_id"], "run_id": attempt["run_id"], "state": "awaiting_command", "attempts": 0, "not_before": None}
+            owner = await prepare_work_owner(self.authority, link.owner_user_id)
+            async with self.outbox._writer(link.id) as (writer, _current):
+                if admission is not None:
+                    await admission(writer, None)
+                await self._stage_work_act(link, kind="stop", request_id=None, work_id=work_id, request=body, owner=owner, session=writer)
+                row = await writer.get(TelegramActRow, operation_id, populate_existing=True)
+                row.stop_dispatch = scope
+                if scope is None:
+                    row.state, row.reason = "refused", "no-running-attempt"
+                await writer.flush()
+                act = _snapshot(row)
+                if admission is not None:
+                    await admission(writer, act)
+        return act
 
     async def _finish_stop(self, act, receipt):
         from app.telegram_bots.acts import _snapshot

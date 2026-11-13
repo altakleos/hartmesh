@@ -2011,7 +2011,8 @@ result or problem needs your attention. Reply to questions, review complete
 results and files, decide, accept results, request changes, or pass a question to
 an eligible colleague. Decisions and acceptance require explicit confirmation;
 answering a question never starts or resumes an assignment. Start, Resume and
-Stop for assignments remain on the web.
+Stop for assignments remain on the web. Stopping targets the selected attempt;
+a newer attempt cannot inherit an earlier cancellation request.
 
 An assignment proposal retained in a Telegram conversation appears as a read-only
 card when opened in the browser. It shows the objective, success criteria and

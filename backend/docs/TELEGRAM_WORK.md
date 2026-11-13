@@ -1338,3 +1338,28 @@ Start controls. The original callback group and complete acknowledged parent
 remain retained beyond ordinary age limits while unresolved. Retention keeps
 evidence; it never renews callback age or admits execution. Pending view gestures
 also retain their original navigation evidence through durable delivery.
+
+
+## Original-attempt Stop admission and execution wording
+
+`WorkStopAdmissions` binds one acknowledged Stop control to its original
+attempt. Current cancellation rights and the displayed source are rechecked in
+the writer that saves the immutable command and reserves the complete callback
+group. Progress changes during preparation retry the read before admission; a
+newer attempt never becomes the cancellation target. A missing reserved journal
+cannot be reconstructed. Saved replay reads the original command without
+issuing it again. `stage_stop` shares Stop preparation with the existing immediate
+path, but leaves command and physical cancellation to the existing journal worker.
+
+`execution_notices` chooses wording from qualified action, original-attempt and
+dispatch facts. A saved Stop is still Stopping until its original attempt has a
+terminal state and settlement timestamp. An ended dispatch cannot distinguish
+pre-dispatch denial from lost authority after an accepted cancellation, so its
+reply preserves an unconfirmed outcome without authorizing another command.
+Refusal of a replay with an unresolved
+runless activation promise remains an unknown outcome, never permission for a
+fresh start. Cancellation of a queued Start removes mutation retries while its
+receipt remains uncertain. Successful activation retains the existing canonical
+status root. English and Chinese copy includes configured wait-duration labels.
+These controllers and pure wording choices remain dormant until runtime wiring;
+they do not change the public command menu or claim delivery of own-action replies.

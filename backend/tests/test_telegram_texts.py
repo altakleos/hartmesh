@@ -104,11 +104,32 @@ WORK_VIEW_KEYS = frozenset(
 )
 
 
+EXECUTION_KEYS = frozenset(
+    (
+        "start.changed start.already start.not_settled start.needs_review start.closed start.brief_changed start.settings_changing start.source_missing "
+        "start.busy_wait start.busy_gave_up start.cancelled start.cancel_unconfirmed start.refused.run-limit start.refused.restarting start.refused.storage-busy "
+        "start.wait_seconds start.wait_two_minutes busy.work_limit busy.work_limit_many busy.work_limit_which busy.place_free assign.no_work denied.start stop.not_yours stop.unconfirmed"
+    ).split()
+)
+
+
 def test_text_catalog_locales_have_equal_keys():
     assert set(catalog("en")) == set(catalog("zh-CN"))
-    assert WORK_VIEW_KEYS | WORK_NEWS_KEYS | WORK_REQUEST_KEYS | AGENT_LIST_KEYS | STAGE_ONE_KEYS | INSTANCE_FILE_KEYS | POLICY_KEYS | INSTANCE_PRESENTATION_KEYS | LIFECYCLE_KEYS | INSTANCE_FAILURE_KEYS | INSTANCE_AVAILABILITY_KEYS == {
-        key for key in catalog("en") if not key.startswith(("label.", "menu."))
-    }
+    assert (
+        EXECUTION_KEYS
+        | WORK_VIEW_KEYS
+        | WORK_NEWS_KEYS
+        | WORK_REQUEST_KEYS
+        | AGENT_LIST_KEYS
+        | STAGE_ONE_KEYS
+        | INSTANCE_FILE_KEYS
+        | POLICY_KEYS
+        | INSTANCE_PRESENTATION_KEYS
+        | LIFECYCLE_KEYS
+        | INSTANCE_FAILURE_KEYS
+        | INSTANCE_AVAILABILITY_KEYS
+        == {key for key in catalog("en") if not key.startswith(("label.", "menu."))}
+    )
     assert catalog("zh_cn") is catalog("zh-CN")
     assert catalog("unrecognised") is catalog("en")
     assert all(text and "<br>" not in text for text in catalog("en").values())
