@@ -37,7 +37,7 @@ _ATTEMPT = ("id", "work_id", "requester_id", "activation_id", "assignment_revisi
 
 @dataclass(frozen=True)
 class WorkNewsRead:
-    work_id: str
+    work_id: str | None
     key: str
     values: dict
     protected: bool

@@ -127,10 +127,16 @@ class WorkActionMethods(StopActionMethods, ActivationActionMethods):
                 return await HumanInput(self.work)._receipt(session, actor, parent.id, body, request_id=act.request_id, work_id=act.work_id)
             return await self.work._receipt(session, actor, parent, body, act.work_id)
 
-    async def _save_work_act(self, link, *, kind, request_id, work_id, request):
+    async def _save_work_act(self, link, *, kind, request_id, work_id, request, admission=None):
         await self._work_link(link)
         owner = await self.authority.prepare_live_owner(link.owner_user_id)
-        return await self._stage_work_act(link, kind=kind, request_id=request_id, work_id=work_id, request=request, owner=owner)
+        if admission is None:
+            return await self._stage_work_act(link, kind=kind, request_id=request_id, work_id=work_id, request=request, owner=owner)
+        async with self.outbox._writer(link.id) as (writer, _):
+            await admission(writer, None)
+            act = await self._stage_work_act(link, kind=kind, request_id=request_id, work_id=work_id, request=request, owner=owner, session=writer)
+            await admission(writer, act)
+            return act
 
     async def _stage_work_act(self, link, *, kind, request_id, work_id, request, owner, session=None, message_id=None):
         """Store an exact operation in its caller's guarded writer; do not act."""

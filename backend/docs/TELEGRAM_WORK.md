@@ -1259,7 +1259,8 @@ and recipient state. A new list includes assignments created since the previous
 snapshot. Deleted or invisible records disappear; new actionable questions on
 listed assignments are included. Snapshot expiry and the exact saved cursor
 payload share the final provider-boundary authority read. Page controls inherit
-the original snapshot's expiry.
+the original snapshot's expiry. Original page slots/counts and row numbers stay
+fixed after deletion; an emptied page retains its navigation.
 
 `work_views.py` renders complete escaped objectives and success criteria before
 any last-part controls. Pure button descriptions intersect current Use/Inspect,
@@ -1301,3 +1302,39 @@ another model call. The artifact is matched to the current visible human turn
 and exact issuing call/draft. Missing support, Just answer, malformed proposals
 and earlier-turn cards cannot end a new turn. Assembly adds the companion only
 when the authorized tool set contains the proposal tool.
+
+
+## Explicit Work view and Start owners
+
+`work_details.py` reads canonical Work, question and conversation facts, then
+joins current assignment, adopted definition, recipient/account, grants,
+lifecycle, conversation metadata and personal custodian facts after provider
+waits. `prepare_detail` borrows its caller's writer. `work_view_reads.py` joins
+all displayed rows in one final read; it retains the opaque list snapshot's
+membership, order and expiry without a separate store checkout per row.
+
+`WorkViewPlans` admits a `/work` inbox route or an acknowledged navigation
+callback as a durable reply intent. Repeated Telegram query IDs retain one
+publication; another press creates another publication. The saved gesture keeps
+its original complete ACK, descriptor and parent presentation, including after
+refresh. Replies retain content protection and bypass notification preferences.
+Existing WorkNews recipes, claims, full multipart ACKs and history own delivery;
+only this source-qualified explicit origin bypasses concealment.
+
+`WorkStartAdmissions` binds a full acknowledged detail to the displayed assignment
+revision, objective, criteria and deadline. A later progress-only revision is
+accepted using a fresh command CAS. Conversation preparation stays outside the
+callback writer; the exact activation body and whole group's reservation commit
+together or both roll back. `stage_activation` admits intent without performing
+its immediate host call; its pending Act remains eligible for the existing
+worker. Saved replay observes the original body. An unresolved owner's Start
+suppresses fresh Start controls across current bots. The admitting writer alone
+can exclude its own new Act while proving the original detail. These owners do
+not yet install public commands or replace existing execution surfaces.
+
+
+Unknown Start reservations, including missing/malformed journals, suppress fresh
+Start controls. The original callback group and complete acknowledged parent
+remain retained beyond ordinary age limits while unresolved. Retention keeps
+evidence; it never renews callback age or admits execution. Pending view gestures
+also retain their original navigation evidence through durable delivery.

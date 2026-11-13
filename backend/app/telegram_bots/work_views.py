@@ -50,6 +50,7 @@ def work_buttons(record, *, owner_id, permissions, held, request=None, lifecycle
             keyboard.append([_button("label.stop", "stop_attempt", "attempt", attempt["id"], {"work_id": work_id, "attempt_id": attempt["id"]})])
     elif (
         not waiting
+        and not record.get("activation_pending")
         and record["status"] in {"open", "blocked"}
         and record["work_enabled"]
         and record["execution_available"]
@@ -123,13 +124,16 @@ def present_work_detail(record, *, owner_id, permissions, held, locale, person, 
 def present_work_page(frame, *, link, owner_id, name, locale, protected=False, public_base_url=None):
     """Preserve this page's saved item order; all data was read as its owner."""
     rows = frame["work"]
-    if not rows:
+    if not rows and frame["pages"] == 1:
         html = render("work.empty", locale, name=name)
         return WorkViewPresentation(tuple({"kind": "text", "html": part, "visible_text": visible_text(part), "protect_content": protected} for part in split_html(html)), ())
     requests = {request["work_id"]: request for request in frame["requests"] if request["state"] != "closed"}
     waiting = {request["work_id"]: request for request in frame["pending"] + frame["routing"]}
     lines, keyboard, section = [render("work.list", locale, name=name)], [], None
+    if not rows:
+        lines.append(render("work.empty", locale, name=name))
     for index, row in enumerate(rows, start=(frame["page"] - 1) * 10 + 1):
+        index = frame.get("positions", {}).get(row["id"], index)
         request = requests.get(row["id"])
         attempt = row.get("attempt") or {}
         if row["id"] in waiting:

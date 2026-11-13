@@ -873,6 +873,10 @@ class CallbackRepository:
             async with self._writer() as session:
                 rows = list(await session.scalars(select(TelegramCallbackRow).order_by(TelegramCallbackRow.id).with_for_update()))
                 pending_groups = {row.group_id for row in rows if callback_publication_pending(row.payload)}
+                from app.telegram_bots.work_start_retention import reserved_starts
+
+                start_groups, start_anchors = await reserved_starts(session)
+                pending_groups.update(start_groups)
                 # A live Retry reads its predecessor's immutable callback-owned
                 # input, even after the predecessor's delivery has completed.
                 # Keep only exact same-scope dependencies, not an entire chat.
@@ -925,7 +929,7 @@ class CallbackRepository:
                         if data["outbox_id"] == parent.id and parent.id in data["delivery_ids"]:
                             pending_groups.add(owner.group_id)
                 anchors = sorted({anchor for row in rows if row.group_id not in pending_groups and type(anchor := row.payload.get("anchor_outbox_id")) is str})
-                unsettled = set()
+                unsettled = set(start_anchors)
                 from app.telegram_bots.retention import question_cleanup_anchors, status_cleanup_anchors
 
                 unsettled.update(await session.scalars(question_cleanup_anchors()))
@@ -937,6 +941,7 @@ class CallbackRepository:
                 unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_request_basis"]["origin"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
                 for family in ("work_request_basis", "work_news_basis", "result_notice_basis"):
                     unsettled.update(await session.scalars(select(TelegramOutboxRow.payload[family]["navigation_origin"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
+                unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_view_intent"]["origin"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
                 unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_outcome_basis"]["origin"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
                 unsettled.update(await session.scalars(select(TelegramOutboxRow.payload["work_outcome_basis"]["refresh"]["anchor_outbox_id"].as_string()).where(TelegramOutboxRow.state.in_(("pending", "sending", "failed")))))
                 # A captured Work input still owns its shown prompt until its
