@@ -1198,7 +1198,11 @@ class Prompts:
                 from app.telegram_bots.producer import _item
 
                 basis = parent.payload.get("reply_basis", {})
-                if parent.payload.get("work_request_basis", {}).get("version") == 3:
+                if "assignment_prompt_intent" in parent.payload:
+                    from app.telegram_bots.assignment_typing import validate_prompt
+
+                    owned = validate_prompt(_item(parent), row)
+                elif parent.payload.get("work_request_basis", {}).get("version") == 3:
                     from app.telegram_bots.work_typing import validate_prompt
 
                     owned = validate_prompt(_item(parent), row)
@@ -1236,7 +1240,8 @@ class Prompts:
         self.repository._borrow(session)
         basis = parent.payload.get("reply_basis", {})
         work_prompt = parent.payload.get("work_request_basis", {}).get("version") == 3 and parent.payload["work_request_basis"]["interaction"]["view"] == "prompt"
-        if basis.get("version") not in {5, 7} and not work_prompt:
+        assignment_prompt = "assignment_prompt_intent" in parent.payload
+        if basis.get("version") not in {5, 7} and not work_prompt and not assignment_prompt:
             return
         pending = list(
             await session.scalars(
@@ -1262,8 +1267,11 @@ class Prompts:
         ]
         if not pending:
             return
-        if work_prompt:
-            from app.telegram_bots.work_typing import validate_prompt
+        if work_prompt or assignment_prompt:
+            if assignment_prompt:
+                from app.telegram_bots.assignment_typing import validate_prompt
+            else:
+                from app.telegram_bots.work_typing import validate_prompt
 
             owned = validate_prompt(_item(parent), pending[0])
             if len(pending) != 1 or any(value["state"] != "sent" or not value.get("sent_at") or not value.get("message_ids") for value in owned):

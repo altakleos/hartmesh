@@ -277,6 +277,7 @@ class WorkNewsRecovery:
                 if controls:
                     control.created_at = min(old_control.created_at for old_control in controls)
         await writer.flush()
+        await self.plans.stage_metadata(writer, link, row, source)
 
 
 class _RevealGuard:
