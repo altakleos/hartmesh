@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 ACTIVATION_MESSAGE = "Work on the explicitly activated assignment. Read current Work context, follow the adopted mandate, and report progress, blockers or an outcome."
 
 
-async def activate_work(request, *, instance_id, work_id, body):
+async def activate_work(request, *, instance_id, work_id, body, admission=None):
     """Activate as the request's human owner through the shared run path.
 
     HTTP callers retain their route ceilings; trusted in-process callers must
@@ -36,7 +36,7 @@ async def activate_work(request, *, instance_id, work_id, body):
     execution = await execution_for_run(request, body.thread_id, require_ready=not replay)
     if execution is None or execution.instance.id != instance_id:
         raise AgentDenied("Activation requires this AI employee's bound conversation")
-    scope = await activate_work_run(request, service, execution, work_id, body)
+    scope = await activate_work_run(request, service, execution, work_id, body, admission=admission)
     return {**await work.get(actor=execution.requester, instance_id=instance_id, work_id=work_id), "activation_receipt": {"operation_id": body.operation_id, "attempt_id": scope.attempt_id}}
 
 
@@ -44,7 +44,7 @@ class _NewActivationRequired(Exception):
     """Private authoritative preflight: no new durable attempt is permitted."""
 
 
-async def activate_work_run(request, service, execution, work_id, body):
+async def activate_work_run(request, service, execution, work_id, body, *, admission=None):
     """Own capacity, durable reservation, run launch and observation together."""
     from app.gateway.run_models import RunCreateRequest
     from app.gateway.services import start_run
@@ -76,7 +76,7 @@ async def activate_work_run(request, service, execution, work_id, body):
             if not await service.activation_exists(work_id, body.operation_id):
                 await execution.authority.require_ready(execution)
             if residents is None:
-                scope = await admit_storage(service.agents, execution.instance, lambda: service.reserve(execution=execution, work_id=work_id, request=body))
+                scope = await admit_storage(service.agents, execution.instance, lambda: service.reserve(execution=execution, work_id=work_id, request=body, admission=admission))
             else:
                 try:
                     scope = await exact_replay()
@@ -104,6 +104,7 @@ async def activate_work_run(request, service, execution, work_id, body):
                                 request=body,
                                 before_admit=bind,
                                 on_rollback=lambda: residents.cancel(reservation),
+                                admission=admission,
                             ),
                         )
                         if reservation.attempt_id != scope.attempt_id:

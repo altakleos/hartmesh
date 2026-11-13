@@ -73,7 +73,9 @@ class WorkOutcomeRecovery:
                 act.link_id == link.id,
                 act.owner_user_id == link.owner_user_id,
                 act.binding_generation == link.binding_generation,
-                act.kind.in_(WORK_ACT_KINDS),
+                # Execution primitives acquire their dedicated Work-owned
+                # delivery integration before chat controls can expose them.
+                act.kind.in_(WORK_ACT_KINDS - {"stop", "activate"}),
             )
             if horizon is None:
                 horizon = await reader.scalar(query.with_only_columns(func.max(act.id)))
