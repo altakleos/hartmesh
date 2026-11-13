@@ -357,7 +357,7 @@ retries admitted service calls with no conclusive refusal, never settings, files
 network or transcription. Current chat controls do not start an assignment.
 
 `work_start_actions.py` journals explicit activation requests without installing
-chat controls or status/capacity delivery. A fresh intent checks the displayed
+chat controls or capacity offers. A fresh intent checks the displayed
 assignment revision before creating its own idempotent Work conversation. An
 authorized earlier attempt conversation can be reused; the ordinary bot chat
 conversation is never selected. Every retry uses the saved `ActivateWork` body
@@ -388,6 +388,26 @@ conversation/execution child recovery and chat controls remain separate pieces.
 Existing request-owned outcome recovery excludes execution primitives. Retention
 preserves activation journals pending their complete delivery/continuation owner;
 unknown or still-runless admissions cannot fall through legacy closed-act deletion.
+
+`work_start_status.py` inserts the reader's `progress:<attempt_id>` root in the
+same writer as the activation's done receipt. It qualifies the exact canonical
+activation and original attempt, then reuses `WorkEventIntents` under the bot
+lock. Reader-first and journal-first paths share that dedupe key. A seed or
+validation failure after host admission rolls back the journal completion and
+recovers by receipt; it cannot become a new start refusal or another run.
+
+Status projections join the original activation Act and derive chat origin only
+from its exact owner/bot/generation/Work/body and admitted counter. That proof is
+included in current source signatures and checked again after provider awaits.
+Chat-started status keeps its title under protected policy, with protection still
+enabled. Web-started status keeps the normal concealed first send. Refresh and
+pin reads use the same proof, independent of the Act's later outcome phase.
+
+`GatewayClientOwner.get_work_capacity` reads `GET .../work?limit=1` through the
+existing owned HTTP client with the person's headers and current dispatch guard.
+It consumes the route's filtered `work_capacity`, never a service identity's
+unfiltered resident list. Capacity offers and their explicit Start controls remain
+separate integration; the read itself never activates Work.
 
 `work_stop_actions.py` supplies Stop journal primitives without installing chat
 controls. The exact Work command and captured original attempt/thread/run are

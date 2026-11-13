@@ -55,6 +55,11 @@ def recipes(source, basis, identity, link):
     return parts, keyboard
 
 
+def conceal_news(source):
+    """Only a current source-qualified chat activation bypasses its teaser."""
+    return source.protected and not (source.key.startswith("status.") and source.work.get("activation_act_id"))
+
+
 def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
     try:
         item = captured.item
@@ -93,7 +98,7 @@ def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
             or item.class_ != ("reply" if reveal or navigation else news_class(source.key))
             or type(source.protected) is not bool
             or type(basis["concealed"]) is not bool
-            or basis["concealed"] != (source.protected and reveal is None and navigation is None)
+            or basis["concealed"] != (conceal_news(source) and reveal is None and navigation is None)
         ):
             raise ValueError()
         historical = [part for part in item.parts if part["presentation_version"] < version]
@@ -264,7 +269,7 @@ class WorkNewsPlans:
             if binding is None or any(getattr(binding, field) != getattr(link, field) for field in _SCOPE) or row is None or _item(row) != item:
                 raise DeliveryClaimRetired()
             await admission(session=writer, projection=self.projection(self.reader, link, item, source, clock=clock))
-            basis = {"version": 1, "source": asdict(source), "locale": settings.locale, "concealed": source.protected, "public_base_url": origin.base}
+            basis = {"version": 1, "source": asdict(source), "locale": settings.locale, "concealed": conceal_news(source), "public_base_url": origin.base}
             parts, keyboard = recipes(source, basis, identity, link)
             row.parts = self.outbox._parts(parts, 0)
             row.payload = _safe_json({**row.payload, "work_news_basis": {**basis, "parts": parts, "keyboard": keyboard}, "product_keyboard_basis": keyboard})

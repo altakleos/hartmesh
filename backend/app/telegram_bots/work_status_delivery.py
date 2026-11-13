@@ -1,4 +1,4 @@
-"""Dormant status roots share the source-owned Work notice delivery protocol."""
+"""Status roots share the source-owned Work notice delivery protocol."""
 
 from dataclasses import asdict
 
@@ -20,7 +20,7 @@ def notice(source, item):
         key=source.key,
         values=source.values,
         protected=source.protected,
-        work={"id": item.work_id, "attempt_id": source.attempt_id, "terminal": source.terminal, "event_proofs": source.event_proofs},
+        work={"id": item.work_id, "attempt_id": source.attempt_id, "terminal": source.terminal, "event_proofs": source.event_proofs, **({"activation_act_id": source.activation_act_id} if source.activation_act_id is not None else {})},
         event_signature=source.origin_signature,
         signature=source.signature,
     )

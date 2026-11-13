@@ -21,6 +21,11 @@ from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, Agent
 
 @pytest_asyncio.fixture
 async def startable(actions, monkeypatch):
+    return await prepare_startable(actions, monkeypatch)
+
+
+async def prepare_startable(e, monkeypatch):
+    """Real SQL activation setup shared with SDK delivery qualification."""
     from app.gateway.routers import agent_instances
     from deerflow.persistence.spaces.model import SpaceGrantRow
     from deerflow.runtime.runs.manager import RunManager
@@ -28,7 +33,6 @@ async def startable(actions, monkeypatch):
     from deerflow.spaces.principals import HostPrincipalResolver
     from deerflow.spaces.registry import SpaceRegistry
 
-    e = actions
     directory = e.human.agents.directory
     e.human.agents.files.registry = SpaceRegistry(e.db.sessions, HostPrincipalResolver(human=directory.human, nonhuman=directory.lookup, nonhuman_in_session=directory.lookup_in_session))
     e.human.agents.residents = None

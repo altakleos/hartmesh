@@ -1,4 +1,4 @@
-"""Dormant current status reads for one explicitly admitted Work attempt."""
+"""Source-qualified status reads for one explicitly admitted Work attempt."""
 
 import asyncio
 from dataclasses import asdict, dataclass, field
@@ -26,7 +26,7 @@ from deerflow.agent_instances.work_execution_contract import ActivateWork
 from deerflow.persistence.agent_instances.human_input import HumanInputEventRow, HumanInputRequestRow
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow, AgentWorkRow
 from deerflow.persistence.run.model import RunRow
-from deerflow.persistence.telegram_bots.model import TelegramOutboxRow, TelegramPersonSettingsRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramOutboxRow, TelegramPersonSettingsRow
 from deerflow.persistence.user.model import UserRow
 from deerflow.utils.file_io import await_drained
 
@@ -41,6 +41,7 @@ class WorkStatusRead:
     origin_signature: str
     signature: str
     event_proofs: dict = field(default_factory=dict)
+    activation_act_id: str | None = None
 
 
 class WorkStatusReader:
@@ -95,7 +96,7 @@ class StatusProjection:
             return select(candidate.id).where(*conditions).order_by(candidate.revision.desc()).limit(1).correlate(work, attempt, activation, terminal).scalar_subquery()
 
         return (
-            query.add_columns(work, attempt, activation, event, delivery, progress, terminal, cause, request, recipient.email, settings, RunRow, trigger_request, receipt, prior_activation)
+            query.add_columns(work, attempt, activation, event, delivery, progress, terminal, cause, request, recipient.email, settings, RunRow, trigger_request, receipt, prior_activation, TelegramActRow)
             .join(work, work.id == self.item.work_id)
             .join(attempt, and_(attempt.id == self.item.payload.get("work_event_intent", {}).get("attempt_id"), attempt.work_id == work.id))
             .join(activation, and_(activation.work_id == work.id, activation.operation_id == attempt.activation_id))
@@ -120,6 +121,7 @@ class StatusProjection:
             .outerjoin(RunRow, RunRow.run_id == attempt.run_id)
             .outerjoin(trigger_request, trigger_request.id == delivery.request_id)
             .outerjoin(receipt, and_(receipt.instance_id == event.instance_id, receipt.operation_id == event.operation_id))
+            .outerjoin(TelegramActRow, TelegramActRow.id == attempt.activation_id)
         )
 
     def check(self, rows):
@@ -127,6 +129,7 @@ class StatusProjection:
         work, attempt, activation, event, delivery, progress, terminal, cause, request, person, preferences = rows[0][self.column : self.column + 11]
         run = rows[0][self.column + 11]
         trigger_request, receipt, prior_activation = rows[0][self.column + 12 : self.column + 15]
+        act = rows[0][self.column + 15]
         intent = self.item.payload.get("work_event_intent", {})
         trigger_keys = {
             "activate": {"status.starting"},
@@ -263,6 +266,17 @@ class StatusProjection:
         origin = digest([event_signature(activation, None, {}), fields(attempt, ("id", "work_id", "activation_id", "requester_id", "assignment_revision", "thread_id", "incarnation", "request")), aware(attempt.created_at).isoformat()])
         values = {"objective": activation.result["objective"], "name": instance.name, "progress": note, "person": person, "time": format_time(aware(time), settings=settings, now=self.clock.now(), zone=self.clock.zone)}
         data = dict(key=key, values=values, protected=instance.custody != "personal" and policy == "protected", terminal=ended, attempt_id=attempt.id, origin_signature=origin)
+        if act is not None and (act.link_id, act.owner_user_id, act.bot_id, act.binding_generation, act.telegram_user_id, act.chat_id) == (
+            self.link.id,
+            self.link.owner_user_id,
+            self.link.bot_id,
+            self.link.binding_generation,
+            self.link.telegram_user_id,
+            self.link.chat_id,
+        ):
+            if (act.kind, act.instance_id, act.work_id, act.request_id, act.message_id) != ("activate", instance.id, work.id, None, None) or act.attempts < 1 or not same_body(act.body, activation.request):
+                raise ProductSourceRetired()
+            data["activation_act_id"] = act.id
         proofs = {fact.id: digest([event_signature(fact, None, {}), aware(fact.created_at).isoformat()]) for fact in (activation, event, progress, terminal, cause) if fact is not None}
         fresh = WorkStatusRead(
             **data,
