@@ -12,7 +12,7 @@ from test_telegram_work_source_delivery import work_delivery as work_delivery
 from test_work_attention_pages import work_pages as work_pages
 
 from app.telegram_bots.producer import _item
-from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramOutboxRow, TelegramPersonSettingsRow
 
 
 async def reminder(e, *, other_requester=False):
@@ -21,6 +21,9 @@ async def reminder(e, *, other_requester=False):
     from deerflow.agent_instances.human_input_contract import Respond
     from deerflow.agent_instances.work_execution_contract import ReportWork
 
+    # Delivery tests own quiet-hour preconditions; policy cases enable them below.
+    async with e.db.sessions.begin() as writer:
+        (await writer.get(TelegramPersonSettingsRow, e.link.owner_user_id)).quiet_enabled = False
     e.channel._now = lambda: e.sender.outbox.clock()
     peer, worker = await setup(e)
     actor = e.actor
