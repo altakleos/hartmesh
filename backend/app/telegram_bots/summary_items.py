@@ -160,7 +160,10 @@ class SummaryItemProjection(DigestProjection):
                     if control.closed_reason != "revealed" or control.consumed_at is None:
                         raise CallbackRefused()
             for control in controls.values():
-                n.owner.plans.callbacks._usable(control)
+                if control.kind == "summary_off" and control.consumed_at is not None and control.closed_reason == "done":
+                    n.owner.plans.callbacks._unexpired(control)
+                else:
+                    n.owner.plans.callbacks._usable(control)
                 if control.message_id != anchor.message_id or aware(control.created_at) != aware(parent.created_at):
                     raise CallbackRefused()
             selected = controls.get(n.value["callback_id"])

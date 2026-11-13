@@ -9,6 +9,8 @@ import type { Bot, Connect } from "./api";
 import type { TelegramKey, TelegramReader, TelegramValues } from "./text";
 import type { AgentTarget } from "./web-pages";
 
+export const MESSAGE_SETTINGS_SHOWN = true;
+
 export interface RowInput {
   name: string;
   bot: Bot | null;

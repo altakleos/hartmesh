@@ -1,6 +1,7 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "link.token_rejected_other": "The bot for {name} stopped.\nTelegram no longer accepts that bot’s token. Paste a new token in {product} on the web.",
     "settings.state": "{body}",
     "settings.overview": (
         "Your AI assistants and AI employees write first about: {value}.\n"
@@ -183,9 +184,16 @@ TEXTS: dict[str, str] = {
         "k anything you will act on."
     ),
     "help.agent": (
-        "{name} is an AI assistant: {role}.\n{role_description}\n\nIn this chat:\n- write, or send a file, a phot"
-        "o or a voice note\n- /new starts a new conversation\n- /stop stops what is in progress\n- /settings set"
-        "s the language\n\n{name} starts nothing alone."
+        "{name} is an AI assistant: {role}.\n"
+        "{role_description}\n"
+        "\n"
+        "In this chat:\n"
+        "- write, or send a file, a photo or a voice note\n"
+        "- /new starts a new conversation\n"
+        "- /stop stops what is in progress\n"
+        "- /settings sets when this chat may message you, and the language\n"
+        "\n"
+        "{name} starts nothing alone, and writes here first when a question, a result or a problem needs you."
     ),
     "privacy.company": ("People who can see all of {name}'s work can read this conversation in {product}. Files you send are kept in {name}'s files, which everyone who can see all of {name}'s work can open."),
     "privacy.protected": "{name}'s managers have switched off forwarding and saving in this chat. Messages {name} sends first show their details after a tap on Show.",
@@ -227,7 +235,7 @@ TEXTS: dict[str, str] = {
     "- /employees shows the AI employees you can chat with and opens their chats\n"
     "- /new starts a new conversation\n"
     "- /stop stops the current answer\n"
-    "- /settings sets the language\n"
+    "- /settings sets when your AI assistants and AI employees may message you, and the language\n"
     "- a skill's name after a slash uses that skill for one message",
     "help.custom_agent": "This is {agent}, one of your custom agents in {product}.\n"
     "\n"
@@ -353,6 +361,7 @@ TEXTS: dict[str, str] = {
     "settings.state_basic": "Buttons and notices from your bots are in {language}. Answers follow the language you write in.",
     "link.conflict": "This chat is paused.\nAnother program is using this bot, so messages may be missed. If that was not you, replace the bot's token: in BotFather send /revoke, then paste the new token in {product} on the web.",
     "link.conflict_over.plain": "This chat works again.",
+    "link.conflict_over.agent": "This chat works again.\nDeciding, accepting and allowing a blocked site stay paused on this bot until you replace the token or confirm in {product} on the web that the other program was yours.",
     "link.conflict_over.chat": "This chat works again.\nAllowing a blocked site stays paused on this bot until you replace the token or confirm in {product} on the web that the other program was yours.",
     "link.conflict_over.custom_agent": "This chat works again.\nAllowing a blocked site stays paused on this bot until you replace the token or confirm in {product} on the web that the other program was yours.",
     "link.limited": "Paused on this bot since another program used it. Open {product} on the web and replace the token or confirm it was you.",
@@ -434,7 +443,7 @@ TEXTS: dict[str, str] = {
     "menu.employees": "AI employees you can chat with",
     "menu.new": "Start a new conversation",
     "menu.stop": "Stop the current answer",
-    "menu.settings": "Language",
+    "menu.settings": "Messages and language",
     "menu.help": "What this chat can do",
 }
 
@@ -464,21 +473,9 @@ FORMS.update(
             )
         },
         "help.agent": {
-            "company": (
-                "{name} is an AI employee: {role}.\n{role_description}\n\nIn this chat:\n- write, or send a file, a photo"
-                " or a voice note\n- /new starts a new conversation\n- /stop stops what is in progress\n- /settings sets"
-                " the language\n\n{name} starts nothing alone."
-            ),
-            "no_voice": (
-                "{name} is an AI assistant: {role}.\n{role_description}\n\nIn this chat:\n- write, or send a file, a phot"
-                "o\n- /new starts a new conversation\n- /stop stops what is in progress\n- /settings sets the language\n\n"
-                "{name} starts nothing alone."
-            ),
-            "company.no_voice": (
-                "{name} is an AI employee: {role}.\n{role_description}\n\nIn this chat:\n- write, or send a file, a photo"
-                "\n- /new starts a new conversation\n- /stop stops what is in progress\n- /settings sets the language\n\n{"
-                "name} starts nothing alone."
-            ),
+            "company": TEXTS["help.agent"].replace("AI assistant", "AI employee"),
+            "no_voice": TEXTS["help.agent"].replace(", a photo or a voice note", ", a photo"),
+            "company.no_voice": TEXTS["help.agent"].replace("AI assistant", "AI employee").replace(", a photo or a voice note", ", a photo"),
         },
         "profile.short.agent": {"company": "AI employee. Private: answers only the person who connected this bot."},
         "profile.description.agent": {"company": "{name} is an AI employee. Only the person who connected this bot gets an answer, in this chat.\n\nIf this is your bot, use the Open chat button in your web app, then press Start."},

@@ -79,19 +79,30 @@ def unsolicited(row):
     )
 
 
+class _ReservationUnavailable(Exception):
+    pass
+
+
 class DigestReservations:
-    def __init__(self, outbox):
-        self.outbox = outbox
+    def __init__(self, outbox, *, eligible=lambda row: True, available=lambda: True):
+        self.outbox, self.eligible, self.available = outbox, eligible, available
 
     async def reserve(self, link, *, category):
         if type(category) is not str or category not in {"essential", "discretionary"}:
             raise ValueError("invalid-digest-category")
-        return await await_drained(self._reserve(link, category))
+        if not self.available():
+            return None
+        try:
+            return await await_drained(self._reserve(link, category))
+        except _ReservationUnavailable:
+            return None
 
     async def _reserve(self, link, category):
         from app.telegram_bots.producer import _item
 
         async with self.outbox._writer(link.id) as (writer, binding):
+            if not self.available():
+                return None
             if not self.outbox._binding(binding, link) or binding.state != "connected" or binding.health != "ok":
                 return None
             settings = await writer.get(TelegramPersonSettingsRow, link.owner_user_id)
@@ -118,7 +129,7 @@ class DigestReservations:
             while len(members) < DIGEST_MEMBERS_MAX:
                 page = list(await writer.scalars(query.limit(100).offset(offset).with_for_update()))
                 for row in page:
-                    if unsolicited(row) and preference_skip(_item(row), choices, now) is None:
+                    if unsolicited(row) and self.eligible(row) and preference_skip(_item(row), choices, now) is None:
                         members.append(row)
                         if len(members) == DIGEST_MEMBERS_MAX:
                             break
@@ -132,6 +143,8 @@ class DigestReservations:
             # A terminated batch is not silently resurrected. Its now-free
             # members may deliver individually or join a different batch.
             if await writer.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == key)):
+                return None
+            if not self.available():
                 return None
             identity = uuid4().hex
             digest = TelegramOutboxRow(
@@ -162,6 +175,8 @@ class DigestReservations:
             for member in members:
                 member.payload = {**member.payload, "digest_id": identity}
             await writer.flush()
+            if not self.available():
+                raise _ReservationUnavailable()
             return identity
 
     async def abandon(self, link, identity, *, reason="superseded"):

@@ -2890,6 +2890,8 @@ export function createEnUS(product: string): Translations {
           notYou: "Not your Telegram account?",
           locale: ({ language, timezone }) =>
             `Bot messages are in ${language}; times are in ${timezone}.`,
+          quiet: ({ start, end }) =>
+            `Your AI assistants and AI employees may write first when something needs you: without sound from ${start} to ${end}, except in a chat where you wrote or pressed a button in the last 30 minutes.`,
           change: "Change",
           profileLater: `The name and picture could not be set yet. ${product} will try again.`,
           next: ({ nextName }) => `Next: ${nextName}`,
@@ -2959,7 +2961,7 @@ export function createEnUS(product: string): Translations {
         conflictWebhook: `This bot is connected to another service, so nothing reaches ${product}.`,
         afterConflict: {
           agent: ({ time }) =>
-            `Another program began using this bot's token at ${time}. That has stopped, and the bot answers again. Allowing a blocked site stays paused on this bot until you press That was me or replace the token.`,
+            `Another program began using this bot's token at ${time}. That has stopped, and the bot answers again. Deciding, accepting and allowing a blocked site stay paused on this bot until you press That was me or replace the token.`,
           chat: ({ time }) =>
             `Another program began using this bot's token at ${time}. That has stopped, and the bot answers again. Allowing a blocked site stays paused on this bot until you press That was me or replace the token.`,
           custom_agent: ({ time }) =>
@@ -3087,7 +3089,33 @@ export function createEnUS(product: string): Translations {
           label: "Time zone",
           body: "Taken from this browser when you connected your first bot.",
         },
-        inChat: "/settings in any bot changes the language too.",
+        intro:
+          "These apply to all your Telegram bots. An answer to your own message always arrives.",
+        notify: {
+          label:
+            "What your AI assistants and AI employees may write to you about first",
+          all: "Questions, results and problems",
+          questions: "Only questions that need you",
+          none: "Nothing",
+        },
+        quiet: {
+          label: "Quiet hours",
+          body: ({ start, end }) =>
+            `From ${start} to ${end} messages arrive without sound, except in a chat where you wrote or pressed a button in the last 30 minutes. Nothing is held back.`,
+          from: "From",
+          to: "To",
+          same: "The two times must differ.",
+        },
+        summary: {
+          label: "Morning summary",
+          body: ({ time }) =>
+            `At ${time}, each AI assistant and AI employee with something to report sends one message without sound: what was finished and what waits for you. Nothing is sent on a day with nothing to say.`,
+          at: "At",
+        },
+        mute: "To silence one of them, mute that chat in Telegram.",
+        badTime: "Use a time like 21:00.",
+        inChat:
+          "/settings in any bot changes the same things, except the time zone.",
         saved: "Saved.",
         failed: "That could not be saved. Try again.",
       },

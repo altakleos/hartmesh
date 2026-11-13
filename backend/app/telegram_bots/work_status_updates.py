@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import aliased
 
 from app.telegram_bots.attention_authority import prepare_attention
+from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.notifications import aware
 from app.telegram_bots.producer import _PART_IDENTITY, _TRANSPORT_RECEIPTS, DeliveryClaimRetired, DeliveryRetry, ProductSourceRetired, _item
 from app.telegram_bots.split import split_html, visible_text
@@ -294,11 +295,15 @@ class WorkStatusUpdates:
         row.claim_id = row.claim_owner = row.claimed_at = None
         parent.payload = {**parent.payload, "status_update": {"revision": source["revision"], "outbox_id": row.id}}
 
-    async def repair(self, link, identity):
+    async def repair(self, link, identity, *, guard=None):
         async def perform():
+            if guard is not None:
+                await prepare_publication_guard(guard)
             clock = await self.reader.prepare(link)
             admission = await prepare_attention(self.reader, link)
             async with self.outbox._writer(link.id) as (writer, binding):
+                if guard is not None:
+                    await guard.check(writer)
                 row = await writer.get(TelegramOutboxRow, identity, with_for_update=True, populate_existing=True)
                 if (
                     row is None
@@ -325,6 +330,8 @@ class WorkStatusUpdates:
                 self._replace(row, parent, source, {**target, "replace": True})
                 await writer.flush()
                 await admission(session=writer, projection=_SendProjection(self, link, _item(row), clock))
+                if guard is not None:
+                    await guard.check(writer)
                 return True
 
         return await await_drained(perform())

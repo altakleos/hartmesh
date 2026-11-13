@@ -2278,6 +2278,7 @@ export interface Translations {
         body: (values: { telegramName: string }) => string;
         notYou: string;
         locale: (values: { language: string; timezone: string }) => string;
+        quiet: (values: { start: string; end: string }) => string;
         change: string;
         profileLater: string;
         next: (values: { nextName: string }) => string;
@@ -2424,6 +2425,22 @@ export interface Translations {
         label: string;
         body: string;
       };
+      intro: string;
+      notify: { label: string; all: string; questions: string; none: string };
+      quiet: {
+        label: string;
+        body: (values: { start: string; end: string }) => string;
+        from: string;
+        to: string;
+        same: string;
+      };
+      summary: {
+        label: string;
+        body: (values: { time: string }) => string;
+        at: string;
+      };
+      mute: string;
+      badTime: string;
       inChat: string;
       saved: string;
       failed: string;

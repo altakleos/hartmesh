@@ -2,6 +2,35 @@
 
 Read alongside [the managed bot guide](../app/telegram_bots/AGENTS.md).
 
+`notification_runtime.py` composes the source owners around the supervisor's
+single sender. Check installs the binding baseline hook before routes. A negative
+copy decision precedes initial baselines, prior-claim and saved-input recovery,
+and held-update release. Matching generations preserve existing cursors. Event
+reading is structural and continues under refusal; sending, summaries and human
+Acts require current runtime admission. Stop drains every owned task even if
+an owner stop or sibling task fails, then logs failures without preventing the
+supervisor from closing its sender and clients. Cancellation waits for that drain.
+
+Before selecting delivery, the runtime materializes event intents, prepares
+source-aware repair notices, reserves only supported digest members and plans
+pins from actual status ACKs. Conclusively obsolete unrendered questions and
+their never-delivered cleanup edits retire; missing evidence stays held. Bounded
+passes rotate across links, deliveries and saved inputs, preserving each original
+input and operation. Recovery phases reach file reconciliation, outcomes and
+final conversation queue admission.
+
+`notification_retries.py` retains the original displayed Retry group and actual
+notice ACK through every source-owner admission. `attention_scope.py` composes
+that mandatory proof with the same final joined source read after provider awaits,
+preserving each owner's positional projection shape. The context lasts through
+the drained repair and is reset afterward. Replaced outcome deliveries retain a
+successor pointer; its actual ACK closes the old Retry warning. Retention keeps
+that predecessor while its successor remains unsettled.
+
+Message preferences, quiet-hour prompts, cross-bot rejected-token notices and
+summary Stop are installed with this graph. Start/Resume/Stop assignment links
+continue to open the web; no assignment execution controller is installed.
+
 `work_file_exports.py` exports one indexed source of the current Work outcome
 as the human recipient. Outcome, evidence and assignment revisions, source
 identity, referenced Space generation and READ+EXPORT grants are checked in
@@ -16,7 +45,7 @@ primitive does not install workers. `authorize_work_file_batch` admits all album
 Spaces together before claim locks and the combined provider-final snapshot;
 review delivery also requires the current `agents:write` route ceiling.
 
-`work_result_delivery.py` provides dormant initial review-file plans. Its closed
+`work_result_delivery.py` provides initial review-file plans. Its closed
 V1 `result_files` capsule augments the existing request basis, with files before
 the complete card and a filename trailer. Outcome indices preserve identical
 paths in distinct Spaces. `work_result_ledger.py` qualifies the ordered parts,
@@ -53,8 +82,7 @@ provider await; coherent stored URL substitution cannot authorize another origin
 Unavailable-file warnings have no navigation; other file failures reuse durable
 URL-button/plain-address fallback. Historical warning proofs retain their own
 navigation snapshot when the current card changes.
-These initial-delivery components must remain uninstalled until the remaining
-notification paths and supervisor integration are complete.
+The runtime installs these initial-delivery components with the other source owners.
 
 `result_notice_sources.py` owns non-review `result.done` and
 `result.waiting_review` facts. Its joined provider-final read binds the exact
@@ -90,7 +118,7 @@ proof version 2 binds this family's result recipes; review proofs retain version
 the remaining content, without relabeling or repeating an earlier upload.
 Explicit repair accepts only known held General failures with no claim fields;
 active/uncertain sends and retained non-General destinations stay untouched.
-These owners remain dormant pending the remaining notification integration.
+The runtime installs these recovery owners.
 
 `work_event_intents.py` projects current recipient/grant/preferences into empty,
 content-free delivery intents in `WorkEventReader`'s pair writer. Ordinary
@@ -112,7 +140,7 @@ response and one-hour due time. No intent starts work or sends content. Empty
 intents cannot be claimed as delivered, even when proactive sending is opted
 in. Content materializers must still qualify recipient access, source freshness,
 protection, complete previews/files, exact edits, quiet-hour reminder suppression
-and decision-hold release before supervisor installation enables this path.
+and decision-hold release in the installed path.
 
 `work_event_delivery.py` materializes information and decision question intents
 into the existing request source family without allocating a second delivery.
@@ -124,8 +152,7 @@ intent metadata. The final SDK snapshot rechecks those facts alongside the
 current request, recipient and delivery claim. A stale unsolicited question
 cannot refresh into a question from a later routing revision. Acknowledged Show
 owns its separate explicit current-source proof. New controls stay pending
-until the whole presentation is acknowledged. This materializer remains dormant;
-edits, status and summaries require their own integration.
+until the whole presentation is acknowledged. Edits, status and summaries have their own source owners.
 
 `work_review_event_delivery.py` connects review-ready settlement and routing
 intents to the result media owner, preserving the original outbox identity.
@@ -134,7 +161,7 @@ outcome, exact outcome attempt/thread, current request and recipient authority.
 The event attempt must match the outcome attempt. Files precede the complete
 review card; protected delivery uses the existing Show/keyboard cleanup flow.
 The SDK rechecks the original event before any file read or card send. This
-materializer is also dormant and does not enable notification workers.
+materializer is also and does not enable notification workers.
 
 `work_routing_event_delivery.py` borrows that materialization pipeline for manager
 questions, including an unrouted review created by settlement. An exact unsupplied
@@ -147,7 +174,7 @@ its HumanInput receipt and Work event, comparing the full displayed explanation
 with canonical command data. That proof remains required during explicit Show
 and V6 recovery, after every provider await. The same bounded hold applies while the causal attempt
 is unresolved. Existing explicit wrong-person follow-ups keep their own receipt
-and source family. This event materializer is also uninstalled.
+and source family.
 
 `notifications.py` owns class preferences and optional-news budgets. The sender's
 `proactive` switch remains false until notification entry points are complete.
@@ -176,7 +203,7 @@ items, one 32-character item button per row, question/decision/review phrases an
 product first lines for other news. Concealed navigation exposes only a count and
 Show. These bounded titles fit one message; item activation must still deliver a
 fresh complete member preview. This pure renderer supplies no source authority or
-callback admission and remains uninstalled with the reservation primitive.
+callback admission; the runtime composes those separately.
 
 `work_digest_projection.py` composes up to ten source projections into one final
 authority statement, preserving each member's route permissions and distinct
@@ -205,8 +232,7 @@ trusted from the batch row.
 digest. Its final composed snapshot retains the exact batch receipt, every
 reservation edge, the complete acknowledged callback group and the selected
 member's authority. Reading a preview never consumes controls or changes the
-original delivery receipt. This admission helper is not a controller and remains
-uninstalled until Show and item presentation owners are integrated. Its explicit
+original delivery receipt. The runtime composes this admission helper with Show and item presentation owners. Its explicit
 consumed-origin mode accepts only a revealed Show and still applies the original
 control age limit.
 
@@ -223,8 +249,7 @@ before sending. Complete unacknowledged history stays attached; a replacement
 cannot erase or replay an acknowledged prefix. Fresh groups retain the original
 age. Current source, complete groups and exact claims share the final provider
 snapshot before and after mutation. Explicit repair reconciles claim-free held
-failures or retired previews; it never takes an active claim. Item previews and
-startup installation remain pending.
+failures or retired previews; it never takes an active claim.
 
 `work_navigation_origin.py` supplies an explicit closed origin for full previews
 opened from ordinary or revealed digest cards. It retains the acknowledged
@@ -242,8 +267,7 @@ quiet hours and reminder due time. Changed source or presentation choices retire
 the pre-ACK group and release its original members explicitly. Transient retries
 keep membership reserved; typed whole-card ACKs settle members together. An
 admitted digest SDK call drains during shutdown, preserving ambiguous receipts
-and reservations. These plans and sources remain uninstalled; Show/item handling
-and startup integration are still required.
+and reservations. The runtime installs these plans with Show and item handling.
 
 `attention.py` exhausts stable Work/request pages before ranking or applying
 presentation caps. `attention_authority.py` prepares route decisions, then joins
@@ -275,8 +299,7 @@ its later refreshes bypass proactive preferences; the final source read proves
 the original Show receipt. Retain that exact consumed proof while its parent
 exists, and require it under lock before recovery mutates controls. Complete ACK
 validation precedes control activation,
-and repair cannot consume another presentation’s controls. Controller installation remains a prerequisite for activation.
-Presentation/handlers stay dormant.
+and repair cannot consume another presentation’s controls.
 
 `work_routing_admission.py` reserves acknowledged recipient choices in the same
 writer as their immutable Work Act. The command retains the displayed request
@@ -301,8 +324,7 @@ dispositions are never clipped to a notification title. `work_request_delivery.p
 atomically freezes a materialized preview and its last-part callback group; a
 retry reuses the original identities. This is a healthy-binding presentation
 primitive, not event ingestion. Unrendered events must retain their intent while
-transport is unavailable. The raw SDK requires an explicitly installed `WorkRequestSources`; supervisor
-startup does not install it yet. Literal templates and misclassified replies
+transport is unavailable. The raw SDK requires an explicitly installed `WorkRequestSources`; the notification runtime installs it. Literal templates and misclassified replies
 cannot bypass this boundary. `work_request_source.py` validates the entire frozen
 part sequence and preceding ACKs, re-proves complete source/seen data and joins
 claim/settings/Work/request/Space/callback facts to the final account/grant read.
@@ -316,11 +338,9 @@ Revealed protected content requires its consumed Show receipt at dispatch. Multi
 reveal first clears the teaser through a retained cleanup dependency, then sends
 every full chunk as a new protected message; missing cleanup targets settle silently. Current
 presentation versions require every preceding ACK; same-basis anchor repair keeps
-control identities/expiry and moves anchors only after complete delivery. The
-source family stays uninstalled until event and interaction integration.
+control identities/expiry and moves anchors only after complete delivery. The runtime installs this source family with event and interaction owners.
 
-`work_actions.py` adds optional Work service actions to `Acts`; supervisor startup
-does not install them yet. Bound people own immutable request bodies and operation
+`work_actions.py` adds Work service actions to `Acts` during runtime installation. Bound people own immutable request bodies and operation
 ids. Exact service receipts are read without mutation before fresh action guards.
 A generic borrowed-writer admission checks link/account/policy/pause and the exact
 journal attempt before a fresh effect and again before commit. `work_authority.py`
@@ -369,8 +389,7 @@ receipt worker can finish it after restart, using the original body and current
 command authority. Saved bodies use typed JSON equality. Final source, access,
 pause and outer-lifetime checks roll back both journal and reservation on drift.
 First taps cannot acknowledge unchecked sources. Controls remain unconsumed until
-an outcome controller settles them; result delivery and chat installation remain
-outstanding.
+an outcome controller settles them.
 
 `work_refusal_recovery.py` refreshes only a conclusively refused pending decision
 or acceptance with reason `attempt-unresolved`. Unchanged seen data keeps the
@@ -381,7 +400,7 @@ pending calls remain untouched. Publication consumes the old group with
 `work-refresh`, and final SDK proof requires that exact acknowledged origin plus
 current source/access. A new first tap and confirmation follow full delivery.
 The fresh preview is a direct reply even when proactive notifications are off.
-Entry points and outcome delivery remain uninstalled.
+The runtime installs these entry points and outcome delivery.
 
 `same_displayed_basis` is the common preview/confirmation comparison: complete
 rendered source fields, all responses and people, typed seen/CAS data and protection.
@@ -416,7 +435,7 @@ rejected by the domain CAS. The receipt worker owns execution after commit.
 Replay requires the original journal row to remain under lock; deletion cannot
 convert replay into a fresh operation. Decision text remains unsubmitted until
 a separate complete preview and explicit confirmation. Capture can borrow only
-an active same-store writer. Result delivery and chat installation remain pending.
+an active same-store writer.
 
 `work_input_previews.py` publishes complete input-owned decision confirmations and
 fresh reviews for retained changes notes. Its V4 source ties every SDK send to the
@@ -428,7 +447,7 @@ must settle first. Pending, uncertain or completed actions from the same input
 prevent another intent. Captured inbox delivery dependencies retain these views.
 Confirmation admission locks and rechecks the original input proof; restart or
 caller text cannot replace it. Back restores the complete request and its choices
-without applying an action. These components remain dormant until controller wiring.
+without applying an action. These components remain until controller wiring.
 
 `work_retained_drafts.py` owns explicit Edit note and Discard for a V4 review note.
 Both recheck the whole acknowledged group and original input, refuse unresolved
@@ -506,7 +525,7 @@ complete Telegram ACK. Collected outbox history cannot republish an acknowledged
 phase; pending deliveries retain their action through cleanup. Obsolete unsent
 plans can be replaced while their captured input remains unfinished.
 
-This planner and source remain uninstalled. Completed routing uses a closed V2
+Completed routing uses a closed V2
 edit proof tied to the original command's acknowledged selection, message and
 protection. The final SDK check and ACK settlement recheck that proof. Protection
 upgrades use a new protected reply and clear the previous keyboard, including
@@ -562,11 +581,11 @@ the new preview or claiming delivery. Completed and uncertain operations retain
 their receipt and retry handling.
 Per-link tasks share eight slots,
 so a held link cannot drop another link's tick. The worker owns and drains all
-tasks across stop/cancellation and fences publication after shutdown. These components remain uninstalled until the full controller wiring.
+tasks across stop/cancellation and fences publication after shutdown. The runtime installs these components together.
 
 `work_callbacks.py` is an optional dispatcher for acknowledged previews, typing
 prompts, confirmations, routing, Show and explicit Retry. The adapter consults it
-only when a collaborator is installed; the supervisor does not install it yet.
+only when a collaborator is installed; the runtime owns that installation.
 It reserves the existing immutable operation before checking it, and lets canonical
 outcome planning own result replies. A result-read failure after saving an action
 is deferred to receipt observation, never reported as a failed save. Preview-only
@@ -623,8 +642,8 @@ ordinary input cannot switch into a new Work prompt. An admitted decision owns
 recovery until its receipt outcome is delivered, so resuming its source input
 cannot create another confirmation. No model run or Work activation is started.
 
-This owner and its startup recovery are not installed by the supervisor yet.
-Untied last-question text and voice/files remain separate required input flows.
+The runtime installs this owner and startup recovery. Untied last-question
+text and voice/files have separate input owners.
 
 
 Input-owned navigation settles a V4 decision's original input on Back or Add a
@@ -683,8 +702,7 @@ and explicit navigation clear that implicit guard; a later explicit reply still
 identifies the old prompt. Detached spent-card contexts never replace an active
 typing prompt. Unsettled choices retain the original prompt context through
 cleanup. Reopened V3 delivery rechecks the actual held input, consumed Reopen
-choice, acknowledged notice, and current Work/Space authority at dispatch. The
-supervisor does not install these controllers.
+choice, acknowledged notice, and current Work/Space authority at dispatch. The runtime installs these controllers.
 
 Completed decision/review comments can use outcome V5: the canonical response
 receipt owns a complete current request and fresh controls in the same delivered
@@ -717,8 +735,7 @@ It checks the exact sending claim, complete original question, retained input an
 canonical choices in the final joined account/grant snapshot. Compact callback
 facts avoid repeating full outbox JSON. Admission preserves the original input
 snapshot through its own writes, rejects finished input and compares JSON types
-strictly. Receipt-only replay does not repeat an unknown response. These optional
-controllers remain uninstalled until notification and lifecycle integration.
+strictly. Receipt-only replay does not repeat an unknown response. The runtime installs these controllers after startup recovery.
 
 `work_voice_inputs.py` captures an actual quoted card or shown typing prompt
 before transcription. Ordinary clarification keeps priority over an unquoted
@@ -742,7 +759,7 @@ offers existing closed-input choices. Overlong transcripts remain complete and
 offer reentry or a new-message choice without weakening the Work text limit.
 Those multipart recovery choices also require every transcript part's ACK.
 Send as new reclassifies the existing voice audit as a message. These optional
-controllers remain dormant until supervisor integration.
+controllers remain until supervisor integration.
 
 Consent and transcript recovery notices keep their original destination after
 a missing-topic response. The ordinary failed-delivery journal and Retry delivery
@@ -856,10 +873,10 @@ Native transfer also checks the whole acknowledged choice group and presentation
 Reopen's source proof ties all settled members to the original request and fresh
 prompt; the collector still recognizes their retained Work ownership after any
 choice. The single-file recovery path refuses group roots. All Work controllers
-remain dormant; notification production and lifecycle installation remain pending.
+are installed by the runtime after the startup ownership check.
 
 
-Colleague news remains dormant. `work_news.py` renders complete escaped
+`work_news.py` renders complete escaped
 statements and optional notes; its first line contains only product words and
 bounded navigation names/titles. Protected teasers contain no assignment or
 colleague details. Presentation alone grants no delivery authority: generic
@@ -895,8 +912,7 @@ canonical response command, operation, actor, purpose and request/assignment
 revision, including supplied disposition and every saved source. Management
 comments and unsupplied responses cannot become answer news. The original
 requester gets one silent notice; the responder is excluded. Open assignment
-is a web link only when no attempt is unresolved, rechecked in the final snapshot. Other news kinds
-and installation remain pending.
+is a web link only when no attempt is unresolved, rechecked in the final snapshot.
 
 
 `work_stop_news.py` qualifies colleague Stop, edit and withdrawal notifications
@@ -911,8 +927,7 @@ of immutable provenance even after a later attempt starts.
 day label otherwise. `NewsClock` prepares ZoneInfo off-loop and reads its injected
 clock at each source/provider snapshot, so crossing midnight or changing the
 timezone defers the old presentation for refresh. Untimed edit/withdrawal notices
-leave preference drift to the ordinary final settings fence. These sources remain
-dormant pending installation; progress/status messages are separate.
+leave preference drift to the ordinary final settings fence. Progress/status messages use separate source owners.
 
 `work_proposal_news.py` qualifies a derived assignment's exact source Work,
 attempt and activation, including its original requester and agent principal.
@@ -923,7 +938,7 @@ Open assignment on the web and Not now. Protected proposals first offer Show.
 Not now consumes only the exact fully acknowledged proposal group and queues
 durable keyboard cleanup in the same guarded transaction. It does not modify,
 withdraw or start Work, and it can clear an old proposal after Work changes.
-An already consumed group cannot repeat dismissal. These owners remain dormant.
+An already consumed group cannot repeat dismissal. These owners are installed by the runtime.
 
 `work_resume_reminders.py` reuses the canonical information-answer receipt and
 targets its answerer. It requires the same answered blocker and assignment with
@@ -934,7 +949,7 @@ quiet hours plus an enabled summary retire unsolicited delivery as `quiet-hours`
 an explicit protected Show is still served. Resumed or changed Work retires as
 `resumed`. The source-owned sender preserves these closed skip reasons under its
 exact claim fence. Refresh/Show history keeps the original reminder class, and
-the only navigation is a web assignment link. Installation remains pending.
+the only navigation is a web assignment link.
 
 `work_attempt_notices.py` qualifies failed, contained, service-restarted and
 no-result settlements against their explicit attempt and activation. Current
@@ -962,7 +977,7 @@ snapshot. Current `threads:read` permits the original conversation link;
 lose both. The nonactionable excerpt is clipped to 600 characters at a word
 boundary; protected previews conceal it until Show. Attention projections that
 need optional route ceilings run their checks after provider resolution against
-a fresh joined snapshot. Installation remains pending.
+a fresh joined snapshot.
 
 `work_question_updates.py` qualifies closure facts independently of request
 actability. Answer updates require the exact supplied information response and
@@ -983,7 +998,7 @@ terminal footer. Missing edit targets retire instead of creating endless copies.
 Display changes refresh a flat presentation history; canonical event changes
 retire. Explicit repair accepts only a held known refresh failure with no claim.
 Pending intents and updates retain their original and moved message evidence.
-This owner remains uninstalled until notification integration is complete.
+The notification runtime installs this owner.
 
 `work_status.py` reads one admitted attempt through its original activation,
 canonical progress/question events and terminal settlement. Retained run metadata
@@ -1009,8 +1024,7 @@ refresh and known missing-target repair retain a flat presentation history.
 Current authority and immutable source evidence are checked after provider waits.
 A late locale change preserves delivery for refresh, while revoked access or
 changed source retires it. Retention keeps original and moved presentations while
-the attempt or an update remains unresolved. These owners remain dormant pending
-supervisor installation.
+the attempt or an update remains unresolved. The runtime installs these owners.
 
 `work_status_pins.py` owns a durable, serialized pin ledger for each status root.
 Every operation binds an exact complete acknowledged presentation and its first
@@ -1026,7 +1040,7 @@ Bot-authored pin service messages are deleted through ingress only when the ledg
 proves their pinned target, with fresh checks inside the SDK limiter. Retention
 uses the same closed, typed ledger and presentation receipts; a row's `sent` state
 alone never proves cleanup. Pin operations and all referenced presentations stay
-retained until exact cleanup is acknowledged. Installation remains deferred.
+retained until exact cleanup is acknowledged.
 
 `work_digest_items.DigestItems` publishes question, decision, review, routing,
 colleague-news and completed-result full previews
@@ -1050,7 +1064,7 @@ previews reuse family renderers and media ledgers; final SDK admission and nativ
 file reads compose current family authority with the complete original digest proof.
 Pending previews retain navigation evidence without extending callback usability.
 Optional `work_digest_items` callback dispatch preserves per-query dedupe and leaves
-reusable digest controls intact. Supervisor installation remains separate work.
+reusable digest controls intact.
 
 
 `summary.sections` ranks a complete `AttentionReader.collect` result before
@@ -1078,10 +1092,9 @@ a Show teaser on the wire. Exact complete receipts are required before controls
 activate. An ACK for a manifest changed during the SDK await retains the actual
 wire proof as a held conflict, including after retention sweeps. Prior summary
 cutoffs require a valid persisted plan, with JSON versions compared as text to
-avoid PostgreSQL conversion failures. These owners remain uninstalled; summary navigation, refresh and
-scheduler integration must be qualified before activation.
+avoid PostgreSQL conversion failures. Summary navigation, refresh and scheduling share the installed runtime.
 
-The dormant `summary_scheduler.SummaryScheduler` pages connected healthy
+The `summary_scheduler.SummaryScheduler` pages connected healthy
 instance links and delegates to the source-owned planner. It consults the same
 availability gate before storage and between links; final publication checks
 that gate again after asynchronous source preparation. A denied source defers
@@ -1095,8 +1108,7 @@ presentation history. A changed complete selection, locale or protection never
 reuses stale buttons. A selection that becomes empty closes without a send.
 The final combined source/claim/group/settings checks surround replacement;
 held repair additionally fences the exact failure disposition and cannot take
-an active claim. SDK-manifest conflicts remain quarantined. Summary navigation
-and runtime installation are still separate requirements.
+an active claim. SDK-manifest conflicts remain quarantined. The runtime composes summary navigation with these recovery owners.
 
 `summary_navigation.py` and `summary_views.py` own explicit Show on a protected
 summary. The original daily receipt stays intact; a separate protected reply
@@ -1105,8 +1117,7 @@ source and consumed Show proof. Reply visibility does not depend on whether
 future daily summaries are enabled. New item controls retain the original age
 and remain pending until the complete exact ACK. Pending views retain their
 origin through callback and outbox sweeps without making expired controls
-usable. Optional callback ingress is available, but view refresh/relocation,
-item navigation and supervisor installation remain required follow-ups.
+usable. The runtime installs callback ingress, view refresh/relocation and item navigation.
 
 `summary_view_recovery.py` refreshes a queued Show against the complete current
 source while retaining its original daily cutoff, Show proof and callback age.
@@ -1123,8 +1134,7 @@ selects existing question/decision/review owners from a typed navigation target.
 Current summary selection, canonical request, acknowledged parent/Show, original
 control age and exact reusable callback are checked in one provider-final read.
 Review media keeps the existing result identity, export guards and receipt ledger.
-Navigation recovery retains that same origin and age. These optional owners remain
-uninstalled until the supervisor integration is qualified.
+Navigation recovery retains that same origin and age. The runtime installs these owners.
 
 `message_settings.py` owns closed preference values, quiet-time parsing and the
 English/Chinese forms. `message_settings_commands.py` is an optional chat owner;
@@ -1137,3 +1147,18 @@ summary-off edits have separate source owners and must be installed with the pag
 Preference mutations compose exact delivered-control custody with the final publication account and connection snapshot. Typed ACK IDs and original callback age remain required through commit; no source SQL follows the final lifetime check.
 
 `settings_prompts.py` optionally owns custom quiet-hour ForceReply prompts. Only the actual source-qualified ACK exposes the prompt. Plain answers retain the original prompt identity before the atomic settings writer; interrupted capture recovers to explicit closed-prompt choices. Reopening discards the held answer and requires a fresh response. Typed `off` is invalid: disabling quiet hours is a saved menu choice. Joined publication projections fence account, binding, prompt and input custody; final SDK admission and ACK retain prompt ownership. The existing input recovery owner invokes this optional handler before ordinary restart messages.
+
+`rejected_notices.py` prepares one service notice per rejected bot/token revision through another healthy same-owner/account bot. Prefer ordinary chat; otherwise use the most recently active unprotected eligible link. The owner settings lock serializes deduplication across recipients. Final publication and SDK snapshots bind the rejected source and recipient authority; repaired/replaced credentials supersede delivery. This optional planner is installed with the proactive sender.
+
+`summary_preferences.py` optionally handles the acknowledged summary Stop control.
+The person's shared preference, consumed Stop control, settings Act and required
+edit commit together. The edit retains the original summary and other callback
+IDs; navigation still checks their original age, ACK and current source. Both
+ordinary summaries and protected Show views retain their original protection.
+Historical summary text stays historical when Work changes. Stopping only needs
+the current account and original control ownership. Full-body delivery separately
+requires current Inspect permission; if that permission is lost, persist a one-way
+redaction before a plain off confirmation clears the private body and controls.
+The committed settings receipt, account, claim and controls are checked at the SDK
+boundary; the admitted edit drains cancellation.
+A missing edit target is superseded without sending a new summary.

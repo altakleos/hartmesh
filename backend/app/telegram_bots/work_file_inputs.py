@@ -9,6 +9,7 @@ from app.telegram_bots.inbox import InboxRow
 from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_actions import same_body, thaw
 from app.telegram_bots.work_input_capture import _TEXT
+from app.telegram_bots.work_input_lifetime import input_current
 from deerflow.agent_instances.contract import AgentConflict
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramInboundMarkRow
 from deerflow.utils.file_io import await_drained
@@ -221,17 +222,18 @@ class WorkFileInputs:
             captured = InboxRow.from_row(mark)
         return await self.resume(channel, captured)
 
-    async def resume(self, channel, origin):
-        return await await_drained(self._resume(channel, origin))
+    async def resume(self, channel, origin, *, recovery_guard=None):
+        return await await_drained(self._resume(channel, origin, recovery_guard=recovery_guard))
 
-    async def _resume(self, channel, origin):
+    async def _resume(self, channel, origin, *, recovery_guard=None):
         link = deepcopy(channel.link)
-        guard = self.services.commands._guard(channel, link)
+        guard = recovery_guard or self.services.commands._guard(channel, link)
         async with self.services.callbacks.writer(link, guard) as writer:
             mark = (await self.inbox._rows(writer, [origin]))[0]
             self.inbox._current(link, mark)
             album = mark.route_kind == "work_file_album" or "work_album" in mark.route_basis or "work_album_recovery" in mark.route_basis
-            if not album and mark.route_kind != "work_file_new" and (mark.route_kind != "work_input" or mark.route_basis.get("work_input", {}).get("version") != 4):
+            held_file = mark.route_kind == "work_card_hold" and mark.sanitized_input.get("type") == "media"
+            if not album and not held_file and mark.route_kind != "work_file_new" and (mark.route_kind != "work_input" or mark.route_basis.get("work_input", {}).get("version") != 4):
                 return False
             if mark.route_complete:
                 return True
@@ -253,12 +255,12 @@ class WorkFileInputs:
         if "work_album_recovery" in captured.route_basis:
             from app.telegram_bots.work_album_recovery import WorkAlbumRecovery
 
-            await WorkAlbumRecovery(self).offer(channel, captured)
+            await WorkAlbumRecovery(self).offer(channel, captured, recovery_guard=guard)
             return True
         if album:
             from app.telegram_bots.work_album_answers import WorkAlbumAnswers
 
-            return await WorkAlbumAnswers(self).submit(channel, captured, recover=True)
+            return await WorkAlbumAnswers(self).submit(channel, captured, recover=True, recovery_guard=guard)
 
         if captured.route_kind == "work_file_new":
             from app.telegram_bots.work_file_handoff import recover_file_message
@@ -266,7 +268,7 @@ class WorkFileInputs:
             return await recover_file_message(self.inputs.callbacks.closed, channel, link, captured, guard=guard)
 
         async def perform():
-            source = captured.route_basis["work_input"]["source_outbox_id"]
+            source = captured.route_basis["source_outbox_id"] if held_file else captured.route_basis["work_input"]["source_outbox_id"]
             try:
                 return await self._apply(channel, link, captured, source, guard, recover=True)
             except (CallbackRefused, ProductSourceRetired, AgentConflict):
@@ -281,17 +283,17 @@ class WorkFileInputs:
         if "work_action_id" not in captured.route_basis:
             for file in captured.route_basis["work_input"]["files"]:
                 if recover:
-                    receipt = await self.services.file_puts.reconcile_input(link, captured, thaw(file), origins=None, authority=self.services.authority, current=lambda: channel._callback_current(link))
+                    receipt = await self.services.file_puts.reconcile_input(link, captured, thaw(file), origins=None, authority=self.services.authority, current=lambda: input_current(channel, link, guard))
                 else:
                     receipt = await channel._own_instance_file(link, captured, thaw(file))
                 if receipt.state != "done":
                     from app.telegram_bots.file_outcomes import FileOutcomes
 
-                    await FileOutcomes(self.services).plan(channel, link, captured, thaw(file))
+                    await FileOutcomes(self.services).plan(channel, link, captured, thaw(file), current=lambda: input_current(channel, link, guard))
                     return True
         staged = await self.cards.stage(link, captured, guard=guard)
         if staged.attempts == 0:
-            await self.inputs.callbacks.acts.check(staged.id, expected={"id": staged.id, "kind": staged.kind, "body": staged.body, "attempts": staged.attempts}, attempt_current=lambda: channel._callback_current(link))
+            await self.inputs.callbacks.acts.check(staged.id, expected={"id": staged.id, "kind": staged.kind, "body": staged.body, "attempts": staged.attempts}, attempt_current=lambda: input_current(channel, link, guard))
         else:
             await self.inputs.callbacks.acts.reconcile_receipt(staged.id)
         await self.inputs.callbacks._observe(link, staged.id, guard=guard)

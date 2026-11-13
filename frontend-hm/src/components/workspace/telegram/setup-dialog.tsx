@@ -50,6 +50,7 @@ import {
   instanceConnectBlock,
   type InstanceConnectBlock,
 } from "@/core/telegram-bots/instance-state";
+import { MESSAGE_SETTINGS_SHOWN } from "@/core/telegram-bots/rows";
 import {
   liveConnectOf,
   rowOf,
@@ -682,6 +683,17 @@ function DoneScreen({
           >
             {strings.setup.done.change}
           </Button>
+        </p>
+      ) : null}
+      {firstBot &&
+      settings &&
+      MESSAGE_SETTINGS_SHOWN &&
+      settings.quiet_enabled ? (
+        <p className="text-muted-foreground text-sm">
+          {strings.setup.done.quiet({
+            start: settings.quiet_start,
+            end: settings.quiet_end,
+          })}
         </p>
       ) : null}
       {bot.profile_synced ? null : (

@@ -273,7 +273,9 @@ async def test_actual_startup_retires_epoch_before_any_held_release(db, monkeypa
 
     async def release(poll):
         assert events[-1] == "epoch_retired"
-        assert not boot.supervisor.send_allowed()
+        assert boot.supervisor.send_allowed()
+        assert boot.supervisor.notifications.ingress_ready
+        assert not boot.supervisor._pending_ingress()
         events.append("held_release")
         return await original_release(poll)
 

@@ -390,6 +390,11 @@ class TelegramAuthority:
                 or not await self._connection_matches(current)
             ):
                 return DeliveryEligibility.skip("link-not-connected")
+            from app.telegram_bots.rejected_notices import eligibility as rejected_eligibility
+
+            rejected = await rejected_eligibility(self, current, item)
+            if rejected is not None:
+                return rejected
             policy = await self.instance_policy(current)
             if policy == "off":
                 return DeliveryEligibility.skip("policy-off")

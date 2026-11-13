@@ -770,12 +770,14 @@ describe("the set-up dialog", () => {
     await screen.findByText(
       /Bot messages are in English; times are in Europe\/Lisbon\./,
     );
+    expect(screen.getByText(/without sound from 21:00 to 07:00/)).toBeTruthy();
     cleanup();
     clearClients();
 
     start({ list: () => listOf([bot()], { settings }) });
     await screen.findByText("HartMesh is on Telegram");
     expect(screen.queryByText(/Bot messages are in/)).toBeNull();
+    expect(screen.queryByText(/without sound from 21:00 to 07:00/)).toBeNull();
   });
 
   it("Change opens the settings over the page the dialog was opened on", async () => {

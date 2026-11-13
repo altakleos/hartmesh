@@ -12,6 +12,7 @@ from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_actions import thaw
 from app.telegram_bots.work_album_inputs import album_context
 from app.telegram_bots.work_file_albums import album_manifest
+from app.telegram_bots.work_input_lifetime import input_current
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
 from deerflow.utils.file_io import await_drained
@@ -21,25 +22,25 @@ class WorkAlbumAnswers:
     def __init__(self, files):
         self.files, self.services, self.cards, self.inbox = files, files.services, files.cards, files.inbox
 
-    async def submit(self, channel, origin, *, recover=False):
+    async def submit(self, channel, origin, *, recover=False, recovery_guard=None):
         from app.telegram_bots.work_album_recovery import WorkAlbumRecovery
 
         async def perform():
             try:
-                return await self._submit(channel, origin, recover=recover)
+                return await self._submit(channel, origin, recover=recover, recovery_guard=recovery_guard)
             except ValidationError:
-                await WorkAlbumRecovery(self.files).offer(channel, origin, too_long=True)
+                await WorkAlbumRecovery(self.files).offer(channel, origin, too_long=True, recovery_guard=recovery_guard)
                 return True
             except (CallbackRefused, ProductSourceRetired, AgentConflict, AgentDenied):
-                await WorkAlbumRecovery(self.files).offer(channel, origin)
+                await WorkAlbumRecovery(self.files).offer(channel, origin, recovery_guard=recovery_guard)
                 return True
 
         return await await_drained(perform())
 
-    async def _submit(self, channel, origin, *, recover=False):
+    async def _submit(self, channel, origin, *, recover=False, recovery_guard=None):
         async def perform():
             link = deepcopy(channel.link)
-            guard = self.services.commands._guard(channel, link)
+            guard = recovery_guard or self.services.commands._guard(channel, link)
             async with self.services.callbacks.writer(link, guard) as writer:
                 mark = (await self.inbox._rows(writer, [origin]))[0]
                 self.inbox._current(link, mark)
@@ -71,17 +72,17 @@ class WorkAlbumAnswers:
                     member = indexed[identity]
                     file = thaw(member.sanitized_input["files"][0])
                     if recover:
-                        receipt = await self.services.file_puts.reconcile_input(link, member, file, origins=None, authority=self.services.authority, current=lambda: channel._callback_current(link))
+                        receipt = await self.services.file_puts.reconcile_input(link, member, file, origins=None, authority=self.services.authority, current=lambda: input_current(channel, link, guard))
                     else:
                         receipt = await channel._own_instance_file(link, member, file)
                     if receipt.state != "done":
                         complete = False
-                        await FileOutcomes(self.services).plan(channel, link, member, file)
+                        await FileOutcomes(self.services).plan(channel, link, member, file, current=lambda: input_current(channel, link, guard))
                 if not complete:
                     return True
             staged = await self.cards.stage(link, captured, guard=guard)
             if staged.attempts == 0:
-                await self.files.inputs.callbacks.acts.check(staged.id, expected={"id": staged.id, "kind": staged.kind, "body": staged.body, "attempts": staged.attempts}, attempt_current=lambda: channel._callback_current(link))
+                await self.files.inputs.callbacks.acts.check(staged.id, expected={"id": staged.id, "kind": staged.kind, "body": staged.body, "attempts": staged.attempts}, attempt_current=lambda: input_current(channel, link, guard))
             else:
                 await self.files.inputs.callbacks.acts.reconcile_receipt(staged.id)
             await self.files.inputs.callbacks._observe(link, staged.id, guard=guard)

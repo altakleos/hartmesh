@@ -2004,104 +2004,33 @@ and obsolete lists retire without delaying later replies. The ordinary bot offer
 chats without starting an assignment. Existing bots receive the updated command
 menu at their next start.
 
-Work notifications, question routing and confirmation controls are still in
-preparation and are not enabled in Telegram. Optional single-file and album answers save files once and name them in the
-acknowledgement without starting work. Album collection retains every member
-before choosing its destination, including across restarts. Closed or ambiguous
-albums retain every member for explicit recovery choices. Reopen asks for a new
-answer; Send as new preserves the files and captions; Discard settles the group.
-Controller activation remains outstanding. A binding-scoped event baseline
-foundation preserves unread Work revisions across restarts without replaying
-history from before connection or restoration. Its catch-up primitive commits
-delivery writes with each cursor, rotates across bots and assignments, and holds
-incomplete history for repair. Recipient intents use canonical response and
-attempt identities, preserve routing revisions, and wait for a rendered delivery
-plan. Information and decision questions can now retain that delivery identity
-through rendering, recheck the original event before sending, and enable buttons
-only after complete delivery. Protected questions wait for Show; decisions wait
-for their attempt to finish or the bounded hold to expire. Manager routing notices
-retain the explanation for an unanswered question and offer current eligible
-recipients, including after protected Show. Other notification
-rendering and startup integration remain outstanding. Result-file export preparation
-checks the original outcome and the recipient's current file permissions.
-Initial review-file delivery keeps files before the complete card, preserves
-acknowledged files through card retries, and waits for the whole delivery before
-enabling controls. Protected result Show clears its teaser button before sending
-protected files and a new card. A changed review resumes unfinished files and
-refreshes the card without uploading acknowledged files again, including after
-a language or file-access change. Explicit repair of cards in General preserves
-delivered files. File-failure links open the conversation that produced the
-result; unavailable-file warnings omit the link. Review-ready event plans use
-this same file/card sequence and recheck the original event before delivery.
-Result notifications without review controls also have a delivery foundation:
-the complete outcome and any suggestion follow its files, protected results wait
-for Show, and a waiting-review notice stays silent after Show. Each notice checks
-the actual event, recipient, outcome and suggestion before sending. Result-notice
-refresh preserves delivered files. Colleague notices also have delivery, protected
-Show and recovery foundations, including answers and stopped attempts. Proposed
-assignments show their complete objective and completion criteria, with Open
-assignment on the web and Not now to clear the buttons without changing Work.
-Interruption and failure notices use the recorded attempt and reason, with
-protected previews and access-qualified links to the original conversation.
-A no-result notice includes a short excerpt only when the exact attempt's
-output can be verified and the recipient can read it.
-Question-update delivery follows web answers, assessments, routing and withdrawal.
-It removes the original controls, preserves the question text, and prevents a
-delayed update from overwriting a newer closure. Protected replacements move the
-message target only after Telegram acknowledges them.
-Status-message foundations read the exact attempt and its current progress,
-question or completion. Initial delivery is silent, protected previews wait for
-Show, and Show reads current status. Updates coalesce at most every 30 seconds,
-preserve complete progress text, and replace deleted messages only after current
-access checks. A replacement becomes the target after Telegram acknowledges all
-its parts. Silent pins follow the acknowledged status message and are removed
-when work ends. A replacement moves the pin only after complete delivery;
-pin failures preserve the status text and never start or stop work.
-These workers remain uninstalled; remaining notification forms and startup
-integration are still pending.
-Digest preparation keeps essential and optional news separate and preserves sound
-when any member needs it. Prepared delivery checks every member's current source
-and access, and marks the batch delivered only after acknowledgement. English/Chinese
-navigation and protected count-only previews remain uninstalled pending item handling
-and startup integration.
-Background recovery preserves newer
-request previews. Complete first-tap previews now have
-a durable delivery boundary that waits for the entire message before enabling controls
-or typing prompts. Confirmed choices also have durable, single-operation admission
-for recovery after a restart. Temporarily refused confirmations can rebuild a
-changed review before a new confirmation, while uncertain actions retain their
-original operation. Changes in workspace readiness alone do not invalidate the
-review the person saw. Typed notes can retain their original displayed review
-across a restart before any submission. Unchanged answers and change requests
-can then enter the durable action journal using those original revisions.
-The routing foundation can also attach recipient choices directly to a manager’s
-saved “wrong person” reply, with a separate operation for passing the question on.
-Those replies can refresh changed recipient choices without resubmitting the response.
-Their original input remains available while live choices or pending refreshes need it.
-An optional callback dispatcher connects previews, confirmations and routing to
-those durable operations. Explicit Retry keeps the original operation and body;
-duplicate presses of one shown retry do not start another attempt. Preview
-buttons remain available after a temporary read failure. A temporary storage
-refusal keeps its buttons and waits for another tap on the same saved action.
-Changed review
-confirmations show the complete current review before offering fresh controls;
-routing choices refresh when a selected person loses access. Optional prompt-text
-routing saves answers and unchanged changes notes once, retains changed review
-notes for confirmation, and previews typed decisions before an explicit tap.
-Retained review notes keep their original 24-hour deadline across refreshes.
-Edit note and Discard retire the old confirmation without submitting it.
-Back and Add a note on a typed decision also retire its old input, so recovery
-cannot reopen the superseded confirmation.
-Further review changes preserve the retained text for a fresh complete preview
-and another explicit confirmation. Unknown operations keep their original journal.
-An unsubmitted note whose review closes can show a replacement review for another
-explicit confirmation, or retire its old controls with a closed notice.
-The same recovery follows a conclusively rejected save; it preserves the original
-operation and never repeats a save whose result remains unknown.
-A direct-card input foundation captures explicitly quoted Work-card text and
-admits one answer or comment with its original revision. Controller installation
-and comment-card refresh remain pending.
-Assignments continue to be managed on the web.
+Connected AI assistants and AI employees can now message you when a question,
+result or problem needs your attention. Reply to questions, review complete
+results and files, decide, accept results, request changes, or pass a question to
+an eligible colleague. Decisions and acceptance require explicit confirmation;
+answering a question never starts or resumes an assignment. Start, Resume and
+Stop for assignments remain on the web.
+
+Notifications follow current access and the employee's Telegram policy. Protected
+notifications reveal their details only after Show, and their files remain
+protected. Digests combine related notices, progress messages follow the current
+attempt, and optional morning summaries show completed work and items waiting
+for you. A summary with nothing to report sends no message.
+
+In Channels settings or a bot's `/settings`, choose which unsolicited messages
+arrive, quiet hours and morning summaries. These preferences apply to all your
+bots; quiet hours make messages silent, with the recent-chat exception, rather
+than holding them back. Replies to your own messages still arrive. Mute an
+individual chat in Telegram to silence that bot.
+
+Saved answers, files, albums and review notes retain their original operation
+across interruptions. Changed or closed questions offer explicit recovery
+choices instead of submitting old text to another question. Delivery Retry
+rechecks the original source and current access; acknowledged files are retained
+when a card needs replacement. The first notification-enabled startup establishes
+a baseline without announcing old questions or results. Later restarts preserve
+unread events and pending delivery. The first summary can include questions
+that still need you, subject to your preferences and current access.
 
 Instance site-permission cards require current Manage access when planned, sent
 and answered. Withdrawing Manage keeps an unsent card from appearing and prevents

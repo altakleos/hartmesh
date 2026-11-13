@@ -109,10 +109,10 @@ class WorkAlbumRecovery:
         self.closed = files.inputs.callbacks.closed
         self.callbacks = self.services.callbacks
 
-    async def offer(self, channel, origin, *, too_long=False):
+    async def offer(self, channel, origin, *, too_long=False, recovery_guard=None):
         async def perform():
             link = deepcopy(channel.link)
-            guard = self.services.commands._guard(channel, link)
+            guard = recovery_guard or self.services.commands._guard(channel, link)
             async with self.callbacks.writer(link, guard) as writer:
                 marks = await cohort(self.inbox, writer, link, origin)
                 if "work_album_recovery" in marks[0].route_basis:

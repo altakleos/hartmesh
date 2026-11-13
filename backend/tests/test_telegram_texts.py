@@ -23,7 +23,7 @@ STAGE_ONE_KEYS = frozenset(
     clarify.other_prompt clarify.form_field clarify.form_yes clarify.form_no clarify.form_done clarify.form_review clarify.form_answer
     net.ask_plain net.allowed net.kept net.cancelled net.stale new.confirm_plain new.done new.kept new.in_topic new.files_full
     cmd.unknown cmd.agent cmd.skill_off cmd.skill_unavailable cmd.skill_failed stranger.waiting error.model_refused settings.state_basic link.conflict
-    link.conflict_over.plain link.conflict_over.chat link.conflict_over.custom_agent link.limited link.back_online link.removed access.off
+    link.conflict_over.plain link.conflict_over.chat link.conflict_over.agent link.conflict_over.custom_agent link.limited link.back_online link.removed access.off
     access.back custom_agent.deleted unavailable.ask_admin unavailable.next unavailable.reference
     stale.other_person stale.not_waiting tap.failed form.required delivery.failed delivery.gone prompt.closed prompt.unavailable
     prompt.discarded profile.name.chat profile.short.chat profile.short.custom_agent
@@ -79,7 +79,7 @@ WORK_NEWS_KEYS |= frozenset(
 WORK_NEWS_FIRST_KEYS |= frozenset("interrupted interrupted.title_not_started attempt.failed attempt.failed.other attempt.stopped_restart attempt.no_result attempt.no_result_excerpt".split())
 WORK_NEWS_FIRST_KEYS |= frozenset("status.starting status.working status.waiting_you status.waiting_answer status.checking status.stopping status.stopped status.finished status.ended".split())
 WORK_NEWS_KEYS |= WORK_NEWS_FIRST_KEYS | {"concealed.progress"}
-WORK_NEWS_FIRST_KEYS |= {"digest.header", "digest.header_news"}
+WORK_NEWS_FIRST_KEYS |= {"digest.header", "digest.header_news", "link.token_rejected_other"}
 WORK_NEWS_KEYS |= WORK_NEWS_FIRST_KEYS | set("concealed.digest concealed.digest_news summary.item.question summary.item.decision summary.item.review summary.button.question summary.button.decision summary.button.review".split())
 
 WORK_NEWS_KEYS |= frozenset(
@@ -139,7 +139,9 @@ def test_localized_templates_keep_the_same_placeholders_and_current_commands():
     for locale in ("en", "zh-CN"):
         for key in ("hello.chat", "help.chat"):
             assert "/assistants" in catalog(locale)[key] and "/employees" in catalog(locale)[key]
-    assert "- /settings sets the language" in catalog("en")["help.chat"]
+    assert "- /settings sets when your AI assistants and AI employees may message you, and the language" in catalog("en")["help.chat"]
+    assert "writes here first" in catalog("en")["help.agent"]
+    assert "Deciding, accepting and allowing" in catalog("en")["link.conflict_over.agent"]
     for locale in ("en", "zh-CN"):
         for key in ("help.agent", "help.custom_agent"):
             assert "/assistants" not in catalog(locale)[key] and "/employees" not in catalog(locale)[key]
@@ -158,7 +160,20 @@ def test_alert_texts_fit_200_characters():
 
 def test_first_keys_are_exact_fixed_notice_subset():
     assert FIRST_KEYS == WORK_NEWS_FIRST_KEYS | POLICY_KEYS | {"ask.info", "ask.decision", "review.ready", "result.done", "result.waiting_review"} | frozenset(
-        {"agent.deleted", "hello.privacy", "link.conflict", "link.conflict_over.plain", "link.conflict_over.chat", "link.conflict_over.custom_agent", "link.back_online", "link.removed", "access.off", "access.back", "delivery.failed"}
+        {
+            "agent.deleted",
+            "hello.privacy",
+            "link.conflict",
+            "link.conflict_over.plain",
+            "link.conflict_over.chat",
+            "link.conflict_over.agent",
+            "link.conflict_over.custom_agent",
+            "link.back_online",
+            "link.removed",
+            "access.off",
+            "access.back",
+            "delivery.failed",
+        }
     )
 
 

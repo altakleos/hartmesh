@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
-import { cleanup, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import type { ReactNode } from "react";
 
 rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
@@ -58,7 +64,9 @@ function start(answer: () => Response) {
     "PUT /api/telegram-bots/settings": answer,
   });
   rs.mocked(fetch).mockImplementation(handle);
-  renderWithClient(<TelegramSettingsBlock settings={settings} />);
+  renderWithClient(
+    <TelegramSettingsBlock settings={settings} showMessageSettings />,
+  );
   return calls;
 }
 
@@ -129,4 +137,79 @@ describe("the settings block", () => {
     expect(timeZonesWith("Old/Zone")[0]).toBe("Old/Zone");
     expect(timeZonesWith("Asia/Tokyo")).toContain("Asia/Tokyo");
   });
+});
+
+describe("message preferences", () => {
+  it("saves notification and both switches using only the changed field", async () => {
+    const calls = start(() => json(settings));
+    selects.change.get("all")?.("questions");
+    await waitFor(() => expect(calls).toHaveLength(1));
+    fireEvent.click(screen.getByRole("switch", { name: "Quiet hours" }));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    fireEvent.click(screen.getByRole("switch", { name: "Morning summary" }));
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls.map(({ body }) => body)).toEqual([
+      { notify: "questions" },
+      { quiet_enabled: false },
+      { summary_enabled: false },
+    ]);
+  });
+
+  it("saves a time on blur and refuses equal quiet times without a request", async () => {
+    const calls = start(() => json(settings));
+    const from = screen.getByLabelText("From");
+    fireEvent.change(from, { target: { value: "07:00" } });
+    fireEvent.blur(from);
+    await screen.findByText("The two times must differ.");
+    expect(calls).toHaveLength(0);
+    fireEvent.change(from, { target: { value: "22:30" } });
+    expect(calls).toHaveLength(0);
+    fireEvent.blur(from);
+    await waitFor(() =>
+      expect(calls.map(({ body }) => body)).toEqual([{ quiet_start: "22:30" }]),
+    );
+  });
+
+  it("restores a refused time and shows the fixed invalid-time sentence", async () => {
+    start(() => json({ reason: "invalid-time" }, 400));
+    const at = screen.getByLabelText<HTMLInputElement>("At");
+    fireEvent.change(at, { target: { value: "09:15" } });
+    fireEvent.blur(at);
+    await screen.findByText("Use a time like 21:00.");
+    await waitFor(() => expect(at.value).toBe("08:00"));
+  });
+
+  it("hides proactive settings when the caller disables them", () => {
+    renderWithClient(
+      <TelegramSettingsBlock settings={settings} showMessageSettings={false} />,
+    );
+    expect(screen.queryByRole("switch")).toBeNull();
+    expect(selects.change.has("all")).toBe(false);
+  });
+});
+
+it("retires an admitted settings save with its account-owned block", async () => {
+  let release!: (response: Response) => void;
+  let signal: AbortSignal | null | undefined;
+  rs.mocked(fetch).mockImplementation((_url, init) => {
+    signal = init?.signal;
+    return new Promise((resolve) => {
+      release = resolve;
+    });
+  });
+  const view = renderWithClient(
+    <TelegramSettingsBlock settings={settings} showMessageSettings />,
+  );
+  selects.change.get("all")?.("none");
+  await waitFor(() => expect(signal).toBeTruthy());
+  view.unmount();
+  expect(signal?.aborted).toBe(true);
+  renderWithClient(
+    <TelegramSettingsBlock settings={settings} showMessageSettings />,
+  );
+  await act(async () => {
+    release(json({ ...settings, notify: "none" }));
+  });
+  expect(shown()).toContain("all");
+  expect(screen.queryByText("Saved.")).toBeNull();
 });

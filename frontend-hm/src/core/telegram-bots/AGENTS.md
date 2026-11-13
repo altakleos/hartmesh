@@ -89,3 +89,9 @@ page’s general execution/Home-busy disabling. The Settings list and setup
 share current availability; Done skips targets whose fresh detail refuses Connect.
 Setup faults supersede Done, while healthy connected rows retain it. Token calls
 own component/account cancellation and drop results after Use or policy retirement. Initial bot-list failure shows a failure sentence, not endless loading.
+
+Message preferences are enabled by `MESSAGE_SETTINGS_SHOWN`. Settings saves send
+only the changed field; time inputs save on blur and reject equal quiet times.
+Per-field pending state prevents duplicate edits, and account/role retirement
+aborts owned requests and drops late results. First-bot Done shows stored quiet
+hours. Assignment execution controls remain on the web.

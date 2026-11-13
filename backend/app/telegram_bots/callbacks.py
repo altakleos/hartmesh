@@ -1001,6 +1001,24 @@ class CallbackRepository:
                     except ProductSourceRetired:
                         continue
                     show_proofs.add(identity)
+                # A completed Stop is still part of the immutable group used by
+                # the remaining summary item controls; keep proof, never renew age.
+                live_groups = {row.group_id for row in rows if row.consumed_at is None}
+                for candidate in rows:
+                    if candidate.kind != "summary_off" or candidate.closed_reason != "done" or candidate.consumed_at is None:
+                        continue
+                    if _aware(now) - _aware(candidate.created_at) >= timedelta(days=self.config.callbacks.max_age_days):
+                        continue
+                    if candidate.group_id not in live_groups:
+                        continue
+                    anchor = await session.get(TelegramOutboxRow, candidate.payload.get("anchor_outbox_id"))
+                    if anchor is None or not {"summary_basis", "summary_view_basis"}.intersection(anchor.payload):
+                        continue
+                    if (anchor.link_id, anchor.binding_generation, anchor.chat_id) != (candidate.link_id, candidate.binding_generation, candidate.chat_id):
+                        continue
+                    if not any(part.get("callback_group_id") == candidate.group_id for part in anchor.parts):
+                        continue
+                    show_proofs.add(candidate.id)
                 removed = 0
                 for row in rows:
                     if row.id in show_proofs:

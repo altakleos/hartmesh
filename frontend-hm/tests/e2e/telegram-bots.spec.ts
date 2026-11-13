@@ -602,6 +602,46 @@ test.describe("Telegram bots", () => {
     expect(state.calls.at(-1)?.body).toEqual({ locale: "zh-CN" });
   });
 
+  test("the three message settings are saved", async ({ page }) => {
+    const state = await mockTelegram(page, {
+      bots: [bot()],
+      settings: SETTINGS,
+      answers: { "PUT /settings": () => [200, SETTINGS] },
+    });
+    await page.goto(DEEP_LINK);
+    await page
+      .getByRole("combobox", { name: strings.prefs.notify.label })
+      .click();
+    await page
+      .getByRole("option", { name: strings.prefs.notify.questions })
+      .click();
+    await expect
+      .poll(() =>
+        state.calls
+          .filter((call) => call.method === "PUT")
+          .map((call) => call.body),
+      )
+      .toContainEqual({ notify: "questions" });
+    await page.getByRole("switch", { name: strings.prefs.quiet.label }).click();
+    await expect
+      .poll(() =>
+        state.calls
+          .filter((call) => call.method === "PUT")
+          .map((call) => call.body),
+      )
+      .toContainEqual({ quiet_enabled: false });
+    await page
+      .getByRole("switch", { name: strings.prefs.summary.label })
+      .click();
+    await expect
+      .poll(() =>
+        state.calls
+          .filter((call) => call.method === "PUT")
+          .map((call) => call.body),
+      )
+      .toContainEqual({ summary_enabled: false });
+  });
+
   test("an answer that offered a page shows the link, and the link opens the page", async ({
     page,
   }) => {

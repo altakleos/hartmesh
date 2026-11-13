@@ -270,6 +270,9 @@ class CallbackCommands:
             return await self._new(channel, link, row, guard)
         keyboard = await self._web_keyboard(link) if row.kind == "web_list" else []
         await prepare_publication_guard(guard)
+        retries = getattr(self.services, "notification_retries", None)
+        if row.kind == "delivery_retry" and retries is not None and await retries.execute(link, row, guard=guard):
+            return
         result = await await_drained(self._execute_local(link, row, guard, keyboard, query_id))
         if row.kind == "web_list":
             guard.current()

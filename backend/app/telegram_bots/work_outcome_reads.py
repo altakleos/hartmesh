@@ -111,6 +111,7 @@ class _OutcomeProjection:
             .correlate(act)
             .exists()
         )
+        self.file_evidence_column = len(query.column_descriptions) + 8
         return (
             query.add_columns(act, work, request, event, attempt, effect, supervisor.email, recipient.email, self.file_answer.expression() if self.file_answer else literal(None).label("work_file_evidence"))
             .join(act, act.id == self.act.id)
@@ -132,7 +133,7 @@ class _OutcomeProjection:
             raise ProductSourceRetired()
 
         if self.file_answer is not None:
-            self.file_answer.check(rows[0]._mapping["work_file_evidence"])
+            self.file_answer.check(rows[0][self.file_evidence_column])
         bot, target, permissions, policy = rows[0][:4]
         saved, work, request, event, attempt, effect = rows[0][8:14]
         self.supervisor, self.recipient = rows[0][14:16]

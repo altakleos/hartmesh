@@ -451,8 +451,9 @@ class WorkActionMethods:
 class ActsWorker:
     """Retry only admitted Work service calls; settings/network/files stay owned."""
 
-    def __init__(self, acts):
+    def __init__(self, acts, *, available=lambda: True):
         self.acts = acts
+        self.available = available
         self._task = None
         self._stopping = False
 
@@ -462,7 +463,7 @@ class ActsWorker:
             await await_drained(self._task)
 
     async def tick(self):
-        if self._stopping or self._task is not None:
+        if self._stopping or self._task is not None or not self.available():
             return
         task = self._task = asyncio.create_task(self._tick())
         try:
@@ -477,6 +478,8 @@ class ActsWorker:
     async def _tick(self):
         from app.telegram_bots.acts import _utc
 
+        if not self.available():
+            return
         now = self.acts.outbox.clock()
         async with self.acts.session_factory() as reader:
             ids = list(
@@ -488,11 +491,11 @@ class ActsWorker:
                 )
             )
         for identity in ids:
-            if self._stopping:
+            if self._stopping or not self.available():
                 break
             if identity in self.acts._work_active:
                 continue
             async with self.acts._work_serial(identity):
                 act = await self.acts._work_record(identity)
                 if now - _utc(act.updated_at) >= timedelta(seconds=self.acts.outbox.config.acts.retry_seconds):
-                    await await_drained(self.acts._attempt_work(act, attempt_current=lambda: not self._stopping))
+                    await await_drained(self.acts._attempt_work(act, attempt_current=lambda: not self._stopping and self.available()))

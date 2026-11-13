@@ -1,6 +1,7 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "link.token_rejected_other": "{name} 的机器人已停止。\nTelegram 不再接受该机器人的令牌。请在网页版 {product} 中粘贴新令牌。",
     "settings.state": "{body}",
     "settings.overview": "AI 助手和 AI 员工会主动通知你：{value}。\n{quiet}\n晨间摘要时间 {time}：{enabled}。\n语言：{language}。\n这些设置适用于你与所有 AI 助手和 AI 员工的聊天。时区可在 {product} 网页端更改。",
     "settings.quiet_on": "免打扰时间：{start} 至 {end}（{zone}）。这段时间的消息不会发出声音，除非你在过去 30 分钟内在该聊天中发过消息或点击过按钮。",
@@ -171,7 +172,18 @@ TEXTS: dict[str, str] = {
         "me} 不会自行开始任何事。像与同事交流一样向 {name} 提问，或说说需要做什么。你在此发送的文件会交给 {name}。\n\n{name}"
         " 是 AI，可能出错。采取行动前请核实相关信息。"
     ),
-    "help.agent": "{name} 是 AI 助理：{role}。\n{role_description}\n\n在此聊天中：\n- 发消息，或发送文件、照片或语音消息\n- /new 开始新对话\n- /stop 停止正在进行的事\n- /settings 设置语言\n\n{name} 不会自行开始任何事。",
+    "help.agent": (
+        "{name} 是 AI 助理：{role}。\n"
+        "{role_description}\n"
+        "\n"
+        "在此聊天中：\n"
+        "- 发消息，或发送文件、照片或语音消息\n"
+        "- /new 开始新对话\n"
+        "- /stop 停止正在进行的事\n"
+        "- /settings 设置此聊天何时可以主动发消息，以及语言\n"
+        "\n"
+        "{name} 不会自行开始任何事，但有问题、结果或故障需要你处理时，会主动在这里发消息。"
+    ),
     "privacy.company": "有权查看 {name} 全部工作的人，可以在 {product} 中阅读此对话。你发送的文件保存在 {name} 的文件中，有权查看 {name} 全部工作的人都可以打开。",
     "privacy.protected": "{name} 的管理者已关闭此聊天的转发和保存功能。{name} 主动发送的消息需要点按“显示”才能查看详情。",
     "profile.short.agent": "AI 助理。私人聊天：只回答连接此机器人的人。",
@@ -317,6 +329,7 @@ TEXTS: dict[str, str] = {
     "settings.state_basic": "机器人的按钮和通知使用{language}。回答会使用你输入的语言。",
     "link.conflict": "此聊天已暂停。\n另一个程序正在使用此机器人，消息可能遗漏。如果不是你在使用，请更换机器人令牌：在 BotFather 中发送 /revoke，然后在 {product} 网页版粘贴新令牌。",
     "link.conflict_over.plain": "此聊天已恢复。",
+    "link.conflict_over.agent": "此聊天已恢复。\n作出决定、接受结果和允许访问被阻止网站的操作仍暂停，直到你更换令牌或在 {product} 网页上确认另一个程序是你的。",
     "link.conflict_over.chat": "此聊天已恢复。\n此机器人仍暂停允许访问被阻止的网站，直到你更换令牌，或在 {product} 网页版确认另一个程序是你在使用。",
     "link.conflict_over.custom_agent": "此聊天已恢复。\n此机器人仍暂停允许访问被阻止的网站，直到你更换令牌，或在 {product} 网页版确认另一个程序是你在使用。",
     "link.limited": "自其他程序使用此机器人后，此操作已暂停。请打开 {product} 网页版，更换令牌或确认是你在使用。",
@@ -398,7 +411,7 @@ TEXTS: dict[str, str] = {
     "menu.employees": "你可以聊天的 AI 员工",
     "menu.new": "开始新对话",
     "menu.stop": "停止当前回答",
-    "menu.settings": "语言",
+    "menu.settings": "消息和语言",
     "menu.help": "此聊天能做什么",
 }
 
@@ -427,9 +440,9 @@ FORMS.update(
             )
         },
         "help.agent": {
-            "company": "{name} 是 AI 员工：{role}。\n{role_description}\n\n在此聊天中：\n- 发消息，或发送文件、照片或语音消息\n- /new 开始新对话\n- /stop 停止正在进行的事\n- /settings 设置语言\n\n{name} 不会自行开始任何事。",
-            "no_voice": "{name} 是 AI 助理：{role}。\n{role_description}\n\n在此聊天中：\n- 发消息，或发送文件、照片\n- /new 开始新对话\n- /stop 停止正在进行的事\n- /settings 设置语言\n\n{name} 不会自行开始任何事。",
-            "company.no_voice": "{name} 是 AI 员工：{role}。\n{role_description}\n\n在此聊天中：\n- 发消息，或发送文件、照片\n- /new 开始新对话\n- /stop 停止正在进行的事\n- /settings 设置语言\n\n{name} 不会自行开始任何事。",
+            "company": TEXTS["help.agent"].replace("AI 助理", "AI 员工"),
+            "no_voice": TEXTS["help.agent"].replace("、照片或语音消息", "、照片"),
+            "company.no_voice": TEXTS["help.agent"].replace("AI 助理", "AI 员工").replace("、照片或语音消息", "、照片"),
         },
         "profile.short.agent": {"company": "AI 员工。私人聊天：只回答连接此机器人的人。"},
         "profile.description.agent": {"company": "{name} 是 AI 员工。此聊天只回答连接此机器人的人。\n\n如果这是你的机器人，请在网页版应用中使用“打开聊天”按钮，然后按“开始”。"},
