@@ -61,7 +61,7 @@ def execution_notice(act, *, original=None, dispatch=None):
     elif act.kind == "stop":
         if act.state == "done":
             if original is not None and original.get("status") in {"succeeded", "failed", "cancelled"} and original.get("settled_at"):
-                return ExecutionNotice("status.stopped" if original["status"] == "cancelled" else "status.ended")
+                return ExecutionNotice("status.stopped" if original["status"] == "cancelled" else "status.ended", preview=True)
             if dispatch is not None and dispatch.get("state") == "ended":
                 return ExecutionNotice("stop.unconfirmed")
             if dispatch is None or dispatch.get("state") == "uncertain":

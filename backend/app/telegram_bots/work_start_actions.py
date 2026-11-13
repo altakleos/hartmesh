@@ -152,7 +152,13 @@ class ActivationActionMethods:
                 return await self._work_record(act.id)
             if receipt is not None:
                 return await self._complete_activation(act, receipt)
-        if act.cancel_requested_at is not None or act.state in {"done", "conflict", "refused"} or act.state == "waiting" and act.reason == "work-limit":
+        held = act.state in {"conflict", "refused"} or act.state == "waiting" and act.reason == "work-limit"
+        if held and explicit and act.cancel_requested_at is None:
+            # A refused exact replay can leave an original runless reservation.
+            # Explicit recovery may complete only that same stored operation;
+            # ordinary refusals and capacity waits never become new launches.
+            held = not await WorkExecution(self.work).activation_exists(act.work_id, act.id)
+        if act.cancel_requested_at is not None or act.state == "done" or held:
             return act
         now = self.outbox.clock()
         if act.state == "waiting" and act.reason == "busy" and now - act.first_attempt_at >= timedelta(seconds=self.outbox.config.queue.max_wait_seconds):
@@ -208,7 +214,7 @@ class ActivationActionMethods:
         else:
             return await self._complete_activation(act, result)
 
-    async def cancel_activation(self, act_id):
+    async def cancel_activation(self, act_id, *, admission=None):
         """Fence future attempts without waiting for an in-flight provider call."""
 
         async def perform():
@@ -230,6 +236,8 @@ class ActivationActionMethods:
                 saved = await writer.get(TelegramActRow, act.id, with_for_update=True, populate_existing=True)
                 if saved is None or any(getattr(saved, key) != getattr(act, key) for key in _ACT_SCOPE) or not same_body(saved.body, act.body):
                     raise ValueError("act-source-conflict")
+                if admission is not None:
+                    await admission(writer, None)
                 if saved.state != "done" and saved.cancel_requested_at is None:
                     saved.cancel_requested_at = saved.updated_at = self.outbox.clock()
                     conclusive = not reserved and saved.attempts == act.attempts and (not saved.attempts or saved.state in {"waiting", "refused", "conflict"})
@@ -237,6 +245,8 @@ class ActivationActionMethods:
                     await writer.flush()
                 result = _snapshot(saved)
                 await owner(act.owner_user_id, writer)
+                if admission is not None:
+                    await admission(writer, result)
             # Only observe. Even a runless exact reservation must never be
             # handed back to the launching helper after this fence.
             receipt = await self.receipt_for(result)

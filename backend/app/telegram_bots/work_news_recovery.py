@@ -152,9 +152,15 @@ class WorkNewsRecovery:
 
         return await await_drained(perform())
 
-    async def _replace(self, writer, link, row, source, settings, origin, *, reveal=None, repair=False, navigation_origin=None):
+    async def _replace(self, writer, link, row, source, settings, origin, *, reveal=None, repair=False, navigation_origin=None, direct_edit=False, unclaimed=False):
         from app.telegram_bots.work_news_delivery import conceal_news, frozen_news, recipes, require_teaser
         from app.telegram_bots.work_request_source import require_show
+
+        if direct_edit and source.key not in {"execution.activate", "execution.stop"}:
+            raise ProductSourceRetired()
+        resumable_skip = unclaimed and row.state == "skipped" and row.skip_reason == "superseded"
+        if unclaimed and (source.key not in {"execution.activate", "execution.stop"} or row.state not in {"pending", "sent"} and not resumable_skip or any(getattr(row, key) is not None for key in ("claim_owner", "claim_id", "claimed_at"))):
+            raise ProductSourceRetired()
 
         saved = row.payload.get("work_news_basis", {}).get("navigation_origin")
         if saved is not None or navigation_origin is not None:
@@ -167,12 +173,21 @@ class WorkNewsRecovery:
         item = _item(row)
         version = item.payload["presentation_version"]
         current = [part for part in row.parts if part["presentation_version"] == version]
-        selected = next((part for part in current if part["state"] == ("pending" if repair else "sending")), current[-1] if row.state == "sent" else None)
+        selected = next((part for part in current if part["state"] == ("sending" if resumable_skip else "pending" if repair or unclaimed else "sending")), current[-1] if row.state == "sent" else None)
         if selected is None or repair and not self._repairable(row):
             raise ProductSourceRetired()
-        basis, previous, _part = frozen_news(SimpleNamespace(link=link, item=item, part=selected), acknowledged=selected["state"] == "sent", pending=repair)
+        basis, previous, _part = frozen_news(SimpleNamespace(link=link, item=item, part=selected), acknowledged=selected["state"] == "sent", pending=repair or unclaimed and selected["state"] == "pending")
         if not same_news_origin(previous, source):
             raise ProductSourceRetired()
+        direct_anchor = None
+        if source.key in {"execution.activate", "execution.stop"}:
+            if direct_edit and row.state == "sent" and len(current) == 1:
+                direct_anchor = current[0]
+            elif basis.get("direct_edit") is not None:
+                target = basis["direct_edit"]
+                direct_anchor = next((part for part in row.parts if part["part_id"] == target["part_id"] and part["presentation_version"] == target["version"]), None)
+                if direct_anchor is None or direct_anchor["state"] != "sent":
+                    raise ProductSourceRetired()
         reveal_id = reveal.id if reveal else basis.get("reveal")
         proof = await writer.get(TelegramCallbackRow, reveal_id, with_for_update=True, populate_existing=True) if reveal_id else None
         if reveal_id:
@@ -216,8 +231,18 @@ class WorkNewsRecovery:
         if reveal and len(fresh) == 1:
             fresh[0].update(kind="edit", target_message_id=reveal.message_id, target_protect_content=current[-1]["protect_content"])
             fresh_basis["edit_target"], fresh_basis["cleanup_id"] = current[-1]["part_id"], None
+        elif direct_anchor is not None and len(fresh) == 1 and direct_anchor["protect_content"] is source.protected:
+            fresh[0].update(kind="edit", target_message_id=direct_anchor["message_ids"][0], target_protect_content=direct_anchor["protect_content"])
+            fresh_basis["direct_edit"], fresh_basis["cleanup_id"] = {"version": direct_anchor["presentation_version"], "part_id": direct_anchor["part_id"]}, None
         else:
             candidates = [control for control in controls if control.message_id is not None]
+            if direct_anchor is not None and direct_anchor.get("callback_group_id"):
+                from app.telegram_bots.work_view_origins import acknowledged_view
+
+                original = acknowledged_view(link, row, direct_anchor["presentation_version"])
+                old_controls = list(await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == direct_anchor["callback_group_id"])))
+                _validate_rows(original, old_controls)
+                candidates.extend(old_controls)
             if proof is not None and fresh_basis["cleanup_id"] is None:
                 candidates.append(proof)
             cleaned = set()

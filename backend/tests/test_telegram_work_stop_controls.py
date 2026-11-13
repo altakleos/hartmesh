@@ -20,7 +20,10 @@ async def stop_control(e):
     attempt_id, captured, manager = await seeded_attempt(e)
     plans, _ = await prepare_view(e)
     await dispatch(e, 3701)
-    button = await selected(e, "work_details")
+    from deerflow.persistence.telegram_bots.model import TelegramCallbackRow
+
+    async with e.db.sessions() as reader:
+        button = await reader.scalar(select(TelegramCallbackRow).where(TelegramCallbackRow.kind == "work_details", TelegramCallbackRow.target_id == e.work["id"]))
     e.identity = await plans.open(e.link, button.id, query_id="stop-preview", chat_id=e.link.chat_id, message_id=3701, message_thread_id=None, guard=await guard_for(e))
     await dispatch(e, 3702)
     stop = await selected(e, "stop_attempt")

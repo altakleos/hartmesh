@@ -28,7 +28,11 @@ from deerflow.utils.file_io import await_drained
 
 
 def recipes(source, basis, identity, link):
-    if source.key in {"view.list", "view.detail"}:
+    if source.key in {"execution.activate", "execution.stop"}:
+        from app.telegram_bots.work_execution_text import present_execution
+
+        view = present_execution(source, basis, link)
+    elif source.key in {"view.list", "view.detail"}:
         from app.telegram_bots.work_view_sources import present_view
 
         view = present_view(source, basis, link)
@@ -62,7 +66,7 @@ def recipes(source, basis, identity, link):
 
 def conceal_news(source):
     """Only a current source-qualified chat activation bypasses its teaser."""
-    return source.protected and source.key not in {"view.list", "view.detail"} and not (source.key.startswith("status.") and source.work.get("activation_act_id"))
+    return source.protected and source.key not in {"view.list", "view.detail", "execution.activate", "execution.stop"} and not (source.key.startswith("status.") and source.work.get("activation_act_id"))
 
 
 def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
@@ -75,6 +79,7 @@ def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
             != {"version", "source", "locale", "concealed", "public_base_url", "parts", "keyboard"}
             | ({"reveal", "cleanup_id", "origin"} if basis.get("version") == 2 else {"reveal", "cleanup_id", "history", "teaser_version", "edit_target"} if basis.get("version") == 3 else set())
             | ({"navigation_origin"} if basis.get("version") in {1, 3} and "navigation_origin" in basis else set())
+            | ({"direct_edit"} if basis.get("version") == 3 and "direct_edit" in basis else set())
             or type(basis["version"]) is not int
             or basis["version"] not in {1, 2, 3}
         ):
@@ -162,8 +167,25 @@ def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
                 raise ValueError()
         teaser_version = basis.get("teaser_version", 0)
         teasers = [part for part in historical if part["presentation_version"] == teaser_version]
-        edit = version and (basis["version"] == 2 and len(expected) == 1 or basis.get("edit_target") is not None)
-        if edit and (len(teasers) != 1 or teasers[0]["state"] != "sent" or basis["version"] == 3 and basis["edit_target"] != teasers[0]["part_id"]):
+        direct = basis.get("direct_edit")
+        if "direct_edit" in basis:
+            if (
+                source.key not in {"execution.activate", "execution.stop"}
+                or reveal is not None
+                or navigation is not None
+                or basis["concealed"]
+                or type(direct) is not dict
+                or set(direct) != {"version", "part_id"}
+                or type(direct["version"]) is not int
+                or not 0 <= direct["version"] < version
+                or basis["cleanup_id"] is not None
+            ):
+                raise ValueError()
+            teasers = [part for part in historical if part["presentation_version"] == direct["version"]]
+            if len(expected) != 1 or len(teasers) != 1 or teasers[0]["state"] != "sent" or teasers[0]["part_id"] != direct["part_id"] or teasers[0]["protect_content"] is not source.protected:
+                raise ValueError()
+        edit = version and (basis["version"] == 2 and len(expected) == 1 or basis.get("edit_target") is not None or direct is not None)
+        if edit and (len(teasers) != 1 or teasers[0]["state"] != "sent" or basis["version"] == 3 and direct is None and basis["edit_target"] != teasers[0]["part_id"]):
             raise ValueError()
         metadata = {
             "part_id",

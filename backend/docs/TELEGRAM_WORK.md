@@ -1363,3 +1363,54 @@ receipt remains uncertain. Successful activation retains the existing canonical
 status root. English and Chinese copy includes configured wait-duration labels.
 These controllers and pure wording choices remain dormant until runtime wiring;
 they do not change the public command menu or claim delivery of own-action replies.
+
+
+## Own execution replies and recovery
+
+`WorkExecutionPlans` keeps one WorkNews reply per admitted Start or Stop. Its
+versioned intent captures the original full ACK and topic. Receipt observation
+never invokes commands, launch or physical cancellation; unreadable receipts
+preserve the saved journal for the final source check. A successful Start keeps
+the canonical attempt status root, closing obsolete own controls only after any
+in-flight SDK claim has retained its acknowledgement. Pending recovery keeps
+already acknowledged Cancel/Retry controls. An unsent presentation retired during
+an intermediate pending phase can rematerialize under the same original intent.
+
+`WorkExecutionReader` reuses the canonical detail/permission projection, then
+joins the exact Act, original control group and historical ACK, original attempt,
+effective Stop child and service event in the final provider-qualified read.
+Full bot/person/chat/generation/topic scope precedes receipt authority. Neither
+saved Work result objects nor candidate/file references enter its presentation.
+The immutable Stop receipt proof is shared with retention; original terminal
+state plus settlement and the captured run binding qualify Stopped/Ended.
+
+A queued Start's Cancel binds the whole shown reply and exact current Act body
+in the cancellation-fence writer. Historical replay reads that same fence;
+provider waits cannot turn old consent into cancellation of another body. A
+receipt fault after a durable fence does not lose its reply. Explicit Retry
+checks the full shown action and attempt/effective-dispatch counters before
+reusing its body and operation ID under current rights. A refused replay may
+finish an existing original runless reservation only on explicit recovery;
+known refusals and Work-capacity waits never become automatic launches.
+
+Fresh Start/Resume controls in a refusal or settled Stop reply follow a complete
+current assignment preview. The callback source validates that preview instead
+of treating the earlier short notice as consent. Waiting copy reads the actual
+activation worker's current configured interval. English and Chinese rendering
+reuse the complete-preview and protected-content rules.
+
+WorkNews direct edits carry the exact historical acknowledged part, message and
+protection proof. A source refresh or repair preserves that destination; when
+shape or protection changes require replacement, the original keyboard cleanup
+retains its validated anchor. No observation clears an active delivery claim.
+
+`execution_dependencies` retains the own reply, original group/ACK, and complete
+Act/Stop-child group while either execution settlement or delivery is unresolved.
+Original activation closure is shared with Start reservation retention and
+remains independent of expired callbacks; displayed revision and marker checks
+still belong to `closed_start`. These pins never renew callback age. Complete,
+settled receipts expire under the existing retention policy.
+
+The runtime must still install these owners and their observer, dispatch and
+repair routes. Public command/menu activation, capacity offers and remaining
+assignment workflows are separate integration work.

@@ -464,6 +464,20 @@ class WorkActionMethods(StopActionMethods, ActivationActionMethods):
                 if expected is not None:
                     if expected["id"] != current.id or expected["kind"] != current.kind or not same_body(expected["body"], current.body) or type(expected["attempts"]) is not int:
                         raise ValueError("work-retry-body-changed")
+                    if any(key in expected and getattr(current, key) != expected[key] for key in _ACT_SCOPE):
+                        raise ValueError("work-retry-scope-changed")
+                    if current.kind == "stop" and "effective" in expected:
+                        effective = current
+                        if expected["effective"]["id"] != current.id:
+                            children = await self._stop_children(current)
+                            effective = next((child for child in children if child.id == expected["effective"]["id"]), None)
+                        if (
+                            effective is None
+                            or not same_body(effective.body, expected["effective"]["body"])
+                            or not same_body(effective.stop_dispatch, expected["effective"]["stop_dispatch"])
+                            or effective.attempts != expected["effective"]["attempts"]
+                        ):
+                            return await self._reconcile_stop_receipt(current)
                     if expected["attempts"] != current.attempts:
                         if current.kind == "stop":
                             return await self._reconcile_stop_receipt(current)

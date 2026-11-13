@@ -15,7 +15,8 @@ from deerflow.utils.file_io import await_drained
 def displayed_start(link, parent, callback):
     original = acknowledged_view(link, parent, callback.payload.get("presentation_version"))
     source = original.payload["work_news_basis"]["source"]
-    if source["key"] != "view.detail" or callback.kind != "work_start" or callback.target_kind != "work":
+    preview = source["key"] in {"execution.activate", "execution.stop"} and source.get("work", {}).get("notice", {}).get("preview") is True
+    if (source["key"] != "view.detail" and not preview) or callback.kind != "work_start" or callback.target_kind != "work":
         raise CallbackRefused()
     detail = source["work"]["detail"]["record"]
     if (callback.target_id, callback.payload.get("work_id"), callback.payload.get("assignment_revision")) != (detail["id"], detail["id"], detail["assignment_revision"]) or type(callback.payload.get("assignment_revision")) is not int:

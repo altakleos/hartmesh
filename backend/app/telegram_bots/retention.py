@@ -149,6 +149,10 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
 
     _groups, start_anchors = await reserved_starts(session)
     pinned.update(start_anchors)
+    from app.telegram_bots.work_execution_retention import execution_dependencies
+
+    _execution_groups, execution_anchors, _execution_acts = await execution_dependencies(session)
+    pinned.update(execution_anchors)
     anchors: set[str] = set()
     callback = TelegramCallbackRow
     for row in await session.execute(select(callback.link_id, callback.binding_generation, callback.target_kind, callback.target_id, callback.payload, callback.expires_at, callback.consumed_at, callback.created_at)):
@@ -198,6 +202,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int)
     navigation_anchor = func.coalesce(
         *(delivery.payload[family]["navigation_origin"]["anchor_outbox_id"].as_string() for family in ("work_request_basis", "work_news_basis", "result_notice_basis")),
         delivery.payload["work_view_intent"]["origin"]["anchor_outbox_id"].as_string(),
+        delivery.payload["work_execution_intent"]["origin"]["anchor_outbox_id"].as_string(),
     )
     view_parent = func.coalesce(delivery.payload["summary_stop_basis"]["anchor_id"].as_string(), delivery.payload["work_digest_view_basis"]["parent_id"].as_string(), delivery.payload["summary_view_basis"]["parent_id"].as_string())
     # Compact dependency edges preserve complete digests behind live controls.
@@ -335,10 +340,14 @@ async def _sweep_acts(sessions, now):
                 delivery.link_id == TelegramActRow.link_id,
                 delivery.binding_generation == TelegramActRow.binding_generation,
                 delivery.state.in_(("pending", "sending", "failed")),
-                delivery.payload["work_outcome_basis"]["context"]["act"]["id"].as_string() == TelegramActRow.id,
+                or_(delivery.payload["work_outcome_basis"]["context"]["act"]["id"].as_string() == TelegramActRow.id, delivery.payload["work_execution_intent"]["act_id"].as_string() == TelegramActRow.id),
             )
             .exists()
         )
+        from app.telegram_bots.work_execution_retention import execution_dependencies
+
+        _execution_groups, _execution_anchors, execution_acts = await execution_dependencies(session)
+        pending_outcome = or_(pending_outcome, TelegramActRow.id.in_(sorted(execution_acts)))
         expired = (~pending_outcome, TelegramActRow.created_at < now - timedelta(days=ACT_RETENTION_DAYS), TelegramActRow.state.in_(_SETTLED_ACTS), TelegramActRow.stop_dispatch.is_(None))
         ordinary = await session.execute(delete(TelegramActRow).where(*expired, TelegramActRow.kind.not_in(("file_put", "stop", "activate")), TelegramActRow.continuation.is_(None)))
         mark = TelegramInboundMarkRow
