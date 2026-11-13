@@ -43,6 +43,11 @@ async def ended(e, kind, *, reason=None):
 @pytest.mark.parametrize("kind,first", [("attempt.no_result", "Ended without a result:"), ("attempt.failed", "Failed:"), ("attempt.stopped_restart", "Stopped:"), ("interrupted", "Interrupted:")])
 async def test_attempt_notice_delivers_from_actual_terminal_work_event(work_delivery, kind, first):
     e = work_delivery
+    from deerflow.persistence.telegram_bots.model import TelegramPersonSettingsRow
+
+    # This case asserts audible delivery, independently of the runner's hour.
+    async with e.db.sessions.begin() as writer:
+        (await writer.get(TelegramPersonSettingsRow, e.link.owner_user_id)).quiet_enabled = False
     e.live.config.model_extra["telegram_bots"] = {"public_base_url": "https://app.example.test"}
     item = await ended(e, kind)
     await prepare(e, item=item)

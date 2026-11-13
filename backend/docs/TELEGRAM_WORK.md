@@ -1125,3 +1125,15 @@ control age and exact reusable callback are checked in one provider-final read.
 Review media keeps the existing result identity, export guards and receipt ledger.
 Navigation recovery retains that same origin and age. These optional owners remain
 uninstalled until the supervisor integration is qualified.
+
+`message_settings.py` owns closed preference values, quiet-time parsing and the
+English/Chinese forms. `message_settings_commands.py` is an optional chat owner;
+its pages and preset choices share the existing settings Act transaction. A choice
+commits one preference, original receipt, consumed group and required edit together.
+Only language changes mark all the person's bot profiles owed. Legacy language-only
+commands remain until this owner is installed. Custom-hours prompt admission and
+summary-off edits have separate source owners and must be installed with the pages.
+
+Preference mutations compose exact delivered-control custody with the final publication account and connection snapshot. Typed ACK IDs and original callback age remain required through commit; no source SQL follows the final lifetime check.
+
+`settings_prompts.py` optionally owns custom quiet-hour ForceReply prompts. Only the actual source-qualified ACK exposes the prompt. Plain answers retain the original prompt identity before the atomic settings writer; interrupted capture recovers to explicit closed-prompt choices. Reopening discards the held answer and requires a fresh response. Typed `off` is invalid: disabling quiet hours is a saved menu choice. Joined publication projections fence account, binding, prompt and input custody; final SDK admission and ACK retain prompt ownership. The existing input recovery owner invokes this optional handler before ordinary restart messages.

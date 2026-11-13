@@ -1,6 +1,36 @@
 """English fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "settings.state": "{body}",
+    "settings.overview": (
+        "Your AI assistants and AI employees write first about: {value}.\n"
+        "{quiet}\n"
+        "Morning summary at {time}: {enabled}.\n"
+        "Language: {language}.\n"
+        "These settings apply to all your chats with AI assistants and AI employees. The time zone is changed in {product} on the web."
+    ),
+    "settings.quiet_on": "Quiet hours: {start} to {end}, {zone} time. In those hours messages arrive without sound, unless you wrote or tapped in that chat in the last 30 minutes.",
+    "settings.quiet_off": "Quiet hours: off.",
+    "settings.notify_all": "questions, results and problems",
+    "settings.notify_questions": "only questions that need you",
+    "settings.notify_none": "nothing",
+    "settings.on": "on",
+    "settings.off": "Off",
+    "settings.label_notify": "Messages first",
+    "settings.label_quiet": "Quiet hours",
+    "settings.label_summary": "Summary",
+    "settings.label_locale": "Language",
+    "settings.label_questions": "Only questions",
+    "settings.label_none": "Nothing",
+    "settings.other_hours": "Other hours",
+    "settings.messages_choose": "What your AI assistants and AI employees may write to you about first. An answer to your own message always arrives.",
+    "settings.messages_questions": "Only questions, decisions and reviews that need you are sent first. Results and problems wait in {product} on the web.",
+    "settings.messages_off": "No question, result or problem is sent first. Questions wait in {product} on the web until you look.",
+    "settings.quiet_choose": "In quiet hours, messages arrive without sound. A message still sounds when you wrote or tapped in that chat in the last 30 minutes.",
+    "settings.quiet_prompt": "Send the hours like this: 22:30-06:30",
+    "settings.quiet_bad": "That was not understood. Send two different times like this: 22:30-06:30",
+    "settings.summary_choose": "The morning summary says what each of your AI assistants and AI employees did and what waits for you. Each sends one, without sound, and none on a day with nothing to say.",
+    "settings.language_choose": "The language of this chat’s fixed texts. Answers follow the language you write in.",
     "summary.header": "Good morning. Since yesterday {time}:",
     "summary.finished": 'Finished: "{objective}"',
     "summary.working": 'Working on: "{objective}"',

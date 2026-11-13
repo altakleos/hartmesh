@@ -272,7 +272,13 @@ class _PublicationGuard:
 
         return await await_drained(self._check(writer))
 
-    async def _check(self, writer: AsyncSession) -> BotLink:
+    async def check_projection(self, writer: AsyncSession, projection) -> BotLink:
+        """Compose metadata custody into the final account/binding snapshot."""
+        from deerflow.utils.file_io import await_drained
+
+        return await await_drained(self._check(writer, projection=projection))
+
+    async def _check(self, writer: AsyncSession, *, projection=None) -> BotLink:
         captured = self._captured
         bind = self.repository.session_factory.kw.get("bind")
         if bind is None or not writer.in_transaction() or not writer.is_active or writer.get_bind() is not getattr(bind, "sync_engine", bind):
@@ -308,6 +314,31 @@ class _PublicationGuard:
             raise ValueError("publication-stale") from None
         detached = BotLink.from_row(row)
         await self._live_owner(captured.owner_user_id, writer)
+        if projection is not None:
+            from deerflow.persistence.user.access import DisabledIdentityRow
+            from deerflow.persistence.user.model import UserRow
+
+            query = (
+                select(TelegramBotLinkRow, TelegramAccountRow, ChannelConnectionRow, UserRow, DisabledIdentityRow)
+                .join(TelegramAccountRow, TelegramAccountRow.telegram_user_id == TelegramBotLinkRow.telegram_user_id)
+                .join(ChannelConnectionRow, ChannelConnectionRow.id == TelegramBotLinkRow.connection_id)
+                .join(UserRow, UserRow.id == TelegramBotLinkRow.owner_user_id)
+                .outerjoin(DisabledIdentityRow, or_(DisabledIdentityRow.subject == UserRow.id, DisabledIdentityRow.subject == UserRow.oauth_id))
+                .where(TelegramBotLinkRow.id == captured.id)
+            )
+            facts = (await writer.execute(projection.extend(query).execution_options(populate_existing=True))).all()
+            if not facts:
+                raise ValueError("publication-stale")
+            current, account, connection, user = facts[0][:4]
+            if (
+                any(getattr(current, name) != getattr(detached, name) for name in (*basis, "state", "health"))
+                or account.owner_user_id != captured.owner_user_id
+                or (connection.owner_user_id, connection.provider, connection.status, connection.external_account_id, connection.workspace_id, connection.bot_user_id)
+                != (captured.owner_user_id, "telegram", "connected", str(captured.telegram_user_id), str(captured.bot_id), str(captured.bot_id))
+            ):
+                raise ValueError("publication-stale")
+            self._live_owner.check_snapshot(user, [fact[4] for fact in facts])
+            projection.check(facts)
         # No authority/SQL await may follow this original-attempt check.
         self.current()
         return detached

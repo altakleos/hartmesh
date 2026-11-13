@@ -26,7 +26,6 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBot
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.utils.file_io import await_drained
 
-_LOCALES = {"en-US", "zh-CN"}
 _SCOPE = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "connection_id", "telegram_user_id", "chat_id", "binding_generation", "token_revision")
 
 
@@ -81,9 +80,9 @@ def _snapshot(row):
 
 
 def _body(value):
-    if not isinstance(value, Mapping) or set(value) != {"field", "old", "new"} or value["field"] != "locale" or any(type(value[key]) is not str or value[key] not in _LOCALES for key in ("old", "new")):
-        raise ValueError("invalid-settings-act") from None
-    return dict(value)
+    from app.telegram_bots.message_settings import setting_body
+
+    return setting_body(value)
 
 
 def _network_body(value):
@@ -301,19 +300,23 @@ class Acts(WorkActionMethods):
         await session.flush()
         return _snapshot(row)
 
-    async def apply_settings(self, link: BotLink, callback_id: str, *, chat_id: int, message_id: int, message_thread_id: int | None, guard) -> ActRow:
-        """Apply only the actual saved language choice under one original attempt."""
+    async def apply_settings(self, link: BotLink, callback_id: str, *, chat_id: int, message_id: int, message_thread_id: int | None, guard, presentation=None) -> ActRow:
+        """Apply the actual saved preference choice under one original attempt."""
         if type(callback_id) is not str or re.fullmatch(r"[0-9a-f]{32}", callback_id) is None or type(chat_id) is not int or chat_id != link.chat_id or type(message_id) is not int or message_id <= 0:
             raise CallbackRefused() from None
         if message_thread_id is not None and (type(message_thread_id) is not int or message_thread_id <= 0):
             raise CallbackRefused() from None
         topic = None if message_thread_id == 1 else message_thread_id
+        if presentation is not None:
+            from app.telegram_bots.message_settings_custody import SettingsGroupGuard
+
+            guard = SettingsGroupGuard(guard, self.callbacks)
         attempt = _AttemptGuard(guard)
 
         async def run():
             async with self._locks.hold(callback_id):
                 attempt.current()
-                return await await_drained(self._apply_settings(link, callback_id, chat_id, message_id, topic, attempt))
+                return await await_drained(self._apply_settings(link, callback_id, chat_id, message_id, topic, attempt, presentation))
 
         task = asyncio.create_task(run(), name="telegram-settings-act")
         self._operations.add(task)
@@ -354,7 +357,17 @@ class Acts(WorkActionMethods):
     async def _completed(self, session, row, link, message, topic):
         body = self._act_scope(row, link, message)
         result = row.result
-        if row.state != "done" or row.attempts != 1 or row.first_attempt_at is None or type(result) is not dict or set(result) != {"outbox_id", "locale"} or result["locale"] != body["new"] or type(result["outbox_id"]) is not str:
+        legacy = type(result) is dict and set(result) == {"outbox_id", "locale"} and body["field"] == "locale" and result["locale"] == body["new"]
+        current = type(result) is dict and set(result) == {"outbox_id", "field", "value"} and result["field"] == body["field"]
+        if current:
+            from app.telegram_bots.message_settings import setting_value
+            from app.telegram_bots.work_actions import same_body
+
+            try:
+                current = same_body(setting_value(result["field"], result["value"]), body["new"])
+            except ValueError:
+                current = False
+        if row.state != "done" or row.attempts != 1 or row.first_attempt_at is None or not (legacy or current) or type(result["outbox_id"]) is not str:
             raise CallbackRefused() from None
         outbox = await session.get(TelegramOutboxRow, result["outbox_id"], with_for_update=True, populate_existing=True)
         if outbox is None or (outbox.link_id, outbox.owner_user_id, outbox.binding_generation, outbox.chat_id, outbox.message_thread_id, outbox.dedupe_key) != (
@@ -368,7 +381,10 @@ class Acts(WorkActionMethods):
             raise CallbackRefused() from None
         return _snapshot(row)
 
-    async def _apply_settings(self, link, identity, chat, message, topic, guard):
+    async def _apply_settings(self, link, identity, chat, message, topic, guard, presentation):
+        from app.telegram_bots.message_settings_custody import require_settings_group
+
+        group = None
         # Preparation can touch config/provider state; no writer is open yet.
         await prepare_publication_guard(guard)
         async with self.session_factory() as session, session.begin():
@@ -389,18 +405,15 @@ class Acts(WorkActionMethods):
                 result = await self._completed(session, existing, link, message, topic)
             else:
                 group = await self.callbacks.lock_current(link, identity, chat_id=chat, message_id=message, message_thread_id=topic, guard=guard, session=session)
+                if presentation is not None:
+                    guard.actual.group = group
                 selected = group.selected
                 payload = {key: value for key, value in selected.payload.items() if key not in CALLBACK_METADATA_KEYS}
-                if (
-                    selected.kind != "settings_set"
-                    or (selected.target_kind, selected.target_id) != ("link", link.id)
-                    or set(payload) != {"field", "value"}
-                    or payload["field"] != "locale"
-                    or type(payload["value"]) is not str
-                    or payload["value"] not in _LOCALES
-                ):
+                if selected.kind != "settings_set" or (selected.target_kind, selected.target_id) != ("link", link.id) or set(payload) != {"field", "value"} or presentation is None and payload["field"] != "locale":
                     raise CallbackRefused() from None
-                body = {"field": "locale", "old": preferences.locale, "new": payload["value"]}
+                from app.telegram_bots.message_settings import choose, setting_changes
+
+                body = choose(preferences, payload["field"], payload["value"])
                 if existing is not None:
                     saved = self._act_scope(existing, link, message)
                     if existing.state != "pending" or existing.attempts != 0 or existing.first_attempt_at is not None or saved != body:
@@ -410,15 +423,21 @@ class Acts(WorkActionMethods):
                 row = await session.get(TelegramActRow, identity, with_for_update=True)
                 row.attempts, row.first_attempt_at = 1, datetime.now(UTC)
                 guard.current()
-                await self.settings.update(link.owner_user_id, locale=body["new"], session=session)
-                # Every public text of the person's bots is written in this language.
-                await session.execute(update(TelegramBotLinkRow).where(TelegramBotLinkRow.owner_user_id == link.owner_user_id).values(profile_pending=True))
+                updated = await self.settings.update(link.owner_user_id, **setting_changes(body), session=session)
+                if body["field"] == "locale":
+                    # Every public text of the person's bots is written in this language.
+                    await session.execute(update(TelegramBotLinkRow).where(TelegramBotLinkRow.owner_user_id == link.owner_user_id).values(profile_pending=True))
+                source = (
+                    presentation.show(updated, link=link, notice=body["new"] if body["field"] == "notify" else None)
+                    if presentation is not None
+                    else {"key": "settings.state_basic", "values": {"language": "English" if body["new"] == "en-US" else "中文"}, "keyboard": KEYBOARDS["settings.state_basic"](link=link)}
+                )
                 guard.current()
                 outbox_id = await self.outbox.plan_product_keyboard(
                     link,
                     source_id="settings:" + identity,
-                    parts=[{"kind": "edit", "target_message_id": message, "source_ref": {"key": "settings.state_basic", "values": {"language": "English" if body["new"] == "en-US" else "中文"}}}],
-                    keyboard=KEYBOARDS["settings.state_basic"](link=link),
+                    parts=[{"kind": "edit", "target_message_id": message, "source_ref": {"key": source["key"], "values": source["values"]}}],
+                    keyboard=source["keyboard"],
                     callbacks=self.callbacks,
                     guard=guard,
                     message_thread_id=topic,
@@ -426,9 +445,11 @@ class Acts(WorkActionMethods):
                 )
                 guard.current()
                 await self.callbacks.consume_group(group, reason="done", session=session)
-                row.state, row.result, row.updated_at = "done", {"outbox_id": outbox_id, "locale": body["new"]}, datetime.now(UTC)
+                receipt = {"outbox_id": outbox_id, "locale": body["new"]} if presentation is None else {"outbox_id": outbox_id, "field": body["field"], "value": body["new"]}
+                row.state, row.result, row.updated_at = "done", receipt, datetime.now(UTC)
                 result = _snapshot(row)
             await session.flush()
-            # Only commit/exit may follow this original live-human/attempt fence.
+            if group is not None and presentation is None:
+                await require_settings_group(session, group, acknowledged=False)
             await guard.check(session)
         return result
