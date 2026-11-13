@@ -1,6 +1,6 @@
 # Managed Telegram bots
 
-Runtime: [Work guide](../../docs/TELEGRAM_WORK.md).
+Runtime and Work inventory/views: [guide](../../docs/TELEGRAM_WORK.md).
 
 `config.py` validates optional `AppConfig.model_extra["telegram_bots"]` without
 starting services. Nested models forbid unknown keys and coercion; absence returns

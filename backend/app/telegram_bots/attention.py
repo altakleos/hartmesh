@@ -1,9 +1,10 @@
 """Complete current-authority reads before notification/list presentation caps."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.telegram_bots.attention_authority import current_attention
 from app.telegram_bots.authority import AuthorityUnavailable
+from app.telegram_bots.work_lists import WorkListMethods
 from deerflow.agent_instances.human_input import HumanInput
 from deerflow.agent_instances.paging import utc
 from deerflow.agent_instances.work import UNRESOLVED
@@ -15,11 +16,12 @@ def _time(value):
     return datetime.fromisoformat(value).timestamp()
 
 
-class AttentionReader:
+class AttentionReader(WorkListMethods):
     """No stored list or chat entry point is installed by this reader."""
 
-    def __init__(self, *, work, authority, links):
+    def __init__(self, *, work, authority, links, clock=None):
         self.work, self.authority, self.links = work, authority, links
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     async def _current(self, captured):
         return await current_attention(self, captured)
