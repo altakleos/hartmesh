@@ -28,7 +28,11 @@ from deerflow.utils.file_io import await_drained
 
 
 def recipes(source, basis, identity, link):
-    if source.key == "assignment.card":
+    if source.key == "assignment.prompt":
+        from app.telegram_bots.assignment_typing import present_prompt
+
+        view = present_prompt(source, basis)
+    elif source.key == "assignment.card":
         from app.telegram_bots.assignment_cards import present_assignment
 
         view = present_assignment(source, basis, link)
@@ -74,7 +78,9 @@ def recipes(source, basis, identity, link):
 
 def conceal_news(source):
     """Only a current source-qualified chat activation bypasses its teaser."""
-    return source.protected and source.key not in {"view.list", "view.detail", "execution.activate", "execution.stop", "assignment.card"} and not (source.key.startswith("status.") and source.work.get("activation_act_id"))
+    return (
+        source.protected and source.key not in {"view.list", "view.detail", "execution.activate", "execution.stop", "assignment.card", "assignment.prompt"} and not (source.key.startswith("status.") and source.work.get("activation_act_id"))
+    )
 
 
 def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
@@ -281,6 +287,9 @@ class WorkNewsPlans:
     async def materialize(self, link, identity):
         return await await_drained(self._materialize(link, identity))
 
+    async def stage_metadata(self, writer, link, row, source):
+        """Optional metadata owned by this exact source and presentation writer."""
+
     async def _materialize(self, link, identity):
         async with self.outbox.sessions() as reader:
             row = await reader.get(TelegramOutboxRow, identity)
@@ -316,6 +325,7 @@ class WorkNewsPlans:
                 for control in await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group.group_id)):
                     control.payload = {**control.payload, "presentation_pending": True}
             await writer.flush()
+            await self.stage_metadata(writer, link, row, source)
             await admission(session=writer, projection=self.projection(self.reader, link, _item(row), source, clock=clock))
             origin.check(basis)
             return True

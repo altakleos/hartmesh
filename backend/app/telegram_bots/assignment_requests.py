@@ -49,6 +49,9 @@ def request_snapshot(link, row):
             or row.attempts != 0
             or row.first_attempt_at is not None
             or row.operation_ids
+            or row.cancel_requested_at is not None
+            or row.continuation is not None
+            or row.stop_dispatch is not None
             or set(body) != {"version", "request", "source", "origin"}
             or type(body["version"]) is not int
             or body["version"] != 2
@@ -105,7 +108,7 @@ class AssignmentDraftRequests:
         if self._tasks:
             await await_drained(asyncio.gather(*tuple(self._tasks), return_exceptions=True))
 
-    async def request(self, link, inbox, *, words, previous=None, source="command"):
+    async def request(self, link, inbox, *, words, previous=None, source="command", admission=None):
         self._current()
         if type(words) is not str or not words.strip():
             raise ValueError("assign-words-required")
@@ -113,14 +116,14 @@ class AssignmentDraftRequests:
             raise ValueError("assign-too-long")
         if previous is not None and type(previous) is not DraftAssignment or source not in {"command", "edit"}:
             raise ValueError("invalid-draft-request")
-        task = asyncio.create_task(self._request(link, inbox, words=words, previous=previous, source=source))
+        task = asyncio.create_task(self._request(link, inbox, words=words, previous=previous, source=source, admission=admission))
         self._tasks.add(task)
         try:
             return await await_drained(task)
         finally:
             self._tasks.discard(task)
 
-    async def _request(self, link, inbox, *, words, previous, source):
+    async def _request(self, link, inbox, *, words, previous, source, admission):
         identity = draft_identity(link, inbox)
         async with self._locks.hold(identity):
             self._current()
@@ -129,6 +132,8 @@ class AssignmentDraftRequests:
             facts = DraftProjection(link, body["origin"], inbox=inbox)
             await current(projection=facts)
             async with self.outbox._writer(link.id) as (writer, _binding):
+                if admission is not None:
+                    await admission(writer)
                 await current(session=writer, projection=facts)
                 row = await writer.get(TelegramActRow, identity, with_for_update=True, populate_existing=True)
                 if row is None:
@@ -142,13 +147,15 @@ class AssignmentDraftRequests:
                     if value.words != words or not same_body(row.body["request"]["previous"], body["request"]["previous"]) or value.source != source:
                         raise ValueError("draft-source-conflict")
                 complete = row.body.get("version") == 1
+                if admission is not None:
+                    await admission(writer)
             if complete:
                 return await self.drafts.get(link, identity)
             value = await self._read(link, identity)
             if value.phase != "new":
                 return value
             claim = uuid4().hex
-            value = await self._phase(link, identity, expected=value, phase="extracting", claim_id=claim)
+            value = await self._phase(link, identity, expected=value, phase="extracting", claim_id=claim, admission=admission)
             if value.phase != "extracting" or value.claim_id != claim:
                 return value
             self._active.add(identity)
@@ -159,6 +166,9 @@ class AssignmentDraftRequests:
                     live = await self._read(link, identity)
                     if live.phase != "extracting" or live.claim_id != claim:
                         raise ProductSourceRetired()
+                    if admission is not None:
+                        async with self.outbox._writer(link.id) as (writer, _binding):
+                            await admission(writer)
 
                 settings = await self.settings.get(link.owner_user_id)
                 if settings is None:
@@ -166,14 +176,14 @@ class AssignmentDraftRequests:
                 proposal = await draft_assignment(value.words, agent_name=facts.name, settings=settings, config=self.config, previous=value.previous, now=self.outbox.clock(), before_dispatch=before_dispatch)
                 self._current()
                 if proposal is None:
-                    return await self._phase(link, identity, expected=value, phase=fallback_phase(value), claim_id=claim)
-                return await self._complete(link, identity, expected=value, draft=proposal, source=source)
+                    return await self._phase(link, identity, expected=value, phase=fallback_phase(value), claim_id=claim, admission=admission)
+                return await self._complete(link, identity, expected=value, draft=proposal, source=source, admission=admission)
             except ProductSourceRetired:
                 # A current recovery may have selected the manual fallback.
                 # Its owned phase wins over a late provider result.
                 return await self._value(link, identity)
-            except ValueError:
-                return await self._phase(link, identity, expected=value, phase="failed", claim_id=claim)
+            except ValidationError:
+                return await self._phase(link, identity, expected=value, phase="failed", claim_id=claim, admission=admission)
             finally:
                 self._active.discard(identity)
 
@@ -195,7 +205,7 @@ class AssignmentDraftRequests:
         self._age(value)
         return value
 
-    async def _phase(self, link, identity, *, expected, phase, claim_id):
+    async def _phase(self, link, identity, *, expected, phase, claim_id, admission=None):
         self._current()
         async with self.outbox.sessions() as reader:
             row = await reader.get(TelegramActRow, identity)
@@ -207,6 +217,8 @@ class AssignmentDraftRequests:
         before = RequestProjection(link, saved)
         async with self.outbox._writer(link.id) as (writer, _binding):
             self._current()
+            if admission is not None:
+                await admission(writer)
             await current(session=writer, projection=before)
             row = await writer.get(TelegramActRow, identity, with_for_update=True, populate_existing=True)
             if request_snapshot(link, row).signature != expected.signature:
@@ -216,6 +228,8 @@ class AssignmentDraftRequests:
             row.updated_at = self.outbox.clock()
             await writer.flush()
             await current(session=writer, projection=RequestProjection(link, _snapshot(row)))
+            if admission is not None:
+                await admission(writer)
             self._current()
             result = request_snapshot(link, row)
             self._age(result)

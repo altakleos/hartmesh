@@ -1353,8 +1353,32 @@ unfinished effect/continuation. Unconfirmed work survives normal history sweeps;
 unadmitted drafts expire using the configured original age. Settled families with
 no live dependencies expire after the existing 400-day Act retention. Root witnesses
 without their operation marker remain unknown and cannot become a fresh draft.
-These owners remain dormant until runtime installation. Typed assignment prompts,
-draft editing/discard/Just answer and Save-and-Start dispatch remain separate work.
+`AssignmentPromptPlans` owns deferred `assign_words`, `assign_done` and `assign_edit`
+prompts. Presentation and prompt metadata share the WorkNews writer; replacement
+reattaches only a known pending prompt. Full Telegram acknowledgement starts its
+typing lifetime. Cancelled/superseded prompts cannot send a ForceReply, and a lost
+input publication witness prevents delivery. A new Edit query has its own prompt;
+replay of that query retains its identity. The complete original card presentation
+is included in Edit identity, including after a language refresh.
+
+`AssignmentInputs` consumes one acknowledged prompt with the accepted input and
+the durable extraction reservation. Manual criteria adopt the private draft in
+that same guarded writer, retaining both original and criteria inputs. The
+original route stays open while the criteria prompt awaits an answer. Completed
+input replays observe their existing exact card through Save, Discard and expiry;
+they never reconstruct a draft or allocate another operation.
+
+`assignment_editing.py` proves the original full card, callback group, draft and
+input after provider waits. A correction gets its own extraction and private
+draft. Adoption closes the original draft and consumes its controls in the same
+transaction, with an exact replacement/input witness. Save of the original while
+extraction is pending prevents adoption. Failed extraction leaves the original
+draft available. `AssignmentDraftNavigation` implements Discard as a metadata-only
+disposition with the same full-card/fresh-family checks; its replay reads that
+closed witness without resetting its clock.
+
+These owners remain dormant until runtime installation. Voice capture, proposal
+adoption/Just answer and Save-and-Start dispatch remain separate integration work.
 
 Proposal ToolMessage IDs include the issuing AI message's scope so reused
 provider tool-call IDs cannot overwrite earlier cards; replay of the same call

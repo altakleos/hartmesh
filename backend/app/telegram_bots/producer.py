@@ -2684,7 +2684,7 @@ class OutboxSender:
                         saved.state, saved.failed_reason, saved.closed_at = "failed", "invalid-settings-receipt", self.outbox.clock()
                         saved.claim_owner = saved.claim_id = saved.claimed_at = None
                         return
-                if saved.payload.get("reply_basis", {}).get("version") in {5, 7} or saved.payload.get("work_request_basis", {}).get("version") == 3:
+                if saved.payload.get("reply_basis", {}).get("version") in {5, 7} or saved.payload.get("work_request_basis", {}).get("version") == 3 or "assignment_prompt_intent" in saved.payload:
                     from app.telegram_bots.callbacks import CallbackRepository, Prompts
 
                     await Prompts(CallbackRepository(self.outbox.sessions, config=self.outbox.config, clock=self.outbox.clock)).acknowledge_part(saved, acknowledged, session=session)

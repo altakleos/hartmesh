@@ -328,3 +328,26 @@ async def test_criteria_custody_is_rechecked_after_prompt_admission(actions, mon
         assert row.body["version"] == 2 and row.body["request"]["phase"] == "awaiting_done"
         mark = await reader.get(TelegramInboundMarkRow, (criteria.link_id, criteria.message_id, criteria.chat_id))
         assert mark.route_kind is None and mark.state != "interrupted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fence", ["cancel_requested_at", "continuation", "stop_dispatch"])
+async def test_fenced_private_request_never_dispatches_the_drafting_model(actions, monkeypatch, fence):
+    from app.telegram_bots.producer import ProductSourceRetired
+
+    e = actions
+    owner, inbox, words, model = await setup(e, monkeypatch)
+    phase = owner._phase
+
+    async def interrupt(*args, **kwargs):
+        value = await phase(*args, **kwargs)
+        if kwargs["phase"] == "extracting":
+            async with e.db.sessions.begin() as writer:
+                row = await writer.get(TelegramActRow, value.id)
+                setattr(row, fence, e.acts.outbox.clock() if fence == "cancel_requested_at" else {"version": 99})
+        return value
+
+    monkeypatch.setattr(owner, "_phase", interrupt)
+    with pytest.raises(ProductSourceRetired):
+        await owner.request(e.link, inbox, words=words)
+    model.assert_not_awaited()
