@@ -44,6 +44,12 @@ class _FixedGuard:
             raise CallbackRefused() from None
         return await self.actual.check(writer)
 
+    async def check_projection(self, writer, projection):
+        self.current()
+        if self.actual is None:
+            raise CallbackRefused()
+        return await self.actual.check_projection(writer, projection)
+
 
 class CallbackCommands:
     def __init__(self, services):
@@ -91,6 +97,9 @@ class CallbackCommands:
         if word == "new":
             return {"key": "new.confirm_plain", "values": {}, "keyboard_template": "new.confirm_plain"}
         if word == "settings":
+            owner = getattr(self.services, "message_settings", None)
+            if owner is not None:
+                return await owner.presentation(link)
             settings = await self.services.settings.get(link.owner_user_id)
             if settings is None:
                 raise CallbackRefused() from None
@@ -248,6 +257,9 @@ class CallbackCommands:
             raise CallbackRefused() from None
         guard = self._guard(channel, link)
         guard.current()
+        preferences = getattr(self.services, "message_settings", None)
+        if preferences is not None and await preferences.execute_callback(channel, row, query_id=query_id):
+            return
         if row.kind == "settings_set":
             result = await self.services.acts.apply_settings(link, row.id, chat_id=row.chat_id, message_id=row.message_id, message_thread_id=row.message_thread_id, guard=guard)
             profiles = getattr(self.services, "profile_sync", None)

@@ -82,6 +82,14 @@ WORK_NEWS_KEYS |= WORK_NEWS_FIRST_KEYS | {"concealed.progress"}
 WORK_NEWS_FIRST_KEYS |= {"digest.header", "digest.header_news"}
 WORK_NEWS_KEYS |= WORK_NEWS_FIRST_KEYS | set("concealed.digest concealed.digest_news summary.item.question summary.item.decision summary.item.review summary.button.question summary.button.decision summary.button.review".split())
 
+WORK_NEWS_KEYS |= frozenset(
+    (
+        "settings.state settings.overview settings.quiet_on settings.quiet_off settings.notify_all settings.notify_questions "
+        "settings.notify_none settings.on settings.off settings.label_notify settings.label_quiet settings.label_summary "
+        "settings.label_locale settings.label_questions settings.label_none settings.other_hours settings.messages_choose settings.messages_questions "
+        "settings.messages_off settings.quiet_choose settings.quiet_prompt settings.quiet_bad settings.summary_choose settings.language_choose"
+    ).split()
+)
 WORK_NEWS_KEYS |= frozenset("summary.header summary.finished summary.working summary.interrupted summary.waiting summary.item.resume summary.item.start summary.more summary.button.off summary.off concealed.summary".split())
 
 
