@@ -278,3 +278,25 @@ async def test_factual_input_does_not_dispatch_another_persons_stop(execution, m
     manager.cancel.assert_not_awaited()
     async with sf() as session:
         assert await session.scalar(select(func.count()).select_from(AgentWorkEventRow).where(AgentWorkEventRow.operation_id == body.operation_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_final_guard_receives_immutable_original_attempt_and_can_refuse(execution):
+    from app.gateway.work_execution import dispatch_work_stop
+
+    service, admitted, row, _sf, scope, record = await stopped(execution)
+    request, manager = request_for(record)
+    seen = []
+
+    async def guard(original):
+        seen.append((original["id"], original["thread_id"], original["run_id"]))
+        with pytest.raises(TypeError):
+            original["run_id"] = operation()
+        return False
+
+    with pytest.raises(AgentDenied):
+        await dispatch_work_stop(
+            request, service.work, actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"], expected_attempt_id=scope.attempt_id, expected_thread_id=admitted.thread_id, expected_run_id=record.run_id, before_dispatch=guard
+        )
+    assert seen == [(scope.attempt_id, admitted.thread_id, record.run_id)]
+    manager.cancel.assert_not_awaited()

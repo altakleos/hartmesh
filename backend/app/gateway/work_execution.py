@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Literal
 
 from sqlalchemy import select
@@ -162,7 +163,7 @@ class StopDispatchResult:
     run_id: str | None
 
 
-async def dispatch_work_stop(request, work, *, actor, instance_id, work_id, expected_attempt_id=None, expected_thread_id=None, expected_run_id=None):
+async def dispatch_work_stop(request, work, *, actor, instance_id, work_id, expected_attempt_id=None, expected_thread_id=None, expected_run_id=None, before_dispatch=None):
     """Retry the recorded exact stop intent; a cancellation receipt is not settlement."""
     from deerflow.agent_instances.work import UNRESOLVED
     from deerflow.runtime.runs.manager import CancelOutcome
@@ -220,6 +221,10 @@ async def dispatch_work_stop(request, work, *, actor, instance_id, work_id, expe
         return result(fresh, "settled")
     if fresh["status"] != "stopping":
         return result(fresh)
+    # Trusted callers can compose their original intent/custody into a final
+    # snapshot of this same attempt. The guard must never substitute a target.
+    if before_dispatch is not None and await before_dispatch(MappingProxyType(dict(fresh))) is not True:
+        raise AgentDenied("Work stop admission is no longer current")
     # Request ceilings are an in-memory upper bound. Check that bound without
     # another provider await after the final SQL authority snapshot.
     context = get_auth_context(request)

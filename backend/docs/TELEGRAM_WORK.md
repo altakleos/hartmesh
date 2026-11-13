@@ -354,7 +354,39 @@ pause. Recipient refusal never disables the actor's account. Canonical receipt
 recovery happens before this fresh-effect gate and never repeats the command. Review commands
 use the complete displayed basis and captured Work CAS. The bounded worker only
 retries admitted service calls with no conclusive refusal, never settings, files,
-network or transcription. No action here starts or stops an assignment.
+network or transcription. No action here starts an assignment.
+
+`work_stop_actions.py` supplies Stop journal primitives without installing chat
+controls. The exact Work command and captured original attempt/thread/run are
+saved before mutation. Its known receipt, done state and cancellation readiness
+commit together; cancellation remains a separate follow-up even on a done Act.
+The worker selects those follow-ups independently. Missing run bindings stay
+ready; accepted cancellation moves to read-only settlement checks. Failed reads
+never restore dispatch permission. Retirement preserves the original phase and
+attempt count for the next worker. Durable user outcome/control wiring remains
+separate from these primitives.
+
+The generic Gateway `before_dispatch` hook accepts an immutable original-attempt
+snapshot. `StopDispatchProjection` joins the exact done journal, canonical stop
+event and original attempt with current account, bot, generation, token, grants
+and policy after provider waits. It rechecks worker lifetime at that final read.
+Current Manage or original-requester authority is additional to bot Use+Inspect.
+Core retains final request ceilings and host run identity checks.
+
+`work_stop_retries.py` bounds revision-conflict retries to three distinct commands.
+Each child body, original stop scope and parent `operation_ids` link commit before
+the child call. Current parent linkage also fences child effects and dispatch.
+Recovery checks every stored child receipt before mutable Work state; it never
+retries a conclusive earlier conflict or replaces an attempted body's revision.
+Parent attempt counters include child calls so duplicate Retry controls cannot
+repeat a child attempt. Receipt-only reconciliation readies the known child's
+follow-up without another Work command or native cancellation.
+New automatic children must be planned within the parent's original hour;
+an admitted child keeps its own first-attempt retry window without resetting it.
+
+`work_stop_retention.py` expires only aged, closed, canonical Stop groups with no
+pending outcome. Parent and children expire together; unresolved, malformed,
+missing or inconsistent dependencies remain retained.
 
 `work_interaction_delivery.py` consumes only acknowledged canonical Work controls
 and derives the first-tap menu/confirmation from their captured basis. It creates

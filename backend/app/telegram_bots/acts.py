@@ -1,7 +1,7 @@
 """Settings actions share one custody, preference and presentation transaction.
 
-Optional Work service actions retain immutable requests and receipts. Their
-chat handlers and retry worker startup are not installed yet.
+Runtime Work actions retain immutable requests and receipts. Additional Stop
+journal primitives share this owner; their chat controls remain uninstalled.
 """
 
 from __future__ import annotations

@@ -1,8 +1,9 @@
 """Receipt-backed human Work actions; never run or activate an assignment.
 
-This service is dormant until the chat controller supplies it. The existing
-Work/HumanInput transaction owns each effect; the Telegram journal owns the
+Runtime installs the existing Work/HumanInput actions. Their transaction owns
+each effect; the Telegram journal owns the
 immutable request, local attempt serialization and uncertain-response recovery.
+Stop journal primitives await their chat controls.
 """
 
 from __future__ import annotations
@@ -13,10 +14,11 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from app.telegram_bots.authority import AccessOff, CeilingRefused, require
 from app.telegram_bots.links import BotLink
+from app.telegram_bots.work_stop_actions import StopActionMethods
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied, Refusal
 from deerflow.agent_instances.human_input import HumanInput
 from deerflow.agent_instances.human_input_contract import RequestCommand, Respond
@@ -29,7 +31,7 @@ from deerflow.utils.file_io import await_drained
 
 _ACT_SCOPE = ("link_id", "owner_user_id", "bot_id", "binding_generation", "telegram_user_id", "chat_id", "instance_id", "work_id", "request_id", "kind", "message_id")
 
-WORK_ACT_KINDS = frozenset({"respond", "decide", "accept", "changes_requested", "route"})
+WORK_ACT_KINDS = frozenset({"respond", "decide", "accept", "changes_requested", "route", "stop"})
 _SCOPE = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "binding_generation", "token_revision", "telegram_user_id", "chat_id", "connection_id")
 
 
@@ -55,7 +57,7 @@ def request_for(kind, body, *, identity=None):
     return request
 
 
-class WorkActionMethods:
+class WorkActionMethods(StopActionMethods):
     """Methods mixed into the existing Acts journal; no independent lifecycle."""
 
     @asynccontextmanager
@@ -109,6 +111,8 @@ class WorkActionMethods:
         ):
             raise AgentDenied("The action's binding is no longer current")
         await self._work_link(link)
+        if act.kind == "stop" and act.operation_ids:
+            return await self._stop_chain_receipt(act)
         actor = PrincipalRef("human", link.owner_user_id)
         body = request_for(act.kind, act.body, identity=act.id)
         async with self.session_factory() as session:
@@ -199,6 +203,8 @@ class WorkActionMethods:
     async def _attempt_work(self, act, *, explicit=False, attempt_current=lambda: True):
         from app.telegram_bots.acts import _snapshot, _utc
 
+        if act.kind == "stop":
+            return await self._run_stop_chain(act, explicit=explicit, attempt_current=attempt_current)
         try:
             request_for(act.kind, act.body, identity=act.id)
         except ValueError:
@@ -424,6 +430,8 @@ class WorkActionMethods:
         async def perform():
             async with self._work_serial(act_id):
                 act = await self._work_record(act_id)
+                if act.kind == "stop":
+                    return await self._reconcile_stop_receipt(act)
                 receipt = await self.receipt_for(act)
                 if receipt is None or act.state == "done":
                     return act
@@ -439,6 +447,8 @@ class WorkActionMethods:
                     if expected["id"] != current.id or expected["kind"] != current.kind or not same_body(expected["body"], current.body) or type(expected["attempts"]) is not int:
                         raise ValueError("work-retry-body-changed")
                     if expected["attempts"] != current.attempts:
+                        if current.kind == "stop":
+                            return await self._reconcile_stop_receipt(current)
                         receipt = await self.receipt_for(current)
                         if receipt is not None and current.state != "done":
                             return await self._work_outcome(current, state="done", result=receipt)
@@ -485,7 +495,11 @@ class ActsWorker:
             ids = list(
                 await reader.scalars(
                     select(TelegramActRow.id)
-                    .where(TelegramActRow.kind.in_(WORK_ACT_KINDS), TelegramActRow.state == "pending", TelegramActRow.reason.is_(None), TelegramActRow.first_attempt_at.is_not(None))
+                    .where(
+                        TelegramActRow.kind.in_(WORK_ACT_KINDS),
+                        TelegramActRow.first_attempt_at.is_not(None),
+                        or_(and_(TelegramActRow.state == "pending", TelegramActRow.reason.is_(None)), and_(TelegramActRow.kind == "stop", TelegramActRow.state == "conflict", TelegramActRow.reason == "changed")),
+                    )
                     .order_by(TelegramActRow.updated_at, TelegramActRow.id)
                     .limit(100)
                 )
@@ -499,3 +513,4 @@ class ActsWorker:
                 act = await self.acts._work_record(identity)
                 if now - _utc(act.updated_at) >= timedelta(seconds=self.acts.outbox.config.acts.retry_seconds):
                     await await_drained(self.acts._attempt_work(act, attempt_current=lambda: not self._stopping and self.available()))
+        await self.acts._recover_stop_dispatches(attempt_current=lambda: not self._stopping and self.available())
