@@ -12,6 +12,30 @@ from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
+ACTIVATION_MESSAGE = "Work on the explicitly activated assignment. Read current Work context, follow the adopted mandate, and report progress, blockers or an outcome."
+
+
+async def activate_work(request, *, instance_id, work_id, body):
+    """Activate as the request's human owner through the shared run path.
+
+    HTTP callers retain their route ceilings; trusted in-process callers must
+    check their owner's ceilings before calling. Instance and conversation
+    authority remain mandatory here, including on exact replay.
+    """
+    from app.gateway.agent_conversations import execution_for_run
+    from app.gateway.routers.agent_instances import _service
+    from deerflow.agent_instances.work import AgentWork
+    from deerflow.agent_instances.work_execution import WorkExecution
+
+    work = AgentWork(await _service(request))
+    service = WorkExecution(work)
+    replay = await service.activation_exists(work_id, body.operation_id)
+    execution = await execution_for_run(request, body.thread_id, require_ready=not replay)
+    if execution is None or execution.instance.id != instance_id:
+        raise AgentDenied("Activation requires this AI employee's bound conversation")
+    scope = await activate_work_run(request, service, execution, work_id, body)
+    return {**await work.get(actor=execution.requester, instance_id=instance_id, work_id=work_id), "activation_receipt": {"operation_id": body.operation_id, "attempt_id": scope.attempt_id}}
+
 
 class _NewActivationRequired(Exception):
     """Private authoritative preflight: no new durable attempt is permitted."""
@@ -95,7 +119,7 @@ async def activate_work_run(request, service, execution, work_id, body):
                             retain(promise)
             if not scope.retired:
                 record = await start_run(
-                    RunCreateRequest(input={"messages": [{"role": "user", "content": "Work on the explicitly activated assignment. Read current Work context, follow the adopted mandate, and report progress, blockers or an outcome."}]}),
+                    RunCreateRequest(input={"messages": [{"role": "user", "content": ACTIVATION_MESSAGE}]}),
                     body.thread_id,
                     request,
                     idempotency_key="agent-work:" + scope.attempt_id,

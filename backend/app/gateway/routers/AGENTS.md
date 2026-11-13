@@ -91,6 +91,10 @@ either lock releases. Multi-Gateway filesystem locks need deployment qualificati
 Work activation uses `start_run` with host-only attempt capability and stable run
 idempotency. Require agents read/write, runs create, Use+Inspect and an existing
 bound conversation; request bodies convey no authority.
+The route delegates orchestration to `gateway.work_execution.activate_work`;
+trusted in-process callers check their human owner's ceilings first and use the
+same binding/replay admission. `activate_work_run` retains launch/cancellation
+ownership and the shared `ACTIVATION_MESSAGE`.
 Manager edits/cancellation of unresolved Work additionally require runs cancel and
 retry the persisted exact stop intent. Human-input replies never invoke activation.
 
