@@ -580,7 +580,9 @@ async def test_stop_through_run_cancel_settles_the_attempt_cancelled(execution, 
             await asyncio.wait_for(entered.wait(), 10)
             current = await service.work.get(actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"])
             await service.work.command(actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"], request=command(current, "stop", attempt_id=scope.attempt_id), can_stop=True)
-            request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=manager)))
+            from app.gateway.authz import AuthContext
+
+            request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=manager)), state=SimpleNamespace(auth=AuthContext(SimpleNamespace(id="alice"), ["runs:cancel"])))
             await dispatch_work_stop(request, service.work, actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"], expected_attempt_id=scope.attempt_id)
         await asyncio.wait_for(asyncio.gather(worker, return_exceptions=True), 10)
         result = await service.work.get(actor=ALICE, instance_id=admitted.instance.id, work_id=row["id"])

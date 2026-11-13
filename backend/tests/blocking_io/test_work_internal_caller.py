@@ -8,6 +8,8 @@ from test_resident_registry import registry as registry
 from test_work_execution import execution as execution
 from test_work_internal_caller import test_inprocess_actor_same_results as parity
 from test_work_internal_caller import test_owner_activation_preserves_retained_launch_ownership as retained
+from test_work_stop_dispatch import test_cancellation_rechecks_authority_after_host_read as recheck_stop
+from test_work_stop_dispatch import test_stop_waits_for_same_attempt_late_run_binding as late_stop
 
 
 @pytest.fixture(autouse=True)
@@ -35,3 +37,13 @@ async def test_owner_activation_matches_http_without_blocking(execution, monkeyp
 @pytest.mark.asyncio
 async def test_cancelled_owner_activation_drains_without_blocking(execution, registry, monkeypatch):
     await retained(execution, registry, monkeypatch, "cancellation")
+
+
+@pytest.mark.asyncio
+async def test_exact_stop_and_late_binding_do_not_block(execution):
+    await late_stop(execution)
+
+
+@pytest.mark.asyncio
+async def test_stop_rechecks_after_host_read_without_blocking(execution):
+    await recheck_stop(execution, "grant")

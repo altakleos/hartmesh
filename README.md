@@ -130,7 +130,9 @@ Current Inspect grants control visibility; referenced files retain separate acce
 checks. Uncertain execution requires qualified containment and explicit recovery.
 The Work command API can stop one exact running attempt without cancelling the
 assignment. It requires the run cancellation capability and current Inspect,
-plus Manage or Use as that attempt's requester. Work attempts run autonomously:
+plus Manage or Use as that attempt's requester. Delayed cancellation stays tied
+to the original attempt; its acknowledgment keeps Stop pending until that attempt
+settles. Work attempts run autonomously:
 questions go through `report_work` to the supervisor, and blocked workspace
 connections are denied and marked on the tool result while the attempt continues.
 Bounded details added by tool middleware remain in saved conversation results;
