@@ -14,6 +14,7 @@ from test_telegram_supervisor import build
 from test_telegram_threads import close
 
 from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow
+from deerflow.persistence.agent_instances.work import AgentWorkRow
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkEventRow
 
 pytestmark = pytest.mark.asyncio
@@ -22,6 +23,8 @@ pytestmark = pytest.mark.asyncio
 @pytest_asyncio.fixture
 async def lifecycle(db, monkeypatch):
     e = await instance_environment(db, monkeypatch)
+    async with db.engine.begin() as connection:
+        await connection.run_sync(lambda sync: AgentWorkRow.__table__.create(sync, checkfirst=True))
     e.db = db
     await e.channel.stop()
     await db.links.end_pending(e.link.id, skip_reason="superseded")

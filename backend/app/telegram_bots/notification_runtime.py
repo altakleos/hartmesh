@@ -267,16 +267,19 @@ class NotificationRuntime:
                 rows = list(
                     await reader.scalars(
                         select(TelegramBotLinkRow)
-                        .join(TelegramOutboxRow, TelegramOutboxRow.link_id == TelegramBotLinkRow.id)
                         .where(
                             TelegramBotLinkRow.id > self._batch_after,
                             TelegramBotLinkRow.agent_kind == "instance",
                             TelegramBotLinkRow.state == "connected",
                             TelegramBotLinkRow.health == "ok",
-                            TelegramOutboxRow.state == "pending",
-                            TelegramOutboxRow.not_before <= self.host.outbox.clock(),
+                            select(TelegramOutboxRow.id)
+                            .where(
+                                TelegramOutboxRow.link_id == TelegramBotLinkRow.id,
+                                TelegramOutboxRow.state == "pending",
+                                TelegramOutboxRow.not_before <= self.host.outbox.clock(),
+                            )
+                            .exists(),
                         )
-                        .distinct()
                         .order_by(TelegramBotLinkRow.id)
                         .limit(self.host.config.producer.batch)
                     )
