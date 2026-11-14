@@ -15,7 +15,8 @@ from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, Telegr
 
 
 @pytest.mark.asyncio
-async def test_selected_prompt_keeps_original_custody_when_answer_fails_before_claim(work_delivery, monkeypatch):
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_selected_prompt_keeps_original_custody_when_answer_fails_before_claim(work_delivery, monkeypatch, legacy):
     e = work_delivery
     owner, calls = await installed_prompt(e, monkeypatch)
     ordinary = []
@@ -26,6 +27,8 @@ async def test_selected_prompt_keeps_original_custody_when_answer_fails_before_c
 
     owner.host.turns = SimpleNamespace(accept=accept, retire=AsyncMock(), message_sent=Mock(), typing_allowed=lambda *args, **kwargs: False)
     update = make_update(6231, account=e.link.chat_id, text="Review the handbook")
+    if legacy:
+        await owner.host.outbox.inbox.accept(e.link, update, sanitized_input={"text": update.message.text})
 
     async def unavailable(link, origin, **kwargs):
         assert kwargs.get("prompt_id") is not None

@@ -34,6 +34,7 @@ TEXTS: dict[str, str] = {
     "assign.no_access": "要给{name}安排任务，除了“可以聊天”，你还需要“可以查看所有工作”权限。请联系{supervisor}。",
     "work.need_inspect": "要查看{name}的任务，除了“可以聊天”，你还需要“可以查看所有工作”权限。请联系{supervisor}。",
     "assign.prompt": "希望{name}做什么？请用自己的话描述，如有截止时间也请说明。",
+    "assign.resend": "这条消息未能得到回答，请重新发送。",
     "assign.ask_done": "怎样才算完成？一句话就够了。",
     "assign.too_long": "内容超过{max}个字符，无法据此拟定任务。请发送简短描述，并将详细内容放在文件中。",
     "assign.card": "要做的事：{objective_full}\n完成标准：{success_criteria}",

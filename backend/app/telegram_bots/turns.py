@@ -1673,7 +1673,8 @@ class ChatTurns:
                 if not phase():
                     return
                 settings_input = entry.hold_reason == "unsupported_input" and len(entry.origins) == 1 and type(entry.origins[0].route_basis.get("settings_prompt_id")) is str
-                if entry.hold_reason not in (None, "voice_interrupted") and not settings_input or not entry.origins:
+                work_probe = entry.hold_reason == "unsupported_input" and len(entry.origins) == 1 and getattr(self.services, "work_chat", None) is not None
+                if entry.hold_reason not in (None, "voice_interrupted") and not settings_input and not work_probe or not entry.origins:
                     continue
                 try:
                     await self._recover_input(entry, phase)
@@ -1707,6 +1708,10 @@ class ChatTurns:
         settings_prompts = getattr(host, "settings_prompts", None)
         if settings_prompts is not None and await settings_prompts.recover(channel, captured, entry, guard=guard):
             return
+        work_chat = getattr(host, "work_chat", None)
+        if entry.hold_reason == "unsupported_input" and len(entry.origins) == 1 and work_chat is not None:
+            if await work_chat.assignment_commands.close_legacy_capture(captured, entry.origins[0], guard=guard):
+                return
         if entry.hold_reason not in (None, "voice_interrupted"):
             return
         if captured.agent_kind == "instance" and getattr(host, "file_puts", None) is not None:
