@@ -120,11 +120,19 @@ ASSIGNMENT_KEYS = frozenset(
     ).split()
 )
 
+MANAGEMENT_KEYS = frozenset(
+    (
+        "work.change_title work.change_saved work.change_saved_running work.change_none denied.change denied.withdraw "
+        "work.action_waiting work.action_cancelled work.stop_unconfirmed work.withdraw_confirm work.withdraw_confirm_running work.withdrawn"
+    ).split()
+)
+
 
 def test_text_catalog_locales_have_equal_keys():
     assert set(catalog("en")) == set(catalog("zh-CN"))
     assert (
         ASSIGNMENT_KEYS
+        | MANAGEMENT_KEYS
         | EXECUTION_KEYS
         | WORK_VIEW_KEYS
         | WORK_NEWS_KEYS

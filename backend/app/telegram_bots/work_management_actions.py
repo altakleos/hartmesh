@@ -50,6 +50,7 @@ def command_source(act):
         or type(value["version"]) is not int
         or value["version"] != 1
         or value["origin_kind"] not in {"internal", "callback"}
+        or set(act.continuation) != ({"management_source", "management_origin"} if value["origin_kind"] == "callback" else {"management_source"})
         or act.kind not in MANAGEMENT_KINDS
     ):
         raise ValueError("invalid-management-source")
@@ -94,6 +95,56 @@ def command_source(act):
 
 
 class ManagementActionMethods:
+    async def cancel_management(self, act_id, *, admission=None, confirmation_current=lambda: None):
+        """Fence logical retries without waiting for a live service attempt."""
+
+        async def perform():
+            from app.telegram_bots.acts import _snapshot
+            from app.telegram_bots.work_actions import _ACT_SCOPE, request_for, same_body
+
+            captured = await self._work_record(act_id)
+            request_for(captured.kind, captured.body, identity=captured.id)
+            command_source(captured)
+            link = await self.links.get(captured.link_id)
+            if not same_binding(link, captured):
+                raise AgentDenied("The command binding changed", reason="not-visible")
+            await self._work_link(link)
+            owner = await self.authority.prepare_live_owner(captured.owner_user_id)
+            async with self.outbox._writer(link.id) as (writer, binding):
+                row = await writer.get(TelegramActRow, captured.id, with_for_update=True, populate_existing=True)
+                if (
+                    row is None
+                    or not same_binding(binding, captured)
+                    or any(getattr(row, key) != getattr(captured, key) for key in _ACT_SCOPE)
+                    or not same_body(row.body, captured.body)
+                    or not same_body(row.continuation, captured.continuation)
+                ):
+                    raise ValueError("act-source-conflict")
+                command_source(_snapshot(row))
+                if admission is not None:
+                    await admission(writer, None)
+                confirmation_current()
+                if row.cancel_requested_at is None:
+                    row.cancel_requested_at = row.updated_at = self.outbox.clock()
+                    if row.state != "done":
+                        conclusive = row.attempts == 0 or row.state in {"refused", "conflict"}
+                        row.state, row.reason = ("refused", "cancelled") if conclusive else ("uncertain", "cancel-unconfirmed")
+                        if conclusive and row.stop_dispatch is not None:
+                            row.stop_dispatch = {**row.stop_dispatch, "state": "ended"}
+                await writer.flush()
+                result = _snapshot(row)
+                if admission is not None:
+                    await admission(writer, result)
+                await owner(result.owner_user_id, writer)
+                confirmation_current()
+            try:
+                receipt = await self.receipt_for(result)
+            except Exception:
+                return result
+            return await self._management_outcome(result, state="done", result=receipt) if receipt is not None else result
+
+        return await await_drained(perform())
+
     async def edit(self, link, draft_act_id, *, operation_id):
         async def perform():
             async with self._work_serial(operation_id):
@@ -102,14 +153,14 @@ class ManagementActionMethods:
 
         return await await_drained(perform())
 
-    async def stage_edit(self, link, draft_act_id, *, operation_id, admission=None):
+    async def stage_edit(self, link, draft_act_id, *, operation_id, admission=None, origin=None, confirmation_current=lambda: None):
         async def perform():
             async with self._work_serial(operation_id):
-                return await self._stage_edit(link, draft_act_id, operation_id=operation_id, admission=admission)
+                return await self._stage_edit(link, draft_act_id, operation_id=operation_id, admission=admission, origin=origin, confirmation_current=confirmation_current)
 
         return await await_drained(perform())
 
-    async def _stage_edit(self, link, draft_act_id, *, operation_id, admission=None):
+    async def _stage_edit(self, link, draft_act_id, *, operation_id, admission=None, origin=None, confirmation_current=lambda: None):
         from app.telegram_bots.acts import _snapshot
         from app.telegram_bots.work_actions import request_for, same_body
         from app.telegram_bots.work_edit_drafts import WorkEditDrafts, snapshot_edit
@@ -150,7 +201,10 @@ class ManagementActionMethods:
                 raise ValueError("edit-source-conflict")
             if act is not None:
                 saved.operation_ids = [act.id]
-                saved.continuation = {**saved.continuation, "edit_admission": {"version": 1, "act_id": act.id, "signature": reference["signature"]}}
+                from app.telegram_bots.work_management_consent import edit_admission_for
+
+                witness = edit_admission_for(act, reference)
+                saved.continuation = {**saved.continuation, "edit_admission": witness}
                 await writer.flush()
             if admission is not None:
                 await admission(writer, act)
@@ -166,7 +220,9 @@ class ManagementActionMethods:
             due_at=original["due_at"],
         )
         unchanged = same_body(request.model_dump(mode="json", exclude_unset=True), original_body.model_dump(mode="json", exclude_unset=True))
-        return await self._stage_management(link, request, work_id=root.work_id, current=current, draft_ref=reference, admission=admit, non_effect_reason="unchanged" if unchanged else None)
+        return await self._stage_management(
+            link, request, work_id=root.work_id, current=current, draft_ref=reference, admission=admit, non_effect_reason="unchanged" if unchanged else None, origin=origin, confirmation_current=confirmation_current
+        )
 
     async def cancel(self, link, *, operation_id, work_id):
         async def perform():
@@ -176,14 +232,23 @@ class ManagementActionMethods:
 
         return await await_drained(perform())
 
-    async def stage_cancel(self, link, *, operation_id, work_id, expected_revision=None, expected_assignment_revision=None, admission=None):
+    async def stage_cancel(self, link, *, operation_id, work_id, expected_revision=None, expected_assignment_revision=None, admission=None, origin=None, confirmation_current=lambda: None):
         async def perform():
             async with self._work_serial(operation_id):
-                return await self._stage_cancel(link, operation_id=operation_id, work_id=work_id, expected_revision=expected_revision, expected_assignment_revision=expected_assignment_revision, admission=admission)
+                return await self._stage_cancel(
+                    link,
+                    operation_id=operation_id,
+                    work_id=work_id,
+                    expected_revision=expected_revision,
+                    expected_assignment_revision=expected_assignment_revision,
+                    admission=admission,
+                    origin=origin,
+                    confirmation_current=confirmation_current,
+                )
 
         return await await_drained(perform())
 
-    async def _stage_cancel(self, link, *, operation_id, work_id, expected_revision=None, expected_assignment_revision=None, admission=None):
+    async def _stage_cancel(self, link, *, operation_id, work_id, expected_revision=None, expected_assignment_revision=None, admission=None, origin=None, confirmation_current=lambda: None):
         from app.telegram_bots.acts import _snapshot
         from app.telegram_bots.work_actions import request_for
 
@@ -203,9 +268,9 @@ class ManagementActionMethods:
             expected_assignment_revision=current["assignment_revision"] if expected_assignment_revision is None else expected_assignment_revision,
             action="cancel",
         )
-        return await self._stage_management(link, body, work_id=work_id, current=current, admission=admission)
+        return await self._stage_management(link, body, work_id=work_id, current=current, admission=admission, origin=origin, confirmation_current=confirmation_current)
 
-    async def _stage_management(self, link, body, *, work_id, current, draft_ref=None, admission=None, non_effect_reason=None):
+    async def _stage_management(self, link, body, *, work_id, current, draft_ref=None, admission=None, non_effect_reason=None, origin=None, confirmation_current=lambda: None):
         from app.telegram_bots.acts import _snapshot
         from app.telegram_bots.work_authority import prepare_work_owner
 
@@ -219,13 +284,17 @@ class ManagementActionMethods:
             row = await self._stage_work_act(link, kind=body.action, request_id=None, work_id=work_id, request=body, owner=owner, session=writer)
             saved = await writer.get(TelegramActRow, row.id, populate_existing=True)
             saved.stop_dispatch = {**scope, "state": "awaiting_command", "attempts": 0, "not_before": None} if scope is not None else None
-            saved.continuation = {"management_source": {"version": 1, "origin_kind": "internal", "scope": scope, "draft_ref": draft_ref, "link_id": link.id, "signature": management_signature(saved, scope, "internal", draft_ref)}}
+            mode = "callback" if origin is not None else "internal"
+            saved.continuation = {"management_source": {"version": 1, "origin_kind": mode, "scope": scope, "draft_ref": draft_ref, "link_id": link.id, "signature": management_signature(saved, scope, mode, draft_ref)}}
+            if origin is not None:
+                saved.continuation = {**saved.continuation, "management_origin": origin}
             await writer.flush()
             staged = _snapshot(saved)
             await prepared(session=writer, projection=ManagementProjection(staged, lambda: True, staged=True, admitting=True, clock=self.outbox.clock, draft_ttl_hours=self.outbox.config.callbacks.draft_ttl_hours))
             if admission is not None:
                 await admission(writer, staged)
             await prepared(session=writer, projection=ManagementProjection(_snapshot(saved), lambda: True, staged=True, clock=self.outbox.clock, draft_ttl_hours=self.outbox.config.callbacks.draft_ttl_hours))
+            confirmation_current()
             if non_effect_reason is not None:
                 if body.action != "edit" or non_effect_reason != "unchanged":
                     raise ValueError("invalid-non-effect")
@@ -234,6 +303,7 @@ class ManagementActionMethods:
                 if saved.stop_dispatch is not None:
                     saved.stop_dispatch = {**saved.stop_dispatch, "state": "ended"}
                 await writer.flush()
+            confirmation_current()
             return _snapshot(saved)
 
     async def _management_outcome(self, act, *, state, reason=None, result=None):
@@ -330,6 +400,14 @@ class ManagementProjection:
     def __init__(self, act, attempt_current, *, staged=False, admitting=False, clock=None, draft_ttl_hours=24):
         self.act, self.attempt_current, self.staged = act, attempt_current, staged
         self.source = command_source(act)
+        from app.telegram_bots.work_management_consent import ManagementModeWitness
+
+        self.witness = ManagementModeWitness(act, admitting=admitting)
+        self.consent = None
+        if self.source["origin_kind"] == "callback":
+            from app.telegram_bots.work_management_consent import ManagementConsent
+
+            self.consent = ManagementConsent(act, admitting=admitting)
         self.edit = None
         if act.kind == "edit":
             from app.telegram_bots.work_edit_drafts import EditCommandProof
@@ -347,7 +425,10 @@ class ManagementProjection:
             .outerjoin(control, control.id == self.act.id)
             .outerjoin(event, and_(event.instance_id == self.act.instance_id, event.work_id == self.act.work_id, event.operation_id == self.act.id))
         )
-        return self.edit.extend(result) if self.edit is not None else result
+        if self.edit is not None:
+            result = self.edit.extend(result)
+        result = self.witness.extend(result)
+        return self.consent.extend(result) if self.consent is not None else result
 
     def check_with_permissions(self, rows, held):
         from app.telegram_bots.work_actions import _ACT_SCOPE, same_body
@@ -371,8 +452,11 @@ class ManagementProjection:
             or saved.operation_ids
         ):
             raise AuthorityUnavailable()
-        if self.source["origin_kind"] != "internal" or control is not None:
+        if self.consent is not None:
+            self.consent.check(rows, allow_closed=not self.staged)
+        elif self.source["origin_kind"] != "internal" or control is not None:
             raise AuthorityUnavailable()
+        self.witness.check(rows)
         expected = self.act.body["expected_revision"], self.act.body["expected_assignment_revision"]
         if event is None:
             if (work.revision, work.assignment_revision) != expected:
