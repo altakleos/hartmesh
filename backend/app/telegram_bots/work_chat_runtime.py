@@ -4,6 +4,7 @@ import asyncio
 import logging
 from copy import deepcopy
 
+from app.telegram_bots.assignment_answers import AssignmentAnswers
 from app.telegram_bots.assignment_commands import AssignmentCommands
 from app.telegram_bots.assignment_controls import AssignmentAdmissions
 from app.telegram_bots.assignment_delivery import AssignmentPlans
@@ -58,6 +59,13 @@ class WorkChatRuntime:
         self.starts = WorkStartAdmissions(self.views, host.acts)
         self.stops = WorkStopAdmissions(self.views, host.acts)
         self.assignments = AssignmentPlans(reader=AssignmentReader(host.acts), **delivery)
+        self.assignment_answers = AssignmentAnswers(self.assignments)
+        source = getattr(host, "assignment_proposal_source", None)
+        if source is not None:
+            from app.telegram_bots.assignment_proposal_plans import AssignmentProposalPlans
+
+            self.proposals = AssignmentProposalPlans(self.assignments, source=source)
+            host.publications.assignment_proposal_planner = self.proposals.plan_terminal
         self.assignment_prompts = AssignmentPromptPlans(reader=AssignmentPromptReader(host.acts), **delivery)
         self.assignment_inputs = AssignmentInputs(self.assignment_prompts, self.assignments)
         self.assignment_admissions = AssignmentAdmissions(self.assignments, host.acts)
@@ -171,6 +179,7 @@ class WorkChatRuntime:
             "assign_start",
             "assign_edit",
             "assign_discard",
+            "assign_answer",
             "work_change",
             "work_withdraw",
             "work_change_save",
@@ -220,7 +229,10 @@ class WorkChatRuntime:
                 except Exception:
                     return False
 
-            if row.kind == "stop_which":
+            if row.kind == "assign_answer":
+                stage = await self.assignment_answers.stage(link, row.id, update_id=update_id, **scope)
+                await self.host.turns.accept_staged(channel, stage, admission_current=current)
+            elif row.kind == "stop_which":
                 await self.command_stops.select(channel, row, link=link, guard=guard)
             elif row.kind in {"accept_open", "changes_open"}:
                 await self.review_views.open(link, row.id, **scope)

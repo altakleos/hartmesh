@@ -26,8 +26,11 @@ DESCRIPTION = (
 )
 
 
-def execution(custody):
-    definition = DefinitionSnapshot.capture(owner_id="creator", config={"name": "helper"}, soul="Help with the request.")
+def execution(custody, *, work_policy=None):
+    config = {"name": "helper"}
+    if work_policy is not None:
+        config["work_policy"] = {"enabled": work_policy}
+    definition = DefinitionSnapshot.capture(owner_id="creator", config=config, soul="Help with the request.")
     instance = InstanceIdentity(
         id="a" * 32,
         principal=PrincipalRef("nonhuman", "agent:" + "a" * 32),
@@ -178,3 +181,25 @@ def test_actual_instance_assembly_offers_page_tool_only_for_normal_chat(monkeypa
     assert names.count("show_web_page") == (1 if mode == "chat" else 0)
     if mode == "work":
         assert {"read_work_context", "report_work"} <= set(names)
+
+
+@pytest.mark.parametrize("custody", ["personal", "company"])
+@pytest.mark.parametrize("enabled", [None, False, True])
+@pytest.mark.parametrize("mode", ["chat", "work", "subagent"])
+def test_actual_assembly_offers_proposals_only_for_adopted_work_chat(monkeypatch, custody, enabled, mode):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from test_agent_assembly_descriptor import TestLeadAgentAssembly
+
+    from deerflow.agents.lead_agent import agent
+
+    config = TestLeadAgentAssembly._isolate_from_the_ambient_config(monkeypatch)
+    bound = replace(execution(custody, work_policy=enabled), work=SimpleNamespace() if mode == "work" else None)
+    ctx = {AGENT_EXECUTION_CONTEXT_KEY: bound, "is_subagent": mode == "subagent"}
+    if mode == "work":
+        ctx["interaction_mode"] = "autonomous"
+    assembly = agent.assemble_lead_agent({"context": ctx, "configurable": {"thread_id": "chat"}}, app_config=config)
+    expected = int(mode == "chat" and enabled is True)
+    assert [tool.name for tool in assembly.graph["tools"]].count("propose_assignment") == expected
+    assert [type(item).__name__ for item in assembly.graph["middleware"]].count("AssignmentProposalMiddleware") == expected

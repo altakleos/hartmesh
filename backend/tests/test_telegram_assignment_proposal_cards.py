@@ -45,6 +45,21 @@ async def proposal_cards(work_delivery, request):
             return httpx.Response(200, headers=ACK, json={"thread_id": "proposal-original-thread", "owner_user_id": e.link.owner_user_id, "agent_instance": {"id": e.link.agent_ref}, "metadata": {}})
         if request.url.path.endswith("/output"):
             return httpx.Response(200, headers=ACK, json=e.proposal_basis["projection"])
+        if request.url.path.endswith("/runs/proposal-original-run"):
+            return httpx.Response(
+                200,
+                headers=ACK,
+                json={
+                    "run_id": e.proposal_record.run_id,
+                    "thread_id": e.proposal_record.scope.thread_id,
+                    "assistant_id": "lead_agent",
+                    "status": "success",
+                    "stop_reason": None,
+                    "created_at": "2026-11-14T00:00:00Z",
+                    "metadata": {"channel_turn_id": e.proposal_record.publication_id},
+                    "kwargs": {"channel_execution": e.proposal_basis["projection"]["output"]["channel_execution"]},
+                },
+            )
         return httpx.Response(200, headers=ACK, json={"data": e.proposal_basis["messages"], "has_more": False})
 
     e.proposal_http = GatewayClientOwner(gateway_url="https://gateway.example", langgraph_url="https://runtime.example/api", transport=httpx.MockTransport(respond))
@@ -93,6 +108,8 @@ async def proposal_cards(work_delivery, request):
     # The remote read admission is a controlled seam; creation and every card
     # SDK fence retain the actual current account, grant and SQL source checks.
     class Admission:
+        retired = False
+
         def current(self, operation):
             return e.source_active
 
@@ -102,7 +119,7 @@ async def proposal_cards(work_delivery, request):
 
     async def capture(link, *, thread_id, endpoint_id):
         assert (link.id, thread_id, endpoint_id) == (e.link.id, scope.thread_id, e.proposal_http.endpoint_id)
-        return SimpleNamespace(admission=Admission(), read_guard=await guard_for(e), create_guard=await guard_for(e), thread_id=thread_id, endpoint_id=endpoint_id)
+        return SimpleNamespace(admission=Admission(), read_guard=await guard_for(e), create_guard=await guard_for(e), cancel_guard=await guard_for(e), thread_id=thread_id, endpoint_id=endpoint_id)
 
     async def read_output(record, link):
         from app.gateway.run_output import RunOutputProjectionV2

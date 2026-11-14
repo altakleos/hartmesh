@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Offer assignment proposals in eligible agent conversations, with explicit
+  Start, Save, Edit or Just answer choices and verified original-run adoption.
 - Let `/stop` choose the original active answer, running assignments, or both,
   retaining exact targets and cancellation receipts through restart.
 - Preserve ordinary chat input when no assignment prompt claims a message.

@@ -51,6 +51,41 @@ async def test_saved_file_reaches_actual_bus_in_web_composer_shape(file_admissio
     assert record.dispatch_started
 
 
+@pytest.mark.parametrize("after", [1, 3])
+@pytest.mark.parametrize("installed", [False, True])
+async def test_card_marks_use_current_grants_after_file_receipt_wait(file_admission, monkeypatch, after, installed):
+    from app.telegram_bots.file_puts import FileReceiptReader
+    from app.telegram_bots.work_view_sources import WorkViewReader
+    from deerflow.agent_instances.work import AgentWork
+    from deerflow.config import app_config
+    from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
+
+    e = file_admission
+    _service, origin, _file, _saved = await prepared(e, monkeypatch)
+    monkeypatch.setattr(app_config, "peek_loaded_app_config", lambda: e.live.config)
+    reader = WorkViewReader(work=AgentWork(e.http_app.state.agent_instances), authority=e.live.authority, links=e.db.links, clock=e.coordinator.outbox.clock)
+    if installed:
+        e.coordinator.host = SimpleNamespace(work_chat=SimpleNamespace(views=SimpleNamespace(reader=reader)))
+    async with e.db.sessions.begin() as writer:
+        (await writer.get(AgentInstanceGrantRow, (e.link.agent_ref, e.link.owner_user_id))).permissions = 3
+    original = FileReceiptReader.composer_files
+    finished = []
+
+    async def changed_after_receipts(receipts, *args, **kwargs):
+        result = await original(receipts, *args, **kwargs)
+        async with e.db.sessions.begin() as writer:
+            (await writer.get(AgentInstanceGrantRow, (e.link.agent_ref, e.link.owner_user_id))).permissions = after
+        finished.append(True)
+        return result
+
+    monkeypatch.setattr(FileReceiptReader, "composer_files", changed_after_receipts)
+    record = await e.coordinator.dispatch(e.link, [origin], thread_id=e.thread_id)
+    message = e.bus.get_inbound_nowait()
+    e.bus.inbound_task_done()
+    assert record.dispatch_started and finished == [True]
+    assert message.metadata["human_message_kwargs"]["shows_cards"] == (["assignment_card"] if installed and after == 3 else [])
+
+
 async def test_instance_files_never_fall_back_to_legacy_reader_without_receipt_service(file_admission, monkeypatch):
     e = file_admission
     service, origin, file, saved = await prepared(e, monkeypatch, install=False)

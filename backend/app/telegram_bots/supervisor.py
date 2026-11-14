@@ -357,6 +357,9 @@ class TelegramSupervisor:
             self.threads = ThreadCoordinator(links=self.links, authority=self.authority, client=self.thread_client, channel=self.channel, send_allowed=self.send_allowed, outbox=self.outbox, product_name=self.product_name)
             self.publication_authority = PublicationAttemptAuthority(links=self.links, authority=self.authority, client=self.thread_client, channel=self.channel, create_allowed=self.send_allowed, read_allowed=self.publication_read_allowed)
             self.publications = PublicationCoordinator(inbox=self.outbox.inbox, outbox=self.outbox, bus=self.channel_service.bus, http_owner=self.thread_client, capture_attempt=self.publication_authority.capture)
+            from app.telegram_bots.assignment_proposal_source import AssignmentProposalSource
+
+            self.assignment_proposal_source = AssignmentProposalSource(self.publications, self.thread_client, self.publication_authority.capture)
             self.publications.file_preflight = self.preflight_inbound_files
             self.publications.instance_file_receipts = self.instance_file_receipts
             from app.telegram_bots.human_input import HumanInputs
@@ -365,6 +368,7 @@ class TelegramSupervisor:
             self.publications.human_input_planner = self.human_inputs.plan_terminal
             self.model_source = ModelSource(
                 read_output=self.publications.read_output,
+                assignment_proposal_source=self.assignment_proposal_source,
                 human_input_source=self.human_inputs.source,
                 outbox=self.outbox,
                 http_owner=self.thread_client,

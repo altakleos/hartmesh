@@ -1279,8 +1279,9 @@ newest visible human message's `shows_cards` / `assignment_card_response` marks.
 A supported proposal returns one stable `assignment_card` tool artifact and
 ends the turn. Unsupported cards and Just answer continue the conversation
 with fixed model guidance. The primitive has no database, thread, run, service
-or model effect. Tool registration and card marks remain runtime integration
-work. Web history validates the artifact and
+or model effect. Adopted Work policy enables registration in normal instance
+chat; Work attempts and subagents never receive it. Publication recomputes card
+support from current Use+Inspect for each message. Web history validates the artifact and
 renders only passive details and a Work link in an instance conversation.
 
 Successful proposals leave an active Goal waiting with `needs_user_input`, without
@@ -1315,7 +1316,11 @@ unchanged Root body and navigation witness, and exact Retry ancestry. New
 admission expires at the earliest draft/control deadline, including after the
 final provider await; entered owners can recover without a new press. Retention
 pins all grouped inputs and original consent/Retry families while unresolved.
-These services are not installed in the default channel runtime yet.
+The default supervisor installs the shared source reader and model delivery
+reader. WorkChatRuntime installs proposal adoption and Just answer; live
+RunObserver completion and cold publication recovery use the same source-qualified
+primary. Just answer passes its retained submission through ChatTurns' ordinary
+queue, preserves the original conversation and never resends the original words.
 
 `assign.draft_assignment` reuses that strict schema for one bounded non-graph
 model call. The constant extraction instruction carries no user-controlled

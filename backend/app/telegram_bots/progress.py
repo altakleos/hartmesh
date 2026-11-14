@@ -109,9 +109,14 @@ class _Guard:
     def captured_link(self):
         return self.original.captured_link
 
+    def current(self):
+        return self.observer._current(self.state) and self.state.attempt.admission.current("source_read") is True
+
     async def prepare(self):
+        from app.telegram_bots.links import prepare_publication_guard
+
         self.observer._check(self.state)
-        await self.original.prepare()
+        await prepare_publication_guard(self.original)
         self.observer._check(self.state)
 
     async def check(self, session):
@@ -630,6 +635,19 @@ class RunObserver:
         self._check(state)
         if existing is not None:
             return existing
+        proposal = getattr(self.coordinator, "assignment_proposal_planner", None)
+        if proposal is not None and not stopped and output.output.state == "unavailable" and output.output.reason == "unsupported_output" and output.inventory.state == "matched" and output.inventory.document.coverage == "complete":
+            identity = await proposal(state.record, current_link, guard=guard)
+            self._check(state)
+            if identity is not None:
+                from app.telegram_bots.model_source import validate_model_reply_basis
+
+                item = await self.coordinator.outbox.get(current_link, identity)
+                proof = await await_drained(asyncio.to_thread(validate_model_reply_basis, item))
+                self._check(state)
+                if proof.kind != "assignment_proposal" or proof.output != output or publication_identity(proof.record) != publication_identity(state.record):
+                    _refuse()
+                return identity
         if self.coordinator.file_output_planner is not None and output.inventory.state == "matched" and output.inventory.document.coverage == "complete" and delivery_items(output.inventory.document):
             identity = await self.coordinator.file_output_planner(state.record, current_link, output, guard=guard, shown=self.freeze_shown(record, current_link))
             self._check(state)
