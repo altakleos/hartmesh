@@ -3585,12 +3585,20 @@ async def _prepare_goal_continuation_input(
         if _ends_on_human_input_request(messages) or proposal_waiting:
             # The agent asked the user something. Continuing would tell it to keep
             # going while the question is still open on screen.
-            evaluation = GoalEvaluation(
-                satisfied=False,
-                blocker="needs_user_input",
-                reason="The turn ended on an assignment proposal awaiting the user's choice." if proposal_waiting else "The turn ended on a question to the user that has not been answered.",
-                evidence_summary="",
-            )
+            if proposal_waiting:
+                evaluation = GoalEvaluation(
+                    satisfied=False,
+                    blocker="needs_user_input",
+                    reason="The turn ended on an assignment proposal awaiting the user's choice.",
+                    evidence_summary="",
+                )
+            else:
+                evaluation = GoalEvaluation(
+                    satisfied=False,
+                    blocker="needs_user_input",
+                    reason="The turn ended on a question to the user that has not been answered.",
+                    evidence_summary="",
+                )
             no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature, operation_progress=operation_progress)
             await _persist(goal, evaluation, no_progress_count, stand_down_reason=_stand_down_reason(goal, evaluation, no_progress_count))
             return None
