@@ -60,6 +60,29 @@ def draft_identity(link, inbox):
     return digest([draft_scope(link), origin_facts(inbox), "assignment"])[:32]
 
 
+def draft_input_basis(mark):
+    """Keep captured speech custody separate from the private draft route."""
+    from app.telegram_bots.assignment_voice_inputs import voice_basis
+    from app.telegram_bots.inbox import _basis
+
+    basis = _basis(mark)
+    voice = voice_basis(mark)
+    if voice is not None:
+        if voice["phase"] != "ready" or not same_body(mark.route_basis.get("voice_note", {}).get("original"), voice["original"]):
+            raise ProductSourceRetired()
+        basis.pop("work_voice", None)
+    return basis
+
+
+def draft_route_basis(mark, identity):
+    from app.telegram_bots.assignment_voice_inputs import voice_basis
+
+    voice = voice_basis(mark)
+    if voice is not None:
+        draft_input_basis(mark)
+    return {"draft_id": identity, **({"work_voice": voice} if voice is not None else {})}
+
+
 def prepare_draft(draft, *, permissions, now):
     shown, note = prepare_due_date(draft, permissions=permissions, now=now)
     if note and draft.due_text:

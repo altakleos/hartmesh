@@ -15,6 +15,17 @@ def present_prompt(source, basis):
     text = render("assign.edit_prompt" if source.key == "management.prompt" else PURPOSES[intent["purpose"]], basis["locale"], name=source.values["name"])
     parts = [{"kind": "text", "html": html, "visible_text": visible_text(html), "protect_content": source.protected} for html in split_html(text)]
     parts[-1]["force_reply"] = True
+    if "heard" in source.values:
+        from app.telegram_bots.voice import _echo
+
+        parts = [
+            *[
+                {"kind": "text", "html": chunk, "visible_text": visible_text(chunk), "protect_content": source.protected}
+                for transcript in source.values["heard"]
+                for chunk in split_html(render("voice.heard", basis["locale"], text=_echo(transcript)))
+            ],
+            *parts,
+        ]
     return WorkViewPresentation(tuple(parts), ())
 
 

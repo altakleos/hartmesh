@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from app.telegram_bots.acts import _snapshot
 from app.telegram_bots.assign import DraftAssignment
-from app.telegram_bots.assignment_drafts import AssignmentDraft, DraftProjection, draft_identity, origin_facts, snapshot_draft
+from app.telegram_bots.assignment_drafts import AssignmentDraft, DraftProjection, draft_identity, draft_input_basis, origin_facts, snapshot_draft
 from app.telegram_bots.assignment_prompt_sources import AssignmentPromptProjection, require_publication
 from app.telegram_bots.assignment_requests import AssignmentDraftRequests
 from app.telegram_bots.assignment_typing import shown_prompt
@@ -36,7 +36,12 @@ class AssignmentInputs:
             self.outbox.inbox._current(link, mark)
             incoming = InboxRow.from_row(mark)
             identity = draft_identity(link, incoming)
-            if mark.route_kind in {"assignment_draft", "assignment_criteria"}:
+            from app.telegram_bots.assignment_voice_inputs import voice_basis
+
+            voice = voice_basis(mark)
+            if voice is not None and mark.route_kind == "work_card_hold":
+                prompt = await writer.get(TelegramCallbackRow, voice["prompt_id"])
+            elif mark.route_kind in {"assignment_draft", "assignment_criteria"}:
                 matches = list(
                     await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.link_id == link.id, TelegramCallbackRow.kind == "prompt", TelegramCallbackRow.payload["assignment_input"]["input_id"].as_string() == identity))
                 )
@@ -72,6 +77,10 @@ class AssignmentInputs:
             item = _item(parent)
             _basis, source, _part = frozen_news(SimpleNamespace(item=item, link=link, part=None))
             acknowledged, messages = shown_prompt(item, prompt, accepted_at=mark.accepted_at)
+            if voice is not None:
+                from app.telegram_bots.assignment_voice_inputs import check_voice_prompt
+
+                check_voice_prompt(link, mark, prompt, parent, ready=True)
             text = accepted_text(mark, prompt, acknowledged, message_ids=messages)
             if len(text) > self.outbox.config.assign.max_chars:
                 raise ValueError("assign-too-long")
@@ -106,6 +115,12 @@ class AssignmentInputs:
                 raise ProductSourceRetired()
             acknowledged, messages = shown_prompt(_item(parent), prompt, accepted_at=mark.accepted_at)
             route = "assignment_criteria" if criteria else "assignment_draft"
+            if voice is not None:
+                check_voice_prompt(link, mark, prompt, parent, ready=True)
+                if mark.route_kind == "work_card_hold" and mark.route_target_id == item.id and prompt.payload.get("assignment_input") is None:
+                    # The private draft/input handoff commits in this same
+                    # writer; no ordinary routing interval is exposed.
+                    mark.route_kind, mark.route_target_id = None, None
             if accepted_text(mark, prompt, acknowledged, message_ids=messages) != text or mark.route_kind not in {None, route} or mark.route_kind is not None and mark.route_target_id != draft_id:
                 raise CallbackRefused()
             captured = prompt.payload.get("assignment_input")
@@ -172,7 +187,6 @@ class _CompletedCriteria(DraftProjection):
         self.item, self.intent = item, intent
 
     def check_with_permissions(self, rows, held):
-        from app.telegram_bots.inbox import _basis
 
         super().check_with_permissions(rows, held)
         original, criterion = rows[0][self.column + 1], rows[0][self.criteria_column]
@@ -181,10 +195,10 @@ class _CompletedCriteria(DraftProjection):
             original.state == "interrupted"
             or original.route_kind != "assignment_draft"
             or original.route_target_id != self.saved.id
-            or not same_body(_basis(original), {"draft_id": self.saved.id})
+            or not same_body(draft_input_basis(original), {"draft_id": self.saved.id})
             or criterion.state == "interrupted"
             or criterion.route_kind != "assignment_criteria"
             or criterion.route_target_id != self.saved.id
-            or not same_body(_basis(criterion), {"draft_id": self.saved.id})
+            or not same_body(draft_input_basis(criterion), {"draft_id": self.saved.id})
         ):
             raise ProductSourceRetired()

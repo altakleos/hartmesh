@@ -61,4 +61,9 @@ def present_assignment(source, basis, link):
         else:
             raise ValueError("unsupported-assignment-phase")
     parts = tuple({"kind": "text", "html": chunk, "visible_text": visible_text(chunk), "protect_content": source.protected} for chunk in split_html(html))
+    if phase == "draft" and "heard" in source.values:
+        from app.telegram_bots.voice import _echo
+
+        heard = tuple({"kind": "text", "html": chunk, "visible_text": visible_text(chunk), "protect_content": source.protected} for text in source.values["heard"] for chunk in split_html(render("voice.heard", locale, text=_echo(text))))
+        parts = heard + parts
     return WorkViewPresentation(parts, tuple(tuple(line) for line in canonical_keyboard(keyboard)))

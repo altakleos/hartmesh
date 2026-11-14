@@ -288,6 +288,9 @@ class VoiceNotes:
 
         return _Guard(self.services, channel, link, lambda: channel._callback_current(link), repair=True)
 
+    def _input_router(self):
+        return getattr(self.services, "voice_inputs", None) or getattr(getattr(self.services, "work_text_inputs", None), "voice", None)
+
     async def accept(self, channel, update) -> None:
         """Save the note and return: Telegram's next update never waits for it."""
         from app.telegram_bots.turns import forward_origin
@@ -310,7 +313,7 @@ class VoiceNotes:
         row, created = await await_drained(inbox.accept(link, update, sanitized_input={"type": "voice", "voice": descriptor}))
         if created or row.route_kind is None:
             forwarded, origin = forward_origin(message)
-            work_voice = getattr(getattr(self.services, "work_text_inputs", None), "voice", None)
+            work_voice = self._input_router()
             if work_voice is not None:
                 row = await work_voice.capture(channel, link, row, forwarded=forwarded, forward_origin=origin, guard=self._guard(channel, link))
             else:
@@ -330,6 +333,9 @@ class VoiceNotes:
             async with self._locks.hold(link.owner_user_id):
                 row = await step(self._guard(channel, link))
             if row is not None:
+                routed = getattr(self._input_router(), "resume", None)
+                if routed is not None and await routed(channel, row):
+                    return
                 work_inputs = getattr(self.services, "work_text_inputs", None)
                 if row.route_kind.startswith("work_") and work_inputs is not None and await work_inputs.resume(channel, row):
                     return
@@ -487,7 +493,7 @@ class VoiceNotes:
             return None
         human_inputs = getattr(self.services, "human_inputs", None)
         used_as = "answer" if "work_voice" in row.route_basis or human_inputs is not None and await human_inputs.answers_prompt(channel, link, row) else "message"
-        work_voice = getattr(getattr(self.services, "work_text_inputs", None), "voice", None)
+        work_voice = self._input_router()
         prepare = getattr(work_voice, "prepare_complete", None)
         work_options = {"resume": await prepare(link, row)} if prepare is not None else {}
         async with self.services.callbacks.writer(link, guard) as writer:

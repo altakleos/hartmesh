@@ -11,10 +11,10 @@ from sqlalchemy import select
 
 from app.telegram_bots.acts import _snapshot
 from app.telegram_bots.assign import DraftAssignment, draft_assignment
-from app.telegram_bots.assignment_drafts import AssignmentDrafts, DraftProjection, draft_identity, draft_scope, origin_facts
+from app.telegram_bots.assignment_drafts import AssignmentDrafts, DraftProjection, draft_identity, draft_input_basis, draft_route_basis, draft_scope, origin_facts
 from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.callbacks import CallbackRefused
-from app.telegram_bots.inbox import InboxRow, _basis
+from app.telegram_bots.inbox import InboxRow
 from app.telegram_bots.notifications import aware
 from app.telegram_bots.producer import ProductSourceRetired, _safe_json
 from app.telegram_bots.settings import SettingsRepository
@@ -141,7 +141,7 @@ class AssignmentDraftRequests:
                     row = TelegramActRow(id=identity, **draft_scope(link), body=body, state="draft", operation_ids=[], attempts=0, created_at=now, updated_at=now)
                     writer.add(row)
                     await writer.flush()
-                    await self.outbox.inbox.route(inbox, kind="assignment_draft", target_id=identity, basis={"draft_id": identity}, operation_ids=[], session=writer)
+                    await self.outbox.inbox.route(inbox, kind="assignment_draft", target_id=identity, basis=draft_route_basis(inbox, identity), operation_ids=[], session=writer)
                 elif row.body.get("version") != 1:
                     value = request_snapshot(link, row)
                     if value.words != words or not same_body(row.body["request"]["previous"], body["request"]["previous"]) or value.source != source:
@@ -266,7 +266,7 @@ class AssignmentDraftRequests:
             if admission is not None:
                 await admission(writer)
             if criteria is not None:
-                await self.outbox.inbox.route(criteria, kind="assignment_criteria", target_id=identity, basis={"draft_id": identity}, operation_ids=[], session=writer)
+                await self.outbox.inbox.route(criteria, kind="assignment_criteria", target_id=identity, basis=draft_route_basis(criteria, identity), operation_ids=[], session=writer)
             result = await install(writer, expected_request=body)
             row = await writer.get(TelegramActRow, identity, populate_existing=True)
             completed = _snapshot(row)
@@ -326,12 +326,12 @@ class RequestProjection(DraftProjection):
             mark.route_kind != "assignment_draft"
             or mark.route_target_id != self.saved.id
             or mark.state == "interrupted"
-            or not same_body(_basis(mark), {"draft_id": self.saved.id})
+            or not same_body(draft_input_basis(mark), {"draft_id": self.saved.id})
             or self.request_phase in {"new", "extracting"}
             and mark.route_complete
         ):
             raise ProductSourceRetired()
         if self.criteria_origin is not None:
             criterion = rows[0][self.criteria_column]
-            if criterion.state == "interrupted" or criterion.route_kind != "assignment_criteria" or criterion.route_target_id != self.saved.id or not same_body(_basis(criterion), {"draft_id": self.saved.id}):
+            if criterion.state == "interrupted" or criterion.route_kind != "assignment_criteria" or criterion.route_target_id != self.saved.id or not same_body(draft_input_basis(criterion), {"draft_id": self.saved.id}):
                 raise ProductSourceRetired()
