@@ -304,13 +304,17 @@ class WorkNewsPlans:
         if reader.links.session_factory.kw.get("bind") is not outbox.sessions.kw.get("bind") or callbacks.sessions.kw.get("bind") is not outbox.sessions.kw.get("bind"):
             raise ValueError("work-news-requires-shared-storage")
 
-    async def materialize(self, link, identity):
-        return await await_drained(self._materialize(link, identity))
+    async def materialize(self, link, identity, *, guard=None):
+        return await await_drained(self._materialize(link, identity, guard=guard))
 
     async def stage_metadata(self, writer, link, row, source):
         """Optional metadata owned by this exact source and presentation writer."""
 
-    async def _materialize(self, link, identity):
+    async def _materialize(self, link, identity, *, guard=None):
+        if guard is not None:
+            from app.telegram_bots.links import prepare_publication_guard
+
+            await prepare_publication_guard(guard)
         async with self.outbox.sessions() as reader:
             row = await reader.get(TelegramOutboxRow, identity)
             if row is None or any(getattr(row, field) is not None for field in ("claim_owner", "claim_id", "claimed_at")):
@@ -318,6 +322,8 @@ class WorkNewsPlans:
             item = _item(row)
         if item.parts:
             frozen_news(SimpleNamespace(link=link, item=item, part=None))
+            if guard is not None:
+                guard.current()
             return True
         if item.state != "pending" or item.payload.get("presentation_version") != 0:
             raise ProductSourceRetired()
@@ -330,6 +336,8 @@ class WorkNewsPlans:
         clock = await self.reader.prepare_clock(link, item)
         projected = await prepare_news_projection(self.projection(self.reader, link, item, source, clock=clock))
         async with self.outbox._writer(link.id) as (writer, binding):
+            if guard is not None:
+                await guard.check(writer)
             row = await writer.get(TelegramOutboxRow, identity, with_for_update=True, populate_existing=True)
             if binding is None or any(getattr(binding, field) != getattr(link, field) for field in _SCOPE) or row is None or _item(row) != item:
                 raise DeliveryClaimRetired()
@@ -349,6 +357,10 @@ class WorkNewsPlans:
             await self.stage_metadata(writer, link, row, source)
             await admission(session=writer, projection=news_projection_for_item(self, link, _item(row), source, clock, projected))
             origin.check(basis)
+            if guard is not None:
+                await guard.check(writer)
+            if guard is not None:
+                guard.current()
             return True
 
 

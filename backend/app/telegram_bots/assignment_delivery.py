@@ -31,8 +31,12 @@ class AssignmentPlans(WorkNewsPlans):
 
         return await AssignmentRecovery(self).operate(link, callback_id, cancel=False, **kwargs)
 
-    async def observe(self, link, draft_id):
+    async def observe(self, link, draft_id, *, guard=None):
         async def perform():
+            if guard is not None:
+                from app.telegram_bots.links import prepare_publication_guard
+
+                await prepare_publication_guard(guard)
             async with self.outbox.sessions() as reader:
                 root = await reader.get(TelegramActRow, draft_id)
                 snapshot_draft(link, root)
@@ -64,7 +68,7 @@ class AssignmentPlans(WorkNewsPlans):
                     return row.id
             source = await self.reader.read(link, item)
             if not item.parts:
-                await self.materialize(link, item.id)
+                await self.materialize(link, item.id, guard=guard)
                 return item.id
             basis, previous, _ = frozen_news(SimpleNamespace(link=link, item=item, part=None))
             settings = await self.settings.get(link.owner_user_id)
@@ -76,6 +80,8 @@ class AssignmentPlans(WorkNewsPlans):
             current = await prepare_attention(self.reader, link)
             clock = await self.reader.prepare_clock(link, item)
             async with self.outbox._writer(link.id) as (writer, _binding):
+                if guard is not None:
+                    await guard.check(writer)
                 row = await writer.get(TelegramOutboxRow, item.id, with_for_update=True, populate_existing=True)
                 if row is None or _item(row) != item or any(getattr(row, key) is not None for key in ("claim_owner", "claim_id", "claimed_at")):
                     return item.id
@@ -83,6 +89,8 @@ class AssignmentPlans(WorkNewsPlans):
                 await WorkNewsRecovery(self)._replace(writer, link, row, source, settings, origin, unclaimed=True, direct_edit=True)
                 await current(session=writer, projection=self.projection(self.reader, link, _item(row), source, clock=clock))
                 origin.check(row.payload["work_news_basis"])
+                if guard is not None:
+                    await guard.check(writer)
                 return row.id
 
         return await await_drained(perform())
@@ -131,7 +139,7 @@ class AssignmentPlans(WorkNewsPlans):
                             inbox = await self.outbox.inbox.route(inbox, kind="assignment_draft", target_id=draft_id, basis=draft_route_basis(inbox, draft_id), operation_ids=[], session=writer)
                         await self.outbox.inbox.register_delivery([inbox], outbox_id=row.id, primary=mark.outbox_id is None, finish=True, session=writer)
                 identity = row.id
-            await self.materialize(link, identity)
+            await self.materialize(link, identity, guard=guard)
             return identity
 
         return await await_drained(perform())

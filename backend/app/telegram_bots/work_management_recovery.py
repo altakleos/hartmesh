@@ -176,7 +176,7 @@ class WorkManagementRecovery:
                 result = await self.acts.check(shown.id, expected=expected, attempt_current=lambda: _current(guard) and self.outbox.clock() < deadline) if resume else await self.acts._work_record(shown.id)
             else:
                 result = await self.acts.cancel_management(shown.id, admission=admission, confirmation_current=current)
-            await self.plans.observe(link, identity)
+            await self.plans.observe(link, identity, guard=guard)
             return result
 
         return await await_drained(perform())

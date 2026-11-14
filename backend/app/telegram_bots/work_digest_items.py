@@ -22,8 +22,8 @@ from deerflow.utils.file_io import await_drained
 
 
 class DigestItems:
-    def __init__(self, *, digests, requests, reviews=None, routing=None, news=None, results=None, summaries=None):
-        self.navigation = WorkNavigation(digests, summaries=summaries, requests=requests, reviews=reviews)
+    def __init__(self, *, digests, requests, reviews=None, routing=None, news=None, results=None, summaries=None, views=None):
+        self.navigation = WorkNavigation(digests, summaries=summaries, requests=requests, reviews=reviews, views=views)
         self.digests, self.requests = digests, requests
         self.outbox, self.callbacks = digests.outbox, digests.callbacks
         self.reviews, self.routing, self.news, self.results = reviews, routing, news, results
@@ -55,7 +55,7 @@ class DigestItems:
     async def open(self, link, *, callback_id, query_id, chat_id, message_id, message_thread_id, guard):
         async def perform():
             origin = await self.navigation.read(link, callback_id=callback_id, query_id=query_id)
-            if type(chat_id) is not int or type(message_id) is not int or (chat_id, message_id, message_thread_id) != (link.chat_id, origin.value["message_id"], None):
+            if type(chat_id) is not int or type(message_id) is not int or (chat_id, message_id, message_thread_id) != (link.chat_id, origin.value["message_id"], origin.anchor.message_thread_id):
                 raise CallbackRefused()
             source = origin.target.source
             family, planner = self._owner(origin.target)
@@ -88,6 +88,7 @@ class DigestItems:
                     event_id=origin.target.event_id,
                     dedupe_key=key,
                     class_="reply",
+                    message_thread_id=message_thread_id,
                     payload={"presentation_version": 0, **deepcopy(origin.target.intent or {})},
                     parts=[],
                     state="pending",

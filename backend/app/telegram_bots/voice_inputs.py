@@ -23,6 +23,6 @@ class VoiceInputRouter:
     async def complete(self, link, origin, **kwargs):
         return await self.owner(origin).complete(link, origin, **kwargs)
 
-    async def resume(self, channel, origin):
+    async def resume(self, channel, origin, **kwargs):
         resume = getattr(self.owner(origin), "resume", None)
-        return await resume(channel, origin) if resume is not None else False
+        return await resume(channel, origin, **kwargs) if resume is not None else False

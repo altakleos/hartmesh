@@ -20,7 +20,7 @@ from deerflow.utils.file_io import await_drained
 
 
 def validate_origin(value):
-    if type(value) is not dict or value.get("kind") not in {"digest", "summary"}:
+    if type(value) is not dict or value.get("kind") not in {"digest", "summary", "view"}:
         raise ProductSourceRetired()
     root = value["kind"]
     if set(value) != {"version", "kind", root + "_id", root + "_proof", "anchor_outbox_id", "anchor_proof", "presentation_version", "message_id", "callback_id", "member_id", "query_key"}:
@@ -97,8 +97,16 @@ class NavigationRead:
 
 
 class WorkNavigation:
-    def __init__(self, plans, *, summaries=None, requests=None, reviews=None):
+    def __init__(self, plans, *, summaries=None, requests=None, reviews=None, views=None):
         self.plans, self.digests = plans, DigestNavigation(plans)
+        self.views = {}
+        if views is not None:
+            from app.telegram_bots.work_detail_cards import DETAIL_INTENTS
+            from app.telegram_bots.work_view_navigation import WorkViewNavigation
+
+            if type(views) is not dict or not views or not set(views).issubset(DETAIL_INTENTS):
+                raise ValueError("invalid-work-detail-owners")
+            self.views = {key: WorkViewNavigation(owner, requests=requests, reviews=reviews) for key, owner in views.items()}
         self.summaries = None
         if summaries is not None:
             from app.telegram_bots.summary_items import SummaryItemsNavigation
@@ -128,6 +136,10 @@ class WorkNavigation:
             item, member_id = _item(row), callback.target_id
         if self.summaries is not None and {"summary_basis", "summary_view_basis"}.intersection(item.payload):
             return await self.summaries.read(link, item, callback, query_key, expected=expected)
+        if set(self.views).intersection(item.payload):
+            from app.telegram_bots.work_detail_cards import detail_card_owner
+
+            return await detail_card_owner(item, self.views).read(link, item, callback, query_key, expected=expected)
         if callback.target_kind != "outbox":
             raise ProductSourceRetired()
         digest_id, show_id = frozen_anchor(link, item)
@@ -206,7 +218,11 @@ class NavigationOriginProjection:
 
     def __init__(self, navigation):
         self.navigation = navigation
-        if navigation.value["kind"] == "summary":
+        if navigation.value["kind"] == "view":
+            from app.telegram_bots.work_view_navigation import WorkViewNavigationProjection
+
+            self.delegate = WorkViewNavigationProjection(navigation)
+        elif navigation.value["kind"] == "summary":
             from app.telegram_bots.summary_items import SummaryItemProjection
 
             self.delegate = SummaryItemProjection(navigation)
@@ -218,7 +234,7 @@ class NavigationOriginProjection:
 
     @property
     def callback_column(self):
-        if self.navigation.value["kind"] == "summary":
+        if self.navigation.value["kind"] in {"summary", "view"}:
             return self.delegate.callback_column
         delegate = self.delegate
         return delegate.column + 2 if delegate.origin_column is None else delegate.origin_column + 1

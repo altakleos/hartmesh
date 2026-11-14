@@ -2010,8 +2010,12 @@ Connected AI assistants and AI employees can now message you when a question,
 result or problem needs your attention. Reply to questions, review complete
 results and files, decide, accept results, request changes, or pass a question to
 an eligible colleague. Decisions and acceptance require explicit confirmation;
-answering a question never starts or resumes an assignment. Start, Resume and
-Stop for assignments remain on the web. Stopping targets the selected attempt;
+answering a question never starts or resumes an assignment. Type `/work` (or
+`/status`) to list assignments and open their details. Detail cards offer Start,
+Resume and Stop when your current access allows them. Use `/assign` followed by
+your instructions, or answer its prompt with text or voice, to review a private
+draft before saving or starting it. Change and Withdraw open their own previews;
+saving an edit or confirming withdrawal is a separate gesture. Stopping targets the selected attempt;
 a newer attempt cannot inherit an earlier cancellation request. An acknowledgement
 of the request is separate from confirmed settlement.
 

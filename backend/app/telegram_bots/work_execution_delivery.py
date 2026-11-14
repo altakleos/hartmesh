@@ -43,8 +43,12 @@ class WorkExecutionPlans(WorkNewsPlans):
         if acts.session_factory.kw.get("bind") is not self.outbox.sessions.kw.get("bind"):
             raise ValueError("work-execution-requires-shared-storage")
 
-    async def observe(self, link, act_id):
+    async def observe(self, link, act_id, *, guard=None):
         async def perform():
+            if guard is not None:
+                from app.telegram_bots.links import prepare_publication_guard
+
+                await prepare_publication_guard(guard)
             # Receipt observation may settle the journal, but never calls check(),
             # commands, launching or physical cancellation.
             captured = await self.acts._work_record(act_id)
@@ -58,6 +62,8 @@ class WorkExecutionPlans(WorkNewsPlans):
             require_execution_scope(link, act)
             key = "notice:work-execution:" + act_id
             async with self.outbox._writer(link.id) as (writer, _binding):
+                if guard is not None:
+                    await guard.check(writer)
                 journal = await writer.get(TelegramActRow, act_id, with_for_update=True, populate_existing=True)
                 if journal is None or journal.state != act.state or journal.attempts != act.attempts:
                     raise ProductSourceRetired()
@@ -91,6 +97,8 @@ class WorkExecutionPlans(WorkNewsPlans):
                     writer.add(row)
                     await writer.flush()
                 identity = row.id
+                if guard is not None:
+                    await guard.check(writer)
             async with self.outbox.sessions() as reader:
                 row = await reader.get(TelegramOutboxRow, identity)
                 item = _item(row)
@@ -104,7 +112,7 @@ class WorkExecutionPlans(WorkNewsPlans):
                 # acknowledged Cancel/Retry while its outcome is still unknown.
                 return identity
             if not item.parts and source is not None:
-                await self.materialize(link, identity)
+                await self.materialize(link, identity, guard=guard)
                 return identity
             basis, prior = None, None
             if item.parts:
@@ -117,6 +125,8 @@ class WorkExecutionPlans(WorkNewsPlans):
                 return identity
             admission = await prepare_attention(self.reader, link)
             async with self.outbox._writer(link.id) as (writer, _binding):
+                if guard is not None:
+                    await guard.check(writer)
                 row = await writer.get(TelegramOutboxRow, identity, with_for_update=True, populate_existing=True)
                 if _item(row) != item or any(getattr(row, key) is not None for key in ("claim_owner", "claim_id", "claimed_at")):
                     return identity
@@ -139,6 +149,8 @@ class WorkExecutionPlans(WorkNewsPlans):
                     await WorkNewsRecovery(self)._replace(writer, link, row, source, settings, origin, direct_edit=True, unclaimed=True)
                     await admission(session=writer, projection=current.with_item(_item(row)))
                     origin.check(row.payload["work_news_basis"])
+                if guard is not None:
+                    await guard.check(writer)
             return identity
 
         return await await_drained(perform())
@@ -221,7 +233,7 @@ class WorkExecutionPlans(WorkNewsPlans):
                     if anchor_signature(original) != signature or any(control.payload.get("work_action_id") != act_id for control in controls) or target.cancel_requested_at is None and target.state != "done":
                         raise CallbackRefused()
                 result = await self.acts.reconcile_receipt(act_id)
-            await self.observe(link, act_id)
+            await self.observe(link, act_id, guard=guard)
             return result
 
         return await await_drained(perform())
@@ -265,7 +277,7 @@ class WorkExecutionPlans(WorkNewsPlans):
                     return False
 
             result = await self.acts.check(expected["id"], expected=expected, attempt_current=current)
-            await self.observe(link, result.id)
+            await self.observe(link, result.id, guard=guard)
             return result
 
         return await await_drained(perform())

@@ -95,7 +95,7 @@ WORK_NEWS_KEYS |= frozenset("summary.header summary.finished summary.working sum
 
 WORK_VIEW_KEYS = frozenset(
     (
-        "work.list work.list.working work.list.waiting work.list.other work.list.row work.list_page work.list_more work.empty "
+        "work.list work.list.working work.list.waiting work.list.other work.list.row work.list_page work.list_more work.empty work.need_inspect "
         "work.needs.answer work.needs.decision work.needs.review work.needs.resume work.detail work.detail.latest work.detail.criteria work.detail.due work.detail.given "
         "work.status.not_started work.status.starting work.status.working work.status.stopping work.status.stopped work.status.interrupted work.status.did_not_start work.status.failed work.status.no_result work.status.checking "
         "work.status.waiting_you_answer work.status.waiting_you_decision work.status.review_you work.status.waiting_answer work.status.waiting_decision "
@@ -115,7 +115,7 @@ EXECUTION_KEYS = frozenset(
 
 ASSIGNMENT_KEYS = frozenset(
     (
-        "assign.prompt assign.ask_done assign.too_long assign.card assign.due assign.card_title assign.card_title_proposed assign.due_note assign.edit_prompt "
+        "assign.prompt assign.ask_done assign.too_long assign.card assign.due assign.card_title assign.card_title_proposed assign.due_note assign.edit_prompt assign.no_access "
         "assign.replaced assign.started_line assign.saved_line assign.discarded assign.answering assign.just_answer_message assign.draft_failed stale.draft assign.saving assign.not_saved assign.save_cancelled assign.save_unconfirmed"
     ).split()
 )

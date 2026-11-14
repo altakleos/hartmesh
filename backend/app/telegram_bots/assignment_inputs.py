@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.telegram_bots.acts import _snapshot
 from app.telegram_bots.assign import DraftAssignment
 from app.telegram_bots.assignment_drafts import AssignmentDraft, DraftProjection, draft_identity, draft_input_basis, origin_facts, snapshot_draft
+from app.telegram_bots.assignment_input_ownership import release_hold, require_owner, typed_basis
 from app.telegram_bots.assignment_prompt_sources import AssignmentPromptProjection, require_publication
 from app.telegram_bots.assignment_requests import AssignmentDraftRequests
 from app.telegram_bots.assignment_typing import shown_prompt
@@ -27,10 +28,10 @@ class AssignmentInputs:
         self.outbox, self.callbacks = prompts.outbox, prompts.callbacks
         self.requests = requests or AssignmentDraftRequests(self.acts)
 
-    async def answer(self, link, inbox, *, guard):
-        return await await_drained(self._answer(link, inbox, guard=guard))
+    async def answer(self, link, inbox, *, guard, prompt_id=None):
+        return await await_drained(self._answer(link, inbox, guard=guard, source_prompt_id=prompt_id))
 
-    async def _answer(self, link, inbox, *, guard):
+    async def _answer(self, link, inbox, *, guard, source_prompt_id=None):
         async with self.callbacks.writer(link, guard) as writer:
             mark = (await self.outbox.inbox._rows(writer, [inbox]))[0]
             self.outbox.inbox._current(link, mark)
@@ -39,7 +40,10 @@ class AssignmentInputs:
             from app.telegram_bots.assignment_voice_inputs import voice_basis
 
             voice = voice_basis(mark)
-            if voice is not None and mark.route_kind == "work_card_hold":
+            typed = typed_basis(mark) if mark.route_kind == "assignment_hold" else None
+            if typed is not None:
+                prompt = await writer.get(TelegramCallbackRow, typed["prompt_id"])
+            elif voice is not None and mark.route_kind == "work_card_hold":
                 prompt = await writer.get(TelegramCallbackRow, voice["prompt_id"])
             elif mark.route_kind in {"assignment_draft", "assignment_criteria"}:
                 matches = list(
@@ -48,6 +52,8 @@ class AssignmentInputs:
                 if len(matches) != 1:
                     raise CallbackRefused()
                 prompt = matches[0]
+            elif mark.route_kind is None and source_prompt_id is not None:
+                prompt = await writer.get(TelegramCallbackRow, source_prompt_id)
             elif mark.route_kind is not None:
                 return None
             else:
@@ -77,6 +83,8 @@ class AssignmentInputs:
             item = _item(parent)
             _basis, source, _part = frozen_news(SimpleNamespace(item=item, link=link, part=None))
             acknowledged, messages = shown_prompt(item, prompt, accepted_at=mark.accepted_at)
+            if typed is not None:
+                require_owner(link, mark, prompt, parent, expected=typed)
             if voice is not None:
                 from app.telegram_bots.assignment_voice_inputs import check_voice_prompt
 
@@ -115,6 +123,9 @@ class AssignmentInputs:
                 raise ProductSourceRetired()
             acknowledged, messages = shown_prompt(_item(parent), prompt, accepted_at=mark.accepted_at)
             route = "assignment_criteria" if criteria else "assignment_draft"
+            if typed is not None and mark.route_kind == "assignment_hold":
+                require_owner(link, mark, prompt, parent, expected=typed)
+                release_hold(mark)
             if voice is not None:
                 check_voice_prompt(link, mark, prompt, parent, ready=True)
                 if mark.route_kind == "work_card_hold" and mark.route_target_id == item.id and prompt.payload.get("assignment_input") is None:
@@ -159,7 +170,7 @@ class AssignmentInputs:
         if existing_card is not None:
             async with self.callbacks.writer(link, guard) as writer:
                 await admission(writer)
-            return await self.cards.observe(link, draft_id)
+            return await self.cards.observe(link, draft_id, guard=guard)
         if criteria:
             async with self.outbox.sessions() as reader:
                 root = await reader.get(TelegramActRow, draft_id)
@@ -174,7 +185,7 @@ class AssignmentInputs:
             value = await self.requests.request(link, incoming, words=text, previous=previous, source="edit" if editing else "command", admission=admission)
         if isinstance(value, AssignmentDraft):
             if editing:
-                await self.cards.observe(link, source.work["intent"]["draft_id"])
+                await self.cards.observe(link, source.work["intent"]["draft_id"], guard=guard)
             return await self.cards.plan(link, value.id, guard=guard)
         if value.phase == "awaiting_done":
             return await self.prompts.plan(link, incoming, purpose="assign_done", draft_id=value.id, guard=guard)

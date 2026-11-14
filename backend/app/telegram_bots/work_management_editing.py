@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from app.telegram_bots.assign import DraftAssignment, draft_assignment
 from app.telegram_bots.assignment_drafts import origin_facts
+from app.telegram_bots.assignment_input_ownership import release_hold, require_owner, typed_basis
 from app.telegram_bots.assignment_typing import shown_prompt
 from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.callbacks import CallbackRefused, Prompts
@@ -69,16 +70,16 @@ class WorkManagementEdits:
         if self._stopping:
             raise ProductSourceRetired()
 
-    async def answer(self, link, incoming, *, guard):
+    async def answer(self, link, incoming, *, guard, prompt_id=None):
         self.current()
-        task = asyncio.create_task(self._answer(link, incoming, guard=guard))
+        task = asyncio.create_task(self._answer(link, incoming, guard=guard, source_prompt_id=prompt_id))
         self._tasks.add(task)
         try:
             return await await_drained(task)
         finally:
             self._tasks.discard(task)
 
-    async def _answer(self, link, incoming, *, guard):
+    async def _answer(self, link, incoming, *, guard, source_prompt_id=None):
         identity = digest(["management-edit", origin_facts(incoming)])[:32]
         async with self._locks.hold(identity):
             self.current()
@@ -86,9 +87,14 @@ class WorkManagementEdits:
             async with self.callbacks.writer(link, guard) as writer:
                 mark = (await self.outbox.inbox._rows(writer, [incoming]))[0]
                 self.outbox.inbox._current(link, mark)
-                if mark.route_kind is None:
+                if mark.route_kind in {None, "assignment_hold"}:
                     quote = mark.sanitized_input.get("reply_to_message_id")
-                    if quote is not None:
+                    typed = typed_basis(mark) if mark.route_kind == "assignment_hold" else None
+                    if typed is not None:
+                        prompt = await writer.get(TelegramCallbackRow, typed["prompt_id"])
+                    elif source_prompt_id is not None:
+                        prompt = await writer.get(TelegramCallbackRow, source_prompt_id)
+                    elif quote is not None:
                         found = list(
                             await writer.scalars(
                                 select(TelegramCallbackRow).where(
@@ -110,6 +116,9 @@ class WorkManagementEdits:
                     prompt_parent = await writer.get(TelegramOutboxRow, prompt.payload.get("anchor_outbox_id"))
                     if prompt_parent is None:
                         raise CallbackRefused()
+                    if typed is not None:
+                        require_owner(link, mark, prompt, prompt_parent, expected=typed)
+                        release_hold(mark)
                     item = _item(prompt_parent)
                     intent = prompt_intent(item)
                     acknowledged, messages = shown_prompt(item, prompt, accepted_at=mark.accepted_at)
@@ -256,7 +265,7 @@ class WorkManagementEdits:
     async def _finish(self, link, incoming, parent_id, *, guard):
         """Recover an owed presentation, without another extraction or command."""
         self.current()
-        await self.cards.observe(link, parent_id)
+        await self.cards.observe(link, parent_id, guard=guard)
         async with self.callbacks.writer(link, guard) as writer:
             mark = (await self.outbox.inbox._rows(writer, [incoming]))[0]
             if mark.state == "interrupted" or mark.route_kind != "management_edit" or not same_body(origin_facts(InboxRow.from_row(mark)), origin_facts(incoming)):
@@ -409,7 +418,7 @@ class WorkManagementEdits:
                     raise ProductSourceRetired()
                 guard.current()
                 identity = row.id
-            await self.prompts.materialize(link, identity)
+            await self.prompts.materialize(link, identity, guard=guard)
             return identity
 
         return await await_drained(perform())

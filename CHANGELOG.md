@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Telegram Work chat
+
+- Install `/work`, its `/status` alias, and private `/assign` draft entry points
+  in connected assistant and employee chats. Detail cards use acknowledged
+  Start/Stop controls and full current question or review previews.
+- Route assignment voice prompts and saved-assignment corrections through their
+  original private input owners. Restart recovery preserves selected prompts,
+  saved action bodies and delivery identities without another model call.
+- Observe saved assignment and management receipts through the existing runtime
+  lifetime, and dispatch their explicit Retry and Cancel controls by source family.
+
 ## [2.2.0+hartmesh.57] - 2026-11-13
 
 ### Telegram delivery

@@ -77,7 +77,7 @@ class WorkManagementPlans(WorkNewsPlans):
                 else:
                     identity = None
             if identity is not None:
-                await self.observe(link, identity)
+                await self.observe(link, identity, guard=guard)
                 return identity
             async with self.callbacks.writer(link, guard) as writer:
                 group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=guard, session=writer)
@@ -172,15 +172,19 @@ class WorkManagementPlans(WorkNewsPlans):
                     await validate(writer)
                     await stage_row(writer, None)
                     await validate(writer)
-            await self.materialize(link, identity)
+            await self.materialize(link, identity, guard=guard)
             return identity
 
         return await await_drained(perform())
 
-    async def observe(self, link, identity):
+    async def observe(self, link, identity, *, guard=None):
         """Refresh only this saved preview; never issue a Work command."""
 
         async def perform():
+            if guard is not None:
+                from app.telegram_bots.links import prepare_publication_guard
+
+                await prepare_publication_guard(guard)
             async with self.outbox.sessions() as reader:
                 row = await reader.get(TelegramOutboxRow, identity)
                 if row is None:
@@ -190,7 +194,7 @@ class WorkManagementPlans(WorkNewsPlans):
                     return identity
             source = await self.reader.read(link, item)
             if not item.parts:
-                await self.materialize(link, identity)
+                await self.materialize(link, identity, guard=guard)
                 return identity
             basis, prior, _part = frozen_news(SimpleNamespace(link=link, item=item, part=None))
             settings = await self.settings.get(link.owner_user_id)
@@ -202,6 +206,8 @@ class WorkManagementPlans(WorkNewsPlans):
             current = await prepare_attention(self.reader, link)
             clock = await self.reader.prepare_clock(link, item)
             async with self.outbox._writer(link.id) as (writer, _binding):
+                if guard is not None:
+                    await guard.check(writer)
                 row = await writer.get(TelegramOutboxRow, identity, with_for_update=True, populate_existing=True)
                 if row is None or _item(row) != item or any(getattr(row, field) is not None for field in ("claim_owner", "claim_id", "claimed_at")):
                     return identity
@@ -209,6 +215,8 @@ class WorkManagementPlans(WorkNewsPlans):
                 await WorkNewsRecovery(self)._replace(writer, link, row, source, settings, origin, direct_edit=True, unclaimed=True)
                 await current(session=writer, projection=WorkManagementProjection(self.reader, link, _item(row), source, clock=clock))
                 origin.check(row.payload["work_news_basis"])
+                if guard is not None:
+                    await guard.check(writer)
             return identity
 
         return await await_drained(perform())

@@ -8,7 +8,7 @@ from app.telegram_bots.inbox import InboxRow
 from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
 
 logger = logging.getLogger(__name__)
-_ROUTES = {"work_input", "work_card_hold", "work_file_new", "work_album_hold", "work_file_album", "work_answer"}
+_ROUTES = {"work_input", "work_card_hold", "work_file_new", "work_album_hold", "work_file_album", "work_answer", "assignment_hold", "assignment_draft", "assignment_criteria", "management_edit"}
 
 
 async def recover_inputs(runtime, phase, *, link_id=None, guard_factory):
@@ -38,6 +38,9 @@ async def recover_inputs(runtime, phase, *, link_id=None, guard_factory):
                     continue
                 guard = guard_factory(runtime, host.commands._guard(channel, link), phase=phase)
                 guard.current()
+                chat = getattr(host, "work_chat", None)
+                if chat is not None and await chat.recover_input(channel, origin, guard=guard):
+                    continue
                 await inputs.resume(channel, origin, recovery_guard=guard)
             except Exception:
                 logger.warning("Telegram saved Work input remains held: link=%s message=%s", origin.link_id, origin.message_id)

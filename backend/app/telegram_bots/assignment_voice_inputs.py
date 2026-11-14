@@ -55,35 +55,15 @@ def check_voice_prompt(link, mark, prompt, parent, *, ready=False):
 
 
 class AssignmentVoiceInputs:
-    def __init__(self, inputs):
+    def __init__(self, inputs, *, guard_factory=None):
         self.inputs = inputs
         self.outbox, self.callbacks = inputs.outbox, inputs.callbacks
+        self.guard_factory = guard_factory
 
     async def quoted_sources(self, link, message_id, topic):
-        after, found = "", []
-        while True:
-            async with self.outbox.sessions() as reader:
-                page = list(
-                    await reader.scalars(
-                        select(TelegramOutboxRow)
-                        .where(
-                            TelegramOutboxRow.id > after,
-                            TelegramOutboxRow.link_id == link.id,
-                            TelegramOutboxRow.owner_user_id == link.owner_user_id,
-                            TelegramOutboxRow.binding_generation == link.binding_generation,
-                            TelegramOutboxRow.chat_id == link.chat_id,
-                            TelegramOutboxRow.message_thread_id == topic,
-                            TelegramOutboxRow.instance_id == link.agent_ref,
-                            TelegramOutboxRow.payload["assignment_prompt_intent"]["prompt_id"].as_string().is_not(None),
-                        )
-                        .order_by(TelegramOutboxRow.id)
-                        .limit(100)
-                    )
-                )
-                found.extend(row.id for row in page if type(row.message_id) is int and row.message_id == message_id or any(type(value) is int and value == message_id for part in row.parts for value in part.get("message_ids", [])))
-                if len(page) < 100:
-                    return found
-                after = page[-1].id
+        from app.telegram_bots.assignment_prompt_owners import quoted_assignment_sources
+
+        return await quoted_assignment_sources(self.outbox, link, message_id, topic)
 
     async def capture(self, channel, link, origin, *, forwarded, forward_origin, guard):
         if forwarded or link.agent_kind != "instance":
@@ -204,8 +184,8 @@ class AssignmentVoiceInputs:
             )
         return captured
 
-    async def resume(self, channel, origin):
-        return await await_drained(self._resume(channel, origin))
+    async def resume(self, channel, origin, *, recovery_guard=None):
+        return await await_drained(self._resume(channel, origin, recovery_guard=recovery_guard))
 
     async def _ready(self, link, origin, guard):
         value = voice_basis(origin)
@@ -237,12 +217,12 @@ class AssignmentVoiceInputs:
                 await writer.flush()
             return InboxRow.from_row(mark)
 
-    async def _resume(self, channel, origin):
+    async def _resume(self, channel, origin, *, recovery_guard=None):
         value = voice_basis(origin)
         if value is None:
             return False
-        link = channel.link
-        guard = channel._services.commands._guard(channel, link)
+        link = recovery_guard.captured_link if recovery_guard is not None else channel.link
+        guard = recovery_guard or (self.guard_factory(channel, link) if self.guard_factory is not None else channel._services.commands._guard(channel, link))
         origin = await self._ready(link, origin, guard)
         if origin.route_complete:
             return True

@@ -871,6 +871,9 @@ class TelegramBotChannel(TelegramChannel):
         settings_prompts = getattr(self._services, "settings_prompts", None)
         if settings_prompts is not None and await settings_prompts.execute_callback(self, row, query_id=query_id, update_id=update_id):
             return
+        work_chat = getattr(self._services, "work_chat", None)
+        if work_chat is not None and await work_chat.execute_callback(self, row, update_id=update_id, query_id=query_id):
+            return
         work_callbacks = getattr(self._services, "work_callbacks", None)
         if work_callbacks is not None and await work_callbacks.execute_callback(self, row, update_id=update_id, query_id=query_id):
             return
@@ -1082,6 +1085,8 @@ class TelegramBotChannel(TelegramChannel):
         elif word in {"assistants", "employees"} and self._admission(update).link.agent_kind == "lead_agent" and getattr(self._services, "commands", None) is not None:
             await self._services.commands.handle_list(self, update, word)
             self._classified(update, remember=True)
+        elif getattr(self._services, "work_chat", None) is not None and await self._services.work_chat.handle_command(self, update, word):
+            pass
         elif word in {"work", "assign", "status"} and self._admission(update).link.agent_kind == "lead_agent":
             await self._fixed_reply(update, "cmd.other_chat", word)
         elif word == "agent":
@@ -1123,6 +1128,9 @@ class TelegramBotChannel(TelegramChannel):
         work_inputs = getattr(self._services, "work_text_inputs", None)
         if not skill and work_inputs is not None and await work_inputs.files.handle(self, update, captured_link=self._admission(update).link):
             self._classified(update)
+            return
+        work_chat = getattr(self._services, "work_chat", None)
+        if not skill and work_chat is not None and await work_chat.handle_text(self, update, captured_link=self._admission(update).link):
             return
         if not skill and work_inputs is not None and await work_inputs.handle_text(self, update, captured_link=self._admission(update).link):
             self._classified(update)
@@ -1676,7 +1684,7 @@ class TelegramBotChannel(TelegramChannel):
 
         if set(source) != {"key", "values"} or not isinstance(source["key"], str) or not isinstance(source["values"], dict):
             raise PermanentDeliveryError("unsupported-source")
-        if link.agent_kind == "instance" and source["key"] in {"file.no_access", "net.blocked_ask"}:
+        if link.agent_kind == "instance" and source["key"] in {"file.no_access", "net.blocked_ask", "assign.no_work", "assign.no_access", "work.need_inspect"}:
             from app.telegram_bots.publication import fixed_source
 
             current = await fixed_source(self._services, link, source["key"])
@@ -1995,6 +2003,10 @@ class TelegramBotChannel(TelegramChannel):
             if work_sources is None:
                 raise PermanentDeliveryError("unsupported-work-request-source")
             work_part = await work_sources.read_part(saved)
+        elif source_key == "work.need_inspect" and saved.item.class_ == "reply" and "product_basis" in saved.item.payload and part["source_ref"].get("values") == {}:
+            # This fixed command refusal reads only current Use-visible identity;
+            # it neither carries Work content nor grants a Work action.
+            pass
         elif source_key.startswith(
             ("ask.", "review.", "decide.", "work.", "request.route", "request.unrouted", "request.answered", "result.", "decision.recorded", "attempt.", "interrupted", "remind.", "status.", "digest.", "summary.", "concealed.digest")
         ) or source_key in {
