@@ -63,6 +63,9 @@ class ControlledView:
         self.closed = True
         return True
 
+    def message_sent(self, *args, **kwargs):
+        pass
+
 
 def test_retired_turn_cannot_drop_a_replacement_owners_waiting_inputs():
     from test_telegram_chat_queue import environment
@@ -86,7 +89,6 @@ def test_retired_turn_cannot_drop_a_replacement_owners_waiting_inputs():
 async def controlled_execution(e, monkeypatch):
     """Real ingress/SQL custody, with explicitly controlled execution reads."""
     from app.telegram_bots.callbacks import CallbackRepository
-    from app.telegram_bots.streaming import LivePresentation
 
     module = importlib.import_module("app.telegram_bots.turns")
     turns = module.ChatTurns(e.services)
@@ -94,7 +96,7 @@ async def controlled_execution(e, monkeypatch):
     e.services.channel = lambda identity: e.channel if identity == e.link.id else None
     e.services.callbacks = CallbackRepository(e.services.outbox.sessions)
     e.services.thread_client = SimpleNamespace(endpoint_id="a" * 64)
-    monkeypatch.setattr(importlib.import_module(LivePresentation.__module__), "LivePresentation", ControlledView)
+    monkeypatch.setattr("app.telegram_bots.streaming.LivePresentation", ControlledView)
     reached, release = asyncio.Event(), asyncio.Event()
     state = SimpleNamespace(record=None, reads=0, plans=0, posts=0, terminal=None, pinned=None, stop_calls=0, saved_files=[])
 
@@ -145,7 +147,9 @@ async def controlled_execution(e, monkeypatch):
         state.terminal = None
         return await dispatch_record(successor, link, saved_files=saved_files)
 
-    async def request_stop(record, link, *, stop_id):
+    async def request_stop(record, link, *, stop_id, admission=None):
+        if admission is not None:
+            await admission()
         state.stop_calls += 1
         attempt = await capture(link)
         await e.services.outbox.inbox.request_publication_stop(record, stop_id=stop_id, guard=attempt.cancel_guard)

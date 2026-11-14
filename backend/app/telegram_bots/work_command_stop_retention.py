@@ -24,6 +24,9 @@ def closed_marker(row):
             return False
         basis, target = marker["basis"], marker["target"]
         incoming = read_incoming(basis["input"])
+        from app.telegram_bots.work_command_stop_answers import read_answer
+
+        read_answer(basis["answer"], incoming=incoming)
         selection = basis["selection"]
         if type(selection) is not dict or selection.get("kind") not in {"command", "callback"} or set(selection) != {"kind", "choice"} | ({"origin"} if selection["kind"] == "callback" else set()):
             return False
@@ -35,7 +38,6 @@ def closed_marker(row):
             set(basis) == {"version", "input", "owner_user_id", "instance_id", "answer", "targets", "selection"}
             and type(basis["version"]) is int
             and basis["version"] == 1
-            and basis["answer"] is None
             and basis["instance_id"] == row.instance_id
             and basis["owner_user_id"] == row.owner_user_id
             and target in selected_targets(basis)
@@ -53,6 +55,7 @@ class CommandStopDependencies:
     deliveries: set = field(default_factory=set)
     groups: set = field(default_factory=set)
     acts: set = field(default_factory=set)
+    callbacks: set = field(default_factory=set)
 
 
 def _identities(values):
@@ -123,17 +126,21 @@ def _pin_family(result, mark, basis, members, journals, deliveries, controls):
     result.groups.update(control.group_id for control in controls if _scope(control, mark, basis) and control.payload.get("anchor_outbox_id") in anchors)
 
 
-def _pin_unknown(result, mark, journals, deliveries, controls):
+async def _pin_unknown(session, result, mark, journals, deliveries, controls):
     """Historical provenance can retain evidence, never complete an input."""
+    from app.telegram_bots.work_command_stop_answer_retention import pin
+
     for root in journals.values():
         if not closed_marker(root):
             continue
         basis = source_marker(root)["basis"]
         incoming = basis["input"]
-        if any(getattr(mark, key) != incoming[key] for key in ("link_id", "message_id", "chat_id", "binding_generation", "message_thread_id", "update_id")) or not _scope(root, mark, basis):
+        historical = SimpleNamespace(**incoming, delivery_ids=[], route_basis={})
+        if any(getattr(mark, key) != incoming[key] for key in ("link_id", "message_id", "chat_id")) or not _scope(root, historical, basis):
             continue
-        members = {root.id} | {child for child in _identities(root.operation_ids) if child in journals and _scope(journals[child], mark, basis)}
-        _pin_family(result, mark, basis, members, journals, deliveries, controls)
+        members = {root.id} | {child for child in _identities(root.operation_ids) if child in journals and _scope(journals[child], historical, basis)}
+        _pin_family(result, historical, basis, members, journals, deliveries, controls)
+        await pin(session, result, historical, basis)
     # An unselected choice has no journal yet. Its complete stored recipe is
     # another historical witness, usable for retention only.
     from app.telegram_bots.producer import _item
@@ -147,16 +154,13 @@ def _pin_unknown(result, mark, journals, deliveries, controls):
             _frozen, source, _part = frozen_news(SimpleNamespace(link=SimpleNamespace(id=mark.link_id), item=_item(row), part=None))
             basis = source.work["basis"]
             incoming = read_incoming(basis["input"])
-            if (
-                source.key != "command.stop"
-                or basis["selection"] is not None
-                or not _scope(row, mark, basis)
-                or any(getattr(mark, key) != incoming[key] for key in ("link_id", "message_id", "chat_id", "binding_generation", "message_thread_id", "update_id"))
-            ):
+            historical = SimpleNamespace(**incoming, delivery_ids=[], route_basis={})
+            if source.key != "command.stop" or basis["selection"] is not None or not _scope(row, historical, basis) or any(getattr(mark, key) != incoming[key] for key in ("link_id", "message_id", "chat_id")):
                 continue
             if row.dedupe_key != "notice:command-stop:" + digest(incoming) or not same_body(row.payload["command_stop_intent"], {"version": 1, "message_id": mark.message_id, "chat_id": mark.chat_id, "signature": digest(basis)}):
                 continue
-            _pin_family(result, mark, basis, set(), journals, deliveries, controls)
+            _pin_family(result, historical, basis, set(), journals, deliveries, controls)
+            await pin(session, result, historical, basis)
         except (ProductSourceRetired, ValueError, TypeError, KeyError, AttributeError):
             continue
 
@@ -205,10 +209,20 @@ async def command_stop_dependencies(session, now=None, *, max_age_days=180):
             basis = command_basis(mark)
         except (ProductSourceRetired, ValueError, TypeError, KeyError, AttributeError):
             result.inputs.add(key)
-            _pin_unknown(result, mark, journals, deliveries, controls)
+            await _pin_unknown(session, result, mark, journals, deliveries, controls)
             continue
         members = {identity for identity in referenced_members if identity in journals and _scope(journals[identity], mark, basis)}
         anchors = _anchors(mark, basis, members, deliveries, controls)
+        answer_closed = False
+        try:
+            from app.telegram_bots.work_command_stop_answer_retention import receipt
+
+            answer = await receipt(session, mark, basis)
+            if answer is not None:
+                anchors.add(answer.id)
+                answer_closed = answer.state in {"sent", "skipped"}
+        except (ProductSourceRetired, ValueError, TypeError, KeyError, AttributeError):
+            pass
         damaged = _damaged_anchors(mark, basis, members, deliveries) - anchors
         closed = False
         live_controls = any(
@@ -226,7 +240,7 @@ async def command_stop_dependencies(session, now=None, *, max_age_days=180):
 
             no_effect = not members and unselected_closed(mark, basis, now, max_age_days)
             closed = (
-                (bool(requested) or no_effect)
+                (bool(requested) or no_effect or answer_closed)
                 and requested == members
                 and referenced_members == members
                 and (no_effect or _identities(mark.delivery_ids) <= anchors)
@@ -242,13 +256,21 @@ async def command_stop_dependencies(session, now=None, *, max_age_days=180):
         if not closed:
             result.inputs.add(key)
             _pin_family(result, mark, basis, members, journals, deliveries, controls)
+            from app.telegram_bots.work_command_stop_answer_retention import pin
+
+            await pin(session, result, mark, basis)
     for identity, key in roots.items():
-        if key not in seen and (not closed_marker(journals[identity]) or not closed_stop(journals[identity], journals, attempts, events)):
+        marker = source_marker(journals[identity])
+        mixed = marker is not None and marker["basis"].get("answer") is not None
+        if key not in seen and (mixed or not closed_marker(journals[identity]) or not closed_stop(journals[identity], journals, attempts, events)):
             result.acts.add(identity)
             root = journals[identity]
             basis = source_marker(root)["basis"]
-            mark = SimpleNamespace(**basis["input"], delivery_ids=[])
+            mark = SimpleNamespace(**basis["input"], delivery_ids=[], route_basis={})
             if (root.link_id, root.binding_generation, root.chat_id, root.instance_id, root.owner_user_id) != (mark.link_id, mark.binding_generation, mark.chat_id, basis["instance_id"], basis["owner_user_id"]):
                 continue
             _pin_family(result, mark, basis, {identity}, journals, deliveries, controls)
+            from app.telegram_bots.work_command_stop_answer_retention import pin
+
+            await pin(session, result, mark, basis)
     return result

@@ -2019,9 +2019,11 @@ an Edit prompt also accepts a voice note and shows its transcript with the revis
 draft. Saving an edit or confirming withdrawal is a separate gesture. Stopping targets the selected attempt;
 a newer attempt cannot inherit an earlier cancellation request. An acknowledgement
 of the request is separate from confirmed settlement.
-When no chat answer is active, `/stop` stops an eligible running assignment.
-If several assignments can be stopped, choose one or Everything. The command
-keeps its original targets through delivery recovery and restart.
+When an answer and running assignments are active, `/stop` offers The answer,
+an assignment, or Everything. With only assignments, choose one or Everything
+when several can be stopped. Choices retain their original targets through
+restart; a later answer or attempt cannot inherit them. Expired choices require
+a new gesture, while an uncertain cancellation keeps its original receipt.
 Ordinary messages continue into the conversation when no assignment prompt is waiting.
 
 Capacity counts include every occupied place. Running-assignment details require

@@ -23,10 +23,13 @@ from deerflow.utils.file_io import await_drained
 
 class WorkCommandStops:
     def __init__(self, chat):
+        from app.telegram_bots.work_command_stop_answers import CommandStopAnswers
+
         self.chat, self.host = chat, chat.host
         self.outbox, self.callbacks = self.host.outbox, self.host.callbacks
         self.choices = CommandStopChoicePlans(reader=CommandStopChoiceReader(work=chat.views.reader.work, authority=self.host.authority, links=self.host.links, clock=self.outbox.clock), outbox=self.outbox, callbacks=self.callbacks)
         self.host.work_command_stop_sources = WorkNewsSources(self.choices)
+        self.answers = CommandStopAnswers(self)
 
     async def recover(self, link, origin, *, guard):
         await guard.prepare()
@@ -48,6 +51,10 @@ class WorkCommandStops:
         return True
 
     async def command(self, channel, link, origin, *, original, guard):
+        from app.telegram_bots.work_command_stop_answers import capture_answer
+
+        answer = capture_answer(self.host.turns, original, link, origin)
+
         async def perform():
             nonlocal origin
             await guard.prepare()
@@ -56,8 +63,6 @@ class WorkCommandStops:
             elif origin.route_kind is not None:
                 return False
             else:
-                if original is not None:
-                    return False
                 try:
                     snapshot = await self.chat.views.reader.collect(link, as_of=self.outbox.clock())
                 except AgentDenied:
@@ -72,8 +77,8 @@ class WorkCommandStops:
                         targets.extend({"work_id": detail.record["id"], "attempt_id": button["target_id"]} for button in line if button.get("kind") == "stop_attempt")
                 if not targets:
                     return False
-                selection = {"kind": "command", "choice": "attempt:" + targets[0]["attempt_id"]} if len(targets) == 1 else None
-                basis = {"version": 1, "input": origin_facts(origin), "owner_user_id": link.owner_user_id, "instance_id": link.agent_ref, "answer": None, "targets": targets, "selection": selection}
+                selection = {"kind": "command", "choice": "attempt:" + targets[0]["attempt_id"]} if len(targets) == 1 and answer is None else None
+                basis = {"version": 1, "input": origin_facts(origin), "owner_user_id": link.owner_user_id, "instance_id": link.agent_ref, "answer": answer, "targets": targets, "selection": selection}
                 async with self.callbacks.writer(link, guard) as writer:
                     mark = (await self.outbox.inbox._rows(writer, [origin]))[0]
                     self.outbox.inbox._current(link, mark)
@@ -87,6 +92,7 @@ class WorkCommandStops:
                         operation_ids=[operation_id(basis["input"], targets[0])] if selection is not None else [],
                         session=writer,
                     )
+            self.answers.remember(origin, basis, original)
             if basis["selection"] is None:
                 from app.telegram_bots.work_command_stop_lifetime import expire_unselected
 
@@ -133,7 +139,15 @@ class WorkCommandStops:
         return identity
 
     async def run(self, link, origin, basis, *, guard):
+        from app.telegram_bots.work_command_stop_answers import selected_answer
+
         failure = None
+        if selected_answer(basis):
+            try:
+                await self.answers.run(link, origin, basis, guard=guard)
+            except Exception as exc:
+                guard.current()
+                failure = exc
         for target in selected_targets(basis):
             try:
                 await self.run_target(link, origin, basis, target, guard=guard)

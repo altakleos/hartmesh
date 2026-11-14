@@ -1783,11 +1783,19 @@ class InboxRepository:
             # A 404 for the thread says nothing about a run. Its run went with it, and the row may still name one.
             or proof.kind != "conversation_deleted"
             and proof.run_id != fresh.run_id
-            or proof.kind not in {"run", "undeliverable", "creation_refusal", "instance_creation_refusal", "no_run", "conversation_deleted"}
-            or proof.kind in {"run", "undeliverable"}
+            or proof.kind not in {"run", "undeliverable", "creation_refusal", "instance_creation_refusal", "no_run", "conversation_deleted", "cancelled_stop"}
+            or proof.kind in {"run", "undeliverable", "cancelled_stop"}
             and fresh.run_id is None
         ):
             raise ValueError("publication-outcome-conflict") from None
+        if proof.kind == "cancelled_stop":
+            if fresh.owner_callback_id is not None:
+                _callback, data = await self._callback_state(fresh, session)
+                execution = data["publications"][-1]["publication_execution"]
+            else:
+                execution = marks[0].route_basis["publications"][-1]["publication_execution"]
+            if execution.get("stop_id") != proof.stop_id:
+                raise ValueError("publication-outcome-conflict")
         if fresh.owner_callback_id is not None:
             row, data = await self._callback_state(fresh, session)
             if data["state"] == "interrupted" or data["outbox_id"] not in (None, outbox_id):

@@ -169,6 +169,9 @@ async def test_deleted_newest_anchor_replaces_only_unacknowledged_suffix(publica
 
     initial = _item(await _primary(e.db, identity))
     validate_model_reply_basis(initial)
+    from app.telegram_bots.work_command_stop_answers import answer_signature, qualify_answer_delivery
+
+    signature = answer_signature(initial.payload)
     calls = []
 
     async def read(*args):
@@ -203,7 +206,10 @@ async def test_deleted_newest_anchor_replaces_only_unacknowledged_suffix(publica
         await sender.drain()
         assert [part["target_message_id"] for part, _ready in calls if part["kind"] == "edit"] == [702]
         assert calls[-1][1].plain_text == "tail"
-        assert (await _primary(e.db, identity)).state == "sent"
+        repaired = await _primary(e.db, identity)
+        assert repaired.state == "sent"
+        assert answer_signature(repaired.payload) == signature
+        qualify_answer_delivery(repaired)
     finally:
         await sender.stop()
 

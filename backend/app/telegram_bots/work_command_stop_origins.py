@@ -27,6 +27,8 @@ def selected_targets(basis):
     if selection is None:
         return []
     choice = selection["choice"]
+    if choice == "answer" and basis["answer"] is not None:
+        return []
     if choice == "all":
         return basis["targets"]
     targets = [target for target in basis["targets"] if choice == "attempt:" + target["attempt_id"]]
@@ -57,6 +59,9 @@ def command_basis(mark):
     ):
         raise ProductSourceRetired()
     targets = basis["targets"]
+    from app.telegram_bots.work_command_stop_answers import read_answer
+
+    read_answer(basis["answer"], incoming=basis["input"])
     for target in targets:
         if type(target) is not dict or set(target) != {"work_id", "attempt_id"} or any(type(value) is not str or len(value) != 32 or any(ch not in "0123456789abcdef" for ch in value) for value in target.values()):
             raise ProductSourceRetired()
@@ -84,6 +89,53 @@ def source_marker(act):
     return marker
 
 
+def require_command_choice(link, basis, mark, callback=None, parent=None, controls=()):
+    if (
+        not same_body(command_basis(mark), basis)
+        or basis["selection"] is None
+        or (mark.link_id, mark.chat_id, mark.binding_generation, mark.message_thread_id, basis["owner_user_id"], basis["instance_id"])
+        != (link.id, link.chat_id, link.binding_generation, basis["input"]["message_thread_id"], link.owner_user_id, link.agent_ref)
+    ):
+        raise ProductSourceRetired()
+    selection = basis["selection"]
+    if selection["kind"] == "callback":
+        from app.telegram_bots.work_news_delivery import frozen_news
+
+        origin = selection["origin"]
+        if callback is None or parent is None or set(origin) != {"callback_id", "anchor_outbox_id", "presentation_version", "signature"}:
+            raise ProductSourceRetired()
+        item = _item(parent)
+        _frozen, source, _part = frozen_news(SimpleNamespace(link=link, item=item, part=None), acknowledged=True)
+        _validate_rows(item, list(controls))
+        if (
+            source.key != "command.stop"
+            or not same_body(source.work["basis"], {**basis, "selection": None})
+            or (callback.id, parent.id, parent.payload["presentation_version"], anchor_signature(item)) != (origin["callback_id"], origin["anchor_outbox_id"], origin["presentation_version"], origin["signature"])
+            or (callback.kind, callback.target_kind, callback.target_id, callback.payload.get("choice")) != ("stop_which", "link", link.id, selection["choice"])
+            or callback.id not in {value.id for value in controls}
+            or any(value.consumed_at is None or value.closed_reason != "stop-chosen" for value in controls)
+            or (parent.link_id, parent.owner_user_id, parent.chat_id, parent.binding_generation, parent.message_thread_id, parent.instance_id)
+            != (link.id, link.owner_user_id, link.chat_id, link.binding_generation, basis["input"]["message_thread_id"], basis["instance_id"])
+        ):
+            raise ProductSourceRetired()
+        return aware(callback.consumed_at)
+    else:
+        return aware(mark.accepted_at)
+
+
+async def read_command_choice(reader, link, basis):
+    incoming = basis["input"]
+    mark = await reader.get(TelegramInboundMarkRow, (incoming["link_id"], incoming["message_id"], incoming["chat_id"]), populate_existing=True)
+    if mark is None:
+        raise ProductSourceRetired()
+    origin = basis["selection"].get("origin")
+    callback = await reader.get(TelegramCallbackRow, origin["callback_id"], populate_existing=True) if origin is not None else None
+    parent = await reader.get(TelegramOutboxRow, origin["anchor_outbox_id"], populate_existing=True) if origin is not None else None
+    controls = list(await reader.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == callback.group_id).execution_options(populate_existing=True))) if callback is not None else []
+    accepted_at = require_command_choice(link, basis, mark, callback, parent, controls)
+    return InboxRow.from_row(mark), accepted_at
+
+
 class CommandStopProof:
     def __init__(self, link, act):
         self.link, self.act, self.marker = link, act, source_marker(act)
@@ -106,29 +158,7 @@ class CommandStopProof:
             or basis["owner_user_id"] != self.act.owner_user_id
         ):
             raise ProductSourceRetired()
-        selection = basis["selection"]
-        if selection["kind"] == "callback":
-            from app.telegram_bots.work_news_delivery import frozen_news
-
-            origin = selection["origin"]
-            if callback is None or parent is None or set(origin) != {"callback_id", "anchor_outbox_id", "presentation_version", "signature"}:
-                raise ProductSourceRetired()
-            item = _item(parent)
-            _frozen, source, _part = frozen_news(SimpleNamespace(link=self.link, item=item, part=None), acknowledged=True)
-            _validate_rows(item, list(controls))
-            if (
-                source.key != "command.stop"
-                or not same_body(source.work["basis"], {**basis, "selection": None})
-                or (callback.id, parent.id, parent.payload["presentation_version"], anchor_signature(item)) != (origin["callback_id"], origin["anchor_outbox_id"], origin["presentation_version"], origin["signature"])
-                or (callback.kind, callback.target_kind, callback.target_id, callback.payload.get("choice")) != ("stop_which", "link", self.link.id, selection["choice"])
-                or callback.id not in {value.id for value in controls}
-                or any(value.consumed_at is None or value.closed_reason != "stop-chosen" for value in controls)
-                or (parent.link_id, parent.owner_user_id, parent.chat_id, parent.binding_generation, parent.message_thread_id) != (self.link.id, self.link.owner_user_id, self.link.chat_id, self.link.binding_generation, self.topic)
-            ):
-                raise ProductSourceRetired()
-            self.accepted_at = aware(callback.consumed_at)
-        else:
-            self.accepted_at = aware(mark.accepted_at)
+        self.accepted_at = require_command_choice(self.link, basis, mark, callback, parent, controls)
 
     async def read(self, reader):
         incoming = self.incoming

@@ -38,6 +38,45 @@ async def test_cancel_borrows_original_owner_and_needs_no_create_permission():
         await owner.stop()
 
 
+@pytest.mark.parametrize("phase", ["entered", "deadline", "lost_response"])
+async def test_cancel_entry_hook_is_owned_at_the_actual_post_boundary(phase):
+    calls, entries = [], []
+
+    def respond(request):
+        calls.append(request)
+        if request.method == "GET":
+            assert entries == []
+            return httpx.Response(200, json=run_row(), headers=ACK)
+        assert entries == ["run"]
+        if phase == "lost_response":
+            raise httpx.ReadTimeout("Original cancellation response was lost")
+        return httpx.Response(202)
+
+    client, owner, admission, _scope = facade(respond)
+    admission.permitted.add("run_cancel")
+
+    async def begin(run_id):
+        assert not any(call.method == "POST" for call in calls)
+        if phase == "deadline":
+            raise ChannelExecutionProtocolError()
+        entries.append(run_id)
+
+    admission.begin_cancel = begin
+    try:
+        if phase == "deadline":
+            with pytest.raises(ChannelExecutionProtocolError):
+                await client.cancel_run("run")
+        elif phase == "lost_response":
+            with pytest.raises(ChannelExecutionProtocolError):
+                await client.cancel_run("run")
+        else:
+            assert await client.cancel_run("run") == "requested"
+        assert len([call for call in calls if call.method == "POST"]) == int(phase != "deadline")
+        assert entries == ([] if phase == "deadline" else ["run"])
+    finally:
+        await owner.stop()
+
+
 async def test_a_file_goes_up_by_the_route_the_web_uses_as_the_bound_person():
     calls = []
     entry = {"filename": "input.csv", "size": 3, "virtual_path": "/mnt/user-data/uploads/input.csv"}
