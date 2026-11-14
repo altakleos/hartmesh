@@ -143,8 +143,8 @@ TEXTS: dict[str, str] = {
     "settings.label_none": "Nothing",
     "settings.other_hours": "Other hours",
     "settings.messages_choose": "What your AI assistants and AI employees may write to you about first. An answer to your own message always arrives.",
-    "settings.messages_questions": "Only questions, decisions and reviews that need you are sent first. Results and problems wait in {product} on the web.",
-    "settings.messages_off": "No question, result or problem is sent first. Questions wait in {product} on the web until you look.",
+    "settings.messages_questions": ("Only questions, decisions and reviews that need you are sent first. Results and problems wait in /work in the relevant AI assistant's or AI employee's chat, and in {product} on the web."),
+    "settings.messages_off": ("No question, result or problem is sent first. Questions wait in /work in the relevant AI assistant's or AI employee's chat, and in {product} on the web until you look."),
     "settings.quiet_choose": "In quiet hours, messages arrive without sound. A message still sounds when you wrote or tapped in that chat in the last 30 minutes.",
     "settings.quiet_prompt": "Send the hours like this: 22:30-06:30",
     "settings.quiet_bad": "That was not understood. Send two different times like this: 22:30-06:30",
@@ -292,13 +292,13 @@ TEXTS: dict[str, str] = {
     "hello.assistant": (
         "Connected as {email}. This chat is {name}, your AI assistant ({role}). No other Telegram account can"
         " write here.\n\n{name} starts nothing alone. Write to {name} as to a colleague: ask a question, or say"
-        " what needs doing. A file you send here is passed on to {name}.\n\n{name} is an AI and can be wrong. C"
+        " what needs doing. /work shows what is going on. A file you send here is passed on to {name}.\n\n{name} is an AI and can be wrong. C"
         "heck anything you will act on."
     ),
     "hello.employee": (
         "Connected as {email}. This chat is {name}, an AI employee ({role}). No other Telegram account can wr"
         "ite here.\n\n{name} starts nothing alone. Write to {name} as to a colleague: ask a question, or say wh"
-        "at needs doing. A file you send here is passed on to {name}.\n\n{name} is an AI and can be wrong. Chec"
+        "at needs doing. /work shows what is going on. A file you send here is passed on to {name}.\n\n{name} is an AI and can be wrong. Chec"
         "k anything you will act on."
     ),
     "help.agent": (
@@ -307,6 +307,8 @@ TEXTS: dict[str, str] = {
         "\n"
         "In this chat:\n"
         "- write, or send a file, a photo or a voice note\n"
+        "- say what needs doing, or use /assign, to give {name} an assignment\n"
+        "- /work shows what is going on and what waits for you\n"
         "- /new starts a new conversation\n"
         "- /stop stops what is in progress\n"
         "- /settings sets when this chat may message you, and the language\n"
@@ -479,7 +481,10 @@ TEXTS: dict[str, str] = {
     "settings.state_basic": "Buttons and notices from your bots are in {language}. Answers follow the language you write in.",
     "link.conflict": "This chat is paused.\nAnother program is using this bot, so messages may be missed. If that was not you, replace the bot's token: in BotFather send /revoke, then paste the new token in {product} on the web.",
     "link.conflict_over.plain": "This chat works again.",
-    "link.conflict_over.agent": "This chat works again.\nDeciding, accepting and allowing a blocked site stay paused on this bot until you replace the token or confirm in {product} on the web that the other program was yours.",
+    "link.conflict_over.agent": (
+        "This chat works again.\nDeciding, accepting, allowing a blocked site, and changing or withdrawing an assignment stay paused on this bot "
+        "until you replace the token or confirm in {product} on the web that the other program was yours."
+    ),
     "link.conflict_over.chat": "This chat works again.\nAllowing a blocked site stays paused on this bot until you replace the token or confirm in {product} on the web that the other program was yours.",
     "link.conflict_over.custom_agent": "This chat works again.\nAllowing a blocked site stays paused on this bot until you replace the token or confirm in {product} on the web that the other program was yours.",
     "link.limited": "Paused on this bot since another program used it. Open {product} on the web and replace the token or confirm it was you.",
@@ -558,10 +563,13 @@ TEXTS: dict[str, str] = {
     "label.form_field": "{label}",
     "label.choice": "{label}",
     "menu.assistants": "Your AI assistants",
+    "menu.work": "What {name} is working on",
+    "menu.assign": "Hand over a piece of work",
+    "menu.stop_work": "Stop what is in progress",
     "menu.employees": "AI employees you can chat with",
     "menu.new": "Start a new conversation",
     "menu.stop": "Stop the current answer",
-    "menu.settings": "Messages and language",
+    "menu.settings": "Messages, quiet hours, summary, language",
     "menu.help": "What this chat can do",
 }
 

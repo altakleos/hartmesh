@@ -190,8 +190,12 @@ def test_localized_templates_keep_the_same_placeholders_and_current_commands():
             assert "/assistants" in catalog(locale)[key] and "/employees" in catalog(locale)[key]
     assert "- /settings sets when your AI assistants and AI employees may message you, and the language" in catalog("en")["help.chat"]
     assert "writes here first" in catalog("en")["help.agent"]
-    assert "Deciding, accepting and allowing" in catalog("en")["link.conflict_over.agent"]
+    assert "Deciding, accepting, allowing" in catalog("en")["link.conflict_over.agent"]
+    assert "changing or withdrawing an assignment" in catalog("en")["link.conflict_over.agent"]
     for locale in ("en", "zh-CN"):
+        for key in ("hello.assistant", "hello.employee", "help.agent", "settings.messages_questions", "settings.messages_off"):
+            assert "/work" in catalog(locale)[key]
+        assert "/assign" in catalog(locale)["help.agent"]
         for key in ("help.agent", "help.custom_agent"):
             assert "/assistants" not in catalog(locale)[key] and "/employees" not in catalog(locale)[key]
 
@@ -254,7 +258,8 @@ def test_instance_help_and_hello_hide_missing_roles_and_keep_kind(locale, custod
     help_ = render_plain("help.agent", locale, **values)
     kind = ("AI assistant" if custody == "personal" else "AI employee") if locale == "en" else ("AI 助理" if custody == "personal" else "AI 员工")
     assert kind in hello and kind in help_
-    assert all(text not in hello + help_ for text in ("None", "()", "（）", "/work", "/assign", "voice note", "语音消息"))
+    assert all(text not in hello + help_ for text in ("None", "()", "（）", "voice note", "语音消息"))
+    assert "/work" in hello and "/work" in help_ and "/assign" in help_
     shared = render_plain("hello.assistant" if custody == "personal" else "hello.employee", locale, read_by_others=True, **values)
     disclosure = render_plain("privacy.company", locale, **values)
     assert disclosure in shared and disclosure not in hello

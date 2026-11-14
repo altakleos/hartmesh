@@ -105,12 +105,14 @@ async def test_help_privacy_and_pages_use_current_instance_grants(presentation):
 
 
 @pytest.mark.parametrize("custody", ["personal", "company"])
-async def test_instance_profile_names_kind_and_registers_current_menu(presentation, custody):
+@pytest.mark.parametrize("locale", ["en-US", "zh-CN"])
+async def test_instance_profile_names_kind_and_registers_current_menu(presentation, custody, locale):
     from test_telegram_profile import script, sent
 
     from app.telegram_bots.profile import ProfileSync
 
     e = presentation
+    await e.db.settings.update(e.link.owner_user_id, locale=locale)
     await definition(e, "custom", 7)
     async with e.db.sessions.begin() as writer:
         await writer.execute(update(AgentInstanceRow).where(AgentInstanceRow.id == e.link.agent_ref).values(custody=custody, owner_id=e.link.owner_user_id if custody == "personal" else None))
@@ -118,11 +120,40 @@ async def test_instance_profile_names_kind_and_registers_current_menu(presentati
     e.request = e.channel.bot.request
     script(e)
     assert await ProfileSync(e.services).push(e.link)
-    assert [item["command"] for item in sent(e, "setMyCommands")["commands"]] == ["new", "stop", "settings", "help"]
-    kind = "AI assistant" if custody == "personal" else "AI employee"
+    menu = sent(e, "setMyCommands")["commands"]
+    assert [item["command"] for item in menu] == ["work", "assign", "new", "stop", "settings", "help"]
+    assert menu[0]["description"] == ("What Fixture employee is working on" if locale == "en-US" else "查看 Fixture employee 正在做的工作")
+    assert menu[1]["description"] == ("Hand over a piece of work" if locale == "en-US" else "交付一项工作")
+    assert menu[3]["description"] == ("Stop what is in progress" if locale == "en-US" else "停止正在进行的工作")
+    assert "status" not in {item["command"] for item in menu}
+    kind = ("AI assistant" if custody == "personal" else "AI employee") if locale == "en-US" else ("AI 助理" if custody == "personal" else "AI 员工")
     assert kind in sent(e, "setMyShortDescription")["short_description"]
     assert kind in sent(e, "setMyDescription")["description"]
     assert "Private definition" not in str(e.request.calls)
+
+
+@pytest.mark.parametrize("locale", ["en-US", "zh-CN"])
+async def test_existing_profile_three_gets_work_menu_once_on_startup(presentation, locale):
+    from test_telegram_profile import count, script, sent
+
+    from app.telegram_bots.profile import ProfileSync
+    from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow
+
+    e = presentation
+    await definition(e, "custom", 7)
+    await e.db.settings.update(e.link.owner_user_id, locale=locale)
+    async with e.db.sessions.begin() as writer:
+        row = await writer.get(TelegramBotLinkRow, e.link.id)
+        row.profile_version, row.profile_pending = 3, False
+    e.request = e.channel.bot.request
+    script(e)
+    sync = ProfileSync(e.services)
+    await sync.push_owed()
+    assert [item["command"] for item in sent(e, "setMyCommands")["commands"]] == ["work", "assign", "new", "stop", "settings", "help"]
+    assert (await e.db.links.get(e.link.id)).profile_version == 4
+    assert count(e, "setMyCommands") == 1
+    await sync.push_owed()
+    assert count(e, "setMyCommands") == 1
 
 
 @pytest.mark.parametrize("custody", ["personal", "company"])

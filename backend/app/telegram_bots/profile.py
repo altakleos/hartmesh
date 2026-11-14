@@ -14,9 +14,9 @@ from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
-PROFILE_VERSION = 3
+PROFILE_VERSION = 4
 ALL_PARTS = frozenset({"name", "descriptions", "commands", "picture"})
-_MENUS = {"lead_agent": ("assistants", "employees", "new", "stop", "settings", "help"), "custom_agent": ("new", "stop", "help"), "instance": ("new", "stop", "settings", "help")}
+_MENUS = {"lead_agent": ("assistants", "employees", "new", "stop", "settings", "help"), "custom_agent": ("new", "stop", "help"), "instance": ("work", "assign", "new", "stop", "settings", "help")}
 _TEXTS = {"lead_agent": "chat", "custom_agent": "custom_agent", "instance": "agent"}
 _NAME_MAX = 64
 
@@ -102,7 +102,7 @@ class ProfileSync:
             await bot.set_my_description(description=render_plain(f"profile.description.{kind}", locale, **description_values))
             check()
         if "commands" in parts:
-            commands = [BotCommand(word, render_plain(f"menu.{word}", locale)) for word in _MENUS[link.agent_kind]]
+            commands = [BotCommand(word, render_plain("menu.stop_work" if word == "stop" and link.agent_kind == "instance" else f"menu.{word}", locale, **description_values)) for word in _MENUS[link.agent_kind]]
             await bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
             check()
             await bot.set_chat_menu_button(menu_button=MenuButtonCommands())

@@ -94,4 +94,5 @@ Message preferences are enabled by `MESSAGE_SETTINGS_SHOWN`. Settings saves send
 only the changed field; time inputs save on blur and reject equal quiet times.
 Per-field pending state prevents duplicate edits, and account/role retirement
 aborts owned requests and drops late results. First-bot Done shows stored quiet
-hours. Assignment execution controls remain on the web.
+hours. Agent-bot menus offer Work and Assign. Recovery copy names paused assignment
+changes and withdrawal alongside decisions, acceptance and blocked-site permission.

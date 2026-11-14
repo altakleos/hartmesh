@@ -61,6 +61,20 @@ def test_message_settings_pages_have_scoped_controls_and_web_handover(locale):
         assert controls[-1]["kind"] == "back" and controls[-1]["payload"] == {"settings_page": "state"}
 
 
+@pytest.mark.parametrize("kind", ["lead_agent", "custom_agent", "instance"])
+@pytest.mark.parametrize("notice", ["questions", "none"])
+@pytest.mark.parametrize("locale", ["en-US", "zh-CN"])
+def test_shared_preference_notices_name_the_work_chat_and_keep_the_web_option(kind, notice, locale):
+    from app.telegram_bots.message_settings import present
+
+    settings = preferences()
+    settings.locale, settings.notify = locale, notice
+    view = present(settings, link=SimpleNamespace(id="a" * 32, agent_kind=kind), product="Product", notice=notice)
+    note = view["values"]["body"].splitlines()[-1]
+    assert "/work" in note and "Product" in note
+    assert ("AI assistant's or AI employee's chat" if locale == "en-US" else "AI 助理或 AI 员工聊天中的") in note
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

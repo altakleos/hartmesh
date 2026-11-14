@@ -137,8 +137,8 @@ TEXTS: dict[str, str] = {
     "settings.label_none": "不通知",
     "settings.other_hours": "其他时间",
     "settings.messages_choose": "选择 AI 助手和 AI 员工可以主动通知你的内容。对你所发消息的回复始终会送达。",
-    "settings.messages_questions": "仅主动发送需要你处理的问题、决策和审核。结果和异常可在 {product} 网页端查看。",
-    "settings.messages_off": "不主动发送问题、结果或异常。待处理的问题可在 {product} 网页端查看。",
+    "settings.messages_questions": "仅主动发送需要你处理的问题、决策和审核。结果和异常可在相应 AI 助理或 AI 员工聊天中的 /work，或 {product} 网页端查看。",
+    "settings.messages_off": "不主动发送问题、结果或异常。待处理的问题可在相应 AI 助理或 AI 员工聊天中的 /work，或 {product} 网页端查看。",
     "settings.quiet_choose": "免打扰时间内的消息不会发出声音。如果你在过去 30 分钟内在该聊天中发过消息或点击过按钮，消息仍会发出声音。",
     "settings.quiet_prompt": "请按此格式发送时间：22:30-06:30",
     "settings.quiet_bad": "无法识别。请按此格式发送两个不同的时间：22:30-06:30",
@@ -282,12 +282,12 @@ TEXTS: dict[str, str] = {
     "agent.deleted": "{name} 已删除。\n{name} 的文件也已删除，无法恢复 {name}。此聊天不再回答。如需从 Telegram 删除此对话，请删除聊天。",
     "hello.assistant": (
         "已以 {email} 连接。此聊天是 {name}，你的 AI 助理（{role}）。其他 Telegram 账号无法在此发消息。\n\n{na"
-        "me} 不会自行开始任何事。像与同事交流一样向 {name} 提问，或说说需要做什么。你在此发送的文件会交给 {name}。\n\n{name}"
+        "me} 不会自行开始任何事。像与同事交流一样向 {name} 提问，或说说需要做什么。/work 显示当前工作。你在此发送的文件会交给 {name}。\n\n{name}"
         " 是 AI，可能出错。采取行动前请核实相关信息。"
     ),
     "hello.employee": (
         "已以 {email} 连接。此聊天是 {name}，一位 AI 员工（{role}）。其他 Telegram 账号无法在此发消息。\n\n{na"
-        "me} 不会自行开始任何事。像与同事交流一样向 {name} 提问，或说说需要做什么。你在此发送的文件会交给 {name}。\n\n{name}"
+        "me} 不会自行开始任何事。像与同事交流一样向 {name} 提问，或说说需要做什么。/work 显示当前工作。你在此发送的文件会交给 {name}。\n\n{name}"
         " 是 AI，可能出错。采取行动前请核实相关信息。"
     ),
     "help.agent": (
@@ -296,6 +296,8 @@ TEXTS: dict[str, str] = {
         "\n"
         "在此聊天中：\n"
         "- 发消息，或发送文件、照片或语音消息\n"
+        "- 说明需要做什么，或用 /assign 向 {name} 交付任务\n"
+        "- /work 显示当前工作和等待你处理的事项\n"
         "- /new 开始新对话\n"
         "- /stop 停止正在进行的事\n"
         "- /settings 设置此聊天何时可以主动发消息，以及语言\n"
@@ -447,7 +449,7 @@ TEXTS: dict[str, str] = {
     "settings.state_basic": "机器人的按钮和通知使用{language}。回答会使用你输入的语言。",
     "link.conflict": "此聊天已暂停。\n另一个程序正在使用此机器人，消息可能遗漏。如果不是你在使用，请更换机器人令牌：在 BotFather 中发送 /revoke，然后在 {product} 网页版粘贴新令牌。",
     "link.conflict_over.plain": "此聊天已恢复。",
-    "link.conflict_over.agent": "此聊天已恢复。\n作出决定、接受结果和允许访问被阻止网站的操作仍暂停，直到你更换令牌或在 {product} 网页上确认另一个程序是你的。",
+    "link.conflict_over.agent": "此聊天已恢复。\n作出决定、接受结果、允许访问被阻止网站，以及修改或撤回任务的操作仍暂停，直到你更换令牌或在 {product} 网页上确认另一个程序是你的。",
     "link.conflict_over.chat": "此聊天已恢复。\n此机器人仍暂停允许访问被阻止的网站，直到你更换令牌，或在 {product} 网页版确认另一个程序是你在使用。",
     "link.conflict_over.custom_agent": "此聊天已恢复。\n此机器人仍暂停允许访问被阻止的网站，直到你更换令牌，或在 {product} 网页版确认另一个程序是你在使用。",
     "link.limited": "自其他程序使用此机器人后，此操作已暂停。请打开 {product} 网页版，更换令牌或确认是你在使用。",
@@ -529,7 +531,10 @@ TEXTS: dict[str, str] = {
     "menu.employees": "你可以聊天的 AI 员工",
     "menu.new": "开始新对话",
     "menu.stop": "停止当前回答",
-    "menu.settings": "消息和语言",
+    "menu.work": "查看 {name} 正在做的工作",
+    "menu.assign": "交付一项工作",
+    "menu.stop_work": "停止正在进行的工作",
+    "menu.settings": "消息、免打扰、摘要和语言",
     "menu.help": "此聊天能做什么",
 }
 

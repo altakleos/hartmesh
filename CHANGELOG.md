@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Put Work and Assign first in agent-bot menus, upgrade existing profiles, and
+  explain assignment controls and paused changes in English and Chinese.
 - Offer Start or Resume beneath complete assignment news previews, retaining the
   original acknowledged event through admission and native launch checks.
 - Offer assignment proposals in eligible agent conversations, with explicit

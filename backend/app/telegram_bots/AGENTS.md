@@ -668,7 +668,7 @@ policy/execution holds or archival; a different-bot replacement uses new-setup
 rules. Exact committed replacement receipts still settle without fresh mutation.
 Suspended instances remain connectable;
 provisioning, deleted and archived instances do not. No readiness/provider read
-opens another session inside that writer. Profile version 2 adds the ordinary
-bot’s assistant/employee menu entries; instance/custom menus retain their scope.
+opens another session inside that writer. Profile 4 adds Work/Assign to instance
+menus; ordinary and custom scopes stay fixed.
 
 Managed turns run with `recursion_limit` 1000 (`EXECUTION_RUN_CONFIG` in `app/channels/manager.py`), matching web chats and scheduled runs; a configured channel session value overrides it and the Gateway clamps to `max_recursion_limit`.
