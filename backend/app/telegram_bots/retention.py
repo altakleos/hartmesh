@@ -157,6 +157,10 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int,
 
     assignments = await assignment_dependencies(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
     pinned.update(assignments.deliveries)
+    from app.telegram_bots.work_request_continuation_retention import request_dependencies
+
+    requests = await request_dependencies(session, now, max_age_days=callback_max_age_days)
+    pinned.update(requests.deliveries)
     from app.telegram_bots.work_management_ui_retention import management_dependencies
 
     management = await management_dependencies(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
@@ -337,7 +341,7 @@ async def sweep_pending_files(sessions, now: datetime, *, ttl_hours: int) -> int
     return await _sweep(sessions, delete(TelegramPendingFileRow).where(TelegramPendingFileRow.created_at <= _aware(now) - timedelta(hours=ttl_hours)))
 
 
-async def _sweep_acts(sessions, now, *, draft_ttl_hours=24):
+async def _sweep_acts(sessions, now, *, draft_ttl_hours=24, callback_max_age_days=180):
     from app.telegram_bots.file_puts import settled_file_journal
 
     async with _writer(sessions) as session:
@@ -356,6 +360,10 @@ async def _sweep_acts(sessions, now, *, draft_ttl_hours=24):
 
         _execution_groups, _execution_anchors, execution_acts = await execution_dependencies(session)
         pending_outcome = or_(pending_outcome, TelegramActRow.id.in_(sorted(execution_acts)))
+        from app.telegram_bots.work_request_continuation_retention import request_dependencies
+
+        requests = await request_dependencies(session, now, max_age_days=callback_max_age_days)
+        pending_outcome = or_(pending_outcome, TelegramActRow.id.in_(sorted(requests.acts)))
         from app.telegram_bots.work_management_retention import expire_management
 
         management = await expire_management(session, now, draft_ttl_hours=draft_ttl_hours, pending_outcome=pending_outcome)
@@ -421,7 +429,9 @@ async def _sweep_acts(sessions, now, *, draft_ttl_hours=24):
 
         outcomes = list(
             await session.scalars(
-                select(TelegramActRow).where(*expired, TelegramActRow.kind.in_(WORK_ACT_KINDS - {"stop", "activate", "delegate", "edit", "cancel"}), TelegramActRow.continuation.is_not(None)).with_for_update(skip_locked=True)
+                select(TelegramActRow)
+                .where(*expired, TelegramActRow.kind.in_(WORK_ACT_KINDS - {"stop", "activate", "delegate", "edit", "cancel"}), TelegramActRow.continuation.is_not(None), TelegramActRow.id.not_in(sorted(requests.expired_history)))
+                .with_for_update(skip_locked=True)
             )
         )
         settled = []
@@ -441,7 +451,11 @@ async def _sweep_acts(sessions, now, *, draft_ttl_hours=24):
         stop_ids = await expired_stop_groups(session, cutoff=now - timedelta(days=ACT_RETENTION_DAYS), pending_outcome=pending_outcome)
         for start in range(0, len(stop_ids), _BATCH):
             await session.execute(delete(TelegramActRow).where(TelegramActRow.id.in_(stop_ids[start : start + _BATCH])))
-        return ordinary.rowcount + len(identities) + len(settled) + len(stop_ids) + management
+        request_ids = sorted(requests.expired_history)
+        removed_requests = 0
+        for start in range(0, len(request_ids), _BATCH):
+            removed_requests += (await session.execute(delete(TelegramActRow).where(TelegramActRow.id.in_(request_ids[start : start + _BATCH])))).rowcount
+        return ordinary.rowcount + len(identities) + len(settled) + len(stop_ids) + management + removed_requests
 
 
 def _live_followup_input(mark, now, callback_max_age_days):
@@ -494,10 +508,12 @@ async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int, dra
     # A mark is done only once every delivery it lists is sent or skipped.
     from app.telegram_bots.assignment_retention import assignment_dependencies, expire_assignments
     from app.telegram_bots.work_management_ui_retention import management_dependencies
+    from app.telegram_bots.work_request_continuation_retention import request_dependencies
 
     async with _writer(sessions) as session:
         assignments = await assignment_dependencies(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
         management = await management_dependencies(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
+        requests = await request_dependencies(session, now, max_age_days=callback_max_age_days)
         candidates = list(
             (
                 await session.execute(
@@ -512,12 +528,12 @@ async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int, dra
                 )
             ).all()
         )
-        eligible = sorted(set(candidates) - assignments.inputs - management.inputs)
+        eligible = sorted(set(candidates) - assignments.inputs - management.inputs - requests.inputs)
         inbound = 0
         for start in range(0, len(eligible), _BATCH):
             inbound += (await session.execute(delete(mark).where(tuple_(mark.link_id, mark.message_id, mark.chat_id).in_(eligible[start : start + _BATCH])))).rowcount
     outbox = await _sweep_outbox(sessions, now, callback_max_age_days, draft_ttl_hours)
-    acts = await _sweep_acts(sessions, now, draft_ttl_hours=draft_ttl_hours)
+    acts = await _sweep_acts(sessions, now, draft_ttl_hours=draft_ttl_hours, callback_max_age_days=callback_max_age_days)
     async with _writer(sessions) as session:
         acts += await expire_assignments(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
     events = await _sweep(sessions, delete(TelegramBotLinkEventRow).where(TelegramBotLinkEventRow.created_at < now - timedelta(days=LINK_EVENT_RETENTION_DAYS)))

@@ -28,7 +28,7 @@ from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 _VIEWS = {"hi_answer", "hi_cant_open", "hi_cannot", "hi_wrong", "decide_choice", "decide_own", "decide_note", "accept_open", "changes_open", "back"}
-_ACTIONS = {"hi_choice": "respond", "decide_confirm": "decide", "accept_confirm": "accept", "changes_confirm": "changes_requested", "route_to": "route"}
+_ACTIONS = {"hi_choice": "respond", "decide_confirm": "decide", "decide_confirm_resume": "decide", "accept_confirm": "accept", "changes_confirm": "changes_requested", "route_to": "route"}
 
 
 class WorkCallbacks:
@@ -205,5 +205,18 @@ class WorkCallbacks:
     async def _observe(self, link, act_id, *, guard):
         try:
             await self.outcomes.plan(link, act_id, guard=guard)
+            act = await self.acts._work_record(act_id)
+            if act.continuation is not None and "request_activation" in act.continuation:
+
+                def current():
+                    probe = getattr(guard, "current", None)
+                    if probe is None:
+                        return False
+                    try:
+                        return probe() is not False
+                    except ValueError:
+                        return False
+
+                await self.acts.resume_continuation(act_id, attempt_current=current)
         except Exception as error:
             logger.warning("Work outcome observation deferred (%s)", type(error).__name__)

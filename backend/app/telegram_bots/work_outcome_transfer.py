@@ -11,6 +11,11 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCal
 def transfer_receipt(value):
     if not isinstance(value, Mapping) or value.get("version") != 2:
         return None
+    if "request_activation" in value:
+        from app.telegram_bots.work_request_continuations import request_activation_value
+
+        request_activation_value(value)
+        value = {"version": value["version"], "work_outcome_transfer": value.get("work_outcome_transfer")}
     if type(value["version"]) is not int or set(value) != {"version", "work_outcome_transfer"}:
         raise ValueError("invalid-work-outcome-transfer")
     saved = value["work_outcome_transfer"]
@@ -74,7 +79,8 @@ async def transfer_outcome(writer, link, act_id, outbox_id, *, outbox, input_ori
     for old in previous:
         await retire_outcome(outbox, writer, link, old)
     await outbox.inbox.settle_deliveries(link_id=link.id, session=writer)
-    act.continuation = {"version": 2, "work_outcome_transfer": {"phase": [act.state, act.reason, act.attempts], "outbox_id": outbox_id}}
+    saved = {key: value for key, value in (act.continuation or {}).items() if key in {"request_activation", "activation_continuation"}}
+    act.continuation = {**saved, "version": 2, "work_outcome_transfer": {"phase": [act.state, act.reason, act.attempts], "outbox_id": outbox_id}}
     await writer.flush()
 
 

@@ -629,6 +629,8 @@ TEXTS.update(
         "review.changes_confirm": "你的备注已保留，但尚未发送：“{note}”。要对上方结果提出这些修改要求吗？",
         "voice.confirm_answer": "听到：“{text}”。将此内容保存为你的回答吗？",
         "label.confirm": "确认",
+        "label.confirm_resume": "确认并继续",
+        "label.save_resume": "保存并继续",
         "label.add_note": "添加备注",
         "label.yes_accept": "是，接受",
         "label.request_these_changes": "请求这些修改",

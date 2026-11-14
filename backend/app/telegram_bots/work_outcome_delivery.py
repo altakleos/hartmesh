@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -32,7 +33,7 @@ from deerflow.utils.file_io import await_drained
 
 def context(read):
     act, source = read.act, read.source
-    return {
+    value = {
         **({"file_answer": read.file_answer.shown} if read.file_answer is not None else {}),
         "act": {"id": act.id, "kind": act.kind, "state": act.state, "reason": act.reason, "body": thaw(act.body), "attempts": act.attempts},
         "work_id": act.work_id,
@@ -49,6 +50,21 @@ def context(read):
         "person": read.recipient,
         "accepted_at": (read.receipt or {}).get("review", {}).get("accepted_at") if act.kind == "accept" and act.state == "done" else None,
     }
+    if act.state == "done" and isinstance(act.continuation, Mapping) and "request_activation" in act.continuation:
+        from app.telegram_bots.work_request_continuations import request_activation
+
+        request_activation(act)
+        if type(read.primary_work_revision) is not int or read.primary_work_revision < 1:
+            raise ProductSourceRetired()
+        # The combined gesture owns a saved primary confirmation and a separate
+        # execution outcome. Its own child must not retire that saved message.
+        value.update(
+            work_revision=read.primary_work_revision,
+            request_revision=act.body["request_basis"]["revision"] + 1 if act.kind == "decide" else read.receipt["receipt"]["revision"],
+            attempt_status=None,
+            continued=True,
+        )
+    return value
 
 
 def materialize(link, data, *, locale, timezone, product, routing=None, comment=None):
@@ -94,6 +110,13 @@ def delivery_receipt(value):
         return None
     from collections.abc import Mapping
 
+    if isinstance(value, Mapping) and "request_activation" in value:
+        from app.telegram_bots.work_request_continuations import request_activation_value
+
+        request_activation_value(value)
+        if "work_outcome" not in value:
+            return None
+        value = {"version": value["version"], "work_outcome": value["work_outcome"]}
     if not isinstance(value, Mapping) or set(value) != {"version", "work_outcome"} or type(value["version"]) is not int or value["version"] != 1:
         raise ValueError("invalid-work-outcome-receipt")
     receipt = value["work_outcome"]
@@ -136,13 +159,13 @@ def validate_origin(callback, parent, basis, row):
     if parent.owner_user_id != row.owner_user_id or callback.payload.get("work_action_id") != data["act"]["id"] or callback.group_id not in {part.get("callback_group_id") for part in parent.parts}:
         raise ProductSourceRetired()
     original_input = parent.payload.get("work_request_basis", {}).get("input")
-    if callback.kind in {"answer_yes", "voice_save_answer"} and original_input is None and mark is not None:
+    if callback.kind in {"answer_yes", "voice_save_answer", "voice_save_resume"} and original_input is None and mark is not None:
         fixed = parent.payload.get("product_basis", {})
         if (
             fixed.get("origins") != [[mark["link_id"], mark["message_id"], mark["chat_id"]]]
             or fixed.get("finish_route") is not False
             or not fixed.get("parts")
-            or any(part.get("source_ref", {}).get("key") != ("voice.confirm_answer" if callback.kind == "voice_save_answer" else "ask.is_this_answer") for part in fixed["parts"])
+            or any(part.get("source_ref", {}).get("key") != ("voice.confirm_answer" if callback.kind in {"voice_save_answer", "voice_save_resume"} else "ask.is_this_answer") for part in fixed["parts"])
         ):
             raise ProductSourceRetired()
         original_input = mark
@@ -268,7 +291,7 @@ async def acknowledge_outcome(session, row):
                 member.route_complete = True
         else:
             mark.route_complete = True
-    act.continuation = {"version": 1, "work_outcome": {"phase": phase(data["act"]), "outbox_id": row.id}}
+    act.continuation = {**(thaw(act.continuation) or {}), "version": 1, "work_outcome": {"phase": phase(data["act"]), "outbox_id": row.id}}
     from app.telegram_bots.producer import OutboxSender
 
     old = aliased(TelegramOutboxRow)
@@ -429,6 +452,15 @@ class WorkOutcomePlans:
 
                         members = await outcome_members(writer, origin)
                     await self.inbox.register_delivery([InboxRow.from_row(member) for member in members], outbox_id=identity, finish=False, session=writer)
+                from dataclasses import replace
+
+                from app.telegram_bots.acts import _snapshot
+                from app.telegram_bots.work_request_continuations import ready_request_activation
+
+                saved = await writer.get(TelegramActRow, act_id, populate_existing=True)
+                if ready_request_activation(saved, row):
+                    await writer.flush()
+                    composed.read = replace(read, act=_snapshot(saved))
                 return identity
 
         return await await_drained(perform())
@@ -503,12 +535,12 @@ async def retire_outcome_controls(outbox, writer, link, row, reason, *, editing=
                 writer.add(keyboard_cleanup_row(control, owner_user_id=link.owner_user_id, now=outbox.clock(), dedupe_key=key))
         if control.consumed_at is None:
             control.consumed_at, control.closed_reason = outbox.clock(), reason
-        if reason == "work-done" and control.kind == "voice_save_answer":
+        if reason == "work-done" and control.kind in {"voice_save_answer", "voice_save_resume"}:
             control.payload = {key: value for key, value in control.payload.items() if key != "transcript"}
             keyboard = deepcopy(row.payload["product_keyboard_basis"])
             for line in keyboard:
                 for descriptor in line:
-                    if descriptor.get("kind") == "voice_save_answer":
+                    if descriptor.get("kind") in {"voice_save_answer", "voice_save_resume"}:
                         descriptor["payload"].pop("transcript", None)
             row.payload = {**row.payload, "product_keyboard_basis": keyboard}
 

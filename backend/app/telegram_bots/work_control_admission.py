@@ -27,7 +27,7 @@ def command(acts, callback, source):
             raise CallbackRefused()
         return "respond", Respond(operation_id=callback.id, expected_request_revision=seen["request_revision"], expected_assignment_revision=seen["assignment_revision"], choice=payload["choice"])
     state = interaction_state(payload.get("interaction"), source)
-    if callback.kind == "decide_confirm" and state["view"] == "decision":
+    if callback.kind in {"decide_confirm", "decide_confirm_resume"} and state["view"] == "decision":
         return "decide", acts._decision_command(operation_id=callback.id, request_id=source.request["id"], decision=state["decision"], note=state["note"], seen=seen)
     if callback.kind == "changes_confirm" and state["view"] == "changes":
         return "changes_requested", acts._changes_command(operation_id=callback.id, request_id=source.request["id"], note=state["note"], seen=seen)
@@ -58,9 +58,11 @@ class WorkControlAdmissions:
             owner = await self.acts.authority.prepare_live_owner(link.owner_user_id)
             if existing is None:
                 source, _settings = await self.recovery._source(link, request_id)
+                if callback.kind == "decide_confirm_resume" and source.request.get("can_resume") is not True:
+                    raise CallbackRefused("denied.start")
                 admission = await prepare_attention(self.plans.reader, link)
                 kind, _request = command(self.acts, callback, source)
-                composed = _ActionGuard(guard, admission, source, callback_id, kind)
+                composed = _ActionGuard(guard, admission, source, callback_id, kind, composite=callback.kind == "decide_confirm_resume")
             else:
                 source, composed = None, guard
             async with self.callbacks.writer(link, composed) as writer:
@@ -88,20 +90,35 @@ class WorkControlAdmissions:
                     raise CallbackRefused()
                 if any(row.payload.get("work_action_id") not in {None, callback_id} for row in rows):
                     raise CallbackRefused(None)
+                if any(row.payload.get("work_action_id") is not None for row in rows) and await writer.get(TelegramActRow, callback_id, with_for_update=True, populate_existing=True) is None:
+                    raise CallbackRefused()
                 kind, request = command(self.acts, selected, captured)
                 result = await self.acts._stage_work_act(link, kind=kind, request_id=request_id, work_id=captured.work["id"], request=request, owner=owner, session=writer)
                 for row in rows:
                     row.payload = {**row.payload, "work_action_id": result.id}
+                if selected.kind == "decide_confirm_resume":
+                    from app.telegram_bots.acts import _snapshot
+                    from app.telegram_bots.work_request_continuations import stage_request_activation
+
+                    saved = await writer.get(TelegramActRow, result.id, populate_existing=True)
+                    from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
+
+                    identity = parent.payload.get("work_request_basis", {}).get("input")
+                    mark = await writer.get(TelegramInboundMarkRow, (identity["link_id"], identity["message_id"], identity["chat_id"]), populate_existing=True) if identity is not None else None
+                    stage_request_activation(saved, selected, parent, captured, mark=mark)
+                    await writer.flush()
+                    result = _snapshot(saved)
                 return result
 
         return await await_drained(perform())
 
 
 class _ActionGuard:
-    def __init__(self, base, admission, source, identity, kind):
+    def __init__(self, base, admission, source, identity, kind, *, composite=False):
         if not callable(getattr(base, "current", None)):
             raise CallbackRefused()
         self.base, self.admission, self.source, self.identity, self.kind = base, admission, source, identity, kind
+        self.composite = composite
 
     async def prepare(self):
         await prepare_publication_guard(self.base)
@@ -111,6 +128,8 @@ class _ActionGuard:
         held, _target = await self.admission(session=writer, projection=_ActionProjection(self.source, allowed_act_id=self.identity, kind=self.kind))
         if "agents:write" not in held:
             raise AgentDenied("The action is unavailable")
+        if self.composite and "runs:create" not in held:
+            raise AgentDenied("Starting work is unavailable")
         self.base.current()
         return current
 

@@ -30,6 +30,7 @@ class WorkOutcomeRead:
     supervisor: str | None
     recipient: str | None
     file_answer: object = None
+    primary_work_revision: int | None = None
 
     @property
     def attempt_unresolved(self):
@@ -72,7 +73,19 @@ class WorkOutcomeReader:
             file_answer = await file_answer_proof(self, link, act)
             projection = _OutcomeProjection(act, source, receipt, file_answer=file_answer)
             _held, target = await current_attention(self.requests, link, projection=projection)
-            return WorkOutcomeRead(act, receipt, source, target[0], target[1] == "protected", (source.work.get("attempt") or {}).get("status"), projection.continued, projection.supervisor, projection.recipient, file_answer)
+            return WorkOutcomeRead(
+                act,
+                receipt,
+                source,
+                target[0],
+                target[1] == "protected",
+                (source.work.get("attempt") or {}).get("status"),
+                projection.continued,
+                projection.supervisor,
+                projection.recipient,
+                file_answer,
+                primary_work_revision=projection.primary_work_revision,
+            )
 
         return await await_drained(perform())
 
@@ -85,6 +98,7 @@ class _OutcomeProjection:
         self.file_answer = file_answer
         self.continued = False
         self.supervisor = self.recipient = None
+        self.primary_work_revision = None
 
     def extend(self, query):
         act, work, request = TelegramActRow, AgentWorkRow, HumanInputRequestRow
@@ -167,6 +181,7 @@ class _OutcomeProjection:
         action = {"respond": "human_response", "route": "request_route"}.get(self.act.kind, self.act.kind)
         if effect is None or (effect.work_id, effect.actor_kind, effect.actor_id, effect.action) != (work.id, "human", bot.owner_user_id, action) or not same_body(effect.request, self.act.body):
             raise ProductSourceRetired()
+        self.primary_work_revision = effect.revision
         # The activation's expected Work revision provides logical ordering,
         # independent of wall-clock skew or current execution availability.
         if attempt is not None:

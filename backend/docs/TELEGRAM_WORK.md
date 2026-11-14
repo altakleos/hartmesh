@@ -1377,8 +1377,41 @@ settle before another mutation is due. Cancel fences the parent and its owned
 children together without waiting for a live call. It preserves a proved save
 and reads exact receipts; a known activation keeps its status, while an unresolved
 runless promise remains uncertain and never returns to the launcher after Cancel.
-Completion racing cancellation cannot reauthorize a child. Decision/voice reuse
-and default-controller installation remain separate integration.
+Completion racing cancellation cannot reauthorize a child. Default-controller
+installation remains separate integration.
+
+`work_request_continuations.py` reuses this journal for explicit
+`decide_confirm_resume` and `voice_save_resume`. The complete original confirmation,
+displayed assignment revision, original typed/voice input and press clock commit
+before the primary call. Its successful Native receipt and durable saved-primary
+delivery make the same derived child ready. A refused or unknown primary cannot
+authorize a child. Ordinary typed/tapped answers and Save as answer remain save-only.
+`WorkRequestReader.composites` defaults off until runtime installation. Its current
+Work detail supplies a presentation hint; fresh admission still checks live ceilings,
+Use/Inspect and assignment state. Decision composites obey the action pause; saving
+and resuming an information answer does not inherit the decision-only pause.
+
+`work_request_continuation_sources.py` joins actual primary Work/HumanInput events,
+the exact spoken response, original full-ACK confirmation and accepted input in
+the final child admission SQL. Typed inputs also retain their original answered
+prompt and complete dispatch/ACK proof. Receipt-owned input checks allow legitimate
+completion after saved-primary ACK while preserving routing, text and prompt custody.
+Missing journals, altered targets or an authorization timestamp different from the
+original first scheduling cannot create a conversation or a new activation window.
+Callback observation carries its original lifetime fence into continuation recovery;
+a retired owner leaves the saved intent for the independent worker.
+
+The primary delivery uses its exact Native effect/request revision and neutral
+saved wording, so its own child cannot retire it by changing current Work status.
+Current owner/role/protection/name checks still apply. ACK and conclusive preview
+transfer preserve the closed continuation metadata. Execution replies and capacity
+offers use the real decision/voice callback, never a synthetic child callback.
+`work_request_continuation_retention.py` retains unresolved primary/child journals,
+original controls, typing/voice source and input, saved delivery and same-binding
+execution dependencies together. Missing or damaged family markers stay held.
+Known settled history expires under the existing 400-day policy from immutable
+Native receipts, without requiring already-collected display history. A conclusive
+no-child transfer remains distinct from a successful saved primary.
 
 Composite execution replies and capacity offers locate the original confirmed
 parent callback; they never create a child callback. Their prepared source joins

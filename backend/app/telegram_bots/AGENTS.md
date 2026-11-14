@@ -1,6 +1,6 @@
 # Managed Telegram bots
 
-Work and composite sources: [guide](../../docs/TELEGRAM_WORK.md).
+Work and request/delegation composites: [guide](../../docs/TELEGRAM_WORK.md).
 
 `config.py` validates optional `AppConfig.model_extra["telegram_bots"]` without
 starting services. Nested models forbid unknown keys and coercion; absence returns

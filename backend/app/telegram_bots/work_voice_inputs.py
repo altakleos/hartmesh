@@ -20,6 +20,19 @@ class WorkVoiceInputs:
         self.inputs = inputs
         self.answers = inputs.untied
 
+    async def prepare_complete(self, link, origin):
+        """Read optional execution eligibility before the transcript writer."""
+        data = origin.route_basis.get("work_voice")
+        if not getattr(self.answers.plans.reader, "composites", False) or type(data) is not dict or data.get("held") or data.get("purpose") != "answer":
+            return False
+        try:
+            source, _settings = await self.answers.recovery._source(link, data["request_id"])
+            return source.request.get("can_resume") is True
+        except Exception:
+            # The factual answer keeps its existing source owner. An optional
+            # execution control must not turn a read failure into permission.
+            return False
+
     async def capture(self, channel, link, origin, *, forwarded, forward_origin, guard):
         """Freeze the source of a real reply without inventing a text Update."""
 
@@ -95,7 +108,7 @@ class WorkVoiceInputs:
             "purpose": prompt.payload["purpose"] if prompt else "answer" if source.request["purpose"] == "information" else "work_comment",
         }
 
-    async def complete(self, link, origin, *, guard, session):
+    async def complete(self, link, origin, *, guard, session, resume=False):
         """The caller atomically stores the transcript and its consent preview."""
         data = origin.route_basis.get("work_voice")
         if data is None:
@@ -139,6 +152,8 @@ class WorkVoiceInputs:
         if settings is None:
             raise CallbackRefused()
         data["locale"] = settings.locale
+        if resume is True and data["purpose"] == "answer":
+            data["resume"] = True
         mark.route_kind, mark.route_target_id = "work_answer", data["request_id"]
         mark.route_basis = {**mark.route_basis, "work_answer": data}
         await session.flush()

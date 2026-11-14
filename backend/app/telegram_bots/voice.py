@@ -487,12 +487,14 @@ class VoiceNotes:
             return None
         human_inputs = getattr(self.services, "human_inputs", None)
         used_as = "answer" if "work_voice" in row.route_basis or human_inputs is not None and await human_inputs.answers_prompt(channel, link, row) else "message"
+        work_voice = getattr(getattr(self.services, "work_text_inputs", None), "voice", None)
+        prepare = getattr(work_voice, "prepare_complete", None)
+        work_options = {"resume": await prepare(link, row)} if prepare is not None else {}
         async with self.services.callbacks.writer(link, guard) as writer:
             row = await self.services.outbox.inbox.complete_voice(link, row, text=text, session=writer, guard=guard)
             await self.services.acts.write_voice_note(link, message_id=row.message_id, duration=voice["duration"], provider=transcriber.provider, used_as=used_as, session=writer)
-            work_voice = getattr(getattr(self.services, "work_text_inputs", None), "voice", None)
             if work_voice is not None:
-                completed = await work_voice.complete(link, row, guard=guard, session=writer)
+                completed = await work_voice.complete(link, row, guard=guard, session=writer, **work_options)
                 if completed is True:
                     return None
                 if completed is not False:

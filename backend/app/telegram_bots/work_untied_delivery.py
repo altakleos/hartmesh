@@ -22,7 +22,12 @@ from deerflow.utils.file_io import await_drained
 def answer_data(mark):
     data = mark.route_basis.get("work_answer")
     fields = {"version", "source_outbox_id", "presentation_version", "group_id", "request_id", "work_id", "seen", "text", "notice_id"}
-    if type(data) is not dict or type(data.get("version")) is not int or data["version"] not in {1, 2} or set(data) != fields | ({"original", "locale", "prompt_id", "purpose"} if data["version"] == 2 else set()):
+    if (
+        type(data) is not dict
+        or type(data.get("version")) is not int
+        or data["version"] not in {1, 2}
+        or set(data) != fields | ({"original", "locale", "prompt_id", "purpose"} if data["version"] == 2 else set()) | ({"resume"} if data.get("resume") is True else set())
+    ):
         raise CallbackRefused()
     if type(data["presentation_version"]) is not int or data["presentation_version"] < 0 or type(data["seen"]) is not dict or type(data["text"]) is not str or not data["text"].strip():
         raise CallbackRefused()
@@ -35,6 +40,8 @@ def answer_data(mark):
             raise CallbackRefused()
         if data["purpose"] not in {"answer", "work_comment", "cannot_provide", "wrong_recipient"} or data["prompt_id"] is not None and (type(data["prompt_id"]) is not str or len(data["prompt_id"]) != 32):
             raise CallbackRefused()
+    if "resume" in data and (data["version"] != 2 or data["purpose"] != "answer"):
+        raise CallbackRefused()
     return data
 
 
@@ -65,6 +72,20 @@ def answer_keyboard(data, message_id, *, cleared=False):
             ]
         )
     ]
+    if voice and data.get("resume") is True:
+        result.insert(
+            0,
+            [
+                {
+                    "kind": "voice_save_resume",
+                    "label": "label.save_resume",
+                    "target_kind": "request",
+                    "target_id": data["request_id"],
+                    "payload": {"request_id": data["request_id"], "work_id": data["work_id"], "request_revision": data["seen"]["request_revision"], "assignment_revision": data["seen"]["assignment_revision"], "transcript": data["text"]},
+                }
+            ],
+        )
+    result = [list(line) for line in canonical_keyboard(result)]
     if cleared:
         for line in result:
             for control in line:
@@ -223,7 +244,8 @@ class _NoticeProjection:
         controls = [row for row in all_controls if row.payload.get("anchor_outbox_id") == notice.id]
         answer_source_group(parent, original, data)
         _validate_rows(notice, controls, allow_pending=True)
-        if len(controls) != 2 or {row.kind for row in controls} != ({"voice_save_answer", "voice_discard"} if data["version"] == 2 else {"answer_yes", "answer_no"}):
+        kinds = ({"voice_save_answer", "voice_discard"} | ({"voice_save_resume"} if data.get("resume") is True else set())) if data["version"] == 2 else {"answer_yes", "answer_no"}
+        if len(controls) != len(kinds) or {row.kind for row in controls} != kinds:
             raise ProductSourceRetired()
         for row in original + controls:
             if row.consumed_at is not None or "work_action_id" in row.payload or "publication_owner" in row.payload:

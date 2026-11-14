@@ -2033,6 +2033,9 @@ cancelling a pending request does not claim that a committed start was undone.
 Recovery replies qualify the original confirmed card and its saved child operation.
 Read-only status stays available when Work is disabled; fresh starts still require
 current permission and a complete confirmed preview.
+The same services support explicit combined decision or spoken-answer confirmations:
+the saved answer or decision keeps its own receipt and delivery, while Resume
+retains one original activation request. Ordinary answers keep saving without starting.
 The managed-bot command and button integration follows separately.
 
 ![Assignment proposal in a synthetic conversation](docs/images/assignment-proposal.png)
