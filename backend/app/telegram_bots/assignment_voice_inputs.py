@@ -16,9 +16,9 @@ from deerflow.utils.file_io import await_drained
 PURPOSES = frozenset({"assign_words", "assign_done", "assign_edit"})
 
 
-def voice_basis(mark):
+def voice_basis(mark, *, owner="assignment"):
     value = thaw(mark.route_basis.get("work_voice"))
-    if not isinstance(value, dict) or value.get("owner") != "assignment":
+    if not isinstance(value, dict) or value.get("owner") != owner:
         return None
     if (
         set(value) != {"version", "owner", "held", "phase", "source_outbox_id", "prompt_id", "signature", "original"}
@@ -31,15 +31,15 @@ def voice_basis(mark):
     return value
 
 
-def check_voice_prompt(link, mark, prompt, parent, *, ready=False):
-    value = voice_basis(mark)
+def check_voice_prompt(link, mark, prompt, parent, *, ready=False, owner="assignment", purposes=PURPOSES):
+    value = voice_basis(mark, owner=owner)
     if value is None or value["phase"] != ("ready" if ready else "captured") or prompt is None or parent is None:
         raise ProductSourceRetired()
     if (
         (parent.id, prompt.id) != (value["source_outbox_id"], value["prompt_id"])
         or (parent.link_id, parent.owner_user_id, parent.binding_generation, parent.chat_id, parent.message_thread_id) != (link.id, link.owner_user_id, link.binding_generation, mark.chat_id, mark.message_thread_id)
         or (prompt.link_id, prompt.chat_id, prompt.binding_generation, prompt.message_thread_id) != (link.id, mark.chat_id, link.binding_generation, mark.message_thread_id)
-        or prompt.payload.get("purpose") not in PURPOSES
+        or prompt.payload.get("purpose") not in purposes
         or anchor_signature(_item(parent)) != value["signature"]
         or ready
         and not same_body(mark.route_basis.get("voice_note", {}).get("original"), value["original"])
@@ -55,6 +55,16 @@ def check_voice_prompt(link, mark, prompt, parent, *, ready=False):
 
 
 class AssignmentVoiceInputs:
+    owner = "assignment"
+    purposes = PURPOSES
+    intent_key = "assignment_prompt_intent"
+
+    def _basis(self, mark):
+        return voice_basis(mark, owner=self.owner)
+
+    def _check(self, link, mark, prompt, parent, *, ready=False):
+        return check_voice_prompt(link, mark, prompt, parent, ready=ready, owner=self.owner, purposes=self.purposes)
+
     def __init__(self, inputs, *, guard_factory=None):
         self.inputs = inputs
         self.outbox, self.callbacks = inputs.outbox, inputs.callbacks
@@ -63,7 +73,7 @@ class AssignmentVoiceInputs:
     async def quoted_sources(self, link, message_id, topic):
         from app.telegram_bots.assignment_prompt_owners import quoted_assignment_sources
 
-        return await quoted_assignment_sources(self.outbox, link, message_id, topic)
+        return await quoted_assignment_sources(self.outbox, link, message_id, topic, intents=(self.intent_key,))
 
     async def capture(self, channel, link, origin, *, forwarded, forward_origin, guard):
         if forwarded or link.agent_kind != "instance":
@@ -80,11 +90,11 @@ class AssignmentVoiceInputs:
                 if not same_body(origin_facts(InboxRow.from_row(mark)), origin_facts(origin)):
                     raise ProductSourceRetired()
                 if mark.route_kind is not None:
-                    return InboxRow.from_row(mark) if voice_basis(mark) is not None else None
+                    return InboxRow.from_row(mark) if self._basis(mark) is not None else None
                 parent = None
                 if sources:
                     parent = await writer.get(TelegramOutboxRow, sources[0])
-                    intent = parent.payload["assignment_prompt_intent"] if parent is not None else {}
+                    intent = parent.payload[self.intent_key] if parent is not None else {}
                     prompt = await writer.get(TelegramCallbackRow, intent["prompt_id"]) if type(intent.get("prompt_id")) is str else None
                 elif quote is None:
                     selected = await Prompts(self.callbacks).current(link, mark.chat_id, mark.message_thread_id, guard=guard, session=writer)
@@ -105,14 +115,14 @@ class AssignmentVoiceInputs:
                     prompt = candidates[0] if len(candidates) == 1 else None
                 if parent is None and prompt is not None:
                     parent = await writer.get(TelegramOutboxRow, prompt.payload.get("anchor_outbox_id"))
-                intent = parent.payload.get("assignment_prompt_intent", {}) if parent is not None else {}
-                if not sources and intent.get("purpose") not in PURPOSES and (prompt is None or prompt.payload.get("purpose") not in PURPOSES):
+                intent = parent.payload.get(self.intent_key, {}) if parent is not None else {}
+                if not sources and intent.get("purpose") not in self.purposes and (prompt is None or prompt.payload.get("purpose") not in self.purposes):
                     return None
                 source_id = sources[0] if sources else prompt.payload["anchor_outbox_id"]
                 prompt_id = intent.get("prompt_id") or prompt.id
                 value = {
                     "version": 3,
-                    "owner": "assignment",
+                    "owner": self.owner,
                     # Older transcript consumers recognize this as a held Work
                     # input and cannot turn it into an ordinary instruction.
                     "held": True,
@@ -124,7 +134,7 @@ class AssignmentVoiceInputs:
                 }
                 mark.route_basis = {**mark.route_basis, "work_voice": value}
                 try:
-                    check_voice_prompt(link, mark, prompt, parent)
+                    self._check(link, mark, prompt, parent)
                     self.callbacks._usable(prompt)
                 except (CallbackRefused, ProductSourceRetired, KeyError, TypeError, ValueError):
                     value = {**value, "phase": "closed"}
@@ -144,10 +154,8 @@ class AssignmentVoiceInputs:
         return await await_drained(perform())
 
     async def complete(self, link, origin, *, guard, session, resume=False):
-        from app.telegram_bots.voice import _echo
-
         mark = (await self.outbox.inbox._rows(session, [origin]))[0]
-        value = voice_basis(mark)
+        value = self._basis(mark)
         if value is None or mark.route_kind != "turn" or mark.operation_ids or mark.route_complete:
             raise ProductSourceRetired()
         prompt = await session.get(TelegramCallbackRow, value["prompt_id"])
@@ -161,7 +169,7 @@ class AssignmentVoiceInputs:
                 if not same_body(mark.route_basis.get("voice_note", {}).get("original"), value["original"]):
                     raise ProductSourceRetired()
                 before = replace(probe, sanitized_input=value["original"])
-                check_voice_prompt(link, before, prompt, parent)
+                self._check(link, before, prompt, parent)
                 self.callbacks._usable(prompt)
                 # Commit known speech before the guarded current-prompt read.
                 # _ready and private admission both recheck that selection;
@@ -173,26 +181,17 @@ class AssignmentVoiceInputs:
         mark.route_basis = {**mark.route_basis, "work_voice": {**value, "phase": phase}, "source_outbox_id": value["source_outbox_id"]}
         await session.flush()
         captured = InboxRow.from_row(mark)
-        if phase != "ready" or len(mark.sanitized_input["text"]) > self.outbox.config.assign.max_chars:
-            await self.outbox.plan_product(
-                link,
-                source_id=f"voice-heard:{mark.chat_id}:{mark.message_id}",
-                parts=[{"kind": "text", "reply_to_message_id": mark.message_id, "source_ref": {"key": "voice.heard", "values": {"text": _echo(mark.sanitized_input["text"])}}}],
-                inbox_rows=[captured],
-                finish_route=False,
-                session=session,
-            )
         return captured
 
     async def resume(self, channel, origin, *, recovery_guard=None):
         return await await_drained(self._resume(channel, origin, recovery_guard=recovery_guard))
 
     async def _ready(self, link, origin, guard):
-        value = voice_basis(origin)
+        value = self._basis(origin)
         async with self.callbacks.writer(link, guard) as writer:
             mark = (await self.outbox.inbox._rows(writer, [origin]))[0]
             self.outbox.inbox._current(link, mark)
-            current = voice_basis(mark)
+            current = self._basis(mark)
             same = same_body(current, value) or value["phase"] == "ready" and same_body(current, {**value, "phase": "closed"})
             if not same or not same_body(mark.sanitized_input, origin.sanitized_input):
                 raise ProductSourceRetired()
@@ -203,7 +202,7 @@ class AssignmentVoiceInputs:
                 parent = await writer.get(TelegramOutboxRow, current["source_outbox_id"])
                 valid = True
                 try:
-                    check_voice_prompt(link, mark, prompt, parent, ready=True)
+                    self._check(link, mark, prompt, parent, ready=True)
                     self.callbacks._usable(prompt)
                 except (CallbackRefused, ProductSourceRetired, KeyError, TypeError, ValueError):
                     valid = False
@@ -218,7 +217,7 @@ class AssignmentVoiceInputs:
             return InboxRow.from_row(mark)
 
     async def _resume(self, channel, origin, *, recovery_guard=None):
-        value = voice_basis(origin)
+        value = self._basis(origin)
         if value is None:
             return False
         link = recovery_guard.captured_link if recovery_guard is not None else channel.link
@@ -226,7 +225,7 @@ class AssignmentVoiceInputs:
         origin = await self._ready(link, origin, guard)
         if origin.route_complete:
             return True
-        value = voice_basis(origin)
+        value = self._basis(origin)
         if value["phase"] != "ready" or len(origin.sanitized_input["text"]) > self.outbox.config.assign.max_chars:
             from app.telegram_bots.voice import _echo
 
@@ -234,20 +233,33 @@ class AssignmentVoiceInputs:
             async with self.callbacks.writer(link, guard) as writer:
                 mark = (await self.outbox.inbox._rows(writer, [origin]))[0]
                 self.outbox.inbox._current(link, mark)
-                if not same_body(voice_basis(mark), value) or not same_body(mark.sanitized_input, origin.sanitized_input):
+                if not same_body(self._basis(mark), value) or not same_body(mark.sanitized_input, origin.sanitized_input):
                     raise ProductSourceRetired()
-                await self.outbox.plan_product(
-                    link,
-                    source_id=f"voice-heard:{origin.chat_id}:{origin.message_id}",
-                    parts=[{"kind": "text", "reply_to_message_id": origin.message_id, "source_ref": {"key": "voice.heard", "values": {"text": _echo(origin.sanitized_input["text"])}}}],
-                    inbox_rows=[origin],
-                    finish_route=False,
-                    session=writer,
-                )
+                heard = {"kind": "text", "reply_to_message_id": origin.message_id, "source_ref": {"key": "voice.heard", "values": {"text": _echo(origin.sanitized_input["text"])}}}
+                # Older captures may already own a separate echo. Reconcile its
+                # actual ACK before planning the notice; never repeat that echo.
+                legacy = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == f"notice:voice-heard:{origin.chat_id}:{origin.message_id}"))
+                if legacy is not None:
+                    await self.outbox.plan_product(link, source_id=f"voice-heard:{origin.chat_id}:{origin.message_id}", parts=[heard], inbox_rows=[origin], finish_route=False, session=writer)
+                    if legacy.state != "sent":
+                        return True
+                    from app.telegram_bots.work_outcome_delivery import acknowledged_parts
+
+                    if (
+                        legacy.message_thread_id != origin.message_thread_id
+                        or legacy.class_ != "reply"
+                        or len(legacy.parts) != 1
+                        or type(legacy.parts[0].get("protect_content")) is not bool
+                        or type(legacy.message_id) is not int
+                        or legacy.parts[0].get("message_ids") != [legacy.message_id]
+                    ):
+                        raise ProductSourceRetired()
+                    acknowledged_parts(legacy, [{**heard, "protect_content": legacy.parts[0]["protect_content"]}])
+                notice = {"kind": "text", "reply_to_message_id": origin.message_id, "source_ref": {"key": key, "values": {"max": self.outbox.config.assign.max_chars} if key == "assign.too_long" else {}}}
                 await self.outbox.plan_product(
                     link,
                     source_id=f"assignment-voice-closed:{origin.chat_id}:{origin.message_id}",
-                    parts=[{"kind": "text", "reply_to_message_id": origin.message_id, "source_ref": {"key": key, "values": {}}}],
+                    parts=[notice] if legacy is not None else [heard, notice],
                     inbox_rows=[origin],
                     finish_route=True,
                     session=writer,

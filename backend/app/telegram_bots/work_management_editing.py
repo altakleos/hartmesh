@@ -24,6 +24,7 @@ from app.telegram_bots.work_management_edit_records import read_input
 from app.telegram_bots.work_management_edit_sources import ManagementEditFrame
 from app.telegram_bots.work_management_origins import displayed_management, origin_for
 from app.telegram_bots.work_management_prompt_sources import WorkManagementPromptProjection, WorkManagementPromptReader, editor_from, prompt_intent
+from app.telegram_bots.work_management_voice_inputs import edit_basis, management_voice, require_edit_basis
 from app.telegram_bots.work_news_delivery import WorkNewsPlans, frozen_news
 from app.telegram_bots.work_result_identity import digest
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
@@ -87,10 +88,13 @@ class WorkManagementEdits:
             async with self.callbacks.writer(link, guard) as writer:
                 mark = (await self.outbox.inbox._rows(writer, [incoming]))[0]
                 self.outbox.inbox._current(link, mark)
-                if mark.route_kind in {None, "assignment_hold"}:
+                if mark.route_kind in {None, "assignment_hold", "work_card_hold"}:
                     quote = mark.sanitized_input.get("reply_to_message_id")
                     typed = typed_basis(mark) if mark.route_kind == "assignment_hold" else None
-                    if typed is not None:
+                    voice = mark.route_basis.get("work_voice") if mark.route_kind == "work_card_hold" else None
+                    if voice is not None:
+                        prompt = await writer.get(TelegramCallbackRow, voice.get("prompt_id"))
+                    elif typed is not None:
                         prompt = await writer.get(TelegramCallbackRow, typed["prompt_id"])
                     elif source_prompt_id is not None:
                         prompt = await writer.get(TelegramCallbackRow, source_prompt_id)
@@ -116,6 +120,9 @@ class WorkManagementEdits:
                     prompt_parent = await writer.get(TelegramOutboxRow, prompt.payload.get("anchor_outbox_id"))
                     if prompt_parent is None:
                         raise CallbackRefused()
+                    if mark.route_kind == "work_card_hold":
+                        management_voice(link, mark, prompt, prompt_parent)
+                        mark.route_kind, mark.route_target_id = None, None
                     if typed is not None:
                         require_owner(link, mark, prompt, prompt_parent, expected=typed)
                         release_hold(mark)
@@ -130,6 +137,7 @@ class WorkManagementEdits:
                     if latest is None or latest.id != prompt.id:
                         raise CallbackRefused()
                     basis = {"version": 1, "input": origin_facts(InboxRow.from_row(mark)), "prompt_outbox_id": item.id, "intent": intent, "words": words, "draft_id": identity}
+                    basis = edit_basis(link, mark, prompt, prompt_parent, basis)
                     await self.outbox.inbox.route(InboxRow.from_row(mark), kind="management_edit", target_id=identity, basis={"management_edit": basis}, operation_ids=[], session=writer)
                     prompt.payload = {**prompt.payload, "management_input": {"version": 1, "input_id": identity, "phase": "captured", "claim_id": None}}
                     prompt.consumed_at, prompt.closed_reason = self.outbox.clock(), "answered"
@@ -146,6 +154,7 @@ class WorkManagementEdits:
                         raise ProductSourceRetired()
                     item, intent = _item(prompt_parent), basis["intent"]
                     acknowledged, messages = shown_prompt(item, prompt, accepted_at=mark.accepted_at)
+                    require_edit_basis(link, mark, prompt, prompt_parent, basis)
                     if not same_body(prompt_intent(item), intent) or accepted_text(mark, prompt, acknowledged, message_ids=messages) != basis["words"]:
                         raise ProductSourceRetired()
                 else:
@@ -186,6 +195,8 @@ class WorkManagementEdits:
                 ):
                     raise ProductSourceRetired()
                 marker = prompt.payload.get("management_input")
+                parent = await writer.get(TelegramOutboxRow, basis["prompt_outbox_id"])
+                require_edit_basis(link, current, prompt, parent, basis)
                 if not same_body(marker, {"version": 1, "input_id": identity, "phase": phase, "claim_id": None if phase == "captured" else claim}) or prompt.consumed_at is None or prompt.closed_reason != "answered":
                     raise ProductSourceRetired()
                 await prepared(session=writer, projection=frame)
@@ -270,6 +281,10 @@ class WorkManagementEdits:
             mark = (await self.outbox.inbox._rows(writer, [incoming]))[0]
             if mark.state == "interrupted" or mark.route_kind != "management_edit" or not same_body(origin_facts(InboxRow.from_row(mark)), origin_facts(incoming)):
                 raise ProductSourceRetired()
+            basis = thaw(mark.route_basis.get("management_edit"))
+            prompt = await writer.get(TelegramCallbackRow, basis["intent"]["prompt_id"])
+            parent = await writer.get(TelegramOutboxRow, basis["prompt_outbox_id"])
+            require_edit_basis(link, mark, prompt, parent, basis)
             await self.outbox.inbox.register_delivery([incoming], outbox_id=parent_id, primary=True, finish=True, session=writer)
             guard.current()
 
@@ -309,6 +324,7 @@ class WorkManagementEdits:
                             raise ProductSourceRetired()
                         item, marker = _item(prompt_parent), read_input(prompt.payload.get("management_input"))
                         intent = prompt_intent(item)
+                        require_edit_basis(link, incoming, prompt, prompt_parent, basis)
                         acknowledged, messages = shown_prompt(item, prompt, accepted_at=incoming.accepted_at)
                         if not same_body(intent, basis["intent"]) or accepted_text(incoming, prompt, acknowledged, message_ids=messages) != basis["words"] or not isinstance(marker, dict) or marker.get("input_id") != identity:
                             raise ProductSourceRetired()
@@ -340,6 +356,8 @@ class WorkManagementEdits:
                                 or not same_body(prompt.payload.get("management_input"), marker)
                             ):
                                 raise ProductSourceRetired()
+                            prompt_parent = await writer.get(TelegramOutboxRow, basis["prompt_outbox_id"], populate_existing=True)
+                            require_edit_basis(link, mark, prompt, prompt_parent, basis)
                             prompt.payload = {**prompt.payload, "management_input": {**marker, "phase": "failed"}}
                             await writer.flush()
                             await prepared(session=writer, projection=frame)

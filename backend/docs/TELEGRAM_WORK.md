@@ -1754,6 +1754,15 @@ private copy, current Work/grants and prior replacement history through final
 provider reads. A correction cannot adopt another chat, generation or editor.
 
 An accepted plain-text input and its exact prompt share one guarded capture.
+`ManagementVoiceInputs` reuses the assignment prompt-custody owner with its own
+closed owner and purpose. Capture precedes transcription; a ready held input
+resumes through the original runtime guard. Its version-2 edit basis retains
+the recording, complete prompt signature and transcript alongside the original
+input identity. Source lineage rechecks that proof and supplies Heard before
+the revised preview; the whole preview must be acknowledged before Save.
+Closed and oversized speech publishes Heard and its notice as one ordered
+multipart reply. A separately queued echo from an older capture must be fully
+acknowledged before recovery plans its notice; it is never sent twice.
 The extraction claim commits before the one-shot model call. Independent owners
 serialize through that persisted claim; recovery of an unknown entered call
 marks drafting failed without another inference. Shutdown drains owned model

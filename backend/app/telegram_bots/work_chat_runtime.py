@@ -24,6 +24,7 @@ from app.telegram_bots.work_execution_sources import WorkExecutionReader
 from app.telegram_bots.work_management_delivery import WorkManagementPlans
 from app.telegram_bots.work_management_editing import WorkManagementEdits
 from app.telegram_bots.work_management_sources import WorkManagementReader
+from app.telegram_bots.work_management_voice_inputs import ManagementVoiceInputs
 from app.telegram_bots.work_news_delivery import WorkNewsSources
 from app.telegram_bots.work_start_controls import WorkStartAdmissions
 from app.telegram_bots.work_stop_controls import WorkStopAdmissions
@@ -62,9 +63,12 @@ class WorkChatRuntime:
         self.assignment_navigation = AssignmentDraftNavigation(self.assignments)
         host.assignment_sources = WorkNewsSources(self.assignments)
         host.assignment_prompt_sources = WorkNewsSources(self.assignment_prompts)
-        host.voice_inputs = VoiceInputRouter(host.work_text_inputs.voice, {"assignment": AssignmentVoiceInputs(self.assignment_inputs, guard_factory=self.guard)})
         self.management = WorkManagementPlans(reader=WorkManagementReader(host.acts), **delivery)
         self.management_edits = WorkManagementEdits(self.management)
+        host.voice_inputs = VoiceInputRouter(
+            host.work_text_inputs.voice,
+            {"assignment": AssignmentVoiceInputs(self.assignment_inputs, guard_factory=self.guard), "management": ManagementVoiceInputs(self.management_edits, guard_factory=self.guard)},
+        )
         self.detail_plans = {"work_view_intent": self.views, "work_management_intent": self.management, "work_execution_intent": self.executions}
         self.review_views = WorkViewReviews(host.work_callbacks.interactions, self.detail_plans)
         self.assignment_commands = AssignmentCommands(self.assignment_inputs, management=self.management_edits)
@@ -134,7 +138,7 @@ class WorkChatRuntime:
         from collections.abc import Mapping
 
         voice = origin.route_basis.get("work_voice")
-        if origin.route_kind == "work_card_hold" and isinstance(voice, Mapping) and voice.get("owner") == "assignment":
+        if origin.route_kind == "work_card_hold" and isinstance(voice, Mapping) and voice.get("owner") in {"assignment", "management"}:
             return await self.host.voice_inputs.resume(channel, origin, recovery_guard=guard)
         link = guard.captured_link
         if origin.route_kind == "assignment_hold":
