@@ -3579,15 +3579,26 @@ async def _prepare_goal_continuation_input(
             await _persist(goal, evaluation, no_progress_count, stand_down_reason=run_stop_reason)
             return None
 
-        if _ends_on_human_input_request(messages):
+        from deerflow.agent_instances.chat_tools import successful_assignment_proposal
+
+        proposal_waiting = _checkpoint_id(checkpoint_tuple) is not None and not getattr(checkpoint_tuple, "pending_writes", None) and successful_assignment_proposal(messages) is not None
+        if _ends_on_human_input_request(messages) or proposal_waiting:
             # The agent asked the user something. Continuing would tell it to keep
             # going while the question is still open on screen.
-            evaluation = GoalEvaluation(
-                satisfied=False,
-                blocker="needs_user_input",
-                reason="The turn ended on a question to the user that has not been answered.",
-                evidence_summary="",
-            )
+            if proposal_waiting:
+                evaluation = GoalEvaluation(
+                    satisfied=False,
+                    blocker="needs_user_input",
+                    reason="The turn ended on an assignment proposal awaiting the user's choice.",
+                    evidence_summary="",
+                )
+            else:
+                evaluation = GoalEvaluation(
+                    satisfied=False,
+                    blocker="needs_user_input",
+                    reason="The turn ended on a question to the user that has not been answered.",
+                    evidence_summary="",
+                )
             no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature, operation_progress=operation_progress)
             await _persist(goal, evaluation, no_progress_count, stand_down_reason=_stand_down_reason(goal, evaluation, no_progress_count))
             return None

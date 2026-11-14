@@ -1,5 +1,7 @@
 """One-hour reminders concern the saved answer and never resume Work."""
 
+import asyncio
+from datetime import timedelta
 from uuid import uuid4
 
 import pytest
@@ -13,6 +15,15 @@ from test_work_attention_pages import work_pages as work_pages
 
 from app.telegram_bots.producer import _item
 from deerflow.persistence.telegram_bots.model import TelegramOutboxRow, TelegramPersonSettingsRow
+
+
+async def quiet_window_at_delivery(e, clock):
+    from app.telegram_bots.settings import local_now
+
+    settings = await e.db.settings.get(e.link.owner_user_id)
+    local = await asyncio.to_thread(local_now, settings, clock.now() + timedelta(seconds=3610))
+    start = local.hour * 60 + local.minute
+    return start, (start + 60) % 1440
 
 
 async def reminder(e, *, other_requester=False):
@@ -88,9 +99,10 @@ async def test_reminder_obeys_quiet_summary_and_question_preferences(work_delive
     e.sender.outbox.clock = clock.now
     item = await reminder(e)
     await prepare(e, item=item)
+    quiet_start, quiet_end = await quiet_window_at_delivery(e, clock)
     async with e.db.sessions.begin() as writer:
         settings = await writer.get(TelegramPersonSettingsRow, e.actor.subject_id)
-        settings.quiet_enabled, settings.quiet_start_minute, settings.quiet_end_minute = quiet, 0, 1439
+        settings.quiet_enabled, settings.quiet_start_minute, settings.quiet_end_minute = quiet, quiet_start, quiet_end
         settings.summary_enabled, settings.notify = summary, notify
     clock.advance(3610)
     if expected == "sent":
@@ -201,10 +213,11 @@ async def test_protected_reminder_show_stays_silent_even_when_summary_becomes_en
     clock = ManualClock(e.sender.outbox.clock())
     e.sender.outbox.clock = clock.now
     item = await reminder(e)
+    quiet_start, quiet_end = await quiet_window_at_delivery(e, clock)
     async with e.db.sessions.begin() as writer:
         writer.add(TelegramInstancePolicyRow(instance_id=e.link.agent_ref, policy="protected", updated_by=e.link.owner_user_id, updated_at=datetime.now(UTC)))
         settings = await writer.get(TelegramPersonSettingsRow, e.actor.subject_id)
-        settings.quiet_enabled, settings.quiet_start_minute, settings.quiet_end_minute, settings.summary_enabled = True, 0, 1439, False
+        settings.quiet_enabled, settings.quiet_start_minute, settings.quiet_end_minute, settings.summary_enabled = True, quiet_start, quiet_end, False
     await prepare(e, item=item)
     message(e.channel.bot.request, identity=2731)
     clock.advance(3610)
@@ -239,9 +252,10 @@ async def test_reminder_final_settings_fence_observes_summary_enable(work_delive
     clock = ManualClock(e.sender.outbox.clock())
     e.sender.outbox.clock = clock.now
     item = await reminder(e)
+    quiet_start, quiet_end = await quiet_window_at_delivery(e, clock)
     async with e.db.sessions.begin() as writer:
         settings = await writer.get(TelegramPersonSettingsRow, e.actor.subject_id)
-        settings.quiet_enabled, settings.quiet_start_minute, settings.quiet_end_minute, settings.summary_enabled = True, 0, 1439, False
+        settings.quiet_enabled, settings.quiet_start_minute, settings.quiet_end_minute, settings.summary_enabled = True, quiet_start, quiet_end, False
     await prepare(e, item=item)
     sources = e.channel._services.work_news_sources
     original, reads = sources.settings.get, []

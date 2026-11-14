@@ -124,3 +124,37 @@ def proposal_issuer(messages, identity):
 def proposal_message_id(identity, issuer):
     scope = ":" + sha256(issuer.encode("utf-8")).hexdigest()[:12] if issuer else ""
     return f"assignment-card:{identity}{scope}"
+
+
+def successful_assignment_proposal(messages):
+    """Recognize only this human turn's exact successful issuing-call result.
+
+    This identifies a conversation stop, not presentation or mutation authority.
+    Clients must separately qualify retained run output before adopting a card.
+    """
+    if not supports_assignment_card(messages):
+        return None
+    for message in reversed(messages):
+        if isinstance(message, AIMessage) or is_real_user_message(message):
+            break
+        if not isinstance(message, ToolMessage) or message.name != "propose_assignment" or message.status != "success":
+            continue
+        issuer = proposal_issuer(messages, message.tool_call_id)
+        if issuer is None or message.id != proposal_message_id(message.tool_call_id, issuer):
+            continue
+        issuing = next((item for item in reversed(messages) if isinstance(item, AIMessage) and item.id == issuer), None)
+        calls = [item for item in issuing.tool_calls if item.get("id") == message.tool_call_id] if issuing else []
+        if len(calls) != 1 or calls[0].get("name") != "propose_assignment":
+            continue
+        call = calls[0]
+        card = message.artifact.get("assignment_card") if type(message.artifact) is dict else None
+        if type(card) is not dict or set(card) != {"version", "kind", "tool_call_id", "draft"} or type(card["version"]) is not int or card["version"] != 1 or card["kind"] != "assignment_card" or card["tool_call_id"] != message.tool_call_id:
+            continue
+        try:
+            original = ProposeAssignment.model_validate(call["args"]["proposal"]) if call else None
+            parsed = ProposeAssignment.model_validate(card["draft"])
+            if original is not None and original == parsed:
+                return message
+        except (ValueError, TypeError, KeyError):
+            continue
+    return None

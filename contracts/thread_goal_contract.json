@@ -41,6 +41,7 @@
   "host_reason_texts": [
     "No visible assistant evidence is available yet.",
     "The turn ended on a question to the user that has not been answered.",
+    "The turn ended on an assignment proposal awaiting the user's choice.",
     "No durable assistant end-of-turn receipt was available.",
     "The run reached its step limit before finishing."
   ]

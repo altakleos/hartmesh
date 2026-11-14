@@ -2023,6 +2023,8 @@ An assignment proposal retained in a Telegram conversation appears as a read-onl
 card when opened in the browser. It shows the objective, success criteria and
 any mentioned deadline, with a link to Work. Confirmation belongs to the original
 Telegram card; displaying the proposal saves and starts nothing.
+An active goal waits for the person's choice when a supported client presents a
+proposal; proposing an assignment does not complete the goal.
 
 ![Assignment proposal in a synthetic conversation](docs/images/assignment-proposal.png)
 

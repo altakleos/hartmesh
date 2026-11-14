@@ -244,6 +244,8 @@ Scope / known provider compatibility limits (#8038, #8037 review):
 `AssignmentProposalMiddleware` isolates a supported current-turn proposal from
 sibling tools and uses a conditional before-model jump to end after its exact
 successful artifact. Missing support, Just answer and malformed calls continue.
+`chat_tools.successful_assignment_proposal` is shared with Goal stand-down;
+it identifies the current conversation stop, never client source authority.
 Assembly installs it only with the authorized proposal tool, before Clarification;
 the latter retains priority. Preserve issuer-scoped IDs and actual create_agent
 sync/async tests; Command END alone does not override outgoing tool routing.
