@@ -59,6 +59,8 @@ class WorkNewsRecovery:
             return await self.navigation_recovery.refresh(captured)
 
         async def perform():
+            from app.telegram_bots.work_news_delivery import news_projection_for_item, prepare_news_projection
+
             source = await self.reader.read(captured.link, captured.item)
             settings = await self.plans.settings.get(captured.link.owner_user_id)
             if settings is None:
@@ -66,14 +68,15 @@ class WorkNewsRecovery:
             origin = NavigationOrigin()
             admission = await prepare_attention(self.reader, captured.link)
             clock = await self.reader.prepare_clock(captured.link, captured.item)
+            projected = await prepare_news_projection(self.plans.projection(self.reader, captured.link, captured.item, source, clock=clock))
             async with self.outbox._writer(captured.link.id) as (writer, binding):
                 row = await writer.get(TelegramOutboxRow, captured.item.id, with_for_update=True, populate_existing=True)
                 current = self.outbox._sending(binding, row, link_id=captured.link.id, part_id=captured.part["part_id"], claim_owner=captured.claim_owner, claim_id=captured.claim_id, token_revision=captured.token_revision)
                 if current != captured:
                     raise DeliveryClaimRetired()
-                await admission(session=writer, projection=self.plans.projection(self.reader, captured.link, captured.item, source, clock=clock))
+                await admission(session=writer, projection=projected)
                 await self._replace(writer, captured.link, row, source, settings, origin)
-                await admission(session=writer, projection=self.plans.projection(self.reader, captured.link, _item(row), source, clock=clock))
+                await admission(session=writer, projection=news_projection_for_item(self.plans, captured.link, _item(row), source, clock, projected))
                 origin.check(row.payload["work_news_basis"])
 
         return await await_drained(perform())
@@ -287,10 +290,15 @@ class _RevealGuard:
         self.host, self.base, self.admission, self.link, self.item, self.source, self.clock = host, base, admission, link, item, source, clock
 
     async def prepare(self):
+        from app.telegram_bots.work_news_delivery import prepare_news_projection
+
         await prepare_publication_guard(self.base)
+        self.projection = await prepare_news_projection(self.host.plans.projection(self.host.reader, self.link, self.item, self.source, clock=self.clock))
 
     async def check(self, writer):
+        from app.telegram_bots.work_news_delivery import news_projection_for_item
+
         current = await self.base.check(writer)
-        await self.admission(session=writer, projection=self.host.plans.projection(self.host.reader, self.link, self.item, self.source, clock=self.clock))
+        await self.admission(session=writer, projection=news_projection_for_item(self.host.plans, self.link, self.item, self.source, self.clock, self.projection))
         self.base.current()
         return current

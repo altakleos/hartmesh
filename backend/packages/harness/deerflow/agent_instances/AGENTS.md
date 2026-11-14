@@ -128,6 +128,8 @@ a new attempt; physical capacity stays outside SQL, with pure exact binding
 before commit. Retain live launch tasks through cancellation and never expire
 their promises. Confirmed rollback may cancel; uncertain commit retains charge.
 Serialize runless replay recovery under the Home lock, releasing before launch.
+An unresolved runless replay still checks optional borrowed caller admission;
+bound or retired receipts remain readable without fresh admission.
 Drain sealed admissions before RunManager shutdown snapshots workers. Periodic
 orphan callbacks request an exact deferred recycle; maintenance owns closure.
 Re-read CID-less snapshots under the Home lock and deadline; only exact active

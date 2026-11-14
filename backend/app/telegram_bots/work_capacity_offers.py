@@ -14,7 +14,7 @@ from app.telegram_bots.links import BotLink
 from app.telegram_bots.notifications import aware
 from app.telegram_bots.producer import PermanentDeliveryError, ProductSourceRetired, _item, keyboard_cleanup_row
 from app.telegram_bots.work_capacity_sources import WorkCapacityOfferProjection, qualify_waiting, startable_detail
-from app.telegram_bots.work_execution_sources import act_facts, qualify_execution_origin
+from app.telegram_bots.work_execution_sources import act_facts, execution_origin_rows, qualify_execution_origin
 from app.telegram_bots.work_news_delivery import WorkNewsPlans, frozen_news
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow
@@ -55,12 +55,10 @@ async def retire_offer_controls(writer, old, *, outbox):
 async def waiting_origin(writer, link, journal, *, expected=None, origin=None, transfer=None):
     if link is None or journal is None:
         raise ProductSourceRetired()
-    callback = await writer.get(TelegramCallbackRow, journal.id, populate_existing=True)
-    parent = await writer.get(TelegramOutboxRow, callback.payload.get("anchor_outbox_id"), populate_existing=True) if callback else None
-    controls = list(await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == callback.group_id).execution_options(populate_existing=True))) if callback else []
+    callback, parent, controls, primary = await execution_origin_rows(writer, journal)
     attempt = await writer.scalar(select(AgentWorkAttemptRow).where(AgentWorkAttemptRow.work_id == journal.work_id, AgentWorkAttemptRow.activation_id == journal.id).execution_options(populate_existing=True))
-    origin = origin or qualify_execution_origin(link, _snapshot(journal), callback, parent, controls)
-    act = qualify_waiting(link, journal, attempt, callback, parent, controls, origin, expected=expected, transfer=transfer)
+    origin = origin or qualify_execution_origin(link, _snapshot(journal), callback, parent, controls, activation_parent=primary)
+    act = qualify_waiting(link, journal, attempt, callback, parent, controls, origin, expected=expected, transfer=transfer, activation_parent=primary)
     return act, origin, parent.message_thread_id
 
 
@@ -68,6 +66,7 @@ class WorkCapacityOffers(WorkNewsPlans):
     def __init__(self, *, acts, **kwargs):
         super().__init__(**kwargs, projection=WorkCapacityOfferProjection)
         self.acts = acts
+        self.reader.acts = acts
         if acts.session_factory.kw.get("bind") is not self.outbox.sessions.kw.get("bind"):
             raise ValueError("work-capacity-requires-shared-storage")
 

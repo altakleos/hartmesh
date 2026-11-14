@@ -2030,6 +2030,9 @@ or conflicting source stays held; it cannot create another draft or silently sav
 The backend's assignment-control services retain a confirmed save and its original
 Start request through restart. Uncertain starts keep their original identity;
 cancelling a pending request does not claim that a committed start was undone.
+Recovery replies qualify the original confirmed card and its saved child operation.
+Read-only status stays available when Work is disabled; fresh starts still require
+current permission and a complete confirmed preview.
 The managed-bot command and button integration follows separately.
 
 ![Assignment proposal in a synthetic conversation](docs/images/assignment-proposal.png)

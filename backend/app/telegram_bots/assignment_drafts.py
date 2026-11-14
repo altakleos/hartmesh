@@ -194,8 +194,9 @@ class AssignmentDrafts:
 class DraftProjection:
     """Canonical adopted policy and exact original input after provider waits."""
 
-    def __init__(self, link, origin, *, inbox=None, saved=None, criteria=None):
+    def __init__(self, link, origin, *, inbox=None, saved=None, criteria=None, require_work_policy=True):
         self.link, self.origin, self.inbox, self.saved = link, origin, inbox, saved
+        self.require_work_policy = require_work_policy
         self.permissions = None
         self.name = None
         self.criteria_origin = origin_facts(criteria) if criteria is not None else saved.body.get("criteria_origin") if saved is not None else None
@@ -234,7 +235,7 @@ class DraftProjection:
         policy = AgentConfig.model_validate(definition.config).work_policy
         if snapshot.revision != instance.definition_revision:
             raise AuthorityUnavailable()
-        if policy is None or not policy.enabled:
+        if self.require_work_policy and (policy is None or not policy.enabled):
             raise AgentDenied("Assignments are unavailable", reason="work-off")
         if self.permissions is not None and self.permissions != permissions:
             raise AuthorityUnavailable()

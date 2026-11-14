@@ -12,7 +12,7 @@ from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
 from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.producer import ProductSourceRetired, _item, keyboard_cleanup_row
 from app.telegram_bots.work_actions import _ACT_SCOPE, same_body
-from app.telegram_bots.work_execution_sources import WorkExecutionProjection, qualify_execution_origin, require_execution_scope
+from app.telegram_bots.work_execution_sources import WorkExecutionProjection, execution_origin_rows, qualify_execution_origin, require_execution_scope
 from app.telegram_bots.work_news_delivery import WorkNewsPlans, frozen_news
 from app.telegram_bots.work_news_recovery import WorkNewsRecovery
 from app.telegram_bots.work_result_navigation import NavigationOrigin
@@ -66,12 +66,10 @@ class WorkExecutionPlans(WorkNewsPlans):
                     if act.state == "pending" or act.kind == "activate" and act.state == "done":
                         return None
                     now = self.outbox.clock()
-                    callback = await writer.get(TelegramCallbackRow, act_id, populate_existing=True)
-                    parent = await writer.get(TelegramOutboxRow, callback.payload.get("anchor_outbox_id"), populate_existing=True) if callback else None
+                    callback, parent, controls, primary = await execution_origin_rows(writer, journal)
                     if parent is None or callback.message_thread_id != parent.message_thread_id:
                         raise ProductSourceRetired()
-                    controls = list(await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == callback.group_id)))
-                    origin = qualify_execution_origin(link, _snapshot(journal), callback, parent, controls)
+                    origin = qualify_execution_origin(link, _snapshot(journal), callback, parent, controls, activation_parent=primary)
                     row = TelegramOutboxRow(
                         id=uuid4().hex,
                         link_id=link.id,
@@ -139,7 +137,7 @@ class WorkExecutionPlans(WorkNewsPlans):
                         row.state, row.skip_reason, row.closed_at = "skipped", "superseded", self.outbox.clock()
                 else:
                     await WorkNewsRecovery(self)._replace(writer, link, row, source, settings, origin, direct_edit=True, unclaimed=True)
-                    await admission(session=writer, projection=WorkExecutionProjection(self.reader, link, _item(row), source, clock=current.clock))
+                    await admission(session=writer, projection=current.with_item(_item(row)))
                     origin.check(row.payload["work_news_basis"])
             return identity
 

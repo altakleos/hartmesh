@@ -27,6 +27,20 @@ from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, Telegra
 from deerflow.utils.file_io import await_drained
 
 
+async def prepare_news_projection(projection):
+    """Prepare optional source companions; authorization stays in final SQL."""
+    prepare = getattr(projection, "prepare_source", None)
+    if prepare is not None:
+        await prepare()
+    return projection
+
+
+def news_projection_for_item(plans, link, item, source, clock, prepared):
+    """Reuse off-writer companions while qualifying the writer's actual item."""
+    rebind = getattr(prepared, "with_item", None)
+    return rebind(item) if rebind is not None else plans.projection(plans.reader, link, item, source, clock=clock)
+
+
 def recipes(source, basis, identity, link):
     if source.key in {"management.edit", "management.withdraw"}:
         from app.telegram_bots.work_management_cards import present_management
@@ -314,11 +328,12 @@ class WorkNewsPlans:
         origin = NavigationOrigin()
         admission = await prepare_attention(self.reader, link)
         clock = await self.reader.prepare_clock(link, item)
+        projected = await prepare_news_projection(self.projection(self.reader, link, item, source, clock=clock))
         async with self.outbox._writer(link.id) as (writer, binding):
             row = await writer.get(TelegramOutboxRow, identity, with_for_update=True, populate_existing=True)
             if binding is None or any(getattr(binding, field) != getattr(link, field) for field in _SCOPE) or row is None or _item(row) != item:
                 raise DeliveryClaimRetired()
-            await admission(session=writer, projection=self.projection(self.reader, link, item, source, clock=clock))
+            await admission(session=writer, projection=projected)
             basis = {"version": 1, "source": asdict(source), "locale": settings.locale, "concealed": conceal_news(source), "public_base_url": origin.base}
             parts, keyboard = recipes(source, basis, identity, link)
             row.parts = self.outbox._parts(parts, 0)
@@ -332,7 +347,7 @@ class WorkNewsPlans:
                     control.payload = {**control.payload, "presentation_pending": True}
             await writer.flush()
             await self.stage_metadata(writer, link, row, source)
-            await admission(session=writer, projection=self.projection(self.reader, link, _item(row), source, clock=clock))
+            await admission(session=writer, projection=news_projection_for_item(self, link, _item(row), source, clock, projected))
             origin.check(basis)
             return True
 
@@ -372,7 +387,8 @@ class WorkNewsSources:
             from app.telegram_bots.work_navigation_sources import qualify_navigation
 
             clock = await self.reader.prepare_clock(captured.link, captured.item)
-            projection = await qualify_navigation(self.navigation, captured, basis, source, _SendProjection(self, captured, source, basis, settings, zone, now, silent, clock=clock), family="work_news_basis")
+            sending = await prepare_news_projection(_SendProjection(self, captured, source, basis, settings, zone, now, silent, clock=clock))
+            projection = await qualify_navigation(self.navigation, captured, basis, source, sending, family="work_news_basis")
             try:
                 await current_attention(self.reader, captured.link, projection=projection)
             except ProductSourceRetired:
@@ -393,6 +409,9 @@ class _SendProjection:
         self.host, self.captured, self.basis, self.settings, self.zone, self.now, self.silent = host, captured, basis, settings, zone, now, silent
         self.group = captured.item.parts[-1].get("callback_group_id")
         self.origin = NavigationOrigin()
+
+    async def prepare_source(self):
+        await prepare_news_projection(self.projection)
 
     def extend(self, query):
         result = self.projection.extend(query)
