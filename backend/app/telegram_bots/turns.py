@@ -1471,7 +1471,7 @@ class ChatTurns:
             if self._closed or channel in self._retired or not await channel._input_current(link) or not channel._callback_current(link):
                 return
             row, created = await await_drained(self.services.outbox.inbox.accept(link, update, sanitized_input={"command": "stop"}))
-            if not created and not self.unfinished(link, row):
+            if not created and row.route_kind != "command_stop" and not self.unfinished(link, row):
                 channel._classified(update, remember=True)
                 return
             if not self._open(channel, link):
@@ -1481,6 +1481,11 @@ class ChatTurns:
                 await human_inputs.command(channel, update, "stop", captured_link=link)
             if not self._open(channel, link):
                 return
+            work_chat = getattr(self.services, "work_chat", None)
+            if link.agent_kind == "instance" and work_chat is not None:
+                if await work_chat.command_stops.command(channel, link, row, original=original, guard=work_chat.guard(channel, link)):
+                    channel._classified(update, remember=True)
+                    return
             row = await await_drained(self.services.outbox.inbox.route(row, kind="command", target_id="stop", basis={}, operation_ids=[]))
             if not channel._callback_current(link):
                 return

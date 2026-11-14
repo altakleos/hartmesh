@@ -8,7 +8,7 @@ from app.telegram_bots.inbox import InboxRow
 from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
 
 logger = logging.getLogger(__name__)
-_ROUTES = {"work_input", "work_card_hold", "work_file_new", "work_album_hold", "work_file_album", "work_answer", "assignment_hold", "assignment_draft", "assignment_criteria", "management_edit"}
+_ROUTES = {"work_input", "work_card_hold", "work_file_new", "work_album_hold", "work_file_album", "work_answer", "assignment_hold", "assignment_draft", "assignment_criteria", "management_edit", "command_stop"}
 
 
 async def recover_inputs(runtime, phase, *, link_id=None, guard_factory):

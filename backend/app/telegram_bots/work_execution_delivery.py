@@ -12,6 +12,7 @@ from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
 from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.producer import ProductSourceRetired, _item, keyboard_cleanup_row
 from app.telegram_bots.work_actions import _ACT_SCOPE, same_body
+from app.telegram_bots.work_command_stop_origins import CommandStopProof, source_marker
 from app.telegram_bots.work_execution_sources import WorkExecutionProjection, execution_origin_rows, qualify_execution_origin, require_execution_scope
 from app.telegram_bots.work_news_delivery import WorkNewsPlans, frozen_news
 from app.telegram_bots.work_news_recovery import WorkNewsRecovery
@@ -72,10 +73,17 @@ class WorkExecutionPlans(WorkNewsPlans):
                     if act.state == "pending" or act.kind == "activate" and act.state == "done":
                         return None
                     now = self.outbox.clock()
-                    callback, parent, controls, primary = await execution_origin_rows(writer, journal)
-                    if parent is None or callback.message_thread_id != parent.message_thread_id:
-                        raise ProductSourceRetired()
-                    origin = qualify_execution_origin(link, _snapshot(journal), callback, parent, controls, activation_parent=primary)
+                    command = CommandStopProof(link, _snapshot(journal)) if source_marker(journal) is not None else None
+                    if command is not None:
+                        await command.read(writer)
+                        callback, parent, controls, primary = None, None, [], None
+                        topic = command.topic
+                    else:
+                        callback, parent, controls, primary = await execution_origin_rows(writer, journal)
+                        if parent is None or callback.message_thread_id != parent.message_thread_id:
+                            raise ProductSourceRetired()
+                        topic = parent.message_thread_id
+                    origin = qualify_execution_origin(link, _snapshot(journal), callback, parent, controls, activation_parent=primary, command=command)
                     row = TelegramOutboxRow(
                         id=uuid4().hex,
                         link_id=link.id,
@@ -90,12 +98,16 @@ class WorkExecutionPlans(WorkNewsPlans):
                         parts=[],
                         state="pending",
                         silent=True,
-                        message_thread_id=parent.message_thread_id,
+                        message_thread_id=topic,
                         not_before=now,
                         created_at=now,
                     )
                     writer.add(row)
                     await writer.flush()
+                if source_marker(journal) is not None:
+                    command = CommandStopProof(link, _snapshot(journal))
+                    incoming = await command.read(writer)
+                    await self.outbox.inbox.register_delivery([incoming], outbox_id=row.id, finish=False, session=writer)
                 identity = row.id
                 if guard is not None:
                     await guard.check(writer)
@@ -153,7 +165,15 @@ class WorkExecutionPlans(WorkNewsPlans):
                     await guard.check(writer)
             return identity
 
-        return await await_drained(perform())
+        async def complete():
+            identity = await perform()
+            if identity is not None:
+                from app.telegram_bots.work_command_stop_completion import seal_execution_command
+
+                await seal_execution_command(self, link, act_id, guard=guard)
+            return identity
+
+        return await await_drained(complete())
 
     async def cancel(self, link, callback_id, *, chat_id, message_id, message_thread_id, guard):
         async def perform():

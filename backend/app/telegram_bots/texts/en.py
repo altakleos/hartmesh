@@ -1,6 +1,9 @@
 """English fixed texts for managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "stop.which": "What should stop?",
+    "label.stop_assignment": '"{objective}"',
+    "label.stop_everything": "Everything",
     "start.superseded": "This Start request is no longer current. Open the assignment to review it.",
     "start.changed": "This assignment changed. The current version is below.",
     "start.already": "{name} is already working on this.",

@@ -86,8 +86,11 @@ async def expired_stop_groups(session, *, cutoff, pending_outcome):
             if not closed_scope(row, allow_pending=True):
                 continue
             child = parent_of(_snapshot(row))
-            if row.continuation is not None and child is None and delivery_receipt(row.continuation) is None and not transferred(row):
-                continue
+            if row.continuation is not None and child is None:
+                from app.telegram_bots.work_command_stop_retention import closed_marker
+
+                if not closed_marker(row) and delivery_receipt(row.continuation) is None and not transferred(row):
+                    continue
             event = await session.scalar(select(AgentWorkEventRow).where(AgentWorkEventRow.instance_id == row.instance_id, AgentWorkEventRow.operation_id == row.id))
             if row.operation_ids:
                 if child is not None or len(row.operation_ids) > 2 or len(set(row.operation_ids)) != len(row.operation_ids) or event is not None:

@@ -1,6 +1,9 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "stop.which": "要停止哪一项？",
+    "label.stop_assignment": "“{objective}”",
+    "label.stop_everything": "全部停止",
     "start.superseded": "这次开始请求已失效。请打开任务查看当前内容。",
     "start.changed": "这个任务已更改。下方是当前版本。",
     "start.already": "{name}已经在处理这个任务。",
