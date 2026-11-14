@@ -153,6 +153,10 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int,
 
     _execution_groups, execution_anchors, _execution_acts = await execution_dependencies(session)
     pinned.update(execution_anchors)
+    from app.telegram_bots.work_command_stop_retention import command_stop_dependencies
+
+    command_stops = await command_stop_dependencies(session, now, max_age_days=callback_max_age_days)
+    pinned.update(command_stops.deliveries)
     from app.telegram_bots.assignment_retention import assignment_dependencies
 
     assignments = await assignment_dependencies(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
@@ -360,6 +364,10 @@ async def _sweep_acts(sessions, now, *, draft_ttl_hours=24, callback_max_age_day
 
         _execution_groups, _execution_anchors, execution_acts = await execution_dependencies(session)
         pending_outcome = or_(pending_outcome, TelegramActRow.id.in_(sorted(execution_acts)))
+        from app.telegram_bots.work_command_stop_retention import command_stop_dependencies
+
+        command_stops = await command_stop_dependencies(session, now, max_age_days=callback_max_age_days)
+        pending_outcome = or_(pending_outcome, TelegramActRow.id.in_(sorted(command_stops.acts)))
         from app.telegram_bots.work_request_continuation_retention import request_dependencies
 
         requests = await request_dependencies(session, now, max_age_days=callback_max_age_days)
@@ -507,13 +515,18 @@ async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int, dra
     open_act = select(TelegramActRow.id).where(TelegramActRow.link_id == mark.link_id, TelegramActRow.chat_id == mark.chat_id, TelegramActRow.message_id == mark.message_id, TelegramActRow.state.not_in(_SETTLED_ACTS))
     # A mark is done only once every delivery it lists is sent or skipped.
     from app.telegram_bots.assignment_retention import assignment_dependencies, expire_assignments
+    from app.telegram_bots.work_command_stop_retention import command_stop_dependencies
     from app.telegram_bots.work_management_ui_retention import management_dependencies
     from app.telegram_bots.work_request_continuation_retention import request_dependencies
 
     async with _writer(sessions) as session:
+        from app.telegram_bots.work_command_stop_lifetime import expire_retired_unselected
+
+        await expire_retired_unselected(session, now, max_age_days=callback_max_age_days)
         assignments = await assignment_dependencies(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
         management = await management_dependencies(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
         requests = await request_dependencies(session, now, max_age_days=callback_max_age_days)
+        command_stops = await command_stop_dependencies(session, now, max_age_days=callback_max_age_days)
         candidates = list(
             (
                 await session.execute(
@@ -528,7 +541,7 @@ async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int, dra
                 )
             ).all()
         )
-        eligible = sorted(set(candidates) - assignments.inputs - management.inputs - requests.inputs)
+        eligible = sorted(set(candidates) - assignments.inputs - management.inputs - requests.inputs - command_stops.inputs)
         inbound = 0
         for start in range(0, len(eligible), _BATCH):
             inbound += (await session.execute(delete(mark).where(tuple_(mark.link_id, mark.message_id, mark.chat_id).in_(eligible[start : start + _BATCH])))).rowcount

@@ -1742,6 +1742,35 @@ history follows the same 400-day rule. Dependency reads take no new locks;
 journal deletion derives them after the shared Link -> Act locks. These owners
 still need public callback routing and the runtime observer.
 
+## Typed Stop ownership
+
+`work_command_stops.py` owns `/stop` when no chat answer is active. It reads all
+authorized Work pages and applies the Work tab's Stop rule. One eligible attempt
+is selected by the original command; several require a genuine `stop_which`
+choice. The real command Inbox, frozen Work/attempt identities and actual choice
+group own every derived journal operation. Replay reconciles entered calls;
+only a known unentered operation can enter its first check.
+
+`work_command_stop_choices.py` composes current Work detail projections through
+the shared SDK fence. Selection consumes its acknowledged group and owns the
+keyboard cleanup before actions begin. `work_command_stop_origins.py` joins the
+actual command and complete choice receipt into execution publication; no
+callback is manufactured for a typed command. Multi-target input completion
+waits for all selected execution deliveries. Native Stop retains its existing
+CAS, original cancellation scope and physical-settlement owner.
+Both native command and physical cancellation recheck the original command
+custody. First admission uses the command or acknowledged choice's fixed
+one-hour clock; a delayed unentered target receives a refusal instead of a
+renewed cancellation window. A failed target does not prevent the others settling.
+
+`work_command_stop_retention.py` retains complete input/UI/journal dependencies
+while an original promise is unresolved or its controls remain live. Closed
+historical markers can expire only with the existing native receipt and
+original-attempt settlement proof. This path preserves ordinary chat Stop.
+Expired unselected choices close without native actions. A retired binding's
+maintenance uses Link -> Outbox -> Input locks and preserves pending SDK claims.
+Malformed families retain only their independently identified original scope.
+
 ## Saved assignment correction inputs
 
 `work_management_editing.py` owns Edit prompts and accepted corrections. Opening

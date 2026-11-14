@@ -15,6 +15,7 @@ from app.telegram_bots.notifications import aware
 from app.telegram_bots.producer import ProductSourceRetired, _item
 from app.telegram_bots.settings import format_time
 from app.telegram_bots.work_actions import _ACT_SCOPE, request_for, same_body, thaw
+from app.telegram_bots.work_command_stop_origins import CommandStopProof, source_marker
 from app.telegram_bots.work_details import WorkDetailProjection, _fields
 from app.telegram_bots.work_news_sources import WorkNewsRead
 from app.telegram_bots.work_result_identity import digest
@@ -63,8 +64,13 @@ def require_execution_scope(link, act):
         raise ProductSourceRetired()
 
 
-def qualify_execution_origin(link, act, callback, parent, controls, *, activation_parent=None):
+def qualify_execution_origin(link, act, callback, parent, controls, *, activation_parent=None, command=None):
     try:
+        if command is not None:
+            require_execution_scope(link, act)
+            if activation_parent is not None or act.kind != "stop" or command.act.id != act.id or not same_body(source_marker(act), command.marker):
+                raise ValueError()
+            return command.origin
         if act.kind not in {"activate", "stop"} or callback is None or parent is None:
             raise ValueError()
         voice_parent = activation_parent is not None and activation_parent.kind == "respond"
@@ -223,6 +229,7 @@ class WorkExecutionProjection:
         self.capacity = getattr(clock, "capacity", None)
         self.capacity_projection = None
         self.activation_parent = None
+        self.command = None
         if self.capacity is not None:
             from app.telegram_bots.work_capacity_reads import CapacityProjection
 
@@ -236,6 +243,8 @@ class WorkExecutionProjection:
             if act is None:
                 raise ProductSourceRetired()
             captured = _snapshot(act)
+        if source_marker(captured) is not None:
+            self.command = CommandStopProof(self.link, captured)
         if captured.kind == "activate":
             self.activation_parent = ActivationParentProjection(captured, for_effect=False)
             try:
@@ -272,7 +281,7 @@ class WorkExecutionProjection:
             result.add_columns(delivery, act, callback, parent, control, original, child, event, settings, requester.email, supervisor.email)
             .join(delivery, delivery.id == self.item.id)
             .join(act, act.id == self.item.payload["work_execution_intent"]["act_id"])
-            .outerjoin(callback, callback.id == self.item.payload["work_execution_intent"]["origin"]["callback_id"])
+            .outerjoin(callback, callback.id == self.item.payload["work_execution_intent"]["origin"].get("callback_id"))
             .outerjoin(parent, parent.id == callback.payload["anchor_outbox_id"].as_string())
             .outerjoin(control, control.group_id == callback.group_id)
             .outerjoin(original, and_(original.work_id == act.work_id, case((act.kind == "activate", original.activation_id == act.id), else_=original.id == operation)))
@@ -284,6 +293,8 @@ class WorkExecutionProjection:
         )
         if self.activation_parent is not None:
             result = self.activation_parent.extend(result)
+        if self.command is not None:
+            result = self.command.extend(result)
         return self.capacity_projection.extend(result) if self.capacity_projection is not None else result
 
     def check(self, rows):
@@ -319,10 +330,12 @@ class WorkExecutionProjection:
             primary = _snapshot(primary_row) if primary_row is not None else None
         elif act.kind == "activate":
             raise ProductSourceRetired()
-        origin = qualify_execution_origin(self.link, act, callback, parent, controls, activation_parent=primary)
+        if self.command is not None:
+            self.command.check(rows)
+        origin = qualify_execution_origin(self.link, act, callback, parent, controls, activation_parent=primary, command=self.command)
         if self.item.dedupe_key != "notice:work-execution:" + act.id or not same_body(origin, self.item.payload["work_execution_intent"]["origin"]):
             raise ProductSourceRetired()
-        if delivery.message_thread_id != parent.message_thread_id:
+        if delivery.message_thread_id != (self.command.topic if self.command is not None else parent.message_thread_id):
             raise ProductSourceRetired()
         effective = act
         event_proof = None

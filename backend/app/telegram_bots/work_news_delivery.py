@@ -42,7 +42,11 @@ def news_projection_for_item(plans, link, item, source, clock, prepared):
 
 
 def recipes(source, basis, identity, link):
-    if source.key in {"management.edit", "management.withdraw"}:
+    if source.key == "command.stop":
+        from app.telegram_bots.work_command_stop_choices import present_stop_choices
+
+        view = present_stop_choices(source, basis, link)
+    elif source.key in {"management.edit", "management.withdraw"}:
         from app.telegram_bots.work_management_cards import present_management
 
         view = present_management(source, basis, link)
@@ -98,7 +102,7 @@ def conceal_news(source):
     """Only a current source-qualified chat activation bypasses its teaser."""
     return (
         source.protected
-        and source.key not in {"view.list", "view.detail", "execution.activate", "execution.stop", "assignment.card", "assignment.prompt", "management.edit", "management.withdraw", "management.prompt"}
+        and source.key not in {"view.list", "view.detail", "execution.activate", "execution.stop", "assignment.card", "assignment.prompt", "management.edit", "management.withdraw", "management.prompt", "command.stop"}
         and not (source.key.startswith("status.") and source.work.get("activation_act_id"))
     )
 

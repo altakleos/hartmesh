@@ -19,6 +19,7 @@ from app.telegram_bots.voice_inputs import VoiceInputRouter
 from app.telegram_bots.work_capacity_offers import WorkCapacityOffers
 from app.telegram_bots.work_capacity_reads import WorkCapacityReader
 from app.telegram_bots.work_capacity_sources import WorkCapacityOfferReader
+from app.telegram_bots.work_command_stops import WorkCommandStops
 from app.telegram_bots.work_execution_delivery import WorkExecutionPlans
 from app.telegram_bots.work_execution_sources import WorkExecutionReader
 from app.telegram_bots.work_management_delivery import WorkManagementPlans
@@ -65,6 +66,7 @@ class WorkChatRuntime:
         host.assignment_prompt_sources = WorkNewsSources(self.assignment_prompts)
         self.management = WorkManagementPlans(reader=WorkManagementReader(host.acts), **delivery)
         self.management_edits = WorkManagementEdits(self.management)
+        self.command_stops = WorkCommandStops(self)
         host.voice_inputs = VoiceInputRouter(
             host.work_text_inputs.voice,
             {"assignment": AssignmentVoiceInputs(self.assignment_inputs, guard_factory=self.guard), "management": ManagementVoiceInputs(self.management_edits, guard_factory=self.guard)},
@@ -86,6 +88,7 @@ class WorkChatRuntime:
             "assignment_prompt_intent": self.assignment_prompts,
             "work_management_intent": self.management,
             "management_prompt_intent": self.management_edits.prompts,
+            "command_stop_intent": self.command_stops.choices,
             "capacity_offer_intent": self.offers,
         }
         found = [owner for key, owner in owners.items() if key in item.payload]
@@ -141,6 +144,8 @@ class WorkChatRuntime:
         if origin.route_kind == "work_card_hold" and isinstance(voice, Mapping) and voice.get("owner") in {"assignment", "management"}:
             return await self.host.voice_inputs.resume(channel, origin, recovery_guard=guard)
         link = guard.captured_link
+        if origin.route_kind == "command_stop":
+            return await self.command_stops.recover(link, origin, guard=guard)
         if origin.route_kind == "assignment_hold":
             return await self.assignment_commands.resume(link, origin, guard=guard)
         if origin.route_kind in {"assignment_draft", "assignment_criteria"}:
@@ -161,6 +166,7 @@ class WorkChatRuntime:
             "work_list_page",
             "work_start",
             "stop_attempt",
+            "stop_which",
             "assign_save",
             "assign_start",
             "assign_edit",
@@ -214,7 +220,9 @@ class WorkChatRuntime:
                 except Exception:
                     return False
 
-            if row.kind in {"accept_open", "changes_open"}:
+            if row.kind == "stop_which":
+                await self.command_stops.select(channel, row, link=link, guard=guard)
+            elif row.kind in {"accept_open", "changes_open"}:
                 await self.review_views.open(link, row.id, **scope)
             elif row.kind in {"act_check", "cancel_wait"}:
                 operation = recovery.retry if row.kind == "act_check" else recovery.cancel

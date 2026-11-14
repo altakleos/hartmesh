@@ -286,9 +286,10 @@ class StopActionMethods(StopRetryMethods):
 
 async def stop_admission(acts, link, act, *, attempt_current):
     from app.telegram_bots.attention_authority import prepare_attention
+    from app.telegram_bots.work_command_stop_origins import stop_mode_proof
 
     prepared = await prepare_attention(acts, link)
-    projection = StopProjection(act, attempt_current)
+    projection = StopProjection(act, attempt_current, command=await stop_mode_proof(acts, link, act))
 
     async def admission(writer):
         acts._writer_required(writer)
@@ -302,8 +303,9 @@ async def stop_admission(acts, link, act, *, attempt_current):
 
 
 class StopProjection:
-    def __init__(self, act, attempt_current):
+    def __init__(self, act, attempt_current, *, command=None):
         self.act, self.attempt_current = act, attempt_current
+        self.command = command
         from app.telegram_bots.work_stop_retries import parent_of
 
         self.retry = parent_of(act) if act.kind == "stop" else None
@@ -338,7 +340,7 @@ class StopProjection:
             self.parent_column = len(result.column_descriptions)
             parent = aliased(TelegramActRow)
             result = result.add_columns(parent).join(parent, parent.id == self.retry["parent_id"])
-        return result
+        return self.command.extend(result) if self.command is not None else result
 
     def check_parent(self, rows, saved, *, dispatch=False):
         from app.telegram_bots.acts import _snapshot
@@ -360,11 +362,15 @@ class StopProjection:
         if self.retry is None:
             if parent_of(_snapshot(saved)) is not None:
                 raise AgentDenied("The stop retry identity changed")
+            if self.command is not None:
+                self.command.check(rows, saved)
             return
         if not same_body(saved.continuation, self.act.continuation):
             raise AgentDenied("The stop retry identity changed")
         parent = rows[0][self.parent_column]
         validate_child(_snapshot(parent), _snapshot(saved), self.retry["ordinal"])
+        if self.command is not None:
+            self.command.check(rows, parent)
         if (
             parent.cancel_requested_at is not None
             or not parent.operation_ids
@@ -398,11 +404,13 @@ class StopProjection:
 
 async def stop_dispatch_admission(acts, link, act, *, attempt_current):
     from app.telegram_bots.attention_authority import prepare_attention
+    from app.telegram_bots.work_command_stop_origins import stop_mode_proof
 
     prepared = await prepare_attention(acts, link)
+    command = await stop_mode_proof(acts, link, act) if act.kind == "stop" else None
 
     async def admission(original):
-        projection = StopDispatchProjection(act, original, attempt_current)
+        projection = StopDispatchProjection(act, original, attempt_current, command=command)
         held, _basis = await prepared(projection=projection)
         if not {"agents:write", "runs:cancel"}.issubset(held):
             raise CeilingRefused()
@@ -414,8 +422,8 @@ async def stop_dispatch_admission(acts, link, act, *, attempt_current):
 
 
 class StopDispatchProjection(StopProjection):
-    def __init__(self, act, original, attempt_current):
-        super().__init__(act, attempt_current)
+    def __init__(self, act, original, attempt_current, *, command=None):
+        super().__init__(act, attempt_current, command=command)
         self.original = original
 
     def extend(self, query):
