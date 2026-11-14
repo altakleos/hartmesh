@@ -1820,6 +1820,13 @@ drains its extraction work on shutdown.
 
 ## Installed Work chat runtime
 
+Assignment prompt probing captures ordinary text with the canonical
+`{"type": "text", "text": ...}` input shape. An unclaimed message can then
+enter the existing chat-turn parser with the same immutable Inbox identity.
+Replay and startup recovery close the narrowly identified legacy unpublished
+capture with one resend notice. They preserve its original bytes, and do not
+adopt routed private answers, groups, publication reservations or native operations.
+
 `NotificationRuntime._install_work` builds `WorkChatRuntime` from the same Work,
 Act, callback, inbox and outbox owners as notification delivery. Instance chats
 dispatch `/work` and `/status` to one saved list route; `/assign` accepts trailing

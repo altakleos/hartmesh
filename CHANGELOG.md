@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Preserve ordinary chat input when no assignment prompt claims a message.
 - Route `/stop` in an idle agent chat to its eligible running assignments, with
   acknowledged choices for several assignments and durable original targets.
 - Accept spoken corrections in saved-assignment Edit prompts, retain the original

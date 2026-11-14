@@ -115,7 +115,7 @@ EXECUTION_KEYS = frozenset(
 
 ASSIGNMENT_KEYS = frozenset(
     (
-        "assign.prompt assign.ask_done assign.too_long assign.card assign.due assign.card_title assign.card_title_proposed assign.due_note assign.edit_prompt assign.no_access "
+        "assign.prompt assign.resend assign.ask_done assign.too_long assign.card assign.due assign.card_title assign.card_title_proposed assign.due_note assign.edit_prompt assign.no_access "
         "assign.replaced assign.started_line assign.saved_line assign.discarded assign.answering assign.just_answer_message assign.draft_failed stale.draft assign.saving assign.not_saved assign.save_cancelled assign.save_unconfirmed"
     ).split()
 )

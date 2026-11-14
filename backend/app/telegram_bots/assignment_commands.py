@@ -135,7 +135,7 @@ class AssignmentCommands:
             return False
 
         async def perform():
-            origin, _created = await self.outbox.inbox.accept(link, update, sanitized_input={"text": message.text})
+            origin, _created = await self.outbox.inbox.accept(link, update, sanitized_input={"type": "text", "text": message.text})
             if origin.route_kind == "assignment_notice":
                 return True
             if origin.route_kind in {"assignment_draft", "assignment_criteria"}:
@@ -147,7 +147,7 @@ class AssignmentCommands:
             if origin.route_kind == "assignment_hold":
                 return await self.resume(link, origin, guard=guard)
             if origin.route_kind is not None:
-                return False
+                return await self.close_legacy_capture(link, origin, guard=guard)
             quoted = origin.sanitized_input.get("reply_to_message_id")
             intents = ("assignment_prompt_intent", "management_prompt_intent") if self.management is not None else ("assignment_prompt_intent",)
             sources = await quoted_assignment_sources(self.outbox, link, quoted, origin.message_thread_id, intents=intents) if quoted is not None else []
@@ -176,7 +176,7 @@ class AssignmentCommands:
                     prompt = matches[0] if len(matches) == 1 else None
                 purposes = {"assign_words", "assign_done", "assign_edit"} | ({"work_edit"} if self.management is not None else set())
                 if not sources and (prompt is None or prompt.payload.get("purpose") not in purposes):
-                    return False
+                    return await self.close_legacy_capture(link, origin, guard=guard, session=writer)
                 if parent is None and prompt is not None:
                     parent = await writer.get(TelegramOutboxRow, prompt.payload.get("anchor_outbox_id"))
                 key = typing_notice(origin, prompt, parent, self.callbacks, max_chars=self.outbox.config.assign.max_chars, ambiguous=len(sources) > 1)
@@ -198,6 +198,49 @@ class AssignmentCommands:
             return True
 
         return await await_drained(perform())
+
+    async def close_legacy_capture(self, link, origin, *, guard, session=None):
+        """Close only a proved unpublished old probe; never rewrite its input."""
+        value = origin.sanitized_input
+        if link.agent_kind != "instance" or type(value) is not dict or set(value) not in ({"text"}, {"text", "reply_to_message_id"}) or type(value.get("text")) is not str or not value["text"].strip():
+            return False
+        async with self.callbacks.writer(link, guard, session=session) as writer:
+            mark = (await self.outbox.inbox._rows(writer, [origin]))[0]
+            self.outbox.inbox._current(link, mark)
+            if not same_body(origin_facts(InboxRow.from_row(mark)), origin_facts(origin)):
+                raise ProductSourceRetired()
+            if mark.route_kind not in (None, "turn"):
+                return False
+            if mark.route_complete:
+                return True
+            if (
+                mark.turn_id is not None
+                or mark.thread_id is not None
+                or mark.run_id is not None
+                or mark.assistant_message_id is not None
+                or mark.outbox_id is not None
+                or mark.delivery_ids
+                or mark.operation_ids
+                or mark.grouped_message_ids
+                or mark.route_kind is None
+                and (mark.route_target_id is not None or mark.route_basis)
+                or mark.route_kind == "turn"
+                and (mark.route_target_id != link.agent_ref or not same_body(mark.route_basis, {"input_profile": {"version": 1, "kind": "plain_text", "forwarded": False}}))
+            ):
+                return False
+            incoming = InboxRow.from_row(mark)
+            if mark.route_kind is None:
+                incoming = await self.outbox.inbox.route(incoming, kind="assignment_notice", target_id="assign.resend", basis={"key": "assign.resend"}, operation_ids=[], session=writer)
+            await self.outbox.plan_product(
+                link,
+                source_id=f"assignment-legacy-input:{origin.chat_id}:{origin.message_id}",
+                parts=[{"kind": "text", "reply_to_message_id": origin.message_id, "source_ref": {"key": "assign.resend", "values": {}}}],
+                inbox_rows=[incoming],
+                finish_route=True,
+                session=writer,
+            )
+            await guard.check(writer)
+            return True
 
     async def resume(self, link, origin, *, guard):
         async def perform():
