@@ -13,6 +13,9 @@ class ActivationParentProjection:
         self.draft = self.family = self.consent = self.proposal = None
         self.link = self.parent_id = self.root_id = None
         self.request = None
+        from app.telegram_bots.work_news_carriers import ActivationNewsOrigin
+
+        self.news = ActivationNewsOrigin(child, for_effect=for_effect)
 
     async def prepare(self, acts, link):
         from app.telegram_bots.acts import _snapshot
@@ -24,6 +27,7 @@ class ActivationParentProjection:
 
         marker = self.child.continuation.get("activation_parent") if isinstance(self.child.continuation, Mapping) else None
         if not isinstance(marker, Mapping) or type(marker.get("act_id")) is not str:
+            await self.news.prepare(acts, link)
             return self
         async with acts.session_factory() as reader:
             parent = await reader.get(TelegramActRow, marker["act_id"])
@@ -131,7 +135,7 @@ class ActivationParentProjection:
                         ),
                     )
                 )
-        return result
+        return self.news.extend(result)
 
     def check(self, rows, actual_child, held):
         from app.telegram_bots.acts import _snapshot
@@ -139,6 +143,7 @@ class ActivationParentProjection:
         from app.telegram_bots.work_delegate_actions import delegate_source, qualify_delegate_receipt, qualify_no_due
 
         parents = {value.id: value for row in rows if (value := row[self.column]) is not None}
+        self.news.check(rows, actual_child, held)
         marker = actual_child.continuation.get("activation_parent") if isinstance(actual_child.continuation, Mapping) else None
         if not parents and marker is None:
             return

@@ -87,15 +87,12 @@ async def test_news_final_source_snapshot_refuses_mutation_after_provider(work_d
     assert changed
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("action,key", [("accept", "result.accepted"), ("changes_requested", "result.changes"), ("decide", "decision.recorded")])
-async def test_review_and_decision_news_use_original_requester_and_recorded_statement(work_delivery, action, key):
+async def review_news(e, action, key):
     from test_telegram_work_event_intents import activate
 
     from app.telegram_bots.work_news_sources import WorkNewsReader
     from deerflow.agent_instances.work_execution_contract import ReportWork
 
-    e = work_delivery
     peer, worker = await setup(e)
     work, execution, scope, run = await activate(e)
     current = (await scope.context(execution))["work"]
@@ -121,6 +118,13 @@ async def test_review_and_decision_news_use_original_requester_and_recorded_stat
     async with e.db.sessions() as reader:
         item = _item(await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.work_id == work["id"], TelegramOutboxRow.payload["work_event_intent"]["key"].as_string() == key)))
     source = await WorkNewsReader(work=e.human.work, authority=e.live.authority, links=e.db.links).read(e.link, item)
+    return item, extra, source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action,key", [("accept", "result.accepted"), ("changes_requested", "result.changes"), ("decide", "decision.recorded")])
+async def test_review_and_decision_news_use_original_requester_and_recorded_statement(work_delivery, action, key):
+    _item, extra, source = await review_news(work_delivery, action, key)
     assert source.key == key and source.values["person"] == "event-peer@example.com"
     if action == "decide":
         assert source.values["decision"] == extra["note"] and source.values["note"] is None

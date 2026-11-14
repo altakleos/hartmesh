@@ -15,11 +15,14 @@ from deerflow.utils.file_io import await_drained
 def displayed_start(link, parent, callback):
     original = acknowledged_view(link, parent, callback.payload.get("presentation_version"))
     source = original.payload["work_news_basis"]["source"]
+    from app.telegram_bots.work_news_carriers import ACTION_NEWS_KEYS
+
+    news = source["key"] in ACTION_NEWS_KEYS and "work_event_intent" in original.payload and "detail" in source.get("work", {})
     preview = source["key"] in {"execution.activate", "execution.stop"} and source.get("work", {}).get("notice", {}).get("preview") is True
     saved_assignment = source["key"] == "assignment.card" and source.get("work", {}).get("phase") == "saved"
     management = source["key"] in {"management.edit", "management.withdraw"} and source.get("work", {}).get("phase") in {"saved", "changed", "back"}
     if (
-        (source["key"] not in {"view.detail", "capacity.offer"} and not preview and not saved_assignment and not management)
+        (source["key"] not in {"view.detail", "capacity.offer"} and not preview and not saved_assignment and not management and not news)
         or callback.kind != "work_start"
         or callback.target_kind != "work"
         or original.payload["work_news_basis"]["concealed"]
@@ -81,6 +84,9 @@ class WorkStartAdmissions:
             if not any(item.get("kind") == "work_start" for line in controls for item in line):
                 raise CallbackRefused()
             detail_current = await self.plans.reader.prepare_detail(link, fresh, ignore_activation=callback_id)
+            from app.telegram_bots.work_news_carriers import prepare_news_origin
+
+            news_current = await prepare_news_origin(self.plans.reader, link, parent, original)
 
             async def admit(writer, act):
                 await guard.check(writer)
@@ -93,6 +99,12 @@ class WorkStartAdmissions:
                 if any(row.payload.get("work_action_id") is not None for row in rows):
                     raise CallbackRefused(None)
                 if act is not None:
+                    if news_current is not None:
+                        from app.telegram_bots.work_news_carriers import activation_news_origin, save_news_witness
+
+                        journal = await writer.get(TelegramActRow, act.id, populate_existing=True)
+                        journal.continuation = {**(journal.continuation or {}), "version": 1, "news_origin": activation_news_origin(actual)}
+                        await save_news_witness(writer, link, act, actual)
                     for row in rows:
                         row.payload = {**row.payload, "work_action_id": act.id}
                     await writer.flush()
@@ -101,6 +113,8 @@ class WorkStartAdmissions:
 
                     await transfer_offer(writer, link, actual, callback_id, now=self.outbox.clock())
                 await detail_current(session=writer)
+                if news_current is not None:
+                    await news_current(session=writer)
                 guard.current()
 
             return await self.acts.stage_activation(link, operation_id=callback_id, work_id=displayed["id"], assignment_revision=displayed["assignment_revision"], admission=admit)

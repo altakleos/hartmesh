@@ -28,8 +28,14 @@ successor pointer; its actual ACK closes the old Retry warning. Retention keeps
 that predecessor while its successor remains unsettled.
 
 Message preferences, quiet-hour prompts, cross-bot rejected-token notices and
-summary Stop are installed with this graph. Start/Resume/Stop assignment links
-continue to open the web; no assignment execution controller is installed.
+summary Stop are installed with this graph. Eligible colleague and terminal
+assignment news embeds the complete current objective and success criteria with
+Start/Resume. Its ordered SDK acknowledgements enable only the final keyboard.
+The saved activation binds that actual event, callback and original presentation;
+entry and native launch reread the canonical event in their borrowed SQL snapshot.
+Its own reservation may advance Work without replacing the original event proof.
+Missing proof holds the original operation. Status and summary carriers retain
+their separate source owners.
 
 `work_file_exports.py` exports one indexed source of the current Work outcome
 as the human recipient. Outcome, evidence and assignment revisions, source
@@ -217,8 +223,9 @@ fail qualification; compiling a dialect is not evidence of runtime execution.
 review, result and colleague-news owners. Saved sources must be untouched,
 unsent presentations; a pending-preview validator never invents a dispatch.
 Final projections retain source events, exact claims, referenced Spaces, routing
-rosters, result identities and optional route permissions. Digest titles do not
-read file bytes or grant action authority. Delivery and item controllers still
+rosters, result identities and optional route permissions. Colleague-news titles
+use the compact news read, without fetching or joining an actionable assignment
+preview. Digest titles do not read file bytes or grant action authority. Delivery and item controllers still
 own whole-batch claims, acknowledgements and complete preview admission.
 
 Digest ACKs must match the detached manifest admitted before the SDK await.

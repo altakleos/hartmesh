@@ -1,20 +1,20 @@
 """Current recipient reads for colleague Work command notifications."""
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy import and_, select
 from sqlalchemy.orm import aliased
 
 from app.telegram_bots.attempt_text import ATTEMPT_KEYS
-from app.telegram_bots.attention import AttentionReader
 from app.telegram_bots.attention_authority import _SCOPE, prepare_attention
 from app.telegram_bots.authority import AccessOff, CeilingRefused
 from app.telegram_bots.producer import ProductSourceRetired, _item
 from app.telegram_bots.result_notice_sources import fields
-from app.telegram_bots.work_actions import same_body
+from app.telegram_bots.work_actions import same_body, thaw
 from app.telegram_bots.work_answer_news import AnswerNews
 from app.telegram_bots.work_attempt_notices import AttemptNotice
+from app.telegram_bots.work_details import WorkDetailsReader
 from app.telegram_bots.work_event_source import event_signature
 from app.telegram_bots.work_news import news_class
 from app.telegram_bots.work_proposal_news import ProposalNews
@@ -59,42 +59,54 @@ def same_news_origin(previous, current):
     return True
 
 
-class WorkNewsReader(AttentionReader):
+class WorkNewsReader(WorkDetailsReader):
     def __init__(self, *, work, authority, links, clock=None):
         super().__init__(work=work, authority=authority, links=links)
         self.clock = clock or (lambda: datetime.now(UTC))
 
-    async def read(self, link, item):
+    async def read(self, link, item, *, include_detail=True):
         try:
-            return await await_drained(self._read(link, item))
+            return await await_drained(self._read(link, item, include_detail=include_detail))
         except (AccessOff, CeilingRefused, AgentConflict, AgentDenied):
             raise ProductSourceRetired() from None
 
     async def prepare_clock(self, link, item):
         return await prepare_news_clock(self, link, item)
 
-    async def _read(self, link, item):
+    async def _read(self, link, item, *, include_detail=True):
         authority = await self._current(link)
         current = await self.work.get(actor=PrincipalRef("human", link.owner_user_id), instance_id=link.agent_ref, work_id=item.work_id)
         work = {key: current[key] for key in _WORK}
-        projection = WorkNewsProjection(self, link, item, work=work, protected=authority[1][1] == "protected", clock=await self.prepare_clock(link, item))
+        from app.telegram_bots.work_news_carriers import read_news_detail
+
+        detail = await read_news_detail(self, link, item) if include_detail else None
+        projection = WorkNewsProjection(self, link, item, work=work, protected=authority[1][1] == "protected", clock=await self.prepare_clock(link, item), detail=detail)
         admission = await prepare_attention(self, link)
         await admission(projection=projection)
         return projection.source
 
 
 class WorkNewsProjection:
-    def __init__(self, reader, link, item, source=None, *, work=None, protected=None, clock=None):
+    def __init__(self, reader, link, item, source=None, *, work=None, protected=None, clock=None, detail=None, origin=None, activation_id=None, historical=False):
         self.reader, self.link, self.item, self.source = reader, link, item, source
-        self.work = source.work if source else work
+        self.origin = origin
+        snapshot = source.work if source else work
+        self.work = {key: snapshot[key] for key in _WORK} if snapshot is not None else None
         self.protected = source.protected if source else protected
         self.stop = StopNews(link, item, clock) if item.payload.get("work_event_intent", {}).get("key") in STOP_KEYS else None
         self.answer = AnswerNews(item) if item.payload.get("work_event_intent", {}).get("key") == "request.answered" else None
         self.reminder = item.payload.get("work_event_intent", {}).get("key") == "remind.ready_to_resume"
         if self.reminder:
             self.answer = ResumeReminder(link, item)
-        self.proposal = ProposalNews(link, item) if item.payload.get("work_event_intent", {}).get("key") == "work.proposed" else None
+        self.proposal = ProposalNews(link, item, activation_id=activation_id if origin is not None else None, historical=historical and origin is not None) if item.payload.get("work_event_intent", {}).get("key") == "work.proposed" else None
         self.notice = AttemptNotice(link, item) if item.payload.get("work_event_intent", {}).get("key") in ATTEMPT_KEYS else None
+        from app.telegram_bots.work_details import WorkDetailProjection, WorkDetailRead
+
+        if detail is None and source is not None and "detail" in source.work:
+            saved = source.work["detail"]
+            detail = WorkDetailRead(**{**saved, "held": tuple(saved["held"])})
+        self.detail = WorkDetailProjection(reader, link, detail.record, detail.request, reusable=detail.can_reuse_conversation, expected=detail) if detail is not None else None
+        self.clock = clock
 
     def extend(self, query):
         self.column = len(query.column_descriptions)
@@ -118,9 +130,12 @@ class WorkNewsProjection:
         else:
             result = result.outerjoin(activation, activation.id == prior).outerjoin(attempt, and_(attempt.work_id == work.id, attempt.activation_id == activation.operation_id))
         result = result.outerjoin(actor, actor.id == event.actor_id).join(delivery, delivery.id == self.item.id)
-        return self.answer.extend(result) if self.answer else self.stop.extend(result, activation) if self.stop else self.proposal.extend(result) if self.proposal else self.notice.extend(result, activation) if self.notice else result
+        result = self.answer.extend(result) if self.answer else self.stop.extend(result, activation) if self.stop else self.proposal.extend(result) if self.proposal else self.notice.extend(result, activation) if self.notice else result
+        return self.detail.extend(result) if self.detail is not None else result
 
     def check_with_permissions(self, rows, held):
+        if self.detail is not None:
+            self.detail.check_with_permissions(rows, held)
         if self.notice:
             self.notice.route_permissions = held
         self.check(rows)
@@ -128,6 +143,12 @@ class WorkNewsProjection:
     def check(self, rows):
         bot, instance, _permission, policy = rows[0][:4]
         work, event, attempt, activation, person, delivery = rows[0][self.column : self.column + 6]
+        if self.origin is not None:
+            # A prior event stays the human gesture's source after this action
+            # reserves its own attempt. Current assignment authority is checked
+            # separately by the Work operation, never taken from this preview.
+            self.work = fields(work, _WORK)
+            self.protected = instance.custody != "personal" and policy == "protected"
         intent = self.item.payload.get("work_event_intent", {})
         key = intent.get("key")
         from app.telegram_bots.work_navigation_sources import delivery_scope
@@ -231,7 +252,20 @@ class WorkNewsProjection:
             # fields. Do not invent or duplicate a second annotation.
             values.update(decision=event.request["note"], note=None)
         signature = answer_signature or stop_signature or proposal_signature or notice_signature or event_signature(event, None, intent)
-        fresh = WorkNewsRead(work.id, key, values, self.protected, self.work, signature, digest([signature, self.work, values, fields(attempt, _ATTEMPT), None if activation is None else event_signature(activation, None, {})]))
+        data = self.work
+        if self.detail is not None:
+            from app.telegram_bots.work_news_carriers import detail_dates
+
+            detail = self.detail.source
+            if detail is None:
+                raise ProductSourceRetired()
+            dates = detail_dates(detail, self.clock) if self.clock is not None else self.source.work["detail_dates"]
+            data = {**data, "detail": thaw(asdict(detail)), "detail_dates": dates}
+        fresh = WorkNewsRead(work.id, key, values, self.protected, data, signature, digest([signature, data, values, fields(attempt, _ATTEMPT), None if activation is None else event_signature(activation, None, {})]))
+        if self.origin is not None:
+            if (fresh.work_id, fresh.key, fresh.event_signature) != (self.origin.work_id, self.origin.key, self.origin.event_signature):
+                raise ProductSourceRetired()
+            return
         if self.source is not None and self.source != fresh:
             raise ProductSourceRetired()
         self.source = fresh

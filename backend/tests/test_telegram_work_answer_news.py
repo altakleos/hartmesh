@@ -55,7 +55,9 @@ async def test_answer_news_delivers_from_saved_information_receipt(work_delivery
     assert not e.dispatch_errors, e.dispatch_errors
     calls = [call for call in e.channel.bot.request.calls if call.endpoint == "sendMessage"]
     assert len(calls) == 1
-    assert calls[0].parameters["text"] == 'event-peer@example.com answered the question\n"Report findings"'
+    assert calls[0].parameters["text"].startswith('event-peer@example.com answered the question\n"Report findings"')
+    current = await e.human.work.get(actor=e.actor, instance_id=e.instance.id, work_id=item.work_id)
+    assert current["success_criteria"] in calls[0].parameters["text"]
     assert calls[0].parameters["disable_notification"] is True
     async with e.db.sessions() as reader:
         assert (await reader.get(TelegramOutboxRow, identity)).state == "sent"
@@ -153,7 +155,8 @@ async def test_answer_news_offers_assignment_link_only_without_unresolved_attemp
     keyboard = sent.parameters.get("reply_markup")
     assert bool(keyboard) is not unresolved
     if keyboard:
-        assert "https://example.test" in str(keyboard) and item.work_id in str(keyboard)
+        assert keyboard["inline_keyboard"][0][0]["text"] == "Resume"
+        assert "callback_data" in keyboard["inline_keyboard"][0][0]
 
 
 @pytest.mark.asyncio

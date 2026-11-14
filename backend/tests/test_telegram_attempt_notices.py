@@ -59,8 +59,11 @@ async def test_attempt_notice_delivers_from_actual_terminal_work_event(work_deli
     assert len(calls) == 1 and calls[0].parameters["text"].startswith(first)
     assert calls[0].parameters["disable_notification"] is False
     buttons = [button for row in calls[0].parameters["reply_markup"]["inline_keyboard"] for button in row]
-    assert buttons[0]["text"] == "Open assignment"
-    assert all("callback_data" not in button for button in buttons)
+    assert buttons[0]["text"] == "Resume" and "callback_data" in buttons[0]
+    current = await e.human.work.get(actor=e.actor, instance_id=e.instance.id, work_id=item.work_id)
+    assert current["success_criteria"] in calls[0].parameters["text"]
+    if kind == "attempt.failed":
+        assert buttons[1]["text"] == "Open assignment"
     if kind == "attempt.no_result":
         assert buttons[-1]["text"] == "Open conversation" and e.ended_run.thread_id in buttons[-1]["url"]
     async with e.db.sessions() as reader:
@@ -101,7 +104,7 @@ async def test_files_full_advice_and_navigation_follow_current_manager_grant(wor
     call = [call for call in e.channel.bot.request.calls if call.endpoint == "sendMessage"][0]
     assert ("Delete files on the web" in call.parameters["text"]) is manager
     buttons = [button["text"] for row in call.parameters["reply_markup"]["inline_keyboard"] for button in row]
-    assert buttons == (["Open Files", "Open assignment"] if manager else ["Open assignment"])
+    assert buttons == (["Resume", "Open Files"] if manager else ["Resume"])
 
 
 @pytest.mark.asyncio

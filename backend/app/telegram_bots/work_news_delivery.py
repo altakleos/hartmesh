@@ -72,15 +72,25 @@ def recipes(source, basis, identity, link):
         view = present_view(source, basis, link)
     else:
         view = present_news(source.key, values=source.values, locale=basis["locale"], protected=source.protected, concealed=basis["concealed"], outbox_id=identity)
+        from app.telegram_bots.work_news_carriers import present_news_detail
+
+        view = present_news_detail(source, basis, link, view)
     keyboard = [list(line) for line in view.keyboard]
     if not basis["concealed"] and source.key in ATTEMPT_KEYS and source.values.get("open_files"):
         address = page_address("web.files", link, permissions=3, public_base_url=basis["public_base_url"])
         if address:
             keyboard.append([{"label": "label.open_files", "url": address}])
-    if not basis["concealed"] and (
-        source.key in {"decision.recorded", "result.changes", "attempt.stopped", "attempt.stopped_changed", "work.proposed", "remind.ready_to_resume"} | ATTEMPT_KEYS
-        or source.key == "request.answered"
-        and source.values.get("open_assignment") is True
+    native_start = any(button.get("kind") == "work_start" for line in keyboard for button in line)
+    from app.telegram_bots.attempt_text import FAILED_REASONS
+
+    if (
+        not basis["concealed"]
+        and (not native_start or source.key == "attempt.failed" and source.values.get("reason") not in FAILED_REASONS)
+        and (
+            source.key in {"decision.recorded", "result.changes", "attempt.stopped", "attempt.stopped_changed", "work.proposed", "remind.ready_to_resume"} | ATTEMPT_KEYS
+            or source.key == "request.answered"
+            and source.values.get("open_assignment") is True
+        )
     ):
         address = page_address("web.work", link, work_id=source.work_id, permissions=3, public_base_url=basis["public_base_url"])
         if address:

@@ -13,6 +13,17 @@ def closed_start(control, journal, binding, attempt):
     from app.telegram_bots.work_actions import request_for
 
     try:
+        if control.kind == "work_activation_origin":
+            from app.telegram_bots.work_actions import same_body
+            from app.telegram_bots.work_news_carriers import news_witness_id
+
+            return (
+                journal is not None
+                and control.id == news_witness_id(journal.id)
+                and control.payload.get("work_action_id") == journal.id
+                and same_body(control.payload.get("news_origin"), (journal.continuation or {}).get("news_origin"))
+                and closed_activation(journal, binding, attempt, work_id=control.target_id)
+            )
         if journal is None or journal.id != control.id or control.payload.get("work_action_id") != journal.id or type(control.payload.get("assignment_revision")) is not int:
             return False
         body = request_for("activate", journal.body, identity=journal.id)
@@ -76,7 +87,7 @@ async def reserved_starts(session):
             select(callback, act, link)
             .join(link, and_(link.id == callback.link_id, link.binding_generation == callback.binding_generation, link.chat_id == callback.chat_id))
             .outerjoin(act, act.id == callback.payload["work_action_id"].as_string())
-            .where(callback.kind == "work_start", callback.target_kind == "work", callback.payload["work_action_id"].as_string().is_not(None))
+            .where(callback.kind.in_(("work_start", "work_activation_origin")), callback.target_kind == "work", callback.payload["work_action_id"].as_string().is_not(None))
         )
     ).all()
     identities = sorted({journal.id for _control, journal, _binding in rows if journal is not None and journal.kind == "activate"})
@@ -89,6 +100,13 @@ async def reserved_starts(session):
         attempt = attempts.get((control.target_id, journal.id)) if journal is not None else None
         if not closed_start(control, journal, binding, attempt):
             groups.add(control.group_id)
+            if control.kind == "work_activation_origin":
+                from app.telegram_bots.work_news_carriers import news_witness_dependencies
+
+                own_groups, own_anchors = await news_witness_dependencies(session, control, journal, binding)
+                groups.update(own_groups)
+                anchors.update(own_anchors)
+                continue
             if type(anchor := control.payload.get("anchor_outbox_id")) is str:
                 anchors.add(anchor)
     return groups, anchors

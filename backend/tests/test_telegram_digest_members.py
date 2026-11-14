@@ -91,6 +91,32 @@ async def test_digest_news_title_comes_from_current_canonical_notice(work_delive
 
 
 @pytest.mark.asyncio
+async def test_actionable_news_digest_uses_compact_source_without_preview_reads(work_delivery, monkeypatch):
+    from test_telegram_attempt_notices import ended
+    from test_telegram_work_news_delivery import prepare
+
+    from app.telegram_bots import work_news_carriers
+    from app.telegram_bots.work_digest_members import DigestMembers
+    from app.telegram_bots.work_digest_projection import DigestProjection
+
+    e = work_delivery
+    plans, identity = await prepare(e, item=await ended(e, "attempt.no_result"))
+    async with e.db.sessions() as reader:
+        item = _item(await reader.get(TelegramOutboxRow, identity))
+    assert "detail" in item.payload["work_news_basis"]["source"]["work"]
+
+    async def no_preview(*args, **kwargs):
+        pytest.fail("A digest title must not read an actionable preview")
+
+    monkeypatch.setattr(work_news_carriers, "read_news_detail", no_preview)
+    member = await DigestMembers(requests=e.reader, news=plans.reader).read(e.link, item, locale="en")
+    assert member.entry.kind == "news" and member.entry.first_line
+    assert "detail" not in member.source.work
+    admission = await prepare_attention(e.reader, e.link)
+    await admission(projection=DigestProjection(e.link, [member.projection]))
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("work_exports", ["review_event"], indirect=True)
 async def test_digest_review_retains_result_identity_without_reading_files(work_exports):
     from test_telegram_work_review_event_delivery import queued
