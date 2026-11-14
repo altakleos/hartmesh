@@ -1,5 +1,7 @@
 """Unresolved Start reservations keep their original callback and full ACK."""
 
+from collections.abc import Mapping
+
 from sqlalchemy import and_, select
 
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow
@@ -50,10 +52,10 @@ def closed_activation(journal, binding, attempt, *, work_id):
             # promise remains unresolved. That refusal is no settlement proof.
             return type(journal.reason) is str and bool(journal.reason) and (attempt is None or attempt.status not in UNRESOLVED)
         result = journal.result
-        receipt = result.get("activation_receipt") if type(result) is dict else None
+        receipt = result.get("activation_receipt") if isinstance(result, Mapping) else None
         return (
             journal.reason is None
-            and type(receipt) is dict
+            and isinstance(receipt, Mapping)
             and set(receipt) == {"operation_id", "attempt_id"}
             and receipt["operation_id"] == journal.id
             and attempt is not None

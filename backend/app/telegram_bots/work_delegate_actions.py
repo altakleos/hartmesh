@@ -16,9 +16,27 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBot
 from deerflow.spaces.contract import PrincipalRef
 from deerflow.utils.file_io import await_drained
 
+DELEGATION_RECEIPT_FIELDS = ("id", "instance_id", "creator_id", "objective", "success_criteria", "due_at", "revision", "assignment_revision")
+
 
 def no_due_id(identity):
     return hashlib.sha256((identity + ":no-due").encode()).hexdigest()[:32]
+
+
+def delegation_children(act):
+    """Delegation retries and the separately authorized activation are distinct."""
+    from collections.abc import Mapping
+
+    value = act.continuation.get("activation_continuation") if isinstance(act.continuation, Mapping) else None
+    children = tuple(act.operation_ids)
+    if isinstance(value, Mapping) and value.get("child_id") in children:
+        from app.telegram_bots.work_continuation_state import continuation_state
+
+        state = continuation_state(act)
+        if state["child_body"] is None or children.count(state["child_id"]) != 1:
+            raise ValueError("invalid-delegate-children")
+        children = tuple(identity for identity in children if identity != state["child_id"])
+    return children
 
 
 def private_draft(act):
@@ -87,7 +105,7 @@ def qualify_delegate_receipt(act, event, result):
             or (event.instance_id, event.operation_id, event.work_id, event.action, event.actor_kind, event.actor_id) != (act.instance_id, act.id, receipt["id"], "delegate", "human", act.owner_user_id)
             or not same_body(event.request, act.body)
             or type(event.result) is not dict
-            or any(not same_body(event.result.get(key), receipt.get(key)) for key in ("id", "instance_id", "creator_id", "objective", "success_criteria", "due_at", "revision", "assignment_revision"))
+            or any(not same_body(event.result.get(key), receipt.get(key)) for key in DELEGATION_RECEIPT_FIELDS)
             or (receipt["instance_id"], receipt["creator_id"]) != (act.instance_id, act.owner_user_id)
         ):
             raise ValueError()
@@ -119,7 +137,7 @@ def qualify_no_due(parent, child):
     expected = no_due_body(parent)
     first, second = delegate_source(parent), delegate_source(child)
     if (
-        list(parent.operation_ids) != [child.id]
+        list(delegation_children(parent)) != [child.id]
         or child.operation_ids
         or any(getattr(parent, key) != getattr(child, key) for key in _ACT_SCOPE)
         or child.id != expected.operation_id
@@ -139,7 +157,7 @@ class DelegateActionMethods:
                 if act.kind != "delegate" or private_draft(act) or delegate_source(act)["parent_id"] is not None:
                     raise ValueError("unsupported-work-act")
                 receipt = await self.receipt_for(act)
-                if receipt is None or act.state == "done" and not act.operation_ids:
+                if receipt is None or act.state == "done" and not delegation_children(act):
                     return act
                 return await self._finish_delegate(act, receipt, admission=admission)
 
@@ -168,8 +186,8 @@ class DelegateActionMethods:
                 if admission is not None:
                     await admission(writer, None)
                 members = [saved]
-                if saved.operation_ids:
-                    child = await writer.get(TelegramActRow, saved.operation_ids[0], with_for_update=True, populate_existing=True)
+                if delegation_children(saved):
+                    child = await writer.get(TelegramActRow, delegation_children(saved)[0], with_for_update=True, populate_existing=True)
                     if child is None:
                         raise ValueError("missing-delegate-child")
                     qualify_no_due(_snapshot(saved), _snapshot(child))
@@ -263,6 +281,19 @@ class DelegateActionMethods:
                     "origin_kind": "internal",
                 },
             }
+            if start:
+                saved.continuation = {
+                    **saved.continuation,
+                    "activation_continuation": {
+                        "version": 1,
+                        "phase": "awaiting_primary",
+                        "authorized_at": saved.continuation["delegate_source"]["authorized_at"],
+                        "child_id": hashlib.sha256((saved.id + ":activate").encode()).hexdigest()[:32],
+                        "work_id": None,
+                        "assignment_revision": None,
+                        "child_body": None,
+                    },
+                }
             root.operation_ids = [saved.id]
             await writer.flush()
             act = _snapshot(saved)
@@ -283,8 +314,8 @@ class DelegateActionMethods:
             receipt = await self.work._receipt(reader, actor, parent, body, None)
         if receipt is not None:
             return receipt
-        if act.operation_ids:
-            child = await self._work_record(act.operation_ids[0])
+        if delegation_children(act):
+            child = await self._work_record(delegation_children(act)[0])
             qualify_no_due(act, child)
             receipt = await self._delegate_receipt(child)
             if receipt is not None:
@@ -300,13 +331,13 @@ class DelegateActionMethods:
             if saved is None or any(getattr(saved, key) != getattr(act, key) for key in _ACT_SCOPE) or not same_body(saved.body, act.body):
                 raise ValueError("act-source-conflict")
             was_done = saved.state == "done"
-            if was_done and not saved.operation_ids or not was_done and saved.attempts != act.attempts:
+            if was_done and not delegation_children(saved) or not was_done and saved.attempts != act.attempts:
                 return _snapshot(saved)
             if admission is not None:
                 await admission(writer, None)
             source = delegate_source(_snapshot(saved))
-            if saved.operation_ids:
-                if type(result) is not dict or set(result) != {"delegate_child_id", "receipt"} or list(saved.operation_ids) != [result["delegate_child_id"]]:
+            if delegation_children(saved):
+                if type(result) is not dict or set(result) != {"delegate_child_id", "receipt"} or list(delegation_children(saved)) != [result["delegate_child_id"]]:
                     raise ValueError("invalid-delegate-child-receipt")
                 child = await writer.get(TelegramActRow, result["delegate_child_id"], with_for_update=True, populate_existing=True)
                 if child is None:
@@ -325,11 +356,12 @@ class DelegateActionMethods:
                     **thaw(saved.continuation),
                     "activation_continuation": {
                         "version": 1,
-                        "phase": "ready",
+                        "phase": "cancelled" if saved.cancel_requested_at is not None else "ready",
                         "authorized_at": source["authorized_at"],
                         "child_id": hashlib.sha256((saved.id + ":activate").encode()).hexdigest()[:32],
                         "work_id": record["id"],
                         "assignment_revision": record["assignment_revision"],
+                        "child_body": None,
                     },
                 }
             await writer.flush()
@@ -391,9 +423,9 @@ class DelegateActionMethods:
             # Older incomplete metadata may observe a canonical receipt, but
             # cannot supply new effect authority after an upgrade.
             return await self._work_outcome(act, state="uncertain")
-        if act.operation_ids:
+        if delegation_children(act):
             try:
-                child = await self._work_record(act.operation_ids[0])
+                child = await self._work_record(delegation_children(act)[0])
                 qualify_no_due(act, child)
             except (ValueError, KeyError, TypeError):
                 return await self._work_outcome(act, state="uncertain", reason="invalid")

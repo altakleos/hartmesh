@@ -120,7 +120,9 @@ class ActivationActionMethods:
                 state, reason = "refused", "cancelled"
             saved.state, saved.reason, saved.result, saved.updated_at = state, reason, result, self.outbox.clock()
             if answered:
-                saved.continuation = {"version": 1, "activation_retry": {"answered": min(captured.attempts, answered_calls(captured) + 1)}}
+                from app.telegram_bots.work_actions import thaw
+
+                saved.continuation = {**(thaw(saved.continuation) or {}), "version": 1, "activation_retry": {"answered": min(captured.attempts, answered_calls(captured) + 1)}}
             if state == "done":
                 from app.telegram_bots.work_start_status import seed_activation_status
 
@@ -271,8 +273,20 @@ def answered_calls(act):
     value = act.continuation
     if value is None:
         return 0
-    if not isinstance(value, Mapping) or set(value) != {"version", "activation_retry"} or type(value["version"]) is not int or value["version"] != 1:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) - {"activation_retry", "activation_parent"} != {"version"}
+        or not {"activation_retry", "activation_parent"}.intersection(value)
+        or type(value["version"]) is not int
+        or value["version"] != 1
+    ):
         raise ValueError("invalid-activation-retry")
+    if "activation_parent" in value:
+        parent = value["activation_parent"]
+        if not isinstance(parent, Mapping) or set(parent) != {"version", "act_id", "source_signature", "authorized_at"} or type(parent["version"]) is not int or parent["version"] != 1:
+            raise ValueError("invalid-activation-parent")
+        if "activation_retry" not in value:
+            return 0
     retry = value["activation_retry"]
     if not isinstance(retry, Mapping) or set(retry) != {"answered"} or type(retry["answered"]) is not int or not 0 <= retry["answered"] <= act.attempts:
         raise ValueError("invalid-activation-retry")
@@ -298,6 +312,7 @@ async def activation_admission(acts, link, act, *, attempt_current):
 
     prepared = await prepare_attention(acts, link)
     projection = ActivationProjection(act, attempt_current)
+    await projection.parent.prepare(acts, link)
 
     async def admission(writer):
         acts._writer_required(writer)
@@ -316,11 +331,14 @@ async def activation_admission(acts, link, act, *, attempt_current):
 
 class ActivationProjection:
     def __init__(self, act, attempt_current):
+        from app.telegram_bots.work_continuation_sources import ActivationParentProjection
+
         self.act, self.attempt_current = act, attempt_current
+        self.parent = ActivationParentProjection(self.act)
 
     def extend(self, query):
         self.column = len(query.column_descriptions)
-        return query.add_columns(TelegramActRow).join(TelegramActRow, TelegramActRow.id == self.act.id)
+        return self.parent.extend(query.add_columns(TelegramActRow).join(TelegramActRow, TelegramActRow.id == self.act.id))
 
     def check_with_permissions(self, rows, held):
         from app.telegram_bots.work_actions import _ACT_SCOPE, same_body
@@ -340,3 +358,4 @@ class ActivationProjection:
             or transfer_receipt(saved.continuation) is not None
         ):
             raise AgentDenied("The activation admission is no longer current")
+        self.parent.check(rows, saved, held)
