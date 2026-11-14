@@ -159,6 +159,10 @@ class WorkExecution:
                 if attempt is not None:
                     if attempt.requester_id != execution.requester.subject_id or attempt.request != request.model_dump(mode="json"):
                         raise AgentConflict("Activation identity belongs to another request", reason="operation-mismatch")
+                    if admission is not None and attempt.run_id is None and attempt.status in UNRESOLVED:
+                        # A saved launch promise can still create a run. Its
+                        # caller's final consent must survive exact replay too.
+                        await admission(session)
                     return WorkAttempt(self, row.id, attempt.id, attempt.run_id, attempt.status not in UNRESOLVED)
                 if admission is not None:
                     await admission(session)

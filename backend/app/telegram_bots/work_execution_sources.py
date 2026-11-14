@@ -1,9 +1,10 @@
 """Own Start/Stop outcomes reuse full-ACK Work delivery and current source fences."""
 
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime
 
-from sqlalchemy import and_, case
+from sqlalchemy import and_, case, select
 from sqlalchemy.orm import aliased
 
 from app.telegram_bots.acts import _snapshot
@@ -37,7 +38,7 @@ def act_facts(act):
     """No saved Work result, candidate or file reference enters the presentation."""
     return thaw(
         {
-            **{key: getattr(act, key) for key in ("id", *_ACT_SCOPE, "body", "state", "reason", "attempts", "operation_ids", "stop_dispatch")},
+            **{key: getattr(act, key) for key in ("id", *_ACT_SCOPE, "body", "state", "reason", "attempts", "operation_ids", "stop_dispatch", "continuation")},
             "cancel_requested_at": _date(act.cancel_requested_at) if act.cancel_requested_at is not None else None,
             "first_attempt_at": _date(act.first_attempt_at) if act.first_attempt_at is not None else None,
         }
@@ -62,9 +63,9 @@ def require_execution_scope(link, act):
         raise ProductSourceRetired()
 
 
-def qualify_execution_origin(link, act, callback, parent, controls):
+def qualify_execution_origin(link, act, callback, parent, controls, *, activation_parent=None):
     try:
-        if act.kind not in {"activate", "stop"} or callback is None or parent is None or callback.id != act.id:
+        if act.kind not in {"activate", "stop"} or callback is None or parent is None:
             raise ValueError()
         if (parent.link_id, parent.owner_user_id, parent.binding_generation, parent.chat_id, parent.instance_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id, link.agent_ref) or (
             callback.link_id,
@@ -76,6 +77,27 @@ def qualify_execution_origin(link, act, callback, parent, controls):
         require_execution_scope(link, act)
         parsed = request_for(act.kind, act.body, identity=act.id)
         if not same_body(parsed.model_dump(mode="json", exclude_unset=True), act.body):
+            raise ValueError()
+        if activation_parent is not None:
+            from app.telegram_bots.assignment_consent import delegate_origin
+            from app.telegram_bots.assignment_controls import consent_origin, displayed_assignment
+            from app.telegram_bots.work_continuation_state import require_child
+
+            require_child(activation_parent, act)
+            origin = delegate_origin(activation_parent)
+            original, _source = displayed_assignment(link, parent, callback)
+            _validate_rows(original, controls)
+            if (
+                callback.id != activation_parent.id
+                or callback.kind != "assign_start"
+                or parent.work_id is not None
+                or consent_origin(original, callback) != origin
+                or not controls
+                or any(control.payload.get("work_action_id") != activation_parent.id for control in controls)
+            ):
+                raise ValueError()
+            return {**origin, "activation_parent_id": activation_parent.id}
+        if callback.id != act.id or isinstance(act.continuation, Mapping) and "activation_parent" in act.continuation:
             raise ValueError()
         original, *basis = (displayed_start if act.kind == "activate" else displayed_stop)(link, parent, callback)
         source = original.payload["work_news_basis"]["source"]
@@ -93,6 +115,18 @@ def qualify_execution_origin(link, act, callback, parent, controls):
         return {"callback_id": callback.id, "anchor_outbox_id": parent.id, "presentation_version": callback.payload["presentation_version"], "signature": anchor_signature(original)}
     except (KeyError, TypeError, ValueError, CallbackRefused):
         raise ProductSourceRetired() from None
+
+
+async def execution_origin_rows(reader, journal):
+    """Locate the actual human gesture; a composite child has no own button."""
+    marker = journal.continuation.get("activation_parent") if isinstance(journal.continuation, Mapping) else None
+    primary = await reader.get(TelegramActRow, marker.get("act_id"), populate_existing=True) if isinstance(marker, Mapping) and type(marker.get("act_id")) is str else None
+    if marker is not None and primary is None:
+        raise ProductSourceRetired()
+    callback = await reader.get(TelegramCallbackRow, primary.id if primary is not None else journal.id, populate_existing=True)
+    parent = await reader.get(TelegramOutboxRow, callback.payload.get("anchor_outbox_id"), populate_existing=True) if callback else None
+    controls = list(await reader.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == callback.group_id).execution_options(populate_existing=True))) if callback else []
+    return callback, parent, controls, _snapshot(primary) if primary is not None else None
 
 
 def qualify_stop_receipt(event, act):
@@ -145,6 +179,7 @@ class WorkExecutionReader(WorkViewReader):
             detail = await self.detail(link, item.work_id)
             clock = await self.prepare_clock(link, item)
             projection = WorkExecutionProjection(self, link, item, detail=detail, clock=clock, allow_empty=True)
+            await projection.prepare_source()
             admission = await prepare_attention(self, link)
             await admission(projection=projection)
             return projection
@@ -167,10 +202,34 @@ class WorkExecutionProjection:
         self.projection = WorkDetailProjection(reader, link, self.detail.record, self.detail.request, reusable=self.detail.can_reuse_conversation, expected=self.detail)
         self.capacity = getattr(clock, "capacity", None)
         self.capacity_projection = None
+        self.activation_parent = None
         if self.capacity is not None:
             from app.telegram_bots.work_capacity_reads import CapacityProjection
 
             self.capacity_projection = CapacityProjection(link, self.capacity.capacity, expected=self.capacity)
+
+    async def prepare_source(self):
+        from app.telegram_bots.work_continuation_sources import ActivationParentProjection
+
+        async with self.reader.links.session_factory() as reader:
+            act = await reader.get(TelegramActRow, self.item.payload["work_execution_intent"]["act_id"])
+            if act is None:
+                raise ProductSourceRetired()
+            captured = _snapshot(act)
+        if captured.kind == "activate":
+            self.activation_parent = ActivationParentProjection(captured, for_effect=False)
+            try:
+                await self.activation_parent.prepare(self.reader.acts, self.link)
+            except (ValueError, KeyError, TypeError):
+                raise ProductSourceRetired() from None
+        return self
+
+    def with_item(self, item):
+        from copy import copy
+
+        current = copy(self)
+        current.item = item
+        return current
 
     def extend(self, query):
         result = self.projection.extend(query)
@@ -193,7 +252,7 @@ class WorkExecutionProjection:
             result.add_columns(delivery, act, callback, parent, control, original, child, event, settings, requester.email, supervisor.email)
             .join(delivery, delivery.id == self.item.id)
             .join(act, act.id == self.item.payload["work_execution_intent"]["act_id"])
-            .outerjoin(callback, callback.id == act.id)
+            .outerjoin(callback, callback.id == self.item.payload["work_execution_intent"]["origin"]["callback_id"])
             .outerjoin(parent, parent.id == callback.payload["anchor_outbox_id"].as_string())
             .outerjoin(control, control.group_id == callback.group_id)
             .outerjoin(original, and_(original.work_id == act.work_id, case((act.kind == "activate", original.activation_id == act.id), else_=original.id == operation)))
@@ -203,6 +262,8 @@ class WorkExecutionProjection:
             .outerjoin(requester, requester.id == original.requester_id)
             .outerjoin(supervisor, supervisor.id == AgentInstanceRow.supervisor_id)
         )
+        if self.activation_parent is not None:
+            result = self.activation_parent.extend(result)
         return self.capacity_projection.extend(result) if self.capacity_projection is not None else result
 
     def check(self, rows):
@@ -228,7 +289,17 @@ class WorkExecutionProjection:
             raise ProductSourceRetired()
         self.expected_act = facts
         controls = list({row[self.delivery_column + 4].id: row[self.delivery_column + 4] for row in rows if row[self.delivery_column + 4] is not None}.values())
-        origin = qualify_execution_origin(self.link, act, callback, parent, controls)
+        primary = None
+        if self.activation_parent is not None:
+            try:
+                self.activation_parent.check(rows, journal, held)
+            except (ValueError, KeyError, TypeError):
+                raise ProductSourceRetired() from None
+            primary_row = rows[0][self.activation_parent.column]
+            primary = _snapshot(primary_row) if primary_row is not None else None
+        elif act.kind == "activate":
+            raise ProductSourceRetired()
+        origin = qualify_execution_origin(self.link, act, callback, parent, controls, activation_parent=primary)
         if self.item.dedupe_key != "notice:work-execution:" + act.id or not same_body(origin, self.item.payload["work_execution_intent"]["origin"]):
             raise ProductSourceRetired()
         if delivery.message_thread_id != parent.message_thread_id:
@@ -261,9 +332,10 @@ class WorkExecutionProjection:
         if notice is None:
             if self.allow_empty:
                 if act.kind == "activate" and act.state == "done":
-                    from app.telegram_bots.work_start_retention import closed_start
+                    from app.telegram_bots.work_start_retention import closed_activation, closed_start
 
-                    if not closed_start(callback, journal, self.link, original):
+                    closed = closed_activation(journal, self.link, original, work_id=act.work_id) if primary is not None else closed_start(callback, journal, self.link, original)
+                    if not closed:
                         raise ProductSourceRetired()
                 self.source = None
                 return

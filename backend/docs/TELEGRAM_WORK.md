@@ -1378,7 +1378,18 @@ children together without waiting for a live call. It preserves a proved save
 and reads exact receipts; a known activation keeps its status, while an unresolved
 runless promise remains uncertain and never returns to the launcher after Cancel.
 Completion racing cancellation cannot reauthorize a child. Decision/voice reuse
-and composite notice/default-controller installation remain separate integration.
+and default-controller installation remain separate integration.
+
+Composite execution replies and capacity offers locate the original confirmed
+parent callback; they never create a child callback. Their prepared source joins
+the actual primary event, Root, inputs, parent/child and full ACK in the final
+SQL snapshot, including SDK retries and protected reveal/refresh. Read-only
+qualification does not require today's Work policy to remain enabled. Effects
+retain that policy check. A new capacity-offer Start owns its own full preview
+and operation; the original child becomes superseded atomically with admission.
+Runless host replay also performs final caller admission. A refused composite
+may recover only its joined exact unresolved original promise, without a new
+body or operation; bound or retired receipts remain read-only.
 
 `AssignmentPlans` and `AssignmentReader` own full source-qualified draft cards
 and their Save outcomes through the existing Work notice sender. All canonical

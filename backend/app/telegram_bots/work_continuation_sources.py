@@ -7,8 +7,9 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow
 
 
 class ActivationParentProjection:
-    def __init__(self, child):
+    def __init__(self, child, *, for_effect=True):
         self.child = child
+        self.for_effect = for_effect
         self.draft = self.family = self.consent = self.proposal = None
         self.link = self.parent_id = self.root_id = None
 
@@ -39,7 +40,7 @@ class ActivationParentProjection:
             elif source["origin_kind"] != "internal":
                 raise ValueError("invalid-activation-consent")
             self.link, self.parent_id, self.root_id = link, parent.id, root.id
-            self.draft = DraftProjection(link, root.body["origin"], saved=_snapshot(root))
+            self.draft = DraftProjection(link, root.body["origin"], saved=_snapshot(root), require_work_policy=self.for_effect)
             self.family = DelegateFamily(root.id, parent.id)
             if source["origin_kind"] == "callback":
                 from app.telegram_bots.assignment_consent import DelegationConsent
@@ -79,6 +80,11 @@ class ActivationParentProjection:
             .outerjoin(event, and_(event.instance_id == parent.instance_id, event.operation_id == func.coalesce(parent.result["delegate_child_id"].as_string(), parent.id)))
             .outerjoin(original_event, and_(original_event.instance_id == parent.instance_id, original_event.operation_id == parent.id))
         )
+        from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow
+
+        attempt = aliased(AgentWorkAttemptRow)
+        self.attempt_column = len(result.column_descriptions)
+        result = result.add_columns(attempt).outerjoin(attempt, and_(attempt.work_id == self.child.work_id, attempt.activation_id == self.child.id))
         if self.draft is not None:
             result = self.family.extend(self.draft.extend(result))
             if self.consent is not None:
@@ -136,7 +142,26 @@ class ActivationParentProjection:
         require_child(_snapshot(parent), _snapshot(actual_child))
         state = continuation_state(_snapshot(parent))
         source = delegate_source(_snapshot(parent))
-        if parent.state != "done" or parent.cancel_requested_at is not None or state["phase"] != "child_planned" or not source["start"] or source["parent_id"] is not None or source["authorized_at"] != state["authorized_at"]:
+        from deerflow.agent_instances.work import UNRESOLVED
+
+        promise = rows[0][self.attempt_column]
+        exact_promise = (
+            promise is not None
+            and promise.run_id is None
+            and promise.status in UNRESOLVED
+            and (promise.work_id, promise.activation_id, promise.requester_id, promise.thread_id) == (actual_child.work_id, actual_child.id, actual_child.owner_user_id, actual_child.body["thread_id"])
+            and same_body(promise.request, actual_child.body)
+        )
+        if (
+            parent.state != "done"
+            or self.for_effect
+            and (parent.cancel_requested_at is not None or not (state["phase"] == "child_planned" or state["phase"] == "refused" and exact_promise))
+            or not self.for_effect
+            and state["phase"] not in {"child_planned", "done", "refused", "cancelled"}
+            or not source["start"]
+            or source["parent_id"] is not None
+            or source["authorized_at"] != state["authorized_at"]
+        ):
             raise ValueError("invalid-activation-parent")
         selected = next(row for row in rows if row[self.column] is not None)
         child, event, original_event = selected[self.receipt_column : self.receipt_column + 3]

@@ -57,7 +57,7 @@ async def activate_work_run(request, service, execution, work_id, body, *, admis
         raise _NewActivationRequired
 
     async def exact_replay():
-        return await admit_storage(service.agents, execution.instance, lambda: service.reserve(execution=execution, work_id=work_id, request=body, before_admit=replay_only))
+        return await admit_storage(service.agents, execution.instance, lambda: service.reserve(execution=execution, work_id=work_id, request=body, before_admit=replay_only, admission=admission))
 
     async def perform():
         reservation = None

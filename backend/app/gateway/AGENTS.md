@@ -1,5 +1,9 @@
 ### Gateway API (`app/gateway/`)
 
+`work_execution.activate_work_run` forwards optional caller admission through
+resident exact-replay probes too. An existing runless promise may still launch;
+its original consent must pass the final borrowed Work transaction.
+
 Storage and operator CLI: [guide](../../../docs/STORAGE_SPACES.md).
 CLI `settle` edits file-op rows; other verbs use domain APIs. No slot release.
 Storage-init census skips ENOENT/ESRCH only after the PID directory disappears;
