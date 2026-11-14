@@ -582,7 +582,9 @@ class RunObserver:
         try:
             outcome = await facade.cancel_run(state.record.run_id)
             self._check(state)
-            if outcome in {"refused", "terminal"}:
+            # Legacy terminal decisions keep their original barrier. Only the
+            # mixed owner retires its conclusive per-gesture authorization here.
+            if outcome == "refused" or outcome == "terminal" and stop_id in state.stop_authorizations:
                 fresh = await self.coordinator.inbox.clear_publication_stop(state.record, stop_id=state.stop_id, guard=state.cancel_guard)
                 self._check(state)
                 self._update_record(state, fresh)

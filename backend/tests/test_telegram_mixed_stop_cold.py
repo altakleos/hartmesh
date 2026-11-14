@@ -141,6 +141,24 @@ async def test_cold_selected_stop_only_cancels_its_actual_original_publication(w
                 assert not [path for method, path in calls if method == "POST"]
                 assert manager.cancel.await_count == 1
                 return
+            if scenario == "terminal_non_cancel":
+                assert not turn.stop_requested and turn.stop_authorization is None
+                native = next(iter(observer._states.values()))
+                assert native.stop_id is None and not native.stop_authorizations
+                assert native.stop_decisions[f"command:{e.link.chat_id}:6502"] == "terminal"
+                async with e.db.sessions() as reader:
+                    mark = await reader.get(TelegramInboundMarkRow, (e.link.id, 6502, e.link.chat_id))
+                    first = await reader.get(TelegramInboundMarkRow, (e.link.id, 6501, e.link.chat_id))
+                    assert not mark.route_complete and "stop_answer_dispatch" not in mark.route_basis
+                    assert first.route_basis["publications"][-1]["publication_execution"].get("stop_id") is None
+                await turns._stop_turn(turn, stop_id="later-direct-stop")
+                assert not native.stop_authorizations
+                async with e.db.sessions() as reader:
+                    first = await reader.get(TelegramInboundMarkRow, (e.link.id, 6501, e.link.chat_id))
+                    assert first.route_basis["publications"][-1]["publication_execution"]["stop_id"] == "later-direct-stop"
+                assert not [path for method, path in calls if method == "POST"]
+                assert manager.cancel.await_count == 1
+                return
             assert not turn.stop_requested and turn.stop_authorization is None
             assert turns._current(turn)
             async with e.db.sessions() as reader:
@@ -336,6 +354,11 @@ async def test_expiry_before_observer_admission_resumes_original_with_no_call_pr
 @pytest.mark.asyncio
 async def test_live_retirement_during_last_entry_read_rolls_back_native_call_receipt(work_delivery, monkeypatch):
     await test_cold_selected_stop_only_cancels_its_actual_original_publication(work_delivery, monkeypatch, False, scenario="retire_entry", live=True)
+
+
+@pytest.mark.asyncio
+async def test_mixed_terminal_authorization_retires_before_a_later_direct_stop(work_delivery, monkeypatch):
+    await test_cold_selected_stop_only_cancels_its_actual_original_publication(work_delivery, monkeypatch, False, scenario="terminal_non_cancel", live=True)
 
 
 @pytest.mark.asyncio
