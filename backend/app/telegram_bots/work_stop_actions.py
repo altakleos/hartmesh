@@ -307,6 +307,18 @@ class StopProjection:
         from app.telegram_bots.work_stop_retries import parent_of
 
         self.retry = parent_of(act) if act.kind == "stop" else None
+        self.management_consent = None
+        self.management_witness = None
+        if act.kind in {"edit", "cancel"}:
+            from app.telegram_bots.work_management_actions import command_source
+            from app.telegram_bots.work_management_consent import ManagementModeWitness
+
+            self.management_witness = ManagementModeWitness(act)
+
+            if command_source(act)["origin_kind"] == "callback":
+                from app.telegram_bots.work_management_consent import ManagementConsent
+
+                self.management_consent = ManagementConsent(act)
 
     def extend(self, query):
         self.column = len(query.column_descriptions)
@@ -319,7 +331,9 @@ class StopProjection:
         if self.act.kind in {"edit", "cancel"}:
             self.management_control_column = len(result.column_descriptions)
             control = aliased(TelegramCallbackRow)
-            return result.add_columns(control).outerjoin(control, control.id == self.act.id)
+            result = result.add_columns(control).outerjoin(control, control.id == self.act.id)
+            result = self.management_witness.extend(result)
+            return self.management_consent.extend(result) if self.management_consent is not None else result
         if self.retry is not None:
             self.parent_column = len(result.column_descriptions)
             parent = aliased(TelegramActRow)
@@ -335,7 +349,12 @@ class StopProjection:
             from app.telegram_bots.work_management_actions import command_source
 
             source, expected = command_source(_snapshot(saved)), command_source(self.act)
-            if source != expected or source["origin_kind"] != "internal" or rows[0][self.management_control_column] is not None or saved.operation_ids or parent_of(_snapshot(saved)) is not None:
+            if source != expected or saved.operation_ids or parent_of(_snapshot(saved)) is not None:
+                raise AgentDenied("The management cancellation source changed")
+            self.management_witness.check(rows)
+            if self.management_consent is not None:
+                self.management_consent.check(rows, allow_closed=dispatch)
+            elif source["origin_kind"] != "internal" or rows[0][self.management_control_column] is not None:
                 raise AgentDenied("The management cancellation source changed")
             return
         if self.retry is None:
@@ -421,7 +440,10 @@ class StopDispatchProjection(StopProjection):
             or saved.state != "done"
             or not same_body(saved.body, self.act.body)
             or not same_body(saved.stop_dispatch, self.act.stop_dispatch)
+            # Cancelling logical retries cannot abandon the independent Stop
+            # obligation of an already proved edit/withdraw command.
             or saved.cancel_requested_at is not None
+            and saved.kind not in {"edit", "cancel"}
             or (attempt.id, attempt.thread_id, attempt.run_id, attempt.status, attempt.requester_id) != (original["id"], original["thread_id"], original["run_id"], original["status"], original["requester_id"])
             or permissions & 6 != 6
             and attempt.requester_id != self.act.owner_user_id

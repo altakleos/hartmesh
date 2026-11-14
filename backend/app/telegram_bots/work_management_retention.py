@@ -39,23 +39,39 @@ def private_root(row):
         raise ValueError("unqualified-edit-origin")
 
 
+def discarded_root(root):
+    value = root.result
+    origin = value.get("origin") if isinstance(value, Mapping) else None
+    return (
+        root.state == "refused"
+        and root.reason == "discarded"
+        and isinstance(value, Mapping)
+        and set(value) == {"version", "kind", "origin"}
+        and type(value["version"]) is int
+        and value["version"] == 1
+        and value["kind"] == "discard"
+        and isinstance(origin, Mapping)
+        and set(origin) == {"callback_id", "anchor_outbox_id", "presentation_version", "signature"}
+        and all(type(origin[key]) is str and len(origin[key]) == size and all(ch in "0123456789abcdef" for ch in origin[key]) for key, size in (("callback_id", 32), ("anchor_outbox_id", 32), ("signature", 64)))
+        and type(origin["presentation_version"]) is int
+        and origin["presentation_version"] >= 0
+    )
+
+
 def closed_command(row, events, attempts):
     source = command_source(row)
+    if source["origin_kind"] == "callback":
+        from app.telegram_bots.work_management_consent import management_origin
+
+        management_origin(row)
     body = request_for(row.kind, row.body, identity=row.id)
-    if (
-        source["origin_kind"] != "internal"
-        or set(row.continuation) != {"management_source"}
-        or row.request_id is not None
-        or row.message_id is not None
-        or row.operation_ids
-        or row.cancel_requested_at is not None
-        or not same_body(row.body, body.model_dump(mode="json", exclude_unset=True))
-    ):
+    if row.request_id is not None or row.message_id is not None or row.operation_ids or not same_body(row.body, body.model_dump(mode="json", exclude_unset=True)):
         return False
     event = events.get((row.instance_id, row.id))
     if row.state in {"refused", "conflict"}:
         known_failure = row.state == "refused" and row.reason == "unchanged" and row.kind == "edit" and row.attempts == 0 and row.first_attempt_at is None
         known_failure = known_failure or row.state == "conflict" and row.reason == "changed" and row.attempts > 0 and row.first_attempt_at is not None
+        known_failure = known_failure or row.state == "refused" and row.reason == "cancelled" and row.attempts == 0 and row.cancel_requested_at is not None
         return known_failure and event is None and row.result is None and (source["scope"] is None or row.stop_dispatch["state"] == "ended")
     if row.state != "done" or row.reason is not None or event is None or not isinstance(row.result, Mapping) or not isinstance(event.result, Mapping):
         return False
@@ -85,16 +101,18 @@ def closed_command(row, events, attempts):
 
 
 def closed_edit(root, command, events, attempts):
+    from app.telegram_bots.work_management_consent import edit_admission_for
+
     private_root(root)
     source = command_source(command)
     reference = source["draft_ref"]
     if (
         list(root.operation_ids) != [command.id]
-        or root.state != "draft"
+        or not (root.state == "draft" or command.reason == "unchanged" and discarded_root(root))
         or set(root.continuation) != {"edit_draft_source", "edit_admission"}
         or any(getattr(root, key) != getattr(command, key) for key in _ACT_SCOPE if key != "kind")
         or not same_body(reference, {"id": root.id, "signature": root.continuation["edit_draft_source"]["signature"]})
-        or not same_body(root.continuation["edit_admission"], {"version": 1, "act_id": command.id, "signature": reference["signature"]})
+        or not same_body(root.continuation["edit_admission"], edit_admission_for(command, reference))
     ):
         return False
     draft = root.body["draft"]
@@ -149,6 +167,10 @@ async def expire_management(session, now, *, draft_ttl_hours, pending_outcome):
             graph[member].add(identity)
     held = set(await session.scalars(select(TelegramActRow.id).where(TelegramActRow.kind.in_(("edit", "cancel")), pending_outcome)))
     blocked = held | controls
+    from app.telegram_bots.work_management_ui_retention import management_dependencies
+
+    ui = await management_dependencies(session, now, draft_ttl_hours=draft_ttl_hours)
+    blocked.update(ui.acts)
     foreign = select(TelegramActRow.operation_ids, TelegramActRow.continuation).where(TelegramActRow.kind.not_in(("edit", "cancel")))
     for references, continuation in await session.execute(foreign):
         if isinstance(references, list):
@@ -182,7 +204,7 @@ async def expire_management(session, now, *, draft_ttl_hours, pending_outcome):
                 if closed and root.state == "draft" and aware(now) >= aware(root.created_at) + timedelta(hours=draft_ttl_hours):
                     raw = journals[root.id]
                     raw.state, raw.reason, raw.updated_at = "refused", "draft-expired", now
-                closed = closed and journals[root.id].state == "refused" and journals[root.id].reason == "draft-expired"
+                closed = closed and (journals[root.id].state == "refused" and journals[root.id].reason == "draft-expired" or discarded_root(root))
             elif len(rows) == 2 and len(roots) == 1:
                 command = next(row for row in rows if row.id != roots[0].id)
                 closed = command.kind == "edit" and closed_edit(roots[0], command, events, attempts)

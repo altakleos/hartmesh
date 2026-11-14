@@ -28,7 +28,11 @@ from deerflow.utils.file_io import await_drained
 
 
 def recipes(source, basis, identity, link):
-    if source.key == "assignment.prompt":
+    if source.key in {"management.edit", "management.withdraw"}:
+        from app.telegram_bots.work_management_cards import present_management
+
+        view = present_management(source, basis, link)
+    elif source.key == "assignment.prompt":
         from app.telegram_bots.assignment_typing import present_prompt
 
         view = present_prompt(source, basis)
@@ -79,7 +83,9 @@ def recipes(source, basis, identity, link):
 def conceal_news(source):
     """Only a current source-qualified chat activation bypasses its teaser."""
     return (
-        source.protected and source.key not in {"view.list", "view.detail", "execution.activate", "execution.stop", "assignment.card", "assignment.prompt"} and not (source.key.startswith("status.") and source.work.get("activation_act_id"))
+        source.protected
+        and source.key not in {"view.list", "view.detail", "execution.activate", "execution.stop", "assignment.card", "assignment.prompt", "management.edit", "management.withdraw"}
+        and not (source.key.startswith("status.") and source.work.get("activation_act_id"))
     )
 
 
@@ -184,7 +190,7 @@ def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
         direct = basis.get("direct_edit")
         if "direct_edit" in basis:
             if (
-                source.key not in {"execution.activate", "execution.stop", "assignment.card"}
+                source.key not in {"execution.activate", "execution.stop", "assignment.card", "management.edit", "management.withdraw"}
                 or reveal is not None
                 or navigation is not None
                 or basis["concealed"]

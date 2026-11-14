@@ -81,26 +81,30 @@ class WorkEditDrafts:
         if row.state != "draft" or self.outbox.clock() >= aware(row.created_at) + timedelta(hours=self.outbox.config.callbacks.draft_ttl_hours):
             raise CallbackRefused("stale.draft")
 
-    async def create(self, link, *, operation_id, work_id, draft=None, admission=None):
+    async def create(self, link, *, operation_id, work_id, draft=None, admission=None, confirmation_current=lambda: None):
         if draft is not None and type(draft) is not DraftAssignment:
             raise ValueError("invalid-edit-draft")
 
         async def perform():
+            confirmation_current()
             async with self.outbox.sessions() as reader:
                 saved = await reader.get(TelegramActRow, operation_id)
             if saved is not None:
                 result = await self.get(link, operation_id)
                 if result.work_id != work_id or draft is not None and not same_body(result.body["draft"], draft.model_dump(mode="json")):
                     raise ValueError("edit-source-conflict")
+                confirmation_current()
                 return result
             current = await self.work.get(actor=PrincipalRef("human", link.owner_user_id), instance_id=link.agent_ref, work_id=work_id)
             original = DraftAssignment(objective=current["objective"], success_criteria=current["success_criteria"], due_at=current["due_at"])
             body = {"version": 1, "draft": (draft or original).model_dump(mode="json"), "original": original.model_dump(mode="json"), "expected_revision": current["revision"], "expected_assignment_revision": current["assignment_revision"]}
             prepared = await prepare_attention(self, link)
+            confirmation_current()
             async with self.outbox._writer(link.id) as (writer, _binding):
                 if admission is not None:
                     await admission(writer, None)
                 row = await writer.get(TelegramActRow, operation_id, with_for_update=True, populate_existing=True)
+                confirmation_current()
                 if row is not None:
                     if not same_body(row.body, body):
                         raise ValueError("edit-source-conflict")
@@ -109,6 +113,7 @@ class WorkEditDrafts:
                     row = TelegramActRow(id=operation_id, **{**draft_scope(link), "kind": "edit", "work_id": work_id}, body=body, state="draft", operation_ids=[], attempts=0, created_at=now, updated_at=now)
                     writer.add(row)
                     await writer.flush()
+                    confirmation_current()
                     row.continuation = {"edit_draft_source": {"version": 1, "origin_kind": "internal", "link_id": link.id, "signature": edit_signature(row, "internal")}}
                     await writer.flush()
                 result = snapshot_edit(link, row)
@@ -118,6 +123,7 @@ class WorkEditDrafts:
                     await admission(writer, result)
                 result = snapshot_edit(link, row)
                 await prepared(session=writer, projection=EditDraftProjection(link, result, staged=True))
+                confirmation_current()
                 self.age(result)
                 return result
 
@@ -193,7 +199,11 @@ class EditCommandProof:
         if self.admitting:
             if root.operation_ids or root.continuation.get("edit_admission") is not None:
                 raise ProductSourceRetired()
-        elif list(root.operation_ids) != [self.act.id] or not same_body(root.continuation.get("edit_admission"), {"version": 1, "act_id": self.act.id, "signature": self.reference["signature"]}):
-            raise ProductSourceRetired()
+        else:
+            from app.telegram_bots.work_management_consent import edit_admission_for
+
+            witness = edit_admission_for(self.act, self.reference)
+            if list(root.operation_ids) != [self.act.id] or not same_body(root.continuation.get("edit_admission"), witness):
+                raise ProductSourceRetired()
         if self.staged and (self.clock is None or self.clock() >= aware(root.created_at) + timedelta(hours=self.draft_ttl_hours)):
             raise CallbackRefused("stale.draft")

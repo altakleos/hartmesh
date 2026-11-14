@@ -1577,6 +1577,35 @@ lookups/deletion, and holds malformed, incomplete, overlapping or unresolved
 families. Unadmitted private drafts expire after the configured draft lifetime
 without a Work command. Closed receipt-consistent history expires after 400 days,
 including after unbinding or link removal; sealed historical locators are used
-only for retention reads. Internal origins are the only admitted origins here;
-public saved-work confirmation, typing and delivery ownership are integrated
-separately.
+only for retention reads.
+
+`work_management_delivery.py` owns saved-work edit previews and the second-tap
+withdrawal confirmation. Their opening gesture retains the actual complete Work
+preview, while Save/Confirm retains its own full acknowledged preview and entire
+callback group. Private edit drafts and immutable commands carry reciprocal
+mode witnesses; missing callbacks or outer reservation markers never become a
+fresh internal command. Final source/permission checks and synchronous press
+lifetime checks fence both private draft creation and native command admission.
+Back restores the current Work detail; Discard closes only the private copy.
+Current canonical receipts distinguish Saved/Withdrawn from subsequently changed
+Work. These source owners share the existing protected, bilingual delivery path.
+
+`work_management_recovery.py` binds Cancel and Retry to their actual acknowledged
+notice. Cancel stops further logical attempts, retaining unknown entered calls
+for exact receipt reconciliation. A later successful edit/withdrawal still owns
+its original physical cancellation follow-up. Retry keeps the exact original
+command and frozen attempt counter, continuation and physical scope. A consumed
+logical Retry may finish its interrupted admission within one hour of its
+original consumption, without moving either clock. A consumed physical Retry
+stays read-only because its counter cannot prove that no host call began; a new
+explicit gesture is required. Whole-group closure and the exact current recovery
+witness are mandatory for resumption.
+
+`work_management_ui_retention.py` preserves unresolved journal families together
+with opening and confirmation controls, actual preview ACKs and private roots.
+Missing journals, damaged reservations and canonical receipt gaps hold evidence.
+Known no-effect and discarded copies can expire, and complete callback-owned
+history follows the same 400-day rule. Dependency reads take no new locks;
+journal deletion derives them after the shared Link -> Act locks. These owners
+still need public callback routing and the runtime observer; saved edit typing
+and replacement are a separate input owner.

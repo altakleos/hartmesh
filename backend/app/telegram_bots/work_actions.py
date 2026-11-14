@@ -478,6 +478,11 @@ class WorkActionMethods(ManagementActionMethods, StopActionMethods, ActivationAc
                         raise ValueError("work-retry-body-changed")
                     if any(key in expected and getattr(current, key) != expected[key] for key in _ACT_SCOPE):
                         raise ValueError("work-retry-scope-changed")
+                    if current.kind in {"edit", "cancel"} and (
+                        any(key in expected and not same_body(getattr(current, key), expected[key]) for key in ("continuation", "stop_dispatch")) or "state" in expected and expected["state"] != "done" and current.state == "done"
+                    ):
+                        receipt = await self.receipt_for(current)
+                        return await self._work_outcome(current, state="done", result=receipt) if receipt is not None and current.state != "done" else current
                     if current.kind == "delegate" and "effective" in expected:
                         from app.telegram_bots.work_delegate_actions import qualify_no_due
 

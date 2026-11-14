@@ -157,6 +157,10 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int,
 
     assignments = await assignment_dependencies(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
     pinned.update(assignments.deliveries)
+    from app.telegram_bots.work_management_ui_retention import management_dependencies
+
+    management = await management_dependencies(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
+    pinned.update(management.deliveries)
     anchors: set[str] = set()
     callback = TelegramCallbackRow
     for row in await session.execute(select(callback.link_id, callback.binding_generation, callback.target_kind, callback.target_id, callback.payload, callback.expires_at, callback.consumed_at, callback.created_at)):
