@@ -137,6 +137,11 @@ class AssignmentReader(WorkViewReader):
 
 
 class AssignmentProjection:
+    def delivery_key(self, root):
+        from app.telegram_bots.assignment_proposal_records import assignment_key
+
+        return assignment_key(root, self.item.payload)
+
     def __init__(self, reader, link, item, source=None, *, root=None, journal=None, detail=None, clock):
         self.reader, self.link, self.item, self.expected, self.clock = reader, link, item, source, clock
         if source is not None:
@@ -170,10 +175,15 @@ class AssignmentProjection:
             self.fresh = FreshDraft(root.id, item.id)
         self.detail_projection = WorkDetailProjection(reader, link, detail.record, detail.request, reusable=detail.can_reuse_conversation, expected=detail) if detail is not None else None
         self.projection = DraftProjection(link, root.body["origin"], saved=root)
+        from app.telegram_bots.assignment_proposal_records import ProposalInputs, proposal_primary
+
+        self.proposal = ProposalInputs(link, item) if proposal_primary(item.payload) else None
         self.source = None
 
     def extend(self, query):
         result = self.projection.extend(query)
+        if self.proposal is not None:
+            result = self.proposal.extend(result)
         if self.detail_projection is not None:
             result = self.detail_projection.extend(result)
         self.journal_column = len(result.column_descriptions)
@@ -200,6 +210,8 @@ class AssignmentProjection:
 
     def check_with_permissions(self, rows, held):
         self.projection.check_with_permissions(rows, held)
+        if self.proposal is not None:
+            self.proposal.check(rows)
         detail = None
         if self.detail_projection is not None:
             self.detail_projection.check_with_permissions(rows, held)
@@ -214,7 +226,7 @@ class AssignmentProjection:
         if (
             _item(delivery) != self.item
             or intent["draft_id"] != root.id
-            or delivery.dedupe_key != "notice:assignment:" + root.id
+            or delivery.dedupe_key != self.delivery_key(root)
             or (delivery.link_id, delivery.owner_user_id, delivery.binding_generation, delivery.chat_id, delivery.instance_id, delivery.class_, delivery.work_id, delivery.request_id, delivery.event_id)
             != (self.link.id, self.link.owner_user_id, self.link.binding_generation, self.link.chat_id, self.link.agent_ref, "reply", None, None, None)
             or delivery.message_thread_id != root.body["origin"]["message_thread_id"]

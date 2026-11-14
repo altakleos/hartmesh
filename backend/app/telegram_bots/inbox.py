@@ -446,6 +446,10 @@ def _submission_document(value):
 
     try:
         data = _owner_json(value)
+        if type(data) is dict and type(data.get("version")) is int and data["version"] == 2:
+            from app.telegram_bots.assignment_answers import validate_answer_document
+
+            return validate_answer_document(data)
         if type(data) is not dict or set(data) != {"version", "text", "human_message_kwargs", "source_outbox_id", "parent_publication", "request_basis", "gesture"} or type(data["version"]) is not int or data["version"] != 1:
             raise ValueError
         parent = _identity_record(data["parent_publication"])
@@ -547,6 +551,18 @@ def _callback_owner(payload, callback_id: str) -> tuple[dict, CallbackInputStage
             raise ValueError
         inputs = _input_snapshots(owner["inputs"])
         submission = _submission_document(owner["submission"]) if version == 2 else None
+        if (
+            submission is not None
+            and submission["version"] == 2
+            and submission["gesture"]["callback_id"] == callback_id
+            and (
+                _canonical(submission["parent_publication"]) != _canonical(owner["source_publication"])
+                or submission["draft_id"] != payload.get("draft_id")
+                or submission["source_outbox_id"] != owner["source_outbox_id"]
+                or submission["gesture"]["update_id"] != owner["update_id"]
+            )
+        ):
+            raise ValueError()
         digest = _publication_input(inputs) if submission is None else _submission_input(inputs, submission)
         if owner["input_sha256"] != digest or not _recovery_plain_input(inputs):
             raise ValueError
@@ -1059,13 +1075,17 @@ class InboxRepository:
         row = next((item for item in group if item.id == callback_id), None)
         if (
             row is None
-            or row.kind not in {"retry_message", "file_retry", "clarify_option", "network", "form_send", "prompt_send_new", "answer_no"}
+            or row.kind not in {"retry_message", "file_retry", "clarify_option", "network", "form_send", "prompt_send_new", "answer_no", "assign_answer"}
             or (row.link_id, row.chat_id, row.binding_generation) != (link.id, link.chat_id, link.binding_generation)
         ):
             raise ValueError("callback-publication-conflict") from None
         if any((item.link_id, item.chat_id, item.message_thread_id, item.binding_generation) != (row.link_id, row.chat_id, row.message_thread_id, row.binding_generation) for item in group):
             raise ValueError("callback-publication-conflict") from None
         _owner, stage = _callback_owner(row.payload, callback_id)
+        if stage.submission is not None and stage.submission["version"] == 2:
+            from app.telegram_bots.assignment_answer_custody import qualify_answer_owner
+
+            await qualify_answer_owner(session, link, row, _owner)
         if any((item.link_id, item.chat_id, item.message_thread_id, item.binding_generation, item.route_target_id) != (link.id, link.chat_id, row.message_thread_id, link.binding_generation, link.agent_ref) for item in stage.origins):
             raise ValueError("callback-publication-conflict") from None
         return stage
@@ -2649,11 +2669,24 @@ class InboxRepository:
                 raise ValueError("publication-conflict") from None
             try:
                 basis = delivery.payload["reply_basis"]
-                if type(basis) is not dict or type(basis["version"]) is not int or basis["version"] not in {2, 4, 5, 6, 7} or basis["finish_route"] is not True or _canonical(basis["publication"]) != _canonical(_publication_identity(fresh)):
+                if (
+                    type(basis) is not dict
+                    or type(basis["version"]) is not int
+                    or basis["version"] not in {2, 4, 5, 6, 7, 9}
+                    or basis["finish_route"] is not True
+                    or _canonical(basis["publication"]) != _canonical(_publication_identity(fresh))
+                ):
                     raise ValueError
                 outcome = basis["outcome"]
                 kind = outcome["kind"]
-                if basis["version"] == 7:
+                if basis["version"] == 9:
+                    from app.telegram_bots.assignment_proposal_records import validate_proposal_reply_basis
+                    from app.telegram_bots.producer import _item
+
+                    proof = await await_drained(asyncio.to_thread(validate_proposal_reply_basis, _item(delivery)))
+                    if proof.kind != "assignment_proposal" or not fresh.dispatch_started or proof.record != fresh or assistant_message_id is not None:
+                        raise ValueError()
+                elif basis["version"] == 7:
                     from app.telegram_bots.mixed_source import validate_mixed_reply_basis
                     from app.telegram_bots.producer import _item
 

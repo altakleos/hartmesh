@@ -112,7 +112,7 @@ class AssignmentDrafts:
         if source.state != "draft" or self.outbox.clock() >= source.created_at + timedelta(hours=self.config.callbacks.draft_ttl_hours):
             raise CallbackRefused("stale.draft")
 
-    async def prepare_create(self, link, inbox, *, draft, source, criteria=None):
+    async def prepare_create(self, link, inbox, *, draft, source, criteria=None, projection=None):
         """Prepare providers off-writer; install in an owning or borrowed writer."""
         if type(draft) is not DraftAssignment or source not in {"command", "tool", "edit", "fallback"} or type(inbox) is not InboxRow:
             raise ValueError("invalid-assignment-draft")
@@ -123,7 +123,9 @@ class AssignmentDrafts:
             source != "fallback" or type(criteria) is not InboxRow or (criteria.link_id, criteria.chat_id, criteria.binding_generation, criteria.message_thread_id) != (link.id, link.chat_id, link.binding_generation, inbox.message_thread_id)
         ):
             raise ProductSourceRetired()
-        facts = DraftProjection(link, origin, inbox=inbox, criteria=criteria)
+        if projection is not None and (not isinstance(projection, DraftProjection) or projection.link != link or not same_body(projection.origin, origin) or projection.inbox != inbox or projection.saved is not None or criteria is not None):
+            raise ValueError("invalid-assignment-projection")
+        facts = projection if projection is not None else DraftProjection(link, origin, inbox=inbox, criteria=criteria)
         await admission(projection=facts)
         shown, note = prepare_draft(draft, permissions=facts.permissions, now=self.outbox.clock())
         body = _safe_json({"version": 1, "draft": shown.model_dump(mode="json"), "original": draft.model_dump(mode="json"), "source": source, "due_note": note, "origin": origin})

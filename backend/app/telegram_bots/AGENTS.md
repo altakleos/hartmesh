@@ -129,7 +129,7 @@ Work and message preference contracts:
 only a typing prompt; `/new` and `/stop` also end the forms and cards in scope.
 
 `acts.py` atomically commits settings, exact old/new values, completed Act,
-consumed group and replacement controls. Assignment inputs, cards, proposal sources:
+consumed group and replacement controls. Assignment inputs, proposals, answer custody:
 [Work guide](../../docs/TELEGRAM_WORK.md).
 `SettingsRepository.update(session=...)` borrows the owning engine/writer without
 committing.

@@ -92,7 +92,13 @@ def validate_proposal_basis(record, basis):
             if kind == "llm.human.input":
                 human_count += 1
                 human = inspect_output_message(row["content"])
-                if messages or human.unavailable_reason is not None or human.message_id != output.output_evidence.input_message_id or row["metadata"].get("caller") != "lead_agent":
+                if (
+                    messages
+                    or human.unavailable_reason is not None
+                    or human.message_id != output.output_evidence.input_message_id
+                    or row["metadata"].get("caller") != "lead_agent"
+                    or message.additional_kwargs.get("channel_turn_id") != record.publication_id
+                ):
                     _refuse()
             messages.append(message)
         if human_count != 1:

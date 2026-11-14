@@ -237,6 +237,13 @@ async def assignment_dependencies(session, now, *, max_age_days, draft_ttl_hours
     execution_groups, execution_anchors, _held_acts = await execution_dependencies(session)
     held_groups.update(execution_groups)
     held_anchors.update(execution_anchors)
+    from app.telegram_bots.assignment_answer_retention import answer_dependencies
+
+    answer_groups, answer_anchors = await answer_dependencies(session, controls, links, now, max_age_days=max_age_days)
+    held_groups.update(answer_groups)
+    held_anchors.update(answer_anchors)
+    result.groups.update(answer_groups)
+    result.deliveries.update(answer_anchors)
     families = []
     for identity in sorted(root_ids):
         raw = journals.get(identity)
@@ -322,6 +329,18 @@ async def assignment_dependencies(session, now, *, max_age_days, draft_ttl_hours
                 continue
             for key in ("origin", "criteria_origin"):
                 origin = body.get(key)
+                if isinstance(origin, Mapping) and (origin.get("link_id"), origin.get("chat_id"), origin.get("binding_generation")) == (scope.id, scope.chat_id, scope.binding_generation) and type(origin.get("message_id")) is int:
+                    inputs.add((scope.id, origin["message_id"], scope.chat_id))
+        # Proposal cards seal every input in the original human turn. The Root
+        # names only the first one; raw same-scope locators pin custody here,
+        # without becoming authorization or a replacement for a missing row.
+        for delivery in deliveries:
+            basis = delivery.payload.get("reply_basis", {})
+            receipt = basis.get("inputs", {}) if isinstance(basis, Mapping) else {}
+            originals = receipt.get("inputs", []) if isinstance(receipt, Mapping) else []
+            if not isinstance(basis, Mapping) or basis.get("version") != 9 or not isinstance(originals, list):
+                continue
+            for origin in originals:
                 if isinstance(origin, Mapping) and (origin.get("link_id"), origin.get("chat_id"), origin.get("binding_generation")) == (scope.id, scope.chat_id, scope.binding_generation) and type(origin.get("message_id")) is int:
                     inputs.add((scope.id, origin["message_id"], scope.chat_id))
         hold = not closed or live or pending or other_held or root.state == "draft" and not old_draft
