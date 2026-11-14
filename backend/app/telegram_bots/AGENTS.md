@@ -1,6 +1,6 @@
 # Managed Telegram bots
 
-Installed chat runtime, Work, speech drafts and composites: [guide](../../docs/TELEGRAM_WORK.md).
+Chat runtime, capacity, Work, speech drafts and composites: [guide](../../docs/TELEGRAM_WORK.md).
 
 `config.py` validates optional `AppConfig.model_extra["telegram_bots"]` without
 starting services. Nested models forbid unknown keys and coercion; absence returns

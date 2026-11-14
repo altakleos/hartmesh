@@ -2022,6 +2022,9 @@ of the request is separate from confirmed settlement.
 Capacity counts include every occupied place. Running-assignment details require
 access to inspect the corresponding assistant or employee; missing start dates
 or requesters stay unknown.
+When a Start is waiting for a place, the bot offers a fresh Start button when
+capacity becomes available. This service message arrives even with proactive
+notifications disabled. Work still waits for the person's press.
 
 An assignment proposal retained in a Telegram conversation appears as a read-only
 card when opened in the browser. It shows the objective, success criteria and

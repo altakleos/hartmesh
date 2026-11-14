@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Notify the next eligible saved Start when a Work place becomes available,
+  with an acknowledged full preview and a fresh Start control. Offers remain
+  advisory, globally paced and available with proactive notifications disabled.
 - Install `/work`, its `/status` alias, and private `/assign` draft entry points
   in connected assistant and employee chats. Detail cards use acknowledged
   Start/Stop controls and full current question or review previews.

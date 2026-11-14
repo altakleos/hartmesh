@@ -10,7 +10,7 @@ from sqlalchemy import and_, func, select
 from app.telegram_bots.acts import _snapshot
 from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
-from app.telegram_bots.links import BotLink
+from app.telegram_bots.links import BotLink, prepare_publication_guard
 from app.telegram_bots.notifications import aware
 from app.telegram_bots.producer import PermanentDeliveryError, ProductSourceRetired, _item, keyboard_cleanup_row
 from app.telegram_bots.work_capacity_sources import WorkCapacityOfferProjection, qualify_waiting, startable_detail
@@ -63,12 +63,25 @@ async def waiting_origin(writer, link, journal, *, expected=None, origin=None, t
 
 
 class WorkCapacityOffers(WorkNewsPlans):
-    def __init__(self, *, acts, **kwargs):
+    def __init__(self, *, acts, guard_factory=None, available=lambda: True, **kwargs):
         super().__init__(**kwargs, projection=WorkCapacityOfferProjection)
         self.acts = acts
+        self.guard_factory, self.available = guard_factory, available
         self.reader.acts = acts
         if acts.session_factory.kw.get("bind") is not self.outbox.sessions.kw.get("bind"):
             raise ValueError("work-capacity-requires-shared-storage")
+
+    def current(self):
+        if self.available() is not True:
+            raise ProductSourceRetired()
+
+    async def guard(self, link):
+        self.current()
+        guard = self.guard_factory(link) if self.guard_factory is not None else None
+        if guard is not None:
+            await prepare_publication_guard(guard)
+        self.current()
+        return guard
 
     async def _offers(self, reader):
         return list(
@@ -108,26 +121,32 @@ class WorkCapacityOffers(WorkNewsPlans):
         return await await_drained(self._poll())
 
     async def _poll(self):
+        self.current()
         # The database owns arbitration across bot processes. No process-local
         # lock or occupant query stands in for the authenticated HTTP budget.
         async with self.outbox.sessions() as reader:
             previous = await self._offers(reader)
-            if previous and previous[-1].state == "pending" and not previous[-1].parts:
-                # Resume a crash between saving an offer and its presentation.
-                try:
-                    link = await self.reader.links.get(previous[-1].link_id)
-                    await self.materialize(link, previous[-1].id)
-                except Exception as exc:
-                    logger.debug("Capacity presentation unavailable (%s)", type(exc).__name__)
-                    # No SDK claim can exist without parts. Retire only this
-                    # advisory notice, never the original execution intent.
-                    async with self.outbox._writer(previous[-1].link_id) as (writer, _binding):
-                        saved = await writer.get(TelegramOutboxRow, previous[-1].id, with_for_update=True, populate_existing=True)
-                        if saved is not None and saved.state == "pending" and not saved.parts and all(getattr(saved, key) is None for key in ("claim_owner", "claim_id", "claimed_at")):
-                            saved.state, saved.skip_reason, saved.closed_at = "skipped", "source-retired", self.outbox.clock()
+        if previous and previous[-1].state == "pending" and not previous[-1].parts:
+            # Resume a crash between saving an offer and its presentation.
+            try:
+                link = await self.reader.links.get(previous[-1].link_id)
+                guard = await self.guard(link)
+                await self.materialize(link, previous[-1].id, guard=guard)
+            except Exception as exc:
+                self.current()
+                logger.debug("Capacity presentation unavailable (%s)", type(exc).__name__)
+                # No SDK claim can exist without parts. Retire only this
+                # advisory notice, never the original execution intent.
+                async with self.outbox._writer(previous[-1].link_id) as (writer, _binding):
+                    saved = await writer.get(TelegramOutboxRow, previous[-1].id, with_for_update=True, populate_existing=True)
+                    if saved is not None and saved.state == "pending" and not saved.parts and all(getattr(saved, key) is None for key in ("claim_owner", "claim_id", "claimed_at")):
+                        saved.state, saved.skip_reason, saved.closed_at = "skipped", "source-retired", self.outbox.clock()
+                    self.current()
+            async with self.outbox.sessions() as reader:
                 previous = await self._offers(reader)
-            if self._held(previous):
-                return None
+        if self._held(previous):
+            return None
+        async with self.outbox.sessions() as reader:
             rows = list(
                 await reader.scalars(
                     select(TelegramActRow)
@@ -152,8 +171,10 @@ class WorkCapacityOffers(WorkNewsPlans):
                 counts[identity] = max(counts.get(identity, 0), row.payload["capacity_offer_intent"]["ordinal"])
         candidates.sort(key=lambda act: (act.id in offered, offered.get(act.id, aware(act.created_at)), aware(act.created_at), act.id))
         for captured in candidates:
+            self.current()
             try:
                 link = await self.reader.links.get(captured.link_id)
+                guard = await self.guard(link)
                 async with self.outbox.sessions() as reader:
                     journal = await reader.get(TelegramActRow, captured.id)
                     act, origin, topic = await waiting_origin(reader, link, journal, expected=act_facts(captured))
@@ -174,12 +195,18 @@ class WorkCapacityOffers(WorkNewsPlans):
                     # Global -> bot -> journal/control is the fixed lock order.
                     link_ids = sorted({link.id, *(r.link_id for r in latest[-1:])})
                     await writer.scalars(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id.in_(link_ids)).order_by(TelegramBotLinkRow.id).with_for_update().execution_options(populate_existing=True))
+                    self.current()
+                    if guard is not None:
+                        await guard.check(writer)
                     journal = await writer.get(TelegramActRow, captured.id, with_for_update=True, populate_existing=True)
                     await waiting_origin(writer, link, journal, expected=act_facts(act), origin=origin)
                     await current(session=writer)
                     if not eligible:
                         journal.state, journal.reason, journal.updated_at = "refused", "superseded", self.outbox.clock()
                         await writer.flush()
+                        if guard is not None:
+                            await guard.check(writer)
+                        self.current()
                         continue
                     await admission(session=writer)
                     for old in latest[-1:]:
@@ -212,9 +239,13 @@ class WorkCapacityOffers(WorkNewsPlans):
                     writer.add(row)
                     await writer.flush()
                     identity = row.id
-                await self.materialize(link, identity)
+                    if guard is not None:
+                        await guard.check(writer)
+                    self.current()
+                await self.materialize(link, identity, guard=guard)
                 return identity
             except Exception as exc:
+                self.current()
                 logger.debug("Capacity offer unavailable (%s)", type(exc).__name__)
                 # Unknown source/provider state is never a refusal or a launch.
                 # Continue independent owners; the durable original stays held.

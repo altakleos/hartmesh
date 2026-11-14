@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from datetime import timedelta
 
 from sqlalchemy import select
 
@@ -28,6 +29,8 @@ class NotificationRuntime:
         self._after = ""
         self.events = self.summaries = self.worker = self.observer = None
         self.chat = None
+        self._capacity_after = None
+        self._capacity_revision, self._capacity_seen = 0, -1
         self.installed = self.initialized = self.ingress_ready = False
         from app.telegram_bots.work_event_cursors import WorkEventCursors
 
@@ -367,6 +370,20 @@ class NotificationRuntime:
         if self.available() and self.worker is not None:
             await self.worker.tick()
 
+    async def tick_events(self):
+        # Event metadata still advances under ordinary send refusals, as before.
+        if self._stopping or self.events is None:
+            return 0
+        task = asyncio.create_task(self.events.tick())
+        self._operations.add(task)
+        try:
+            completed = await await_drained(task)
+            if completed:
+                self._capacity_revision += 1
+            return completed
+        finally:
+            self._operations.discard(task)
+
     async def tick_maintenance(self):
         if not self.available() or not self.installed:
             return
@@ -405,6 +422,13 @@ class NotificationRuntime:
                     logger.warning("Telegram notification recovery deferred: link=%s", link.id)
             if len(rows) < self.host.config.producer.batch:
                 self._maintenance_after = ""
+            now = self.host.outbox.clock()
+            if self.available() and self.chat is not None and (self._capacity_revision != self._capacity_seen or self._capacity_after is None or now >= self._capacity_after):
+                revision = self._capacity_revision
+                await self.chat.offers.poll()
+                self._capacity_seen = revision
+                delay = min(60, self.host.config.outbox.place_free_hold_seconds)
+                self._capacity_after = now + timedelta(seconds=delay)
 
     async def recover_inputs(self, phase, *, link_id=None):
         from app.telegram_bots.work_input_recovery import recover_inputs
