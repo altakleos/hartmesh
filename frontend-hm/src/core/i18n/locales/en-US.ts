@@ -2968,7 +2968,7 @@ export function createEnUS(product: string): Translations {
         conflictWebhook: `This bot is connected to another service, so nothing reaches ${product}.`,
         afterConflict: {
           agent: ({ time }) =>
-            `Another program began using this bot's token at ${time}. That has stopped, and the bot answers again. Deciding, accepting and allowing a blocked site stay paused on this bot until you press That was me or replace the token.`,
+            `Another program began using this bot's token at ${time}. That has stopped, and the bot answers again. Deciding, accepting, allowing a blocked site, and changing or withdrawing an assignment stay paused on this bot until you press That was me or replace the token.`,
           chat: ({ time }) =>
             `Another program began using this bot's token at ${time}. That has stopped, and the bot answers again. Allowing a blocked site stays paused on this bot until you press That was me or replace the token.`,
           custom_agent: ({ time }) =>

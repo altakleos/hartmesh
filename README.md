@@ -2032,6 +2032,8 @@ When Work is enabled and you can inspect the agent, a handover can produce a
 proposed assignment card. Start now, Save for later and Edit remain explicit
 choices; Just answer continues in the same conversation. The proposal itself
 saves no assignment and starts no work.
+Agent-bot menus put `/work` and `/assign` first; `/status` remains a typed alias.
+Existing connected bots receive the updated menu at their next start.
 
 Capacity counts include every occupied place. Running-assignment details require
 access to inspect the corresponding assistant or employee; missing start dates
