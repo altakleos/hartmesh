@@ -1607,5 +1607,42 @@ Missing journals, damaged reservations and canonical receipt gaps hold evidence.
 Known no-effect and discarded copies can expire, and complete callback-owned
 history follows the same 400-day rule. Dependency reads take no new locks;
 journal deletion derives them after the shared Link -> Act locks. These owners
-still need public callback routing and the runtime observer; saved edit typing
-and replacement are a separate input owner.
+still need public callback routing and the runtime observer.
+
+## Saved assignment correction inputs
+
+`work_management_editing.py` owns Edit prompts and accepted corrections. Opening
+an editor consumes its actual full-card group and durably queues keyboard
+cleanup. `work_management_prompt_sources.py` permits the typing prompt only
+after the real cleanup acknowledgement; the shared deferred-prompt barrier arms
+its message identity and ten-minute lifetime only after complete SDK delivery.
+`ManagementEditFrame` retains the original Work opening, full Edit preview,
+private copy, current Work/grants and prior replacement history through final
+provider reads. A correction cannot adopt another chat, generation or editor.
+
+An accepted plain-text input and its exact prompt share one guarded capture.
+The extraction claim commits before the one-shot model call. Independent owners
+serialize through that persisted claim; recovery of an unknown entered call
+marks drafting failed without another inference. Shutdown drains owned model
+calls, and final source/lifetime checks prevent late adoption. Completed and
+failed phase replays repair their owed presentation and input settlement without
+another extraction or Work command. Unknown or malformed markers stay held.
+
+Each successful correction creates a new immutable private Root, retaining the
+original Work/assignment revisions, original fields and creation time. An omitted
+deadline preserves the existing saved date. The previous copy records its exact
+replacement witness. `work_management_edit_lineage.py` joins the actual Edit
+group, complete prompt ACK, original typed input, extraction claim and old/new
+copies before granting source authority. Only a known zero-attempt unchanged
+command may precede another correction; every reverse native/control reservation
+still counts. Further edits require their own full preview and gesture. Save
+remains a separate explicit confirmation of the newly displayed body.
+
+`work_management_edit_retention.py` qualifies complete replacement chains with
+the same scope, original CAS and age, known no-effect ancestors and exact final
+command receipt/original settlement. Pending commands and model claims retain
+their complete UI, prompt, input and journal dependencies. Missing, malformed,
+overlapping and foreign references cannot release only part of that family.
+Historical closure permits expiry without granting live authority or renewing
+any consent. The input controller and its recovery owner still need runtime
+installation.

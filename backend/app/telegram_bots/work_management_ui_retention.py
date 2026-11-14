@@ -9,9 +9,11 @@ from sqlalchemy import select
 
 from app.telegram_bots.notifications import aware
 from app.telegram_bots.producer import ProductSourceRetired
-from app.telegram_bots.work_management_retention import closed_command, closed_edit, discarded_root, historical, private_root
+from app.telegram_bots.work_management_edit_records import read_input
+from app.telegram_bots.work_management_edit_retention import family_closed
+from app.telegram_bots.work_management_retention import historical
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 
 
 @dataclass
@@ -19,6 +21,7 @@ class ManagementDependencies:
     groups: set = field(default_factory=set)
     deliveries: set = field(default_factory=set)
     acts: set = field(default_factory=set)
+    inputs: set = field(default_factory=set)
 
 
 def mapping(value):
@@ -27,6 +30,14 @@ def mapping(value):
 
 def identities(*values):
     return {value for value in values if type(value) is str}
+
+
+def input_locator(value):
+    """Pin-only historical locator; never an input or submission authority."""
+    incoming = mapping(value)
+    if type(incoming.get("link_id")) is str and type(incoming.get("chat_id")) is int and type(incoming.get("message_id")) is int:
+        return incoming["link_id"], incoming["message_id"], incoming["chat_id"]
+    return None
 
 
 def sources(row):
@@ -44,29 +55,6 @@ def openings(row, gestures):
         yield mapping(gesture.payload)
 
 
-def family_closed(rows, events, attempts, now, ttl):
-    try:
-        values = [historical(row) for row in rows]
-        roots = [row for row in values if "edit_draft_source" in mapping(row.continuation)]
-        if len(values) == 2 and len(roots) == 1:
-            command = next(row for row in values if row.id != roots[0].id)
-            return command.kind == "edit" and closed_edit(roots[0], command, events, attempts)
-        if len(values) == 1 and not roots:
-            return values[0].kind == "cancel" and closed_command(values[0], events, attempts)
-        if len(values) == 1:
-            root = roots[0]
-            private_root(root)
-            return (
-                not root.operation_ids
-                and set(root.continuation) == {"edit_draft_source"}
-                and events.get((root.instance_id, root.id)) is None
-                and (discarded_root(root) or root.result is None and (root.state == "draft" or root.state == "refused" and root.reason == "draft-expired") and aware(now) >= aware(root.created_at) + timedelta(hours=ttl))
-            )
-        return False
-    except (ValueError, TypeError, KeyError, AttributeError, ProductSourceRetired):
-        return False
-
-
 async def management_dependencies(session, now, *, max_age_days=180, draft_ttl_hours=24):
     """Missing or conflicting custody holds a complete family without renewing it.
 
@@ -77,11 +65,17 @@ async def management_dependencies(session, now, *, max_age_days=180, draft_ttl_h
     result = ManagementDependencies()
     journals = {row.id: row for row in await session.scalars(select(TelegramActRow).where(TelegramActRow.kind.in_(("edit", "cancel"))))}
     controls = list(await session.scalars(select(TelegramCallbackRow)))
+    by_id = {row.id: row for row in controls}
+    outboxes = list(await session.scalars(select(TelegramOutboxRow)))
+    prompts = {row.id: row for row in outboxes if "management_prompt_intent" in mapping(row.payload)}
+    marks = list(await session.scalars(select(TelegramInboundMarkRow).where(TelegramInboundMarkRow.route_kind == "management_edit")))
     native_anchors = {anchor for row in journals.values() if type(anchor := mapping(mapping(row.continuation).get("management_origin")).get("anchor_outbox_id")) is str}
     native_anchors.update(control.target_id for control in controls if control.kind == "work_management_gesture" and control.target_kind == "outbox")
     native_anchors.update(mapping(control.payload).get("anchor_outbox_id") for control in controls if control.kind in {"work_change_save", "work_withdraw_confirm"})
+    native_anchors.update(mapping(mapping(row.payload).get("management_prompt_intent")).get("parent_id") for row in prompts.values())
+    native_anchors.update(mapping(mapping(mapping(row.result).get("editor")).get("origin")).get("anchor_outbox_id") for row in journals.values())
     parents = {}
-    for row in await session.scalars(select(TelegramOutboxRow)):
+    for row in outboxes:
         if row.id in native_anchors or "work_management_intent" in mapping(row.payload) or any(source.get("key") in {"management.edit", "management.withdraw"} for source in sources(row)):
             parents[row.id] = row
     if not parents:
@@ -96,6 +90,7 @@ async def management_dependencies(session, now, *, max_age_days=180, draft_ttl_h
         if control.kind == "work_management_gesture" and control.target_kind == "outbox":
             gestures[control.target_id].append(control)
     graph, parent_members = defaultdict(set), {}
+    family_prompts, family_inputs = defaultdict(set), defaultdict(set)
 
     def connect(left, right):
         graph[left].add(right)
@@ -105,6 +100,7 @@ async def management_dependencies(session, now, *, max_age_days=180, draft_ttl_h
         graph[("act", identity)]
         ref = mapping(mapping(row.continuation).get("management_source")).get("draft_ref")
         members = identities(mapping(ref).get("id"))
+        members.update(identities(mapping(row.result).get("draft_id")))
         if isinstance(row.operation_ids, list):
             members.update(value for value in row.operation_ids if type(value) is str)
         for member in members:
@@ -126,6 +122,11 @@ async def management_dependencies(session, now, *, max_age_days=180, draft_ttl_h
             if control.target_kind == "draft" and control.kind in {"work_change_save", "assign_edit", "assign_discard"}:
                 members.update(identities(control.target_id))
         parent_members[identity] = members
+        replacements = payload.get("work_management_replacements")
+        for replacement in replacements if isinstance(replacements, list) else []:
+            locator = input_locator(mapping(replacement).get("input"))
+            if locator is not None:
+                family_inputs[identity].add(locator)
         graph[("outbox", identity)]
         for member in members:
             connect(("outbox", identity), ("act", member))
@@ -138,6 +139,39 @@ async def management_dependencies(session, now, *, max_age_days=180, draft_ttl_h
         anchor = mapping(mapping(row.continuation).get("management_origin")).get("anchor_outbox_id")
         if type(anchor) is str:
             connect(("act", identity), ("outbox", anchor))
+        result_value = mapping(row.result)
+        parent_id = mapping(mapping(result_value.get("editor")).get("origin")).get("anchor_outbox_id")
+        locator = input_locator(result_value.get("input"))
+        if type(parent_id) is str and locator is not None:
+            family_inputs[parent_id].add(locator)
+            connect(("act", identity), ("outbox", parent_id))
+        prompt_id = result_value.get("prompt_outbox_id")
+        if type(prompt_id) is str:
+            connect(("act", identity), ("delivery", prompt_id))
+    for identity, prompt_parent in prompts.items():
+        intent = mapping(mapping(prompt_parent.payload).get("management_prompt_intent"))
+        parent_id, draft_id = intent.get("parent_id"), intent.get("draft_id")
+        if type(parent_id) is not str:
+            continue
+        family_prompts[parent_id].add(identity)
+        connect(("outbox", parent_id), ("delivery", identity))
+        if type(draft_id) is str:
+            connect(("outbox", parent_id), ("act", draft_id))
+        control = by_id.get(intent.get("prompt_id")) if type(intent.get("prompt_id")) is str else None
+        marker = mapping(mapping(control.payload).get("management_input")) if control is not None else {}
+        if type(marker.get("input_id")) is str and marker["input_id"] in journals:
+            connect(("outbox", parent_id), ("act", marker["input_id"]))
+    for mark in marks:
+        basis = mapping(mapping(mark.route_basis).get("management_edit"))
+        intent = mapping(basis.get("intent"))
+        parent_id, prompt_id = intent.get("parent_id"), basis.get("prompt_outbox_id")
+        if type(parent_id) is str:
+            family_inputs[parent_id].add((mark.link_id, mark.message_id, mark.chat_id))
+            if type(prompt_id) is str:
+                family_prompts[parent_id].add(prompt_id)
+                connect(("outbox", parent_id), ("delivery", prompt_id))
+            if mark.route_target_id in journals:
+                connect(("outbox", parent_id), ("act", mark.route_target_id))
     # A foreign journal can keep this native command unresolved. Preserve the
     # command's evidence too, rather than letting the two sweepers split it.
     for row in await session.scalars(select(TelegramActRow).where(TelegramActRow.kind.not_in(("edit", "cancel")))):
@@ -186,6 +220,18 @@ async def management_dependencies(session, now, *, max_age_days=180, draft_ttl_h
             try:
                 management_intent(parent)
                 expected_members = identities(intent["draft_id"], intent["act_id"])
+                typed = any(mapping(journals[identity].result).get("editor") is not None for identity in members & journals.keys())
+                if typed and closed:
+                    latest = journals.get(intent["draft_id"])
+                    if (
+                        latest is None
+                        or latest.reason == "replaced"
+                        or list(latest.operation_ids) != ([intent["act_id"]] if intent["act_id"] else [])
+                        or latest.body.get("expected_revision") != intent["expected_revision"]
+                        or latest.body.get("expected_assignment_revision") != intent["expected_assignment_revision"]
+                    ):
+                        held = True
+                    expected_members = members
                 if expected_members != parent_members[parent.id]:
                     held = True
                 for identity in members & journals.keys():
@@ -201,6 +247,25 @@ async def management_dependencies(session, now, *, max_age_days=180, draft_ttl_h
             except (ValueError, TypeError, KeyError, AttributeError, ProductSourceRetired):
                 held = True
             held |= parent.state in {"pending", "sending", "failed"}
+            for prompt_id in family_prompts[parent.id]:
+                prompt_parent = prompts.get(prompt_id)
+                if prompt_parent is None:
+                    # Known closed history no longer needs its old prompt,
+                    # while missing evidence of an open family stays held.
+                    held |= not closed
+                    continue
+                prompt_intent = mapping(mapping(prompt_parent.payload).get("management_prompt_intent"))
+                for control in by_anchor[prompt_id]:
+                    owned[control.id] = control
+                prompt = by_id.get(prompt_intent.get("prompt_id")) if type(prompt_intent.get("prompt_id")) is str else None
+                held |= prompt_parent.state in {"pending", "sending", "failed"}
+                held |= any(getattr(prompt_parent, field) != getattr(parent, field) for field in ("link_id", "owner_user_id", "binding_generation", "chat_id", "instance_id", "work_id", "message_thread_id"))
+                try:
+                    marker = read_input(prompt.payload.get("management_input")) if prompt is not None else None
+                    held |= marker is not None and marker["phase"] in {"captured", "extracting"}
+                except ProductSourceRetired:
+                    held = True
+            held |= any((mark.link_id, mark.message_id, mark.chat_id) in family_inputs[parent.id] and mark.state != "done" for mark in marks)
             current = links.get(parent.link_id)
             current_scope = current is not None and current.binding_generation == parent.binding_generation
             held |= current_scope and any(
@@ -221,8 +286,10 @@ async def management_dependencies(session, now, *, max_age_days=180, draft_ttl_h
                     owned[control.id] = control
         if held:
             result.acts.update(members)
-            result.deliveries.update(identity for kind, identity in component if kind == "outbox")
+            result.deliveries.update(identity for kind, identity in component if kind in {"outbox", "delivery"})
             for parent in owners:
+                result.inputs.update(family_inputs[parent.id])
+                result.deliveries.update(family_prompts[parent.id])
                 for origin in openings(parent, gestures[parent.id]):
                     result.deliveries.update(identities(origin.get("anchor_outbox_id")))
             result.groups.update(control.group_id for control in owned.values())

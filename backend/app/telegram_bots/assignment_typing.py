@@ -12,7 +12,7 @@ from app.telegram_bots.work_views import WorkViewPresentation
 
 def present_prompt(source, basis):
     intent = source.work["intent"]
-    text = render(PURPOSES[intent["purpose"]], basis["locale"], name=source.values["name"])
+    text = render("assign.edit_prompt" if source.key == "management.prompt" else PURPOSES[intent["purpose"]], basis["locale"], name=source.values["name"])
     parts = [{"kind": "text", "html": html, "visible_text": visible_text(html), "protect_content": source.protected} for html in split_html(text)]
     parts[-1]["force_reply"] = True
     return WorkViewPresentation(tuple(parts), ())
@@ -23,7 +23,7 @@ def prompt_parts(item):
 
     try:
         _basis, source, _part = frozen_news(SimpleNamespace(item=item, link=None, part=None))
-        if source.key != "assignment.prompt":
+        if source.key not in {"assignment.prompt", "management.prompt"}:
             raise ValueError()
         parts = tuple(part for part in item.parts if part["presentation_version"] == item.payload["presentation_version"])
         if not parts or any(part.get("stored_keyboard") or part.get("callback_group_id") or bool(part.get("force_reply")) != (index == len(parts) - 1) for index, part in enumerate(parts)):
@@ -35,7 +35,7 @@ def prompt_parts(item):
 
 def validate_prompt(item, prompt, *, attached=False):
     parts = prompt_parts(item)
-    intent = item.payload["assignment_prompt_intent"]
+    intent = item.payload["management_prompt_intent"] if "management_prompt_intent" in item.payload else item.payload["assignment_prompt_intent"]
     if (
         prompt is None
         or prompt.kind != "prompt"

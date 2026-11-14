@@ -22,11 +22,15 @@ def present_management(source, basis, link):
 
     if phase in {"discarded", "replaced", "expired"}:
         html = render("stale.draft" if phase == "expired" else "assign." + phase, locale)
+    elif phase == "editing":
+        html = render("assign.edit_prompt", locale)
     elif source.key == "management.edit" and phase in {"draft", "unchanged"}:
         draft, identity = data["draft"], data["draft_id"]
         html = render("work.change_title", locale, name=source.values["name"]) + "\n" + render("assign.card", locale, objective_full=draft["objective"], success_criteria=draft["success_criteria"])
         if source.values.get("due"):
             html += "\n" + render("assign.due", locale, due=source.values["due"])
+        if data.get("edit_failed"):
+            html += "\n" + render("assign.draft_failed", locale)
         if phase == "unchanged":
             html += "\n" + render("work.change_none", locale)
         else:

@@ -32,7 +32,7 @@ def recipes(source, basis, identity, link):
         from app.telegram_bots.work_management_cards import present_management
 
         view = present_management(source, basis, link)
-    elif source.key == "assignment.prompt":
+    elif source.key in {"assignment.prompt", "management.prompt"}:
         from app.telegram_bots.assignment_typing import present_prompt
 
         view = present_prompt(source, basis)
@@ -84,7 +84,7 @@ def conceal_news(source):
     """Only a current source-qualified chat activation bypasses its teaser."""
     return (
         source.protected
-        and source.key not in {"view.list", "view.detail", "execution.activate", "execution.stop", "assignment.card", "assignment.prompt", "management.edit", "management.withdraw"}
+        and source.key not in {"view.list", "view.detail", "execution.activate", "execution.stop", "assignment.card", "assignment.prompt", "management.edit", "management.withdraw", "management.prompt"}
         and not (source.key.startswith("status.") and source.work.get("activation_act_id"))
     )
 

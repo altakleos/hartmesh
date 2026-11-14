@@ -493,9 +493,11 @@ async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int, dra
     open_act = select(TelegramActRow.id).where(TelegramActRow.link_id == mark.link_id, TelegramActRow.chat_id == mark.chat_id, TelegramActRow.message_id == mark.message_id, TelegramActRow.state.not_in(_SETTLED_ACTS))
     # A mark is done only once every delivery it lists is sent or skipped.
     from app.telegram_bots.assignment_retention import assignment_dependencies, expire_assignments
+    from app.telegram_bots.work_management_ui_retention import management_dependencies
 
     async with _writer(sessions) as session:
         assignments = await assignment_dependencies(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
+        management = await management_dependencies(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
         candidates = list(
             (
                 await session.execute(
@@ -510,7 +512,7 @@ async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int, dra
                 )
             ).all()
         )
-        eligible = sorted(set(candidates) - assignments.inputs)
+        eligible = sorted(set(candidates) - assignments.inputs - management.inputs)
         inbound = 0
         for start in range(0, len(eligible), _BATCH):
             inbound += (await session.execute(delete(mark).where(tuple_(mark.link_id, mark.message_id, mark.chat_id).in_(eligible[start : start + _BATCH])))).rowcount
