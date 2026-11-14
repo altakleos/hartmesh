@@ -1,5 +1,7 @@
 """Actual chat preferences share settings, receipts and acknowledged edits."""
 
+from html import unescape
+
 import pytest
 from _telegram_repository_test_support import db as db
 from sqlalchemy import select
@@ -67,9 +69,13 @@ async def test_message_settings_navigation_and_choice_use_one_atomic_receipt(db,
             acts = list(await reader.scalars(select(TelegramActRow)))
             assert len(acts) == 1 and acts[0].id == choice.id and acts[0].state == "done" and acts[0].body["field"] == field
         edits = [call for call in e.request.calls if call.endpoint == "editMessageText"]
-        assert len(edits) == 2 and "/work" not in edits[-1].parameters["text"]
+        assert len(edits) == 2
         if field == "notify":
-            assert "Questions wait in" in edits[-1].parameters["text"]
+            visible = unescape(edits[-1].parameters["text"])
+            assert "Questions wait in /work in the relevant AI assistant's or AI employee's chat" in visible
+            assert "on the web" in visible
+        else:
+            assert "/work" not in edits[-1].parameters["text"]
         assert len(edits[-1].parameters["reply_markup"]["inline_keyboard"]) >= 2
         e.request.enqueue("answerCallbackQuery", result=True)
         assert await e.channel.handle_update(press(e, 1503, choice.id))
