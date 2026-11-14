@@ -160,6 +160,8 @@ async def expire_management(session, now, *, draft_ttl_hours, pending_outcome):
         source = row.continuation.get("management_source") if isinstance(row.continuation, Mapping) else None
         reference = source.get("draft_ref") if isinstance(source, Mapping) else None
         neighbours = {reference["id"]} if isinstance(reference, Mapping) and type(reference.get("id")) is str else set()
+        if isinstance(row.result, Mapping) and "edit_draft_source" in (row.continuation or {}) and type(row.result.get("draft_id")) is str:
+            neighbours.add(row.result["draft_id"])
         if isinstance(row.operation_ids, list):
             neighbours.update(member for member in row.operation_ids if type(member) is str)
         for member in neighbours:
@@ -209,7 +211,14 @@ async def expire_management(session, now, *, draft_ttl_hours, pending_outcome):
                 command = next(row for row in rows if row.id != roots[0].id)
                 closed = command.kind == "edit" and closed_edit(roots[0], command, events, attempts)
             else:
-                closed = len(rows) == 1 and rows[0].kind == "cancel" and closed_command(rows[0], events, attempts)
+                from app.telegram_bots.work_management_edit_retention import family_closed
+
+                closed = family_closed(rows, events, attempts, now, draft_ttl_hours)
+                if closed:
+                    for root in roots:
+                        if root.state == "draft" and not root.operation_ids and aware(now) >= aware(root.created_at) + timedelta(hours=draft_ttl_hours):
+                            raw = journals[root.id]
+                            raw.state, raw.reason, raw.updated_at = "refused", "draft-expired", now
             if closed and all(aware(row.created_at) < aware(now) - timedelta(days=400) for row in rows):
                 expired.extend(component)
         except (ValueError, TypeError, KeyError, AttributeError, ProductSourceRetired):

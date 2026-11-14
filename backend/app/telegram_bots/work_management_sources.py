@@ -14,6 +14,9 @@ from app.telegram_bots.producer import ProductSourceRetired, _item
 from app.telegram_bots.work_actions import same_body, thaw
 from app.telegram_bots.work_details import WorkDetailProjection
 from app.telegram_bots.work_edit_drafts import snapshot_edit
+from app.telegram_bots.work_management_edit_lineage import ManagementEditLineage
+from app.telegram_bots.work_management_edit_records import read_input
+from app.telegram_bots.work_management_edit_sources import editor_for
 from app.telegram_bots.work_management_navigation import ManagementNavigationProof, navigation_for
 from app.telegram_bots.work_management_origins import ManagementOpening
 from app.telegram_bots.work_management_recovery import ManagementRecoveryProof, recovery_for
@@ -46,7 +49,7 @@ def management_intent(item):
     return value
 
 
-def management_source(link, item, intent, detail, root, act, event, *, instance, clock, config):
+def management_source(link, item, intent, detail, root, act, event, *, instance, clock, config, editor_prompt=None):
     expires = aware(item.created_at) + timedelta(hours=config.callbacks.draft_ttl_hours)
     phase = "draft" if root is not None else "confirm"
     if root is not None:
@@ -93,6 +96,31 @@ def management_source(link, item, intent, detail, root, act, event, *, instance,
     navigation = navigation_for(item)
     if navigation is not None:
         phase = "discarded" if navigation["kind"] == "discard" else "back"
+    editor = editor_for(item)
+    edit_phase = None
+    if editor is not None:
+        if editor_prompt is None or (editor_prompt.kind, editor_prompt.payload.get("purpose"), editor_prompt.payload.get("draft_id")) != ("prompt", "work_edit", editor["draft_id"]):
+            raise ProductSourceRetired()
+        marker = read_input(editor_prompt.payload.get("management_input"))
+        if marker is not None:
+            if (
+                type(marker) is not dict
+                or set(marker) != {"version", "input_id", "phase", "claim_id"}
+                or type(marker["version"]) is not int
+                or marker["version"] != 1
+                or marker["phase"] not in {"captured", "extracting", "failed", "completed"}
+            ):
+                raise ProductSourceRetired()
+            edit_phase = marker["phase"]
+        if root is None:
+            raise ProductSourceRetired()
+        if root.id == editor["draft_id"] and phase in {"draft", "unchanged"}:
+            if edit_phase == "completed":
+                raise ProductSourceRetired()
+            if edit_phase != "failed":
+                phase = "editing"
+        elif root.id != editor["draft_id"] and edit_phase != "completed":
+            raise ProductSourceRetired()
 
     def date(value):
         return datetime.fromisoformat(value).astimezone(clock.zone).strftime("%Y-%m-%d %H:%M") if value else None
@@ -117,13 +145,18 @@ def management_source(link, item, intent, detail, root, act, event, *, instance,
     }
     values = {"name": instance.name, "due": date(draft["due_at"]) if draft is not None else None}
     data = thaw(data)
+    if editor is not None:
+        data.update(editor=editor, edit_phase=edit_phase, edit_failed=edit_phase == "failed")
+    origin = {key: value for key, value in intent.items() if key != "act_id"}
+    if intent["kind"] == "edit":
+        origin["draft_id"] = digest([item.dedupe_key, "draft"])[:32]
     return WorkNewsRead(
         intent["work_id"],
         "management.edit" if intent["kind"] == "edit" else "management.withdraw",
         values,
         detail.protected,
         data,
-        digest([link.id, link.binding_generation, {key: value for key, value in intent.items() if key != "act_id"}]),
+        digest([link.id, link.binding_generation, origin]),
         digest([data, values]),
     )
 
@@ -175,6 +208,7 @@ class WorkManagementProjection:
         self.opening, self.source = ManagementOpening(link, item, self.intent), None
         self.navigation = ManagementNavigationProof(link, item)
         self.recovery = ManagementRecoveryProof(link, item)
+        self.lineage = ManagementEditLineage(link, item, self.intent)
         self.act = private_snapshot(source.work["act"]) if source is not None and source.work["act"] is not None else act
         if (self.act is None) != (self.intent["act_id"] is None):
             raise ProductSourceRetired()
@@ -188,18 +222,20 @@ class WorkManagementProjection:
         result = self.detail.extend(query)
         self.column = len(result.column_descriptions)
         self.delivery_column = self.column + 3
-        root, act, event, delivery, settings = aliased(TelegramActRow), aliased(TelegramActRow), aliased(AgentWorkEventRow), aliased(TelegramOutboxRow), aliased(TelegramPersonSettingsRow)
+        root, act, event, delivery, settings, editor_prompt = aliased(TelegramActRow), aliased(TelegramActRow), aliased(AgentWorkEventRow), aliased(TelegramOutboxRow), aliased(TelegramPersonSettingsRow), aliased(TelegramCallbackRow)
         result = (
-            result.add_columns(root, act, event, delivery, settings)
+            result.add_columns(root, act, event, delivery, settings, editor_prompt)
             .outerjoin(root, root.id == self.intent["draft_id"] if self.intent["draft_id"] else false())
             .outerjoin(act, act.id == self.intent["act_id"] if self.intent["act_id"] else false())
             .outerjoin(event, and_(event.instance_id == self.link.agent_ref, event.operation_id == self.intent["act_id"]) if self.intent["act_id"] else false())
             .join(delivery, delivery.id == self.item.id)
             .join(settings, settings.owner_user_id == self.link.owner_user_id)
+            .outerjoin(editor_prompt, editor_prompt.id == delivery.payload["work_management_editor"]["prompt_id"].as_string())
         )
         result = self.opening.extend(result)
         result = self.navigation.extend(result)
         result = self.recovery.extend(result)
+        result = self.lineage.extend(result)
         self.reservation_column = len(result.column_descriptions)
         reservation, control = aliased(TelegramActRow), aliased(TelegramCallbackRow)
         result = (
@@ -220,7 +256,9 @@ class WorkManagementProjection:
         root, act, event, delivery, settings = rows[0][self.column : self.column + 5]
         self.navigation.check(rows, delivery, root)
         self.recovery.check(rows, delivery, act)
+        self.lineage.check(rows, delivery, root)
         expected = {self.intent["act_id"]} if self.intent["act_id"] is not None else set()
+        expected.update(self.lineage.closed_native_ids)
         reserved = {row[self.reservation_column].id for row in rows if row[self.reservation_column] is not None}
         markers = {value for row in rows if row[self.reservation_column + 1] is not None and (value := row[self.reservation_column + 1].payload.get("work_action_id")) is not None}
         if reserved != expected or markers != expected:
@@ -239,7 +277,17 @@ class WorkManagementProjection:
         ):
             raise ProductSourceRetired()
         source = management_source(
-            self.link, self.item, self.intent, self.detail.source, _snapshot(root) if root is not None else None, _snapshot(act) if act is not None else None, event, instance=rows[0][1], clock=self.clock, config=self.reader.config
+            self.link,
+            self.item,
+            self.intent,
+            self.detail.source,
+            _snapshot(root) if root is not None else None,
+            _snapshot(act) if act is not None else None,
+            event,
+            instance=rows[0][1],
+            clock=self.clock,
+            config=self.reader.config,
+            editor_prompt=rows[0][self.column + 5],
         )
         if self.expected is not None and not same_body(asdict(self.expected), asdict(source)):
             raise ProductSourceRetired()

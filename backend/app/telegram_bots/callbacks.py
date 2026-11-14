@@ -1203,7 +1203,7 @@ class Prompts:
                 from app.telegram_bots.producer import _item
 
                 basis = parent.payload.get("reply_basis", {})
-                if "assignment_prompt_intent" in parent.payload:
+                if "assignment_prompt_intent" in parent.payload or "management_prompt_intent" in parent.payload:
                     from app.telegram_bots.assignment_typing import validate_prompt
 
                     owned = validate_prompt(_item(parent), row)
@@ -1245,7 +1245,7 @@ class Prompts:
         self.repository._borrow(session)
         basis = parent.payload.get("reply_basis", {})
         work_prompt = parent.payload.get("work_request_basis", {}).get("version") == 3 and parent.payload["work_request_basis"]["interaction"]["view"] == "prompt"
-        assignment_prompt = "assignment_prompt_intent" in parent.payload
+        assignment_prompt = "assignment_prompt_intent" in parent.payload or "management_prompt_intent" in parent.payload
         if basis.get("version") not in {5, 7} and not work_prompt and not assignment_prompt:
             return
         pending = list(
