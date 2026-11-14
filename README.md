@@ -2027,6 +2027,10 @@ An active goal waits for the person's choice when a supported client presents a
 proposal; proposing an assignment does not complete the goal.
 Proposal preparation binds the card to its original message and run. An unreadable
 or conflicting source stays held; it cannot create another draft or silently save Work.
+The backend's assignment-control services retain a confirmed save and its original
+Start request through restart. Uncertain starts keep their original identity;
+cancelling a pending request does not claim that a committed start was undone.
+The managed-bot command and button integration follows separately.
 
 ![Assignment proposal in a synthetic conversation](docs/images/assignment-proposal.png)
 

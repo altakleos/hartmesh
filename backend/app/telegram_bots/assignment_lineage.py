@@ -54,9 +54,11 @@ class DelegateFamily:
         )
 
     def check(self, rows, parent):
+        from app.telegram_bots.work_delegate_actions import delegation_children
+
         members = {row[self.column].id for row in rows if row[self.column] is not None}
         children = {row[self.column + 1].id for row in rows if row[self.column + 1] is not None}
-        expected = list(parent.operation_ids)
+        expected = list(delegation_children(parent))
         if len(expected) > 1 or len(set(expected)) != len(expected) or children != set(expected) or members != {parent.id, *expected}:
             raise ProductSourceRetired()
 
@@ -80,8 +82,11 @@ class FreshDraft:
 
 
 async def read_family(reader, root_id, parent):
+    from app.telegram_bots.work_delegate_actions import delegation_children
+
     action = TelegramActRow
     members = set(await reader.scalars(select(action.id).where(action.kind == "delegate", action.continuation["delegate_source"]["draft_id"].as_string() == root_id)))
     children = set(await reader.scalars(select(action.id).where(action.kind == "delegate", action.continuation["delegate_source"]["parent_id"].as_string() == parent.id)))
-    if len(parent.operation_ids) > 1 or members != {parent.id, *parent.operation_ids} or children != set(parent.operation_ids):
+    expected = delegation_children(parent)
+    if len(expected) > 1 or members != {parent.id, *expected} or children != set(expected):
         raise ProductSourceRetired()

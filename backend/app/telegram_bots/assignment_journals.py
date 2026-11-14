@@ -5,7 +5,7 @@ from datetime import timedelta
 from app.telegram_bots.assignment_sources import private_facts, private_snapshot
 from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_actions import request_for, same_body, thaw
-from app.telegram_bots.work_delegate_actions import delegate_source, draft_body_signature, qualify_delegate_receipt, qualify_no_due, require_delegate_scope
+from app.telegram_bots.work_delegate_actions import delegate_source, delegation_children, draft_body_signature, qualify_delegate_receipt, qualify_no_due, require_delegate_scope
 
 RETRY_REASONS = frozenset({"agent-not-active", "work-off", "lifecycle-pending", "denied", "grant-required", "not-visible", "storage-busy"})
 
@@ -40,7 +40,7 @@ def exact_delegation(link, root, parent, child):
             or not same_body(request.model_dump(mode="json", exclude_unset=True), parent.body)
         ):
             raise ValueError()
-        if parent.operation_ids:
+        if delegation_children(parent):
             if child is None:
                 raise ValueError()
             require_delegate_scope(link, child)

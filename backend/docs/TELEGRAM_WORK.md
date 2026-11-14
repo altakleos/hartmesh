@@ -1347,11 +1347,38 @@ non-effect refusal; the deadline words remain criteria without truncation. An
 admitted child retains its own attempt window after the parent's window ends.
 `AgentWork.delegate(admission=...)` checks trusted caller custody before writes
 and again before commit, alongside canonical policy and authority checks. Exact
-receipt replay stays read-only. A successful Save-and-Start journal records its
-authorized activation continuation with the delegation receipt; it does not yet
-dispatch it. Card publication and callback admission use the owners below;
-prompt, continuation and runtime installation remain separate work. Private draft/request rows are
+receipt replay stays read-only. A Save-and-Start journal records its authorized
+child before the first primary call, then makes it ready with the delegation
+receipt. Card publication and callback admission use the owners below;
+default runtime installation remains separate work. Private draft/request rows are
 never executable through the generic action worker or human-input outcome owner.
+
+`work_continuation_state.py` owns the closed authorization and canonical child
+identity. `work_continuations.py` recovers the delegation's one activation under
+`sha256(parent + ":activate")[:32]`. Child insertion, immutable body and parent
+operation link commit together before the activation call. Planning checks the
+original one-hour consent window after provider awaits; the entered child keeps
+its own attempt clock. Missing/orphaned journals never become a new plan. The
+no-date delegation child remains distinct from activation in receipts, readers
+and retention. A definite preparation refusal records its bounded reason without
+changing the successful save or inventing a child operation.
+
+`work_continuation_sources.py` joins the primary event, parent/child, original
+draft/input/family and actual full-card consent in the final activation snapshot.
+Proposal origins retain every original input. A callback origin cannot become
+internal merely by losing a field: the independent Root witness and same-binding
+card/control references still prevent that transition. Other-binding history
+cannot provide those witnesses. Receipt recovery compares canonical primary
+fields, allowing its service view to project today's live attempt.
+
+The action worker rotates bounded continuation batches, skips independently
+active children and preserves the existing retry interval. A known receipt may
+settle before another mutation is due. Cancel fences the parent and its owned
+children together without waiting for a live call. It preserves a proved save
+and reads exact receipts; a known activation keeps its status, while an unresolved
+runless promise remains uncertain and never returns to the launcher after Cancel.
+Completion racing cancellation cannot reauthorize a child. Decision/voice reuse
+and composite notice/default-controller installation remain separate integration.
 
 `AssignmentPlans` and `AssignmentReader` own full source-qualified draft cards
 and their Save outcomes through the existing Work notice sender. All canonical
@@ -1387,6 +1414,10 @@ unfinished effect/continuation. Unconfirmed work survives normal history sweeps;
 unadmitted drafts expire using the configured original age. Settled families with
 no live dependencies expire after the existing 400-day Act retention. Root witnesses
 without their operation marker remain unknown and cannot become a fresh draft.
+An independently pending child outcome retains the complete original family only
+after its actual owner/binding/Work scope matches. A proved preparation refusal
+with no child promise can close; read-only journal snapshots qualify the same
+canonical activation receipt as their database rows.
 `AssignmentPromptPlans` owns deferred `assign_words`, `assign_done` and `assign_edit`
 prompts. Presentation and prompt metadata share the WorkNews writer; replacement
 reattaches only a known pending prompt. Full Telegram acknowledgement starts its
@@ -1411,8 +1442,8 @@ draft available. `AssignmentDraftNavigation` implements Discard as a metadata-on
 disposition with the same full-card/fresh-family checks; its replay reads that
 closed witness without resetting its clock.
 
-These owners remain dormant until runtime installation. Voice capture, proposal
-adoption/Just answer and Save-and-Start dispatch remain separate integration work.
+The default channel commands/callbacks, assignment voice capture and composite
+outcome delivery remain separate integration work.
 
 Proposal ToolMessage IDs include the issuing AI message's scope so reused
 provider tool-call IDs cannot overwrite earlier cards; replay of the same call

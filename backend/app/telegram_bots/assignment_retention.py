@@ -17,7 +17,7 @@ from app.telegram_bots.links import BotLink
 from app.telegram_bots.notifications import aware
 from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_actions import same_body
-from app.telegram_bots.work_delegate_actions import delegate_source, private_draft
+from app.telegram_bots.work_delegate_actions import delegate_source, delegation_children, private_draft
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow
 
@@ -93,7 +93,7 @@ def closed_family(scope, root, parents, journals, reverse, forward, events, atte
         if len(parents) != 1 or list(root.operation_ids) != [parents[0].id]:
             return False
         parent = parents[0]
-        children = set(parent.operation_ids)
+        children = set(delegation_children(parent))
         if children != reverse[parent.id] or any(forward[identity] != {parent.id} for identity in children):
             return False
         if root.stop_dispatch is not None or parent.stop_dispatch is not None:
@@ -116,11 +116,23 @@ def closed_family(scope, root, parents, journals, reverse, forward, events, atte
                 return False
             activation, attempt = journals.get(activation_id), attempts.get(activation_id)
             if activation is not None:
+                from app.telegram_bots.work_continuation_state import require_child
+
+                require_child(parent, activation)
                 if not closed_activation(activation, scope, attempt, work_id=activation.work_id):
                     return False
-            elif attempt is not None or continuation["phase"] not in {"expired", "cancelled"}:
+            elif continuation.get("child_body") is not None:
                 return False
-        child = journals.get(parent.operation_ids[0]) if len(parent.operation_ids) == 1 else None
+            elif attempt is not None:
+                return False
+            elif continuation["phase"] not in {"expired", "cancelled"}:
+                from app.telegram_bots.work_continuation_state import continuation_state
+
+                ended = continuation_state(parent)
+                if ended["phase"] != "refused" or ended["child_body"] is not None or "refusal" not in ended:
+                    return False
+        delegated = delegation_children(parent)
+        child = journals.get(delegated[0]) if len(delegated) == 1 else None
         if child is not None and child.stop_dispatch is not None:
             return False
         effective = exact_delegation(scope, root, parent, child)
@@ -130,6 +142,8 @@ def closed_family(scope, root, parents, journals, reverse, forward, events, atte
         event = events.get((effective.instance_id, effective.id))
         receipt = saved_receipt(scope, effective, event)
         if parent.state == "done" and receipt is not None:
+            if continuation is not None and (continuation.get("work_id"), continuation.get("assignment_revision")) != (receipt["id"], receipt["assignment_revision"]):
+                return False
             return child is None or same_body(parent.result, {"delegate_child_id": child.id, "receipt": child.result})
         return event is None and parent.state in {"refused", "conflict"} and effective.state in {"refused", "conflict"} and effective.reason not in {"cancel-unconfirmed", "invalid", "missing"}
     except (ValueError, TypeError, KeyError, AttributeError, ProductSourceRetired):
@@ -234,9 +248,24 @@ async def assignment_dependencies(session, now, *, max_age_days, draft_ttl_hours
     from app.telegram_bots.work_start_retention import reserved_starts
 
     held_groups, held_anchors = await reserved_starts(session)
-    execution_groups, execution_anchors, _held_acts = await execution_dependencies(session)
+    execution_groups, execution_anchors, held_execution_acts = await execution_dependencies(session)
     held_groups.update(execution_groups)
     held_anchors.update(execution_anchors)
+    # A separately pending child outcome owns its whole original family. A raw
+    # foreign-generation/target reference cannot inherit that custody.
+    ordered_anchors = sorted(execution_anchors)
+    for start in range(0, len(ordered_anchors), 500):
+        for delivery in await session.scalars(select(TelegramOutboxRow).where(TelegramOutboxRow.id.in_(ordered_anchors[start : start + 500]))):
+            payload = delivery.payload if isinstance(delivery.payload, Mapping) else {}
+            intent = payload.get("work_execution_intent", payload.get("capacity_offer_intent"))
+            child = journals.get(intent.get("act_id")) if isinstance(intent, Mapping) else None
+            if (
+                child is not None
+                and child.id in held_execution_acts
+                and (child.link_id, child.owner_user_id, child.binding_generation, child.chat_id, child.instance_id, child.work_id)
+                == (delivery.link_id, delivery.owner_user_id, delivery.binding_generation, delivery.chat_id, delivery.instance_id, delivery.work_id)
+            ):
+                result.acts.add(child.id)
     from app.telegram_bots.assignment_answer_retention import answer_dependencies
 
     answer_groups, answer_anchors = await answer_dependencies(session, controls, links, now, max_age_days=max_age_days)
@@ -265,6 +294,14 @@ async def assignment_dependencies(session, now, *, max_age_days, draft_ttl_hours
         member_ids = {identity, *parent_refs[identity], *child_refs[identity]}
         if root is not None:
             member_ids.update(member for member in root.operation_ids if type(member) is str)
+            original_scope = retained_scope(root)
+            for parent_id in parent_refs[identity]:
+                parent = journals.get(parent_id)
+                continuation = parent.continuation.get("activation_continuation") if parent is not None and isinstance(parent.continuation, Mapping) else None
+                child_id = continuation.get("child_id") if isinstance(continuation, Mapping) else None
+                child = journals.get(child_id) if type(child_id) is str else None
+                if child is not None and original_scope is not None and (child.link_id is None or in_scope(child, original_scope)):
+                    member_ids.add(child.id)
         pending_members = list(member_ids)
         visited = set()
         while pending_members:

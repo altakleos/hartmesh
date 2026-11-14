@@ -18,6 +18,7 @@ from sqlalchemy import and_, or_, select
 
 from app.telegram_bots.authority import AccessOff, CeilingRefused, require
 from app.telegram_bots.links import BotLink
+from app.telegram_bots.work_continuations import ContinuationActionMethods
 from app.telegram_bots.work_delegate_actions import DelegateActionMethods
 from app.telegram_bots.work_management_actions import ManagementActionMethods
 from app.telegram_bots.work_start_actions import ActivationActionMethods
@@ -61,7 +62,7 @@ def request_for(kind, body, *, identity=None):
     return request
 
 
-class WorkActionMethods(ManagementActionMethods, StopActionMethods, ActivationActionMethods, DelegateActionMethods):
+class WorkActionMethods(ContinuationActionMethods, ManagementActionMethods, StopActionMethods, ActivationActionMethods, DelegateActionMethods):
     """Methods mixed into the existing Acts journal; no independent lifecycle."""
 
     @asynccontextmanager
@@ -532,6 +533,7 @@ class ActsWorker:
         self.available = available
         self._task = None
         self._stopping = False
+        self._continuation_after = ""
 
     async def stop(self):
         self._stopping = True
@@ -585,3 +587,4 @@ class ActsWorker:
                 if now - _utc(act.updated_at) >= timedelta(seconds=retry_seconds):
                     await await_drained(self.acts._attempt_work(act, attempt_current=lambda: not self._stopping and self.available()))
         await self.acts._recover_stop_dispatches(attempt_current=lambda: not self._stopping and self.available())
+        self._continuation_after = await self.acts._recover_continuations(after=self._continuation_after, attempt_current=lambda: not self._stopping and self.available())

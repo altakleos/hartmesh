@@ -116,7 +116,10 @@ class AssignmentReader(WorkViewReader):
                     from app.telegram_bots.assignment_lineage import read_family
 
                     await read_family(reader, captured.id, parent)
-                    child = await reader.get(TelegramActRow, parent.operation_ids[0]) if len(parent.operation_ids) == 1 else None
+                    from app.telegram_bots.work_delegate_actions import delegation_children
+
+                    children = delegation_children(parent)
+                    child = await reader.get(TelegramActRow, children[0]) if len(children) == 1 else None
                     original_event = await reader.scalar(select(AgentWorkEventRow).where(AgentWorkEventRow.instance_id == link.agent_ref, AgentWorkEventRow.operation_id == parent.id))
                     child_event = await reader.scalar(select(AgentWorkEventRow).where(AgentWorkEventRow.instance_id == link.agent_ref, AgentWorkEventRow.operation_id == child.id)) if child else None
                     journal = (_snapshot(parent), _snapshot(child) if child else None, original_event, child_event)
