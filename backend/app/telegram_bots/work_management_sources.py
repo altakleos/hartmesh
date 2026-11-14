@@ -49,7 +49,7 @@ def management_intent(item):
     return value
 
 
-def management_source(link, item, intent, detail, root, act, event, *, instance, clock, config, editor_prompt=None):
+def management_source(link, item, intent, detail, root, act, event, *, instance, clock, config, editor_prompt=None, heard=None):
     expires = aware(item.created_at) + timedelta(hours=config.callbacks.draft_ttl_hours)
     phase = "draft" if root is not None else "confirm"
     if root is not None:
@@ -144,6 +144,8 @@ def management_source(link, item, intent, detail, root, act, event, *, instance,
         "recovery": recovery_for(item),
     }
     values = {"name": instance.name, "due": date(draft["due_at"]) if draft is not None else None}
+    if heard is not None:
+        values["heard"] = heard
     data = thaw(data)
     if editor is not None:
         data.update(editor=editor, edit_phase=edit_phase, edit_failed=edit_phase == "failed")
@@ -288,6 +290,7 @@ class WorkManagementProjection:
             clock=self.clock,
             config=self.reader.config,
             editor_prompt=rows[0][self.column + 5],
+            heard=self.lineage.heard,
         )
         if self.expected is not None and not same_body(asdict(self.expected), asdict(source)):
             raise ProductSourceRetired()

@@ -64,5 +64,7 @@ def present_management(source, basis, link):
         keyboard.insert(
             0, [{"label": "label.cancel" if notice["cancel"] else "label.retry_action", "kind": "cancel_wait" if notice["cancel"] else "act_check", "target_kind": "act", "target_id": act["id"], "payload": {"act_id": act["id"]}}]
         )
+    if source.values.get("heard") is not None and phase in {"draft", "unchanged"}:
+        html = render("voice.heard", locale, text=source.values["heard"]) + "\n\n" + html
     parts = tuple({"kind": "text", "html": chunk, "visible_text": visible_text(chunk), "protect_content": source.protected} for chunk in split_html(html))
     return WorkViewPresentation(parts, tuple(tuple(row) for row in canonical_keyboard(keyboard)))

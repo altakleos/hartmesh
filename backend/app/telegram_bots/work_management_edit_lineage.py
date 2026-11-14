@@ -19,6 +19,7 @@ from app.telegram_bots.work_management_edit_records import read_editor, read_inc
 from app.telegram_bots.work_management_origins import displayed_management, origin_for
 from app.telegram_bots.work_management_prompt_sources import editor_from, prompt_intent
 from app.telegram_bots.work_management_retention import closed_edit
+from app.telegram_bots.work_management_voice_inputs import edit_basis
 from app.telegram_bots.work_result_identity import digest
 from deerflow.persistence.agent_instances.work import AgentWorkEventRow
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
@@ -89,6 +90,7 @@ class ManagementEditLineage:
     def check(self, rows, parent, root):
         initial = digest([self.item.dedupe_key, "draft"])[:32]
         self.closed_native_ids = set()
+        self.heard = None
         if not self.values:
             if self.intent["kind"] == "edit" and self.intent["draft_id"] != initial:
                 raise ProductSourceRetired()
@@ -145,7 +147,16 @@ class ManagementEditLineage:
                     or mark.route_target_id != fresh.id
                     or mark.operation_ids
                     or not same_body(origin_facts(incoming), value["input"])
-                    or not same_body(basis, {"version": 1, "input": value["input"], "prompt_outbox_id": delivery.id, "intent": intent, "words": accepted_text(mark, prompt, acknowledged, message_ids=messages), "draft_id": fresh.id})
+                    or not same_body(
+                        basis,
+                        edit_basis(
+                            self.link,
+                            mark,
+                            prompt,
+                            delivery,
+                            {"version": 1, "input": value["input"], "prompt_outbox_id": delivery.id, "intent": intent, "words": accepted_text(mark, prompt, acknowledged, message_ids=messages), "draft_id": fresh.id},
+                        ),
+                    )
                     or digest(["management-edit", value["input"]])[:32] != fresh.id
                     or type(marker) is not dict
                     or set(marker) != {"version", "input_id", "phase", "claim_id"}
@@ -158,5 +169,9 @@ class ManagementEditLineage:
                     or prompt.closed_reason != "answered"
                 ):
                     raise ValueError()
+                if fresh.id == root.id and basis["version"] == 2:
+                    from app.telegram_bots.voice import _echo
+
+                    self.heard = _echo(basis["words"])
         except (ValueError, TypeError, KeyError, AttributeError, StopIteration, CallbackRefused):
             raise ProductSourceRetired() from None

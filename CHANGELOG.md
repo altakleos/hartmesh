@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Accept spoken corrections in saved-assignment Edit prompts, retain the original
+  recording and prompt through recovery, and require a fresh acknowledged Save.
 - Notify the next eligible saved Start when a Work place becomes available,
   with an acknowledged full preview and a fresh Start control. Offers remain
   advisory, globally paced and available with proactive notifications disabled.

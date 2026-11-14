@@ -2015,7 +2015,8 @@ answering a question never starts or resumes an assignment. Type `/work` (or
 Resume and Stop when your current access allows them. Use `/assign` followed by
 your instructions, or answer its prompt with text or voice, to review a private
 draft before saving or starting it. Change and Withdraw open their own previews;
-saving an edit or confirming withdrawal is a separate gesture. Stopping targets the selected attempt;
+an Edit prompt also accepts a voice note and shows its transcript with the revised
+draft. Saving an edit or confirming withdrawal is a separate gesture. Stopping targets the selected attempt;
 a newer attempt cannot inherit an earlier cancellation request. An acknowledgement
 of the request is separate from confirmed settlement.
 
