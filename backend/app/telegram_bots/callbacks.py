@@ -1051,6 +1051,8 @@ class CallbackRepository:
                     show_proofs.add(candidate.id)
                 removed = 0
                 for row in rows:
+                    if row.id in command_stops.callbacks:
+                        continue
                     if row.id in show_proofs:
                         continue
                     if row.group_id in pending_groups:

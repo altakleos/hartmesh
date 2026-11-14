@@ -42,6 +42,8 @@ def choice_intent(item):
 
 def present_stop_choices(source, basis, link):
     keyboard = []
+    if source.work["basis"]["answer"] is not None:
+        keyboard.append([{"label": "label.stop_answer", "kind": "stop_which", "target_kind": "link", "target_id": link.id, "payload": {"choice": "answer"}, "expires_at": source.work["expires_at"]}])
     for target, detail in zip(source.work["basis"]["targets"], source.work["details"], strict=True):
         objective = " ".join(detail["record"]["objective"].split())
         title = objective if len(objective) <= 24 else objective[:24] + "…"
@@ -114,7 +116,6 @@ class CommandStopChoiceProjection:
             mark is None
             or not same_body(command_basis(mark), self.basis)
             or self.basis["selection"] is not None
-            or self.basis["answer"] is not None
             or self.intent["signature"] != digest(self.basis)
             or _item(delivery) != self.item
             or (delivery.link_id, delivery.owner_user_id, delivery.binding_generation, delivery.chat_id, delivery.message_thread_id, delivery.instance_id, delivery.work_id, delivery.class_)

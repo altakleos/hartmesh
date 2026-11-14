@@ -86,6 +86,28 @@ class _Guard:
         return result
 
 
+class _StopAdmissionGuard:
+    def __init__(self, original, admission):
+        self.original, self.admission = original, admission
+
+    @property
+    def captured_link(self):
+        return self.original.captured_link
+
+    async def prepare(self):
+        from app.telegram_bots.links import prepare_publication_guard
+
+        await prepare_publication_guard(self.original)
+
+    async def check(self, writer):
+        result = await self.original.check(writer)
+        await self.admission(session=writer)
+        current = getattr(self.original, "current", None)
+        if current is not None:
+            current()
+        return result
+
+
 @dataclass(eq=False)
 class _Turn:
     channel: object
@@ -116,6 +138,7 @@ class _Turn:
     capacity_notice_sent: bool = False
     stop_marker_checked: bool = False
     stop_press: tuple | None = None
+    stop_authorization: object = None
     waiting_told: bool = False
     submission: object = None
     quiet_since: float | None = None
@@ -768,13 +791,16 @@ class ChatTurns:
         source = await self._source(turn, key)
         if values:
             source["values"].update(values)
+        guard = self._guard(turn, repair=True)
+        if key == "busy.cancelled" and turn.stop_authorization is not None:
+            guard = _StopAdmissionGuard(guard, turn.stop_authorization.prepublication)
         identity = await self.services.outbox.plan_input_outcome(
             turn.link,
             source_id=f"chat-input:{turn.link.chat_id}:{turn.link.binding_generation}:" + (turn.callback_id or str(turn.origins[0].message_id)),
             source_ref=source,
             keyboard=keyboard,
             callbacks=self.services.callbacks,
-            guard=self._guard(turn, repair=True),
+            guard=guard,
             inbox_rows=() if turn.callback_id else turn.origins,
             input_owner_callback_id=turn.callback_id,
         )
@@ -1111,7 +1137,10 @@ class ChatTurns:
             guard = self._guard(turn, repair=True)
             await guard.prepare()
             guard.current()
-            await self.services.outbox.inbox.finish_route(row)
+            if row.route_kind == "command_stop":
+                await self.services.work_chat.command_stops.answers.completed(turn, row, guard=guard)
+            else:
+                await self.services.outbox.inbox.finish_route(row)
             guard.current()
         turn.stop_commands.clear()
 
@@ -1375,7 +1404,8 @@ class ChatTurns:
                 await self._pause_ui(turn)
                 if not self._current(turn):
                     return
-                turn.stop_status = await self.observer.request_stop(turn.record, turn.link, stop_id=turn.stop_id)
+                extra = {"admission": turn.stop_authorization} if turn.stop_authorization is not None else {}
+                turn.stop_status = await self.observer.request_stop(turn.record, turn.link, stop_id=turn.stop_id, **extra)
                 if not self._current(turn):
                     return
             elif turn.stop_status == "pending":
@@ -1384,16 +1414,20 @@ class ChatTurns:
                     turn.stop_status = decision
             if turn.stop_status == "requested":
                 self._drop_waiting(turn)
-            if turn.stop_status in {"refused", "terminal"}:
+            if turn.stop_status in {"refused", "terminal", "expired"}:
                 turn.stop_requested = False
                 turn.cancel_future = False
                 turn.stop_id = None
+                turn.stop_authorization = None
                 if turn.presentation is not None:
                     await turn.presentation.resume()
                 press, turn.stop_press = turn.stop_press, None
-                if turn.stop_status == "refused":
+                if turn.stop_status in {"refused", "expired"}:
                     for row in turn.stop_commands:
-                        await turn.channel.send_text("stop.failed", source_id=f"chat-stop-refused:{row.chat_id}:{row.message_id}", inbox_rows=[row], finish_route=True, thread=turn.topic, _captured_link=turn.link)
+                        if row.route_kind == "command_stop":
+                            await self.services.work_chat.command_stops.answers.refused(turn, row, guard=self._guard(turn, repair=True), reason="expired" if turn.stop_status == "expired" else "refused")
+                        else:
+                            await turn.channel.send_text("stop.failed", source_id=f"chat-stop-refused:{row.chat_id}:{row.message_id}", inbox_rows=[row], finish_route=True, thread=turn.topic, _captured_link=turn.link)
                     turn.stop_commands.clear()
                     if press is not None:
                         row, update_id = press
@@ -1403,6 +1437,8 @@ class ChatTurns:
                 record = turn.record
                 attempt = await self.services.publication_authority.capture(turn.link, thread_id=record.scope.thread_id, endpoint_id=record.scope.endpoint_id)
                 guard = self._guard(turn, borrowed=attempt.cancel_guard)
+                if turn.stop_authorization is not None:
+                    guard = _StopAdmissionGuard(guard, turn.stop_authorization.receipt)
                 fresh, _ = await self.services.outbox.inbox.read_publication_input(record, guard=guard)
                 if not self._current(turn):
                     return
@@ -1421,9 +1457,16 @@ class ChatTurns:
             self.queue.cancel_wait(turn.link, turn.topic)
             turn.waiting_dropped = True
 
-    async def _stop_turn(self, turn, *, stop_id):
+    async def _stop_turn(self, turn, *, stop_id, admission=None):
         if not self._current(turn):
             return
+        if turn.stop_id not in (None, stop_id):
+            raise ValueError("original-stop-still-pending")
+        if admission is not None:
+            await admission.admit()
+            if not self._current(turn):
+                return
+            turn.stop_authorization = admission
         turn.stop_requested = True
         turn.cancel_future = True
         turn.quiet_since = None
@@ -1449,7 +1492,10 @@ class ChatTurns:
             if record is None or not self._current(turn):
                 break
             attempt = await self.services.publication_authority.capture(turn.link, thread_id=record.scope.thread_id, endpoint_id=record.scope.endpoint_id)
-            fresh = await self.services.outbox.inbox.request_publication_stop(record, stop_id=turn.stop_id, guard=self._guard(turn, borrowed=attempt.cancel_guard))
+            guard = self._guard(turn, borrowed=attempt.cancel_guard)
+            if turn.stop_authorization is not None:
+                guard = _StopAdmissionGuard(guard, turn.stop_authorization)
+            fresh = await self.services.outbox.inbox.request_publication_stop(record, stop_id=turn.stop_id, guard=guard)
             if not self._current(turn):
                 return
             if turn.record.publication_id == record.publication_id:
@@ -1709,6 +1755,8 @@ class ChatTurns:
         if settings_prompts is not None and await settings_prompts.recover(channel, captured, entry, guard=guard):
             return
         work_chat = getattr(host, "work_chat", None)
+        if work_chat is not None and await work_chat.command_stops.answers.recover_before_disposition(captured, entry, guard=guard):
+            return
         if entry.hold_reason == "unsupported_input" and len(entry.origins) == 1 and work_chat is not None:
             if await work_chat.assignment_commands.close_legacy_capture(captured, entry.origins[0], guard=guard):
                 return

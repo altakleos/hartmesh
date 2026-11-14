@@ -527,13 +527,21 @@ class ChannelExecutionFacade:
             return "requested"  # Already cancelled, and only the answer to that request was lost.
         if run.row["status"] in {"success", "error", "timeout", "interrupted"}:
             return "terminal"
+
+        async def before_cancel():
+            await self._authorize("run_cancel")
+            begin = getattr(self._admission, "begin_cancel", None)
+            if begin is not None:
+                await begin(run_id)
+            self._check_current("run_cancel")
+
         response = await self._owner.request_json(
             operation="run_cancel",
             owner_user_id=self.scope.owner_user_id,
             method="POST",
             path=self._thread_path + "/runs/" + quote(run_id, safe="") + "/cancel",
             params={"wait": False, "action": "interrupt"},
-            before_dispatch=lambda: self._authorize("run_cancel"),
+            before_dispatch=before_cancel,
             after_response=lambda: self._authorize("run_cancel"),
         )
         self._check_current("run_cancel")

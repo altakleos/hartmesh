@@ -1744,7 +1744,7 @@ still need public callback routing and the runtime observer.
 
 ## Typed Stop ownership
 
-`work_command_stops.py` owns `/stop` when no chat answer is active. It reads all
+`work_command_stops.py` owns assignment-aware `/stop`. It reads all
 authorized Work pages and applies the Work tab's Stop rule. One eligible attempt
 is selected by the original command; several require a genuine `stop_which`
 choice. The real command Inbox, frozen Work/attempt identities and actual choice
@@ -1766,10 +1766,28 @@ renewed cancellation window. A failed target does not prevent the others settlin
 `work_command_stop_retention.py` retains complete input/UI/journal dependencies
 while an original promise is unresolved or its controls remain live. Closed
 historical markers can expire only with the existing native receipt and
-original-attempt settlement proof. This path preserves ordinary chat Stop.
+original-attempt settlement proof. Ordinary chats retain their existing Stop.
 Expired unselected choices close without native actions. A retired binding's
 maintenance uses Link -> Outbox -> Input locks and preserves pending SDK claims.
 Malformed families retain only their independently identified original scope.
+
+An active answer adds The answer and Everything choices using the actual
+ChatTurns origins, callback owner and publication captured before Work reads.
+`work_command_stop_answers.py` never constructs a replacement turn. Its durable
+admission separates ready intent from exact pre-POST entry; both use the original
+one-hour consent clock. Native terminal reads can settle an uncertain barrier
+without another cancellation. A known unentered expiry clears its own barrier
+and resumes the original answer. Each selected Work target progresses independently.
+
+Cold recovery uses `work_command_stop_cold.py` for finite original-publication
+lookup and `work_command_stop_cold_receipts.py` for a fixed cancelled primary.
+It creates no run and restores no opaque preview capability. Startup gives a
+selected original its mixed owner before generic restart disposition. Damaged
+custody holds through independently scoped shown-source evidence.
+Prepublication input and callback closure recheck mixed consent in their final
+writer. Common completion waits for every selected target's owned delivery;
+retention additionally requires original physical settlement and complete SDK
+receipts against canonical current presentation and documented repair history.
 
 ## Saved assignment correction inputs
 

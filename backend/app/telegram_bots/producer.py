@@ -191,6 +191,7 @@ _TURN_OUTCOME_KEYS = frozenset(
         "error.model_refused",
         "answer.on_web",
         "busy.cancelled",
+        "stop.answer",
         "busy.gave_up",
         "chat.restarted",
         "chat.conversation_deleted",
@@ -207,7 +208,7 @@ _NO_RUN_KEYS = frozenset({"error.generic", "busy.cancelled", "chat.restarted"})
 _UNDELIVERABLE_KEYS = frozenset({"answer.on_web", "error.generic"})
 _DELETED_SOURCE = {"key": "chat.conversation_deleted", "values": {}}
 _TURN_OUTCOME_KEYS |= frozenset(INSTANCE_RUN_STOP_REASONS.values()) | {"unavailable.off", "unavailable.paused", "unavailable.moved", "unavailable.files_unchecked", "unavailable.fix"}
-INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"answer.on_web"} - CAPACITY_KEYS) | {
+INPUT_OUTCOME_KEYS = (_TURN_OUTCOME_KEYS - {"answer.on_web", "stop.answer"} - CAPACITY_KEYS) | {
     "custom_agent.deleted",
     "busy.followup_full",
     "voice.failed",
@@ -228,10 +229,17 @@ class PublicationOutcomeBasis:
     stop_id: str | None = None
 
 
-def _prepare_publication_outcome(record, *, run, creation_refusal, source_ref, undeliverable=False, no_run=False, deleted=False):
+def _prepare_publication_outcome(record, *, run, creation_refusal, source_ref, undeliverable=False, no_run=False, deleted=False, cancelled_output=None, stop_id=None):
     from app.channels.execution import ChannelExecutionScope
     from app.telegram_bots.errors import classify_creation_refusal, classify_run
 
+    if cancelled_output is not None or stop_id is not None:
+        if run is None or creation_refusal is not None or undeliverable or no_run or deleted:
+            raise ValueError("publication-outcome-conflict")
+        from app.telegram_bots.work_command_stop_cold_receipts import cancelled_stop_proof
+
+        proof = cancelled_stop_proof(record, run, cancelled_output, stop_id, source_ref)
+        return _safe_json({"version": 1, "publication": _publication_identity(record), "proof": proof, "source_ref": source_ref, "finish_route": True})
     if deleted:
         if run is not None or creation_refusal is not None or undeliverable or no_run or source_ref != _DELETED_SOURCE:
             raise ValueError("publication-outcome-conflict") from None
@@ -299,7 +307,11 @@ def validate_publication_outcome(item: OutboxItem) -> PublicationOutcomeBasis:
             scope.agent_name,
             instance_id=scope.agent_ref if scope.agent_kind == "instance" else None,
         )
-        if proof.get("kind") == "run" and set(proof) in ({"kind", "row"}, {"kind", "row", "error"}):
+        if proof.get("kind") == "cancelled_stop":
+            from app.telegram_bots.work_command_stop_cold_receipts import read_cancelled_stop
+
+            read_cancelled_stop(record, proof, source)
+        elif proof.get("kind") == "run" and set(proof) in ({"kind", "row"}, {"kind", "row", "error"}):
             run = ValidatedRun(MappingProxyType(proof["row"]), receipt_from_run_kwargs(proof["row"].get("kwargs")))
             classified = classify_saved_run(run, execution, proof["error"]) if "error" in proof else classify_run(run, execution)
             if classified is None or source["key"] != classified.text_key and not (classified.retry_later and source["key"] in {"busy.gave_up", "busy.cancelled"}):
@@ -1429,7 +1441,7 @@ class Outbox:
             return False
         return proof.record.scope == scope and proof.kind == "run" and proof.source_ref["key"] == "start.ws_failed"
 
-    async def plan_publication_outcome(self, record, *, run=None, creation_refusal=None, source_ref, keyboard, callbacks, guard, undeliverable=False, no_run=False, deleted=False, url_button=None):
+    async def plan_publication_outcome(self, record, *, run=None, creation_refusal=None, source_ref, keyboard, callbacks, guard, undeliverable=False, no_run=False, deleted=False, url_button=None, cancelled_output=None, stop_id=None):
         from app.telegram_bots.links import prepare_publication_guard
 
         link = _guard_publication_link(record, guard)
@@ -1444,7 +1456,11 @@ class Outbox:
                 source["values"].pop("start_failed_again", None)
                 if await self._repeat_start_failure(writer, record):
                     source["values"]["start_failed_again"] = True
-            basis = await await_drained(asyncio.to_thread(_prepare_publication_outcome, record, run=run, creation_refusal=creation_refusal, source_ref=source, undeliverable=undeliverable, no_run=no_run, deleted=deleted))
+            basis = await await_drained(
+                asyncio.to_thread(
+                    _prepare_publication_outcome, record, run=run, creation_refusal=creation_refusal, source_ref=source, undeliverable=undeliverable, no_run=no_run, deleted=deleted, cancelled_output=cancelled_output, stop_id=stop_id
+                )
+            )
             return await self._plan_product_keyboard(
                 link,
                 source_id="turn-outcome:" + record.publication_id,

@@ -42,6 +42,7 @@ class _State:
     stop_accepted: bool = False
     stop_decisions: dict[str, str] = field(default_factory=dict)
     stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    stop_authorizations: dict = field(default_factory=dict)
     sequence: int = 0
     prefixes: dict = field(default_factory=dict)
     issued: object = field(default_factory=weakref.WeakValueDictionary)
@@ -82,7 +83,19 @@ class _Admission:
 
     async def authorize(self, operation):
         self.observer._check(self.state)
+        authorization = self.state.stop_authorizations.get(self.state.stop_id)
+        if operation == "run_cancel" and authorization is not None:
+            await authorization()
         await self.original.authorize(operation)
+        self.observer._check(self.state)
+        if operation == "run_cancel" and authorization is not None:
+            await authorization()
+
+    async def begin_cancel(self, run_id):
+        self.observer._check(self.state)
+        authorization = self.state.stop_authorizations.get(self.state.stop_id)
+        if authorization is not None:
+            await authorization.enter(run_id)
         self.observer._check(self.state)
 
 
@@ -484,7 +497,7 @@ class RunObserver:
             _refuse()
         return state.stop_decisions.get(stop_id)
 
-    async def request_stop(self, record, current_link, *, stop_id):
+    async def request_stop(self, record, current_link, *, stop_id, admission=None):
         state = self._state(record, current_link)
         if type(stop_id) is not str or not stop_id or not stop_id.isprintable():
             _refuse()
@@ -492,6 +505,20 @@ class RunObserver:
         async def perform():
             async with state.stop_lock:
                 self._check(state)
+                if state.stop_id not in (None, stop_id) and state.stop_decisions.get(state.stop_id) not in {"refused", "terminal"}:
+                    _refuse()
+                if admission is not None:
+                    try:
+                        await admission()
+                    except Exception:
+                        if getattr(admission, "expired_unentered", False):
+                            return await self._expire_unentered(state, stop_id, admission)
+                        raise
+                    self._check(state)
+                    previous = state.stop_authorizations.get(stop_id)
+                    if previous is not None and previous is not admission and (getattr(previous, "identity", None) is None or previous.identity != getattr(admission, "identity", None)):
+                        _refuse()
+                    state.stop_authorizations[stop_id] = admission
                 decision = state.stop_decisions.get(stop_id)
                 if decision == "unknown":
                     # The cancel may never have arrived. Asking again is safe, since `cancel_run` reads the run first.
@@ -526,6 +553,20 @@ class RunObserver:
         finally:
             self._operations.discard(task)
 
+    async def _expire_unentered(self, state, stop_id, authorization):
+        from app.telegram_bots.turns import _StopAdmissionGuard
+
+        if state.cancel_guard is None:
+            await self._facade(state)
+        guard = _StopAdmissionGuard(state.cancel_guard, authorization.no_call)
+        fresh = await self.coordinator.inbox.clear_publication_stop(state.record, stop_id=stop_id, guard=guard)
+        self._check(state)
+        self._update_record(state, fresh)
+        state.stop_id, state.stop_attempted = None, False
+        state.stop_authorizations.pop(stop_id, None)
+        state.stop_decisions[stop_id] = "expired"
+        return "expired"
+
     async def _apply_stop(self, state, *, facade=None):
         self._check(state)
         stop_id = state.stop_id
@@ -541,11 +582,14 @@ class RunObserver:
         try:
             outcome = await facade.cancel_run(state.record.run_id)
             self._check(state)
-            if outcome == "refused":
+            # Legacy terminal decisions keep their original barrier. Only the
+            # mixed owner retires its conclusive per-gesture authorization here.
+            if outcome == "refused" or outcome == "terminal" and stop_id in state.stop_authorizations:
                 fresh = await self.coordinator.inbox.clear_publication_stop(state.record, stop_id=state.stop_id, guard=state.cancel_guard)
                 self._check(state)
                 self._update_record(state, fresh)
                 state.stop_id, state.stop_attempted = None, False
+                state.stop_authorizations.pop(stop_id, None)
             elif outcome == "requested":
                 state.stop_accepted = True
             state.stop_decisions[stop_id] = outcome
@@ -554,6 +598,14 @@ class RunObserver:
             state.stop_decisions[stop_id] = "unknown"
             raise
         except Exception:
+            authorization = state.stop_authorizations.get(stop_id)
+            if authorization is not None and getattr(authorization, "expired_unentered", False):
+                try:
+                    return await self._expire_unentered(state, stop_id, authorization)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
             state.stop_decisions[stop_id] = "unknown"
             return "unknown"
 

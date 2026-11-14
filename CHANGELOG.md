@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Let `/stop` choose the original active answer, running assignments, or both,
+  retaining exact targets and cancellation receipts through restart.
 - Preserve ordinary chat input when no assignment prompt claims a message.
 - Route `/stop` in an idle agent chat to its eligible running assignments, with
   acknowledged choices for several assignments and durable original targets.
