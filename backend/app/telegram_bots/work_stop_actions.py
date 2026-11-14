@@ -11,11 +11,23 @@ from app.telegram_bots.work_stop_retries import StopRetryMethods
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied, Refusal
 from deerflow.agent_instances.work_contract import WorkCommand
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkRow
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramCallbackRow
 from deerflow.spaces.contract import PrincipalRef
 from deerflow.utils.file_io import await_drained
 
 ACT_AUTOMATIC_WINDOW_SECONDS = 3600
+
+
+def original_attempt_id(act):
+    if act.kind == "stop":
+        return act.body["attempt_id"]
+    if act.kind in {"edit", "cancel"}:
+        from app.telegram_bots.work_management_actions import command_source
+
+        scope = command_source(act)["scope"]
+        if scope is not None:
+            return scope["attempt_id"]
+    raise ValueError("missing-original-attempt")
 
 
 class StopActionMethods(StopRetryMethods):
@@ -166,9 +178,9 @@ class StopActionMethods(StopRetryMethods):
                 await reader.scalars(
                     select(TelegramActRow.id)
                     .where(
-                        TelegramActRow.kind == "stop",
+                        TelegramActRow.kind.in_(("stop", "edit", "cancel")),
                         TelegramActRow.state == "done",
-                        TelegramActRow.stop_dispatch["state"].as_string().in_(("ready", "requested")),
+                        TelegramActRow.stop_dispatch["state"].as_string().in_(("ready", "requested", "uncertain")),
                         or_(TelegramActRow.stop_dispatch["not_before"].as_string().is_(None), TelegramActRow.stop_dispatch["not_before"].as_string() <= now.isoformat()),
                     )
                     .order_by(TelegramActRow.updated_at, TelegramActRow.id)
@@ -185,30 +197,39 @@ class StopActionMethods(StopRetryMethods):
     async def _dispatch_stop(self, act, *, explicit=False, attempt_current=lambda: True):
         from app.gateway.work_execution import dispatch_work_stop
         from app.telegram_bots.acts import _snapshot
-        from app.telegram_bots.work_actions import same_body
+        from app.telegram_bots.work_actions import _ACT_SCOPE, same_body
+        from app.telegram_bots.work_management_actions import same_binding
 
         scope = act.stop_dispatch
-        if act.state != "done" or scope is None or scope["state"] in {"settled", "ended"} or scope["state"] == "uncertain" and not explicit or not attempt_current():
+        if (
+            act.state != "done"
+            or scope is None
+            or scope["state"] not in {"ready", "requested", "uncertain", "ended"}
+            or scope["state"] == "ended"
+            and not (explicit and scope.get("ended_from") in {"ready", "uncertain"})
+            or not attempt_current()
+        ):
             return act
         try:
-            if scope["attempt_id"] != act.body["attempt_id"] or not isinstance(scope["thread_id"], str) or not scope["thread_id"]:
+            if scope["attempt_id"] != original_attempt_id(act) or not isinstance(scope["thread_id"], str) or not scope["thread_id"]:
                 raise ValueError("act-source-conflict")
             if await self.receipt_for(act) is None:
                 return act
             link = await self.links.get(act.link_id)
-            await self._work_link(link, kind="stop", writable=True)
+            await self._work_link(link)
             if (link.owner_user_id, link.bot_id, link.agent_ref, link.binding_generation, link.telegram_user_id, link.chat_id) != (act.owner_user_id, act.bot_id, act.instance_id, act.binding_generation, act.telegram_user_id, act.chat_id):
                 raise AgentDenied("The action's binding is no longer current")
-            await require(act.owner_user_id, "agents:read", "agents:write", "runs:cancel")
             if not attempt_current():
                 return act
-            if scope["state"] == "requested":
+            if scope["state"] == "requested" or scope["state"] == "uncertain" and not explicit:
                 original = await self.work.attempt_for_stop(actor=PrincipalRef("human", act.owner_user_id), instance_id=act.instance_id, work_id=act.work_id, attempt_id=scope["attempt_id"])
-                if original is not None and (original["thread_id"] != scope["thread_id"] or original["run_id"] != scope["run_id"]):
+                if original is not None and (original["thread_id"] != scope["thread_id"] or scope["run_id"] is not None and original["run_id"] != scope["run_id"]):
                     raise AgentDenied("Work stop binding is unavailable")
                 settled = original is not None and original["status"] in {"succeeded", "failed", "cancelled"} and original["settled_at"] is not None
-                updated = {**scope, "state": "settled" if settled else "requested"}
+                updated = {**scope, "state": "settled" if settled else scope["state"], "run_id": original["run_id"] if original is not None else scope["run_id"]}
             else:
+                await self._work_link(link, kind="stop", writable=True)
+                await require(act.owner_user_id, "agents:read", "agents:write", "runs:cancel")
                 guard = await stop_dispatch_admission(self, link, act, attempt_current=attempt_current)
                 result = await dispatch_work_stop(
                     internal_request(self.authority.app, act.owner_user_id),
@@ -223,19 +244,40 @@ class StopActionMethods(StopRetryMethods):
                 )
                 updated = {**scope, "state": "settled" if result.state == "settled" else "requested" if result.state == "requested" else "ready", "run_id": result.run_id}
         except (AgentDenied, AccessOff, CeilingRefused):
-            updated = {**scope, "state": "ended"}
+            updated = {**scope, "state": scope["state"] if scope["state"] in {"requested", "uncertain"} else "ended"}
+            if updated["state"] == "ended" and scope["state"] == "ready":
+                updated["ended_from"] = "ready"
         except Exception:
             if not attempt_current():
                 return act
             count = scope["attempts"] + 1
             # An acknowledged cancel never becomes permission to dispatch it
             # again. Failed settlement reads retain that acknowledged phase.
-            state = "requested" if scope["state"] == "requested" else "uncertain" if count >= self.outbox.config.acts.max_attempts else "ready"
+            state = scope["state"] if scope["state"] in {"requested", "uncertain"} else "uncertain" if count >= self.outbox.config.acts.max_attempts else "ready"
             updated = {**scope, "attempts": count, "state": state}
         updated["not_before"] = (self.outbox.clock() + timedelta(seconds=self.outbox.config.acts.retry_seconds)).isoformat()
-        async with self.outbox._writer(act.link_id) as (writer, _link):
+        if updated["state"] != "ended":
+            updated.pop("ended_from", None)
+        if not attempt_current():
+            return act
+        async with self.outbox._writer(act.link_id) as (writer, binding):
             row = await writer.get(TelegramActRow, act.id, with_for_update=True, populate_existing=True)
-            if row is not None and row.state == "done" and same_body(row.body, act.body) and same_body(row.stop_dispatch, scope):
+            if (
+                attempt_current()
+                and same_binding(binding, act)
+                and binding.state == "connected"
+                and binding.health == "ok"
+                and row is not None
+                and row.state == "done"
+                and all(getattr(row, key) == getattr(act, key) for key in _ACT_SCOPE)
+                and same_body(row.body, act.body)
+                # Stop reply metadata has its own owner; recording an actual
+                # physical ACK must not leave permission to cancel again.
+                # Management continuations additionally seal command consent.
+                and (act.kind == "stop" or same_body(row.continuation, act.continuation))
+                and same_body(row.stop_dispatch, scope)
+                and row.cancel_requested_at == act.cancel_requested_at
+            ):
                 row.stop_dispatch, row.updated_at = updated, self.outbox.clock()
                 await writer.flush()
                 return _snapshot(row)
@@ -264,7 +306,7 @@ class StopProjection:
         self.act, self.attempt_current = act, attempt_current
         from app.telegram_bots.work_stop_retries import parent_of
 
-        self.retry = parent_of(act)
+        self.retry = parent_of(act) if act.kind == "stop" else None
 
     def extend(self, query):
         self.column = len(query.column_descriptions)
@@ -272,8 +314,12 @@ class StopProjection:
             query.add_columns(TelegramActRow, AgentWorkRow, AgentWorkAttemptRow)
             .join(TelegramActRow, TelegramActRow.id == self.act.id)
             .join(AgentWorkRow, and_(AgentWorkRow.id == self.act.work_id, AgentWorkRow.instance_id == TelegramBotLinkRow.agent_ref))
-            .join(AgentWorkAttemptRow, and_(AgentWorkAttemptRow.id == self.act.body["attempt_id"], AgentWorkAttemptRow.work_id == AgentWorkRow.id))
+            .join(AgentWorkAttemptRow, and_(AgentWorkAttemptRow.id == original_attempt_id(self.act), AgentWorkAttemptRow.work_id == AgentWorkRow.id))
         )
+        if self.act.kind in {"edit", "cancel"}:
+            self.management_control_column = len(result.column_descriptions)
+            control = aliased(TelegramCallbackRow)
+            return result.add_columns(control).outerjoin(control, control.id == self.act.id)
         if self.retry is not None:
             self.parent_column = len(result.column_descriptions)
             parent = aliased(TelegramActRow)
@@ -285,6 +331,13 @@ class StopProjection:
         from app.telegram_bots.work_actions import same_body
         from app.telegram_bots.work_stop_retries import parent_of, validate_child
 
+        if self.act.kind in {"edit", "cancel"}:
+            from app.telegram_bots.work_management_actions import command_source
+
+            source, expected = command_source(_snapshot(saved)), command_source(self.act)
+            if source != expected or source["origin_kind"] != "internal" or rows[0][self.management_control_column] is not None or saved.operation_ids or parent_of(_snapshot(saved)) is not None:
+                raise AgentDenied("The management cancellation source changed")
+            return
         if self.retry is None:
             if parent_of(_snapshot(saved)) is not None:
                 raise AgentDenied("The stop retry identity changed")
@@ -372,7 +425,7 @@ class StopDispatchProjection(StopProjection):
             or (attempt.id, attempt.thread_id, attempt.run_id, attempt.status, attempt.requester_id) != (original["id"], original["thread_id"], original["run_id"], original["status"], original["requester_id"])
             or permissions & 6 != 6
             and attempt.requester_id != self.act.owner_user_id
-            or (event.action, event.actor_kind, event.actor_id) != ("stop", "human", self.act.owner_user_id)
+            or (event.action, event.actor_kind, event.actor_id) != (self.act.kind, "human", self.act.owner_user_id)
             or not same_body(event.request, self.act.body)
         ):
             raise AgentDenied("The stop dispatch admission is no longer current")

@@ -1537,3 +1537,46 @@ renews expired buttons or treats an offer as permission to execute.
 
 These owners still require the supervisor's event/minute observer and public
 button routing during runtime integration. The public menu remains unchanged.
+
+## Saved assignment command journals
+
+`WorkEditDrafts` copies a saved assignment's objective, success criteria, due
+date and both revisions into an immutable private `edit` draft. An existing
+overdue date remains intact. `Acts.stage_edit` admits at most one exact command
+from that draft, recording reciprocal draft and command witnesses in the same
+writer. Current Manage and Inspect, owner ceilings, binding and assignment CAS
+are checked again in the Work service transaction. Draft age limits fresh
+confirmation; the command's separate automatic retry hour begins at its first
+attempt. An unchanged proposal records a no-effect refusal and leaves pending
+requests and Work revisions intact.
+
+`Acts.stage_cancel` freezes the withdrawal command and its displayed revisions.
+Both commands retain a sealed original attempt/thread/run scope before calling
+Work, require current cancellation authority while an attempt is unresolved,
+and qualify their own canonical event during the post-mutation admission check.
+Receipt recovery precedes mutable eligibility checks and never rebuilds an
+attempted body. A confirmed command and its follow-up readiness commit together.
+The legacy human-input outcome scanner does not own these journals.
+
+Physical cancellation shares the Stop recovery owner. Requested cancellation
+remains acknowledged through authority loss. Automatic recovery of an uncertain
+follow-up reads only its original attempt's settlement; a failed read cannot
+authorize another cancellation. Newly ended, unrequested follow-ups retain a
+provenance marker and need a fresh explicit check before physical dispatch.
+Legacy ended scopes with unknown provenance stay held. Exact original settlement
+also gates history expiry, including ended scopes.
+After binding retirement, the old owner leaves its journal unchanged. Retention
+can still qualify that original attempt's terminal status and settlement, with
+the exact captured thread/run and canonical command, even when the retained
+follow-up marker remains ready, requested or uncertain. An unresolved original
+keeps the complete history; the sweep issues no cancellation or journal repair.
+
+`work_management_retention.py` qualifies complete reciprocal edit families and
+standalone withdrawal journals. It locks bindings before journals, batches SQL
+lookups/deletion, and holds malformed, incomplete, overlapping or unresolved
+families. Unadmitted private drafts expire after the configured draft lifetime
+without a Work command. Closed receipt-consistent history expires after 400 days,
+including after unbinding or link removal; sealed historical locators are used
+only for retention reads. Internal origins are the only admitted origins here;
+public saved-work confirmation, typing and delivery ownership are integrated
+separately.

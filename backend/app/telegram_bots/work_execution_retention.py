@@ -9,7 +9,7 @@ from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_execution_sources import qualify_stop_receipt, require_execution_scope
 from app.telegram_bots.work_start_retention import closed_activation
-from app.telegram_bots.work_stop_retention import closed_scope
+from app.telegram_bots.work_stop_retention import closed_scope, original_settled
 from app.telegram_bots.work_stop_retries import parent_of, validate_child
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow
@@ -18,7 +18,7 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBot
 def closed_stop(root, journals, attempts, events):
     """A physical follow-up stays held until its exact original settles."""
     try:
-        if root.state not in {"done", "refused", "conflict"} or not closed_scope(root):
+        if root.state not in {"done", "refused", "conflict"} or not closed_scope(root, allow_pending=True):
             return False
         members = [root]
         for ordinal, identity in enumerate(root.operation_ids, 2):
@@ -33,7 +33,7 @@ def closed_stop(root, journals, attempts, events):
             if root.state == "done" and (root.result.get("stop_child_id") != members[-1].id or not same_body(root.result.get("receipt"), members[-1].result)):
                 return False
         for member in members:
-            if member.state not in {"done", "refused", "conflict"} or not closed_scope(member):
+            if member.state not in {"done", "refused", "conflict"} or not closed_scope(member, allow_pending=True):
                 return False
             event = events.get((member.instance_id, member.id))
             if member is root and root.operation_ids:
@@ -43,19 +43,12 @@ def closed_stop(root, journals, attempts, events):
                     return False
                 continue
             qualify_stop_receipt(event, member)
-            scope = member.stop_dispatch
             original = attempts.get(member.body["attempt_id"])
             if (
                 event is None
                 or (event.work_id, event.action, event.actor_kind, event.actor_id) != (member.work_id, "stop", "human", member.owner_user_id)
                 or not same_body(event.request, member.body)
-                or original is None
-                or original.work_id != member.work_id
-                or original.status not in {"succeeded", "failed", "cancelled"}
-                or original.settled_at is None
-                or original.thread_id != scope["thread_id"]
-                or scope["run_id"] is not None
-                and original.run_id != scope["run_id"]
+                or not original_settled(member, original)
             ):
                 return False
         return True
