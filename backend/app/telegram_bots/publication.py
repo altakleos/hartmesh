@@ -314,6 +314,7 @@ class PublicationCoordinator:
         # Held by the queued message, so an entry lasts exactly as long as that message.
         self._queued: weakref.WeakValueDictionary[str, ChannelExecutionContext] = weakref.WeakValueDictionary()
         self.human_input_planner = None
+        self.assignment_proposal_planner = None
         self.file_output_planner = None
         self.file_preflight = None
         self.instance_file_receipts = None
@@ -840,6 +841,21 @@ class PublicationCoordinator:
                 if output.output.state == "pending":
                     return PublicationObservation("pending", fresh, reason="awaiting_output")
                 inventory = output.inventory
+                if self.assignment_proposal_planner is not None and output.output.state == "unavailable" and output.output.reason == "unsupported_output" and inventory.state == "matched" and inventory.document.coverage == "complete":
+                    control.check_budget()
+                    admission.check("source_read")
+                    identity = await self.assignment_proposal_planner(fresh, current_link, guard=read_guard)
+                    control.check_budget()
+                    admission.check("source_read")
+                    if identity is not None:
+                        from app.telegram_bots.inbox import publication_identity
+                        from app.telegram_bots.model_source import validate_model_reply_basis
+
+                        item = await self.outbox.get(current_link, identity)
+                        proof = await await_drained(asyncio.to_thread(validate_model_reply_basis, item))
+                        if proof.kind != "assignment_proposal" or proof.output != output or publication_identity(proof.record) != publication_identity(fresh) or item.payload["reply_basis"]["finish_route"] is not True:
+                            _refuse()
+                        return PublicationObservation("planned", fresh, outbox_id=identity)
                 if self.human_input_planner is not None and output.output.state == "unavailable" and output.output.reason == "human_input_required" and inventory.state == "matched" and inventory.document.coverage == "complete":
                     control.check_budget()
                     admission.check("source_read")

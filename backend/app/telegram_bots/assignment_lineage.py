@@ -6,7 +6,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.orm import aliased
 
 from app.telegram_bots.producer import ProductSourceRetired
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow
 
 
 def admitted_basis(payload):
@@ -27,10 +27,12 @@ def admitted_basis(payload):
 
 
 async def require_fresh_draft(writer, link, root_id, *, internal=False):
-    action, control, delivery = TelegramActRow, TelegramCallbackRow, TelegramOutboxRow
+    action, control = TelegramActRow, TelegramCallbackRow
     if await writer.scalar(select(action.id).where(action.kind == "delegate", action.continuation["delegate_source"]["draft_id"].as_string() == root_id).limit(1)) is not None:
         raise ProductSourceRetired()
-    row = await writer.scalar(select(delivery).where(delivery.link_id == link.id, delivery.dedupe_key == "notice:assignment:" + root_id))
+    from app.telegram_bots.assignment_proposal_records import assignment_parent
+
+    row = await assignment_parent(writer, link, root_id)
     if row is not None:
         if internal or admitted_basis(row.payload):
             raise ProductSourceRetired()

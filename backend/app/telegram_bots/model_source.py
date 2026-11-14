@@ -28,6 +28,7 @@ class PreparedModelPart:
     human_input: bool = False
     page_keys: tuple[str, ...] = ()
     network_denial_host: str | None = None
+    assignment_proposal: bool = False
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,10 @@ def validate_model_reply_basis(item: OutboxItem, part: dict | None = None) -> Ve
     from app.telegram_bots.producer import FrozenReplyPresentation, OutboxItem, _canonical_primary
 
     try:
+        if type(item) is OutboxItem and type(item.payload) is dict and type(item.payload.get("reply_basis")) is dict and type(item.payload["reply_basis"].get("version")) is int and item.payload["reply_basis"]["version"] == 9:
+            from app.telegram_bots.assignment_proposal_records import validate_proposal_reply_basis
+
+            return validate_proposal_reply_basis(item, part)
         if type(item) is OutboxItem and type(item.payload) is dict and type(item.payload.get("reply_basis")) is dict and type(item.payload["reply_basis"].get("version")) is int and item.payload["reply_basis"]["version"] == 8:
             from app.telegram_bots.network_notices import validate_notice
 
@@ -377,11 +382,12 @@ def _prepare_part(captured):
 
 
 class ModelSource:
-    def __init__(self, *, read_output: ReadPublicationOutput, human_input_source=None, outbox=None, http_owner=None, file_capacity=64 * 1024 * 1024, file_max_bytes=50_000_000, file_output_active=None):
+    def __init__(self, *, read_output: ReadPublicationOutput, human_input_source=None, assignment_proposal_source=None, outbox=None, http_owner=None, file_capacity=64 * 1024 * 1024, file_max_bytes=50_000_000, file_output_active=None):
         if not callable(read_output):
             raise TypeError("Model source requires its publication reader") from None
         self._read_output = read_output
         self._human_input_source = human_input_source
+        self._assignment_proposal_source = assignment_proposal_source
         self._outbox, self._http_owner = outbox, http_owner
         self._file_capacity, self._file_max_bytes = file_capacity, file_max_bytes
         self._file_output_active = file_output_active
@@ -428,6 +434,16 @@ class ModelSource:
 
         try:
             private, proof = await _saved_part(captured)
+            if proof.kind == "assignment_proposal":
+                from app.telegram_bots.assignment_proposal_source import check_qualified_proposal
+                from app.telegram_bots.producer import _canonical_primary
+
+                if self._assignment_proposal_source is None:
+                    raise SourceGone
+                qualified = await self._assignment_proposal_source.read_proposal(proof.record, private.link)
+                if qualified is None or _canonical_primary(check_qualified_proposal(qualified, proof.record)) != _canonical_primary(private.item.payload["reply_basis"]["outcome"]["proposal_basis"]):
+                    raise SourceGone
+                return PreparedModelPart(private.part["html"], private.part["visible_text"], assignment_proposal=True)
             if proof.kind == "network_denials":
                 from app.telegram_bots.network_notices import read_notice
 

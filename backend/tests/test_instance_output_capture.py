@@ -125,6 +125,7 @@ async def test_instance_worker_seals_current_home_inventory(instances, capture_e
         graph_input = {"messages": [HumanMessage("Question")]}
         if case == "proposal":
             graph_input["messages"][0].additional_kwargs["shows_cards"] = ["assignment_card"]
+            graph_input["messages"][0].additional_kwargs["channel_turn_id"] = original.publication_id
         if baseline is not None:
             graph_input["sandbox"] = {"sandbox_id": sandbox.id}
         await run_agent(bridge, e.manager, record, ctx=ctx, agent_factory=lambda **kwargs: assembly, graph_input=graph_input, config={"run_id": uuid4(), "configurable": {"thread_id": thread}})

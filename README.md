@@ -2025,6 +2025,8 @@ any mentioned deadline, with a link to Work. Confirmation belongs to the origina
 Telegram card; displaying the proposal saves and starts nothing.
 An active goal waits for the person's choice when a supported client presents a
 proposal; proposing an assignment does not complete the goal.
+Proposal preparation binds the card to its original message and run. An unreadable
+or conflicting source stays held; it cannot create another draft or silently save Work.
 
 ![Assignment proposal in a synthetic conversation](docs/images/assignment-proposal.png)
 

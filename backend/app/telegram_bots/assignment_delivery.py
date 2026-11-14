@@ -4,9 +4,8 @@ from dataclasses import asdict
 from types import SimpleNamespace
 from uuid import uuid4
 
-from sqlalchemy import select
-
 from app.telegram_bots.assignment_drafts import snapshot_draft
+from app.telegram_bots.assignment_proposal_records import assignment_parent
 from app.telegram_bots.assignment_sources import AssignmentProjection
 from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.producer import ProductSourceRetired, _item
@@ -38,7 +37,7 @@ class AssignmentPlans(WorkNewsPlans):
                 root = await reader.get(TelegramActRow, draft_id)
                 snapshot_draft(link, root)
                 operations = list(root.operation_ids)
-                row = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == "notice:assignment:" + draft_id))
+                row = await assignment_parent(reader, link, draft_id)
                 if row is None:
                     raise ProductSourceRetired()
                 item = _item(row)
@@ -57,7 +56,7 @@ class AssignmentPlans(WorkNewsPlans):
                     # An unavailable receipt is no proof of completion or absence.
                     pass
             async with self.outbox.sessions() as reader:
-                row = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == "notice:assignment:" + draft_id))
+                row = await assignment_parent(reader, link, draft_id)
                 if row is None:
                     raise ProductSourceRetired()
                 item = _item(row)
@@ -96,7 +95,7 @@ class AssignmentPlans(WorkNewsPlans):
                 snapshot_draft(link, root)
                 if root.operation_ids:
                     raise ProductSourceRetired()
-                row = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == key).with_for_update())
+                row = await assignment_parent(writer, link, draft_id)
                 if row is None:
                     now = self.outbox.clock()
                     row = TelegramOutboxRow(

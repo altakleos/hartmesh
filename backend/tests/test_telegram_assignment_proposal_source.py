@@ -17,7 +17,7 @@ def proposal_basis():
     basis = source_basis(original)
     draft = {"objective": "Review the guide", "success_criteria": "Report verified gaps", "due_text": None, "due_at": None}
     messages = [
-        HumanMessage(id="actual-human", content="Review the guide", additional_kwargs={"shows_cards": ["assignment_card"]}),
+        HumanMessage(id="actual-human", content="Review the guide", additional_kwargs={"shows_cards": ["assignment_card"], "channel_turn_id": original.publication_id}),
         AIMessage(id="issuer", content="", tool_calls=[{"id": "proposal-call", "name": "propose_assignment", "args": {"proposal": draft}}]),
         ToolMessage(
             id=proposal_message_id("proposal-call", "issuer"),
@@ -66,6 +66,18 @@ def test_framework_human_id_rewrite_uses_the_shared_canonical_identity():
     original, basis, draft = proposal_basis()
     basis["messages"][0]["content"]["id"] += "__user"
     assert api().validate_proposal_basis(original, basis).model_dump(mode="json") == draft
+
+
+@pytest.mark.parametrize("marker", [None, "f" * 32])
+def test_card_support_must_belong_to_the_original_human_publication(marker):
+    original, basis, _draft = proposal_basis()
+    kwargs = basis["messages"][0]["content"]["additional_kwargs"]
+    if marker is None:
+        kwargs.pop("channel_turn_id", None)
+    else:
+        kwargs["channel_turn_id"] = marker
+    with pytest.raises(ValueError):
+        api().validate_proposal_basis(original, basis)
 
 
 def test_callback_witness_requires_the_unique_actual_current_journal_result():

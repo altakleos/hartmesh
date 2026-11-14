@@ -2093,7 +2093,7 @@ class TelegramBotChannel(TelegramChannel):
         if "summary_stop_basis" in saved.item.payload:
             stored_keyboard = await work_sources.keyboard(saved)
         elif part.get("stored_keyboard"):
-            if model_part is not None and not model_part.human_input or getattr(self._services, "callbacks", None) is None:
+            if model_part is not None and not (model_part.human_input or model_part.assignment_proposal) or getattr(self._services, "callbacks", None) is None:
                 raise DeliveryClaimRetired()
             stored_keyboard = await self._services.callbacks.read_keyboard(saved)
         elif part.get("callback_group_id"):
@@ -2239,7 +2239,7 @@ class TelegramBotChannel(TelegramChannel):
                     raise DeliveryClaimRetired()
 
             preview_fence = LiveRequestFence(check_preview)
-        elif model_part is not None and model_part.human_input:
+        elif model_part is not None and (model_part.human_input or model_part.assignment_proposal):
 
             async def check_human_input():
                 if not self._callback_current(current.link):
@@ -2253,7 +2253,9 @@ class TelegramBotChannel(TelegramChannel):
                 refreshed = await self._services.model_source.read_part(latest_input)
                 if refreshed != model_part or stored_keyboard is not None and await self._services.callbacks.read_keyboard(latest_input) != stored_keyboard:
                     raise DeliveryClaimRetired()
-                if latest_input.item.payload.get("reply_basis", {}).get("version") == 7:
+                if model_part.assignment_proposal:
+                    step_current = True
+                elif latest_input.item.payload.get("reply_basis", {}).get("version") == 7:
                     step_current = await self._services.human_inputs.step_current(latest_input.item, part=latest_input.part)
                 else:
                     step_current = await self._services.human_inputs.step_current(latest_input.item)

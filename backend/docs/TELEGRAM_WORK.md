@@ -1279,8 +1279,8 @@ newest visible human message's `shows_cards` / `assignment_card_response` marks.
 A supported proposal returns one stable `assignment_card` tool artifact and
 ends the turn. Unsupported cards and Just answer continue the conversation
 with fixed model guidance. The primitive has no database, thread, run, service
-or model effect. Its tool registration, Telegram draft conversion and card
-marks remain adapter integration work. Web history validates the artifact and
+or model effect. Tool registration and card marks remain runtime integration
+work. Web history validates the artifact and
 renders only passive details and a Work link in an instance conversation.
 
 Successful proposals leave an active Goal waiting with `needs_user_input`, without
@@ -1291,12 +1291,31 @@ this stop. The goal remains active, and Just answer permits normal evaluation.
 
 `assignment_proposal_source.py` qualifies only the original successful instance
 run's single proposal artifact. It checks the admitted channel/publication, actual
-human input and card marks, lead issuing call, exact result and complete inventory
+human input, its publication marker and card marks, lead issuing call, exact result and complete inventory
 witness. It holds unsupported mixtures rather than dropping other output. The
 shared `terminal_source.py` reader captures output on both sides of bounded message
 pagination through the retained HTTP owner and original-attempt fences. Its JSON
 checks are consistency evidence; only an opaque qualified source retains the
-live read guard. Proposal adoption and Just answer remain adapter integration.
+live read guard.
+
+`AssignmentProposalPlans` atomically adopts the qualified proposal as one private
+tool draft and the original `reply:<turn>` primary, with a closed V9 reply basis,
+complete card, pending controls and every original input. It writes no Work or
+run. Original-primary replay requires its existing Root; missing or conflicting
+owners stay held. Delivery composes the original source reader with the current
+assignment snapshot and actual full-card ACK before admitting controls.
+
+`AssignmentAnswers` turns an acknowledged Just answer press into one fixed
+message and typed card response in the original conversation. It consumes the
+original group, records `answered-here` and edits the card; it never republishes
+the person's words or starts Work. Its immutable V2 submission remains distinct
+from historical inputs and from a later explicit Retry gesture. Borrowed-SQL
+custody checks require the actual original callback profile, complete ACKs,
+unchanged Root body and navigation witness, and exact Retry ancestry. New
+admission expires at the earliest draft/control deadline, including after the
+final provider await; entered owners can recover without a new press. Retention
+pins all grouped inputs and original consent/Retry families while unresolved.
+These services are not installed in the default channel runtime yet.
 
 `assign.draft_assignment` reuses that strict schema for one bounded non-graph
 model call. The constant extraction instruction carries no user-controlled
@@ -1306,7 +1325,7 @@ JSON/schema, provider faults or timeout return no draft for the explicit
 done-when fallback. Caller cancellation drains the owned call within its timeout.
 `prepare_due_date` drops nonfuture dates and removes future dates without current
 Manage+Inspect, retaining the mentioned words; this advisory step grants no
-command authority. Just answer publication remains separate adapter work.
+command authority.
 
 `assignment_requests.py` owns one durable extraction claim per actual Inbox input.
 It stores a private version-2 delegate/draft row and its input route before the
