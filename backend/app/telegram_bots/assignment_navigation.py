@@ -66,7 +66,7 @@ class AssignmentDraftNavigation:
                 await writer.flush()
                 await current(session=writer, projection=DraftProjection(link, root.body["origin"], saved=result))
                 guard.current()
-            await self.plans.observe(link, result.id)
+            await self.plans.observe(link, result.id, guard=guard)
             return result
 
         return await await_drained(perform())

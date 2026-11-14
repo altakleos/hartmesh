@@ -76,6 +76,11 @@ def check_origin(link, parent, callbacks, basis, source, *, reopened_mark=None, 
 
         check_reopen_origin(link, parent, callbacks, reopened_mark, basis, source, outbox_id)
         return
+    if parent is not None and {"work_view_intent", "work_management_intent", "work_execution_intent"}.intersection(parent.payload):
+        from app.telegram_bots.work_view_reviews import check_review_origin
+
+        check_review_origin(link, parent, callbacks, basis, source)
+        return
     origin = basis["origin"]
     if parent is None or parent.id != origin["anchor_outbox_id"] or parent.payload.get("presentation_version") != origin["presentation_version"]:
         raise ProductSourceRetired()

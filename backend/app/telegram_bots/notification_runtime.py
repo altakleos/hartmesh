@@ -27,6 +27,7 @@ class NotificationRuntime:
         self._pin_after = ""
         self._after = ""
         self.events = self.summaries = self.worker = self.observer = None
+        self.chat = None
         self.installed = self.initialized = self.ingress_ready = False
         from app.telegram_bots.work_event_cursors import WorkEventCursors
 
@@ -132,7 +133,13 @@ class NotificationRuntime:
         self.outcomes = WorkOutcomePlans(self.requests, host.acts, product=host.product_name, routing=self.routing)
         host.work_callbacks = WorkCallbacks(host, self.outcomes)
         host.work_text_inputs = WorkTextInputs(host, host.work_callbacks)
-        host.work_digest_items = DigestItems(digests=self.digests, requests=self.requests, reviews=self.reviews, routing=self.routing, news=self.news, results=self.results, summaries=self.summary_plans)
+        from app.telegram_bots.work_chat_runtime import WorkChatRuntime
+
+        self.chat = host.work_chat = WorkChatRuntime(self, work)
+        from app.telegram_bots.work_chat_observation import WorkChatObservation
+
+        self.chat_observer = WorkChatObservation(self.chat)
+        host.work_digest_items = DigestItems(digests=self.digests, requests=self.requests, reviews=self.reviews, routing=self.routing, news=self.news, results=self.results, summaries=self.summary_plans, views=self.chat.detail_plans)
         navigation = host.work_digest_items.navigation
         from app.telegram_bots.work_navigation_recovery import WorkNavigationRecovery, WorkReviewNavigationRecovery, WorkRoutingNavigationRecovery
 
@@ -219,6 +226,12 @@ class NotificationRuntime:
                 item, link = _item(row), BotLink.from_row(binding)
                 key = item.payload.get("work_event_intent", {}).get("key")
                 owner = self.digests if item.class_ == "digest" else self.materializers.get(key)
+                try:
+                    chat_owner = self.chat.materializer(item) if self.chat is not None else None
+                except ProductSourceRetired:
+                    continue
+                if chat_owner is not None:
+                    owner = chat_owner
                 if key in STATUS_KEYS:
                     owner = self.host.work_status_update_sources if item.dedupe_key.startswith("edit:") else self.status
                 elif key in UPDATE_KEYS and item.dedupe_key.startswith("edit:"):
@@ -230,7 +243,14 @@ class NotificationRuntime:
                 if owner is None:
                     continue
                 try:
-                    count += bool(await owner.materialize(link, item.id))
+                    if chat_owner is not None:
+                        channel = self.host.channel(link.id)
+                        if channel is None:
+                            continue
+                        guard = _RuntimeGuard(self, self.host.commands._guard(channel, link))
+                        count += bool(await owner.materialize(link, item.id, guard=guard))
+                    else:
+                        count += bool(await owner.materialize(link, item.id))
                 except ProductSourceRetired:
                     from app.telegram_bots.notification_disposition import retire_obsolete_question
 
@@ -378,6 +398,7 @@ class NotificationRuntime:
                         if channel is not None:
                             guard = _RuntimeGuard(self, self.host.commands._guard(channel, link))
                             await self.observer.tick(link, guard=guard)
+                            await self.chat_observer.tick(link, guard=guard)
                             deadline = asyncio.get_running_loop().time() + 30
                             await self.recover_inputs(lambda: asyncio.get_running_loop().time() < deadline, link_id=link.id)
                 except Exception:
@@ -401,7 +422,7 @@ class NotificationRuntime:
         self._stopping = True
 
         async def drain():
-            results = await asyncio.gather(*(owner.stop() for owner in (self.worker, self.observer) if owner is not None), return_exceptions=True)
+            results = await asyncio.gather(*(owner.stop() for owner in (self.worker, self.observer, self.chat) if owner is not None), return_exceptions=True)
             operations = tuple(self._operations)
             results.extend(await asyncio.gather(*operations, return_exceptions=True))
             self._operations.difference_update(operations)

@@ -111,7 +111,7 @@ class WorkManagementNavigation:
                     await current(session=writer, projection=projection)
                     self.callbacks._unexpired(control)
                     guard.current()
-            await self.plans.observe(link, item.id)
+            await self.plans.observe(link, item.id, guard=guard)
             return item.id
 
         return await await_drained(perform())

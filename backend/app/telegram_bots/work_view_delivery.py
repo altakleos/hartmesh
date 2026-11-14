@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
-from app.telegram_bots.callbacks import CallbackRefused
+from app.telegram_bots.callbacks import CallbackRefused, Prompts
 from app.telegram_bots.notifications import aware
 from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_news_delivery import WorkNewsPlans
@@ -40,12 +40,13 @@ class WorkViewPlans(WorkNewsPlans):
                 routed = await self.outbox.inbox.route(inbox, kind="work_view", target_id=cursor, basis={"cursor": cursor}, operation_ids=[], session=writer)
                 row = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == key).with_for_update())
                 if row is None:
+                    await Prompts(self.callbacks).close(link, inbox.chat_id, inbox.message_thread_id, reason="command", guard=guard, session=writer, shown_only=True)
                     row = self._row(link, key, {"version": 1, "key": "view.list", "cursor": cursor, "origin": {"kind": "inbox", "message_id": inbox.message_id, "update_id": inbox.update_id}}, topic=inbox.message_thread_id)
                     writer.add(row)
                     await writer.flush()
                 await self.outbox.inbox.register_delivery([routed], outbox_id=row.id, primary=True, finish=True, session=writer)
                 identity = row.id
-            await self.materialize(link, identity)
+            await self.materialize(link, identity, guard=guard)
             return identity
 
         return await await_drained(perform())
@@ -101,7 +102,7 @@ class WorkViewPlans(WorkNewsPlans):
                     )
                     await writer.flush()
                 identity = row.id
-            await self.materialize(link, identity)
+            await self.materialize(link, identity, guard=guard)
             return identity
 
         return await await_drained(perform())

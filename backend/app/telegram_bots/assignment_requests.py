@@ -286,8 +286,12 @@ class AssignmentDraftRequests:
         result = DraftAssignment(objective=value.words, success_criteria=text)
         return await self._complete(link, identity, expected=value, draft=result, source="fallback", criteria=inbox, admission=admission)
 
-    async def recover(self, link):
+    async def recover(self, link, *, guard=None):
         self._current()
+        if guard is not None:
+            from app.telegram_bots.links import prepare_publication_guard
+
+            await prepare_publication_guard(guard)
         async with self.outbox.sessions() as reader:
             rows = list(
                 await reader.scalars(
@@ -306,7 +310,7 @@ class AssignmentDraftRequests:
             try:
                 value = await self._read(link, identity)
                 if value.phase == "extracting":
-                    value = await self._phase(link, identity, expected=value, phase=fallback_phase(value), claim_id=value.claim_id)
+                    value = await self._phase(link, identity, expected=value, phase=fallback_phase(value), claim_id=value.claim_id, admission=guard.check if guard is not None else None)
                     recovered.append(value)
             except Exception as exc:
                 logger.debug("Draft recovery deferred (%s)", type(exc).__name__)

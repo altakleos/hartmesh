@@ -93,7 +93,7 @@ class WorkRequestPlans:
         row.payload = _safe_json({**row.payload, "work_request_basis": basis, "product_keyboard_basis": controls})
         saved_parts = self.outbox._parts(parts, 0)
         if controls:
-            group = await self.callbacks.write_group(link, controls, anchor_outbox_id=identity, presentation_version=0, chat_id=link.chat_id, message_id=None, message_thread_id=None, session=writer)
+            group = await self.callbacks.write_group(link, controls, anchor_outbox_id=identity, presentation_version=0, chat_id=link.chat_id, message_id=None, message_thread_id=row.message_thread_id, session=writer)
             saved_parts[-1]["callback_group_id"] = group.group_id
             if pending:
                 for callback in await writer.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group.group_id)):

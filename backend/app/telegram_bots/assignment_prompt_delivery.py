@@ -103,7 +103,7 @@ class AssignmentPromptPlans(WorkNewsPlans):
                     raise ProductSourceRetired()
                 await current(session=writer, projection=facts)
                 identity = row.id
-            await self.materialize(link, identity)
+            await self.materialize(link, identity, guard=guard)
             return identity
 
         return await await_drained(perform())

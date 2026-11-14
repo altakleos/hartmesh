@@ -117,7 +117,7 @@ class AssignmentRecovery:
                         return False
 
                 result = await self.acts.check(expected["id"], expected={**expected, "effective": source["work"].get("child") or expected}, attempt_current=current)
-            await self.plans.observe(link, draft_id)
+            await self.plans.observe(link, draft_id, guard=guard)
             return result
 
         return await await_drained(perform())

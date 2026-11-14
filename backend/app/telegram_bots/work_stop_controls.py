@@ -6,6 +6,7 @@ from app.telegram_bots.authority import AuthorityUnavailable, CeilingRefused
 from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
 from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.work_actions import _ACT_SCOPE, request_for
+from app.telegram_bots.work_detail_cards import full_detail
 from app.telegram_bots.work_view_origins import acknowledged_view, anchor_signature
 from app.telegram_bots.work_views import work_buttons
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow
@@ -16,9 +17,9 @@ from deerflow.utils.file_io import await_drained
 def displayed_stop(link, parent, callback):
     original = acknowledged_view(link, parent, callback.payload.get("presentation_version"))
     source = original.payload["work_news_basis"]["source"]
-    if source["key"] != "view.detail" or callback.kind != "stop_attempt" or callback.target_kind != "attempt":
+    if callback.kind != "stop_attempt" or callback.target_kind != "attempt":
         raise CallbackRefused()
-    record = source["work"]["detail"]["record"]
+    record = full_detail(source)["record"]
     attempt = record.get("attempt") or {}
     if (callback.target_id, callback.payload.get("attempt_id"), callback.payload.get("work_id")) != (attempt.get("id"), attempt.get("id"), record["id"]):
         raise CallbackRefused()

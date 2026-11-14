@@ -62,6 +62,7 @@ _URL_SOURCES = {
     "refused.files_full": ("web.files", "label.open_files"),
     "file.files_full": ("web.files", "label.open_files"),
     "refused.interrupted_recovery": ("web.files", "label.open_files"),
+    "assign.no_work": ("web.agentSettings", "label.open_agent_settings"),
 }
 _TRANSPORT_RECEIPTS = frozenset({"sent_at", "dispatched_at", "unavailable_reason", "invalid_token_verification_pending", "url_button_fallback", "plain_fallback"})
 _PART_IDENTITY = frozenset({"part_id", "presentation_version", "ordinal", "state", "message_ids"})

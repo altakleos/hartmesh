@@ -1630,9 +1630,9 @@ remains independent of expired callbacks; displayed revision and marker checks
 still belong to `closed_start`. These pins never renew callback age. Complete,
 settled receipts expire under the existing retention policy.
 
-The runtime must still install these owners and their observer, dispatch and
-repair routes. Public command/menu activation, capacity offers and remaining
-assignment workflows are separate integration work.
+The installed chat runtime composes these owners with the existing sender,
+callback dispatcher and receipt observer. Capacity offers and the complete
+command-menu/proposal switch have separate integration owners.
 
 ## Capacity notices and free-place offers
 
@@ -1777,5 +1777,86 @@ command receipt/original settlement. Pending commands and model claims retain
 their complete UI, prompt, input and journal dependencies. Missing, malformed,
 overlapping and foreign references cannot release only part of that family.
 Historical closure permits expiry without granting live authority or renewing
-any consent. The input controller and its recovery owner still need runtime
-installation.
+any consent. The installed chat runtime owns input-controller recovery and
+drains its extraction work on shutdown.
+
+## Installed Work chat runtime
+
+`NotificationRuntime._install_work` builds `WorkChatRuntime` from the same Work,
+Act, callback, inbox and outbox owners as notification delivery. Instance chats
+dispatch `/work` and `/status` to one saved list route; `/assign` accepts trailing
+words and an owner's quoted text, or opens a fully acknowledged typing prompt.
+Forwarded or other people's text cannot acquire private assignment provenance.
+The existing extension contract cannot implement these channel admission and
+authentication boundaries; the adapter owns them alongside its other handlers.
+
+Ingress classification stays on the original admitted task. `await_drained`
+may own SQL/model work in a child task, but that task cannot acknowledge an
+update on behalf of the ingress gate. Commands and button presses retain the
+captured binding, owner, topic and runtime lifetime through their writers.
+Commands close shown typing prompts only when creating their own new durable
+reply; replay cannot close a later prompt.
+
+`AssignmentCommands` saves `assignment_hold` before its first asynchronous
+private processor call. `assignment_input_ownership` validates a closed immutable
+owner/purpose/prompt/full-ACK signature and original Inbox facts. Recovery uses
+that owner rather than the newest prompt. Private draft/input admission releases
+the hold in its own guarded writer. A retired original prompt produces a fixed
+closed-input reply; a transient selection/source failure keeps custody. Neither
+expiry nor redelivery can turn owned assignment text into ordinary chat.
+`assignment_prompt_owners` locates quoted parts across the complete same-scope
+outbox page set; location alone grants no source authority.
+
+The default `VoiceInputRouter` composes assignment and existing Work voice
+owners. Assignment capture precedes transcription, and ready recovery receives
+its original runtime guard. `AssignmentRequests.recover` also passes that guard
+through fallback metadata writes. Accepted speech keeps its original recording
+descriptor, transcript, prompt and delivery ownership.
+
+Full-detail question navigation uses an explicit `view` origin containing the
+actual acknowledged card, control, presentation proof, request and query identity.
+It creates a full current request reply in the original topic, preserving the
+existing Request/Space/current-role SDK fences. One query reuses its preview;
+a later press may create a new preview without consuming navigation. No digest
+member or human gesture is fabricated for this path.
+
+`work_detail_cards` selects one registered view, management or execution intent
+and only canonical full-detail phases. Navigation composes the actual planner's
+prepared source projection, including execution companions. Management Back and
+execution previews retain working question, review and original-attempt Stop
+controls; none is relabelled as a synthetic Work view.
+
+`WorkViewReviews` opens a real current request interaction from an acknowledged
+full-detail Accept or Request-changes gesture. Original card/control and current
+request projections share the final account read before and after publication.
+The consumed original group proves that interaction at delivery. Acceptance
+still needs a fresh full ACK and confirmation. Unchanged typed change requests
+use their shown basis; if the review changes while writing, existing retained-note
+recovery requires another complete preview and explicit confirmation.
+
+The installed dispatcher selects overlapping Edit/Discard/Back and Retry/Cancel
+controls from the actual saved parent family. Start/Stop admission and native
+execution remain separate: the controller saves the exact intent first, and
+Act checking uses its original body and attempt count. Postcommit observation
+failure leaves that saved receipt owner in charge instead of claiming that the
+action failed. Complete management saved/changed/back previews can authorize
+their displayed Start revision through the same Start controller.
+
+`WorkChatObservation` uses bounded per-binding cursors inside the existing
+maintenance operation. It reconciles assignment/management cards and original
+Start/Stop journals, then updates owed presentations. It never checks or retries
+a native command, launches an attempt, or physically cancels a run. An individual
+source failure does not prevent later rows from being inspected. Preparation
+materializes only one known source family, under the original runtime guard;
+ambiguous families remain held. Shutdown drains admitted maintenance and private
+extraction work before retiring their storage and HTTP clients.
+
+Definitive command refusals commit a fixed reply and route completion instead of
+holding the polling suffix. Use-only readers get the appropriate Inspect message;
+disabled Work refuses drafting without an inference and offers Settings only to
+managers when a public address is configured. Fixed wording reads current
+Use-visible instance/supervisor identity, without qualifying private Work content.
+Unexpected failures and already-owned private requests retain their existing
+recovery custody. Discard/Back observers receive their caller's original guard,
+and execution-notice creation checks it again after flushing and before commit.
+Receipt settlement remains separate from fresh presentation admission.
