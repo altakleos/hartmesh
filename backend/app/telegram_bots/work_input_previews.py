@@ -113,16 +113,16 @@ def blocked_input_actions(identity):
     return or_(active, orphaned_control, orphaned_input)
 
 
-def check_input_origin(link, parent, callbacks, mark, blocked, basis, source, *, draft_ttl_hours):
+def check_input_origin(link, parent, callbacks, mark, blocked, basis, source, *, draft_ttl_hours, receipt_owned=False):
     """Final joined SQL facts prove the immutable accepted input and shown prompt."""
     try:
-        _check_input_origin(link, parent, callbacks, mark, blocked, basis, source, draft_ttl_hours=draft_ttl_hours)
+        _check_input_origin(link, parent, callbacks, mark, blocked, basis, source, draft_ttl_hours=draft_ttl_hours, receipt_owned=receipt_owned)
     except (KeyError, TypeError, ValueError, IndexError, AttributeError, CallbackRefused):
         raise ProductSourceRetired() from None
 
 
-def _check_input_origin(link, parent, callbacks, mark, blocked, basis, source, *, draft_ttl_hours):
-    if mark is None or blocked or mark.state == "done" or mark.route_complete or mark.route_kind != "work_input" or len(mark.operation_ids) != 1 or not same_body(input_identity(mark), basis["input"]):
+def _check_input_origin(link, parent, callbacks, mark, blocked, basis, source, *, draft_ttl_hours, receipt_owned=False):
+    if mark is None or not receipt_owned and (blocked or mark.state == "done" or mark.route_complete) or mark.route_kind != "work_input" or len(mark.operation_ids) != 1 or not same_body(input_identity(mark), basis["input"]):
         raise ProductSourceRetired()
     if basis["interaction"]["view"] == "changes":
         expiry = (_aware(mark.accepted_at) + timedelta(hours=draft_ttl_hours)).isoformat()

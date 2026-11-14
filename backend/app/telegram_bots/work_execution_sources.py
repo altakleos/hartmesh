@@ -67,7 +67,8 @@ def qualify_execution_origin(link, act, callback, parent, controls, *, activatio
     try:
         if act.kind not in {"activate", "stop"} or callback is None or parent is None:
             raise ValueError()
-        if (parent.link_id, parent.owner_user_id, parent.binding_generation, parent.chat_id, parent.instance_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id, link.agent_ref) or (
+        voice_parent = activation_parent is not None and activation_parent.kind == "respond"
+        if (parent.link_id, parent.owner_user_id, parent.binding_generation, parent.chat_id, parent.instance_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id, None if voice_parent else link.agent_ref) or (
             callback.link_id,
             callback.binding_generation,
             callback.chat_id,
@@ -79,11 +80,30 @@ def qualify_execution_origin(link, act, callback, parent, controls, *, activatio
         if not same_body(parsed.model_dump(mode="json", exclude_unset=True), act.body):
             raise ValueError()
         if activation_parent is not None:
-            from app.telegram_bots.assignment_consent import delegate_origin
-            from app.telegram_bots.assignment_controls import consent_origin, displayed_assignment
             from app.telegram_bots.work_continuation_state import require_child
 
             require_child(activation_parent, act)
+            if activation_parent.kind in {"decide", "respond"}:
+                from app.telegram_bots.work_request_continuations import request_activation, request_signature
+
+                source = request_activation(activation_parent)
+                origin = source["origin"]
+                _validate_rows(parent, controls)
+                if (
+                    callback.id != activation_parent.id
+                    or callback.kind != ("voice_save_resume" if voice_parent else "decide_confirm_resume")
+                    or parent.work_id != (None if voice_parent else act.work_id)
+                    or parent.id != origin["anchor_outbox_id"]
+                    or callback.payload.get("presentation_version") != origin["presentation_version"]
+                    or request_signature(parent) != origin["signature"]
+                    or not controls
+                    or any(control.payload.get("work_action_id") != activation_parent.id for control in controls)
+                ):
+                    raise ValueError()
+                return {**origin, "activation_parent_id": activation_parent.id}
+            from app.telegram_bots.assignment_consent import delegate_origin
+            from app.telegram_bots.assignment_controls import consent_origin, displayed_assignment
+
             origin = delegate_origin(activation_parent)
             original, _source = displayed_assignment(link, parent, callback)
             _validate_rows(original, controls)

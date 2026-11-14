@@ -886,6 +886,11 @@ class CallbackRepository:
                 assignments = await assignment_dependencies(session, now, max_age_days=self.config.callbacks.max_age_days, draft_ttl_hours=self.config.callbacks.draft_ttl_hours)
                 start_groups.update(assignments.groups)
                 start_anchors.update(assignments.deliveries)
+                from app.telegram_bots.work_request_continuation_retention import request_dependencies
+
+                requests = await request_dependencies(session, now, max_age_days=self.config.callbacks.max_age_days)
+                start_groups.update(requests.groups)
+                start_anchors.update(requests.deliveries)
                 from app.telegram_bots.work_management_ui_retention import management_dependencies
 
                 management = await management_dependencies(session, now, max_age_days=self.config.callbacks.max_age_days, draft_ttl_hours=self.config.callbacks.draft_ttl_hours)

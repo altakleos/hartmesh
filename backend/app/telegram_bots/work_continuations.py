@@ -29,8 +29,13 @@ class ContinuationActionMethods:
 
             captured = await self._work_record(act_id)
             original = continuation_state(captured)
-            if captured.kind != "delegate" or not delegate_source(captured)["start"]:
-                raise ValueError("invalid-composite-parent")
+            if captured.kind == "delegate":
+                if not delegate_source(captured)["start"]:
+                    raise ValueError("invalid-composite-parent")
+            else:
+                from app.telegram_bots.work_request_continuations import request_activation
+
+                request_activation(captured)
             link = await self.links.get(captured.link_id)
             if not link_matches(link, captured):
                 raise AgentDenied("The action's binding is no longer current")
@@ -49,7 +54,7 @@ class ContinuationActionMethods:
                 if admission is not None:
                     await admission(writer, None)
                 members = [row]
-                for identity in delegation_children(row):
+                for identity in delegation_children(row) if captured.kind == "delegate" else ():
                     member = await writer.get(TelegramActRow, identity, with_for_update=True, populate_existing=True)
                     if member is None:
                         raise ValueError("missing-delegate-child")
@@ -137,27 +142,42 @@ class ContinuationActionMethods:
 
         parent = await self._work_record(act_id)
         state = continuation_state(parent)
-        if parent.kind != "delegate" or delegate_source(parent)["start"] is not True or delegate_source(parent)["parent_id"] is not None:
-            raise ValueError("invalid-composite-parent")
+        if parent.kind == "delegate":
+            if delegate_source(parent)["start"] is not True or delegate_source(parent)["parent_id"] is not None:
+                raise ValueError("invalid-composite-parent")
+        else:
+            from app.telegram_bots.work_request_continuations import request_activation
+
+            request_activation(parent)
         if state["phase"] in {"done", "refused", "cancelled", "expired"} or not attempt_current():
             return parent
         if parent.state != "done":
             if parent.state in {"refused", "conflict"}:
                 return await self._continuation_phase(parent, "refused")
             return parent
+        if state["phase"] == "awaiting_primary":
+            # The outcome owner makes this ready with its durable primary
+            # delivery. A saved receipt alone cannot invent that commitment.
+            return parent
         receipt = await self.receipt_for(parent)
         if receipt is None:
             return parent
         saved_receipt, current_receipt = parent.result, receipt
-        if "delegate_child_id" in saved_receipt:
-            if current_receipt.get("delegate_child_id") != saved_receipt["delegate_child_id"]:
+        if parent.kind == "respond":
+            if not same_body(saved_receipt.get("receipt"), current_receipt.get("receipt")):
                 return parent
-            saved_receipt, current_receipt = saved_receipt["receipt"], current_receipt["receipt"]
-        # A canonical delegation receipt may project today's live attempt.
-        # Its immutable command fields, rather than that mutable projection,
-        # qualify the primary; the final child admission still joins its event.
-        if any(not same_body(saved_receipt.get(key), current_receipt.get(key)) for key in DELEGATION_RECEIPT_FIELDS):
-            return parent
+            target = (parent.work_id, parent.body["expected_assignment_revision"])
+        else:
+            if parent.kind == "delegate" and "delegate_child_id" in saved_receipt:
+                if current_receipt.get("delegate_child_id") != saved_receipt["delegate_child_id"]:
+                    return parent
+                saved_receipt, current_receipt = saved_receipt["receipt"], current_receipt["receipt"]
+            # These canonical fields exclude today's live attempt projection.
+            if any(not same_body(saved_receipt.get(key), current_receipt.get(key)) for key in DELEGATION_RECEIPT_FIELDS):
+                return parent
+            target = (current_receipt["id"], current_receipt["assignment_revision"])
+        if (state["work_id"], state["assignment_revision"]) != target:
+            raise ValueError("invalid-composite-target")
         link = await self.links.get(parent.link_id)
         if not link_matches(link, parent):
             return await self._continuation_phase(parent, "cancelled")

@@ -18,7 +18,7 @@ from test_work_attention_pages import work_pages as work_pages
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 
 
-async def voice_answer(e, monkeypatch, *, text="Use the current account.", quoted=801, prompt=False, late_ack=False):
+async def voice_answer(e, monkeypatch, *, text="Use the current account.", quoted=801, prompt=False, late_ack=False, combined=False):
     if prompt:
         from test_telegram_work_typed_input import question_prompt
 
@@ -50,7 +50,8 @@ async def voice_answer(e, monkeypatch, *, text="Use the current account.", quote
         assert not mark.route_complete and not mark.operation_ids
         assert not list(await reader.scalars(select(TelegramActRow).where(TelegramActRow.kind == "respond")))
         notice = await reader.get(TelegramOutboxRow, mark.route_basis["work_answer"]["notice_id"])
-        assert [[c["kind"] for c in line] for line in notice.payload["product_keyboard_basis"]] == [["voice_save_answer"], ["voice_discard"]]
+        expected = ([["voice_save_resume"]] if combined else []) + [["voice_save_answer"], ["voice_discard"]]
+        assert [[c["kind"] for c in line] for line in notice.payload["product_keyboard_basis"]] == expected
         e.identity = notice.id
     assert e.services.turns.accept_transcript.await_count == 0
     assert len(e.transcriber.calls) == 1

@@ -12,6 +12,7 @@ class ActivationParentProjection:
         self.for_effect = for_effect
         self.draft = self.family = self.consent = self.proposal = None
         self.link = self.parent_id = self.root_id = None
+        self.request = None
 
     async def prepare(self, acts, link):
         from app.telegram_bots.acts import _snapshot
@@ -29,6 +30,11 @@ class ActivationParentProjection:
             if parent is None:
                 raise ValueError("missing-activation-parent")
             require_child(_snapshot(parent), self.child)
+            if parent.kind in {"decide", "respond"}:
+                from app.telegram_bots.work_request_continuation_sources import RequestParentProof
+
+                self.request = RequestParentProof(acts, link, _snapshot(parent), self.child, for_effect=self.for_effect)
+                return self
             source = delegate_source(_snapshot(parent))
             root = await reader.get(TelegramActRow, source["draft_id"])
             snapshot_draft(link, root)
@@ -85,6 +91,8 @@ class ActivationParentProjection:
         attempt = aliased(AgentWorkAttemptRow)
         self.attempt_column = len(result.column_descriptions)
         result = result.add_columns(attempt).outerjoin(attempt, and_(attempt.work_id == self.child.work_id, attempt.activation_id == self.child.id))
+        if self.request is not None:
+            return self.request.extend(result, parent)
         if self.draft is not None:
             result = self.family.extend(self.draft.extend(result))
             if self.consent is not None:
@@ -137,6 +145,9 @@ class ActivationParentProjection:
         if len(parents) != 1 or not isinstance(marker, Mapping):
             raise ValueError("invalid-activation-parent")
         parent = next(iter(parents.values()))
+        if self.request is not None:
+            self.request.check(rows, parent, actual_child, held)
+            return
         if self.draft is None:
             raise ValueError("missing-activation-consent")
         require_child(_snapshot(parent), _snapshot(actual_child))

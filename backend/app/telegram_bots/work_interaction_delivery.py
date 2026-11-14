@@ -17,7 +17,9 @@ from deerflow.agent_instances.contract import AgentConflict
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
-CURRENT_REQUEST_KINDS = frozenset({"hi_answer", "hi_choice", "hi_cant_open", "hi_cannot", "hi_wrong", "decide_choice", "decide_own", "decide_note", "decide_confirm", "accept_open", "accept_confirm", "changes_open", "back"})
+CURRENT_REQUEST_KINDS = frozenset(
+    {"hi_answer", "hi_choice", "hi_cant_open", "hi_cannot", "hi_wrong", "decide_choice", "decide_own", "decide_note", "decide_confirm", "decide_confirm_resume", "accept_open", "accept_confirm", "changes_open", "back"}
+)
 
 
 def transition(callback, source):
@@ -81,7 +83,7 @@ def check_origin(link, parent, callbacks, basis, source, *, reopened_mark=None, 
     if selected is None:
         raise ProductSourceRetired()
     previous = acknowledged_source(link, parent)
-    refreshing = basis["interaction"]["view"] == "request" and selected.kind in {"decide_confirm", "accept_confirm"} or basis["interaction"]["view"] == "current" and selected.kind in CURRENT_REQUEST_KINDS
+    refreshing = basis["interaction"]["view"] == "request" and selected.kind in {"decide_confirm", "decide_confirm_resume", "accept_confirm"} or basis["interaction"]["view"] == "current" and selected.kind in CURRENT_REQUEST_KINDS
     if refreshing:
         if (previous.request["id"], previous.work["id"]) != (source.request["id"], source.work["id"]):
             raise ProductSourceRetired()
@@ -137,6 +139,7 @@ class WorkInteractionPlans:
 
     async def _publish(self, writer, link, group, parent, source, settings, state, *, key, chat_id, message_id, message_thread_id, guard, reason="work-preview", input_origin=None, reopen_origin=None):
         """Publish a source-checked transition inside its caller's guarded writer."""
+        state = interaction_state(state, source)
         callback_id, request_id, composed = group.selected.id, source.request["id"], guard
         created_at, expires_at = group.selected.created_at, None
         if input_origin is not None and state["view"] == "changes":

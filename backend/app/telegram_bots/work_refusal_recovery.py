@@ -22,12 +22,12 @@ class WorkRefusalRecovery:
         async def perform():
             async with self.outbox.sessions() as reader:
                 callback = await reader.get(TelegramCallbackRow, callback_id)
-                if callback is None or callback.link_id != link.id or callback.kind not in {"decide_confirm", "accept_confirm"}:
+                if callback is None or callback.link_id != link.id or callback.kind not in {"decide_confirm", "decide_confirm_resume", "accept_confirm"}:
                     raise CallbackRefused()
                 request_id = callback.target_id
             source, settings = await self.controls.recovery._source(link, request_id)
             admission = await prepare_attention(self.plans.reader, link)
-            kind = "decide" if callback.kind == "decide_confirm" else "accept"
+            kind = "decide" if callback.kind in {"decide_confirm", "decide_confirm_resume"} else "accept"
             composed = _ActionGuard(guard, admission, source, callback_id, kind)
             key = "notice:work-refusal-refresh:" + callback_id
             async with self.callbacks.writer(link, composed) as writer:

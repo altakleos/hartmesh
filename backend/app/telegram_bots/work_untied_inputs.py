@@ -100,7 +100,7 @@ class WorkUntiedInputs:
         return await await_drained(perform())
 
     async def execute_callback(self, channel, row, *, update_id):
-        if row.kind not in {"answer_yes", "answer_no", "voice_save_answer", "voice_discard"}:
+        if row.kind not in {"answer_yes", "answer_no", "voice_save_answer", "voice_save_resume", "voice_discard"}:
             return False
 
         async def perform():
@@ -237,6 +237,8 @@ class WorkUntiedInputs:
             current, _ = await self.recovery._source(link, data["request_id"])
             if not same_displayed_basis(current, source):
                 raise ProductSourceRetired()
+            if row.kind == "voice_save_resume" and current.request.get("can_resume") is not True:
+                raise CallbackRefused("denied.start")
         admission = await prepare_attention(self.plans.reader, link)
         composed = _AnswerGuard(guard, admission, link, source, captured, row.id, callbacks=self.callbacks, fresh=existing is None)
         async with self.callbacks.writer(link, composed) as writer:
@@ -298,6 +300,18 @@ class WorkUntiedInputs:
                 else captured
             )
             composed.action = result
+            if row.kind == "voice_save_resume":
+                from app.telegram_bots.acts import _snapshot
+                from app.telegram_bots.work_request_continuations import stage_request_activation
+
+                saved = await writer.get(TelegramActRow, result.id, populate_existing=True)
+                notice = await writer.get(TelegramOutboxRow, data["notice_id"], populate_existing=True)
+                mark = (await self.inbox._rows(writer, [origin]))[0]
+                basis = replace(source, request={**source.request, "can_resume": True}) if existing is not None else current
+                stage_request_activation(saved, row, notice, basis, mark=mark)
+                await writer.flush()
+                result = _snapshot(saved)
+                composed.action = result
             return result
 
 
@@ -315,6 +329,8 @@ class _AnswerGuard:
         held, _ = await self.admission(session=writer, projection=_AnswerProjection(self))
         if "agents:write" not in held:
             raise AgentDenied("The answer is unavailable")
+        if self.composite and self.fresh and "runs:create" not in held:
+            raise AgentDenied("Starting work is unavailable")
         self.base.current()
         return current
 
@@ -351,7 +367,10 @@ class _AnswerProjection(_RecoveryProjection):
         controls = _RequestProjection.objects(rows[0][14])
         original = [row for row in controls if row.group_id == data["group_id"]]
         selected = next((row for row in controls if row.id == g.identity), None)
-        if selected is None or selected.kind != ("voice_save_answer" if data["version"] == 2 else "answer_yes") or selected.target_kind != "request" or selected.target_id != data["request_id"]:
+        if selected is None or selected.kind not in ({"voice_save_answer", "voice_save_resume"} if data["version"] == 2 else {"answer_yes"}) or selected.target_kind != "request" or selected.target_id != data["request_id"]:
+            raise CallbackRefused()
+        g.composite = selected.kind == "voice_save_resume"
+        if g.composite and (data.get("resume") is not True or selected.payload.get("work_id") != data["work_id"]):
             raise CallbackRefused()
         choices = [row for row in controls if row.group_id == selected.group_id]
         answer_source_group(parent, original, data)

@@ -48,6 +48,8 @@ def interaction_state(value, source):
         fields = fields | {"replaced"}
     if view == "changes" and state.get("refreshed") is False:
         fields = fields | {"refreshed"}
+    if view == "decision" and state.get("resume") is True:
+        fields = fields | {"resume"}
     if set(state) != fields:
         raise ValueError("invalid-work-interaction")
     for key in {"text", "note", "decision"} & fields:
@@ -72,6 +74,10 @@ def interaction_state(value, source):
         raise AgentDenied("The interaction is unavailable")
     if view == "decision":
         _STATEMENT.validate_python(state["decision"] + ("\n\n" + state["note"] if state["note"] else ""))
+        if source.request.get("can_resume") is True:
+            state["resume"] = True
+        else:
+            state.pop("resume", None)
     return state
 
 
@@ -98,6 +104,10 @@ def present_interaction(source, value, *, locale, expires_at=None):
     elif view == "decision":
         suffix = render("decide.confirm_note" if state["note"] else "decide.confirm", locale, decision=state["decision"], note=state["note"])
         keyboard = [[button("decide_confirm", "label.confirm")]]
+        if state.get("resume") is True:
+            combined = button("decide_confirm_resume", "label.confirm_resume")
+            combined["payload"]["assignment_revision"] = source.seen["assignment_revision"]
+            keyboard.insert(0, [combined])
         keyboard.append(([button("decide_note", "label.add_note")] if not state["note"] else []) + [button("back", "label.back")])
     elif view == "accept":
         suffix = render("review.accept_confirm", locale, name=source.request["instance_name"])

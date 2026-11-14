@@ -662,6 +662,8 @@ TEXTS.update(
         "review.changes_confirm": 'Your note is kept and has not been sent: "{note}". Request these changes to the result above?',
         "voice.confirm_answer": 'Heard: "{text}" Save this as your answer?',
         "label.confirm": "Confirm",
+        "label.confirm_resume": "Confirm and resume",
+        "label.save_resume": "Save and resume",
         "label.add_note": "Add a note",
         "label.yes_accept": "Yes, accept",
         "label.request_these_changes": "Request these changes",

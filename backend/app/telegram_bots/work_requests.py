@@ -47,6 +47,8 @@ def seen_basis(record, request, responses):
 
 
 class WorkRequestReader(AttentionReader):
+    composites = False
+
     async def read_request(self, link, request_id):
         return await await_drained(self._read_request(link, request_id))
 
@@ -84,6 +86,17 @@ class WorkRequestReader(AttentionReader):
             raise AgentConflict("Review the current request and all responses")
         if await self._current(link) != authority:
             raise AuthorityUnavailable()
+        if self.composites:
+            from app.telegram_bots.work_view_reads import WorkViewsReader
+            from app.telegram_bots.work_views import work_buttons
+
+            detail = await WorkViewsReader(work=self.work, authority=self.authority, links=self.links, clock=self.clock).detail(link, record["id"])
+            if detail.record["revision"] != record["revision"]:
+                raise AgentConflict("Review the current assignment")
+            controls = work_buttons(
+                detail.record, owner_id=link.owner_user_id, permissions=detail.permissions, held=detail.held, request=None, lifecycle_pending=detail.lifecycle_pending, can_reuse_conversation=detail.can_reuse_conversation
+            )
+            request = {**request, "can_resume": request["state"] == "pending" and request["purpose"] in {"decision", "information"} and any(item["kind"] == "work_start" for line in controls for item in line)}
         return WorkRequestRead(request, record, tuple(responses), seen_basis(record, request, responses), people, authority[1][1] == "protected")
 
 
