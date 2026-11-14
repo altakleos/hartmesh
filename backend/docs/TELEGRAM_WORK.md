@@ -223,8 +223,9 @@ fail qualification; compiling a dialect is not evidence of runtime execution.
 review, result and colleague-news owners. Saved sources must be untouched,
 unsent presentations; a pending-preview validator never invents a dispatch.
 Final projections retain source events, exact claims, referenced Spaces, routing
-rosters, result identities and optional route permissions. Digest titles do not
-read file bytes or grant action authority. Delivery and item controllers still
+rosters, result identities and optional route permissions. Colleague-news titles
+use the compact news read, without fetching or joining an actionable assignment
+preview. Digest titles do not read file bytes or grant action authority. Delivery and item controllers still
 own whole-batch claims, acknowledgements and complete preview admission.
 
 Digest ACKs must match the detached manifest admitted before the SDK await.

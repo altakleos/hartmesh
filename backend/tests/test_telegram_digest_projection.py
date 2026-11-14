@@ -106,7 +106,8 @@ async def test_ten_complex_sources_fit_postgres_result_column_limit(work_deliver
     e = work_delivery
     item = await ended(e, "attempt.no_result")
     reader = WorkNewsReader(work=e.human.work, authority=e.live.authority, links=e.db.links)
-    source = await reader.read(e.link, item)
+    source = await reader.read(e.link, item, include_detail=False)
+    assert "detail" not in source.work
     projection = DigestProjection(e.link, [WorkNewsProjection(reader, e.link, item, source) for _ in range(10)])
     query = projection.extend(_member_base(e.link))
     for target in (dialect(), asyncpg.dialect()):
@@ -130,6 +131,7 @@ async def test_compact_source_preserves_verified_output_and_final_route_permissi
     reader = WorkNewsReader(work=e.human.work, authority=e.live.authority, links=e.db.links)
     direct = await reader.read(e.link, item)
     assert direct.values["excerpt"] == text
+    assert "detail" in direct.work
     original = authz.resolve_route_permissions
 
     async def permissions(*args, **kwargs):
@@ -138,7 +140,24 @@ async def test_compact_source_preserves_verified_output_and_final_route_permissi
 
     monkeypatch.setattr(authz, "resolve_route_permissions", permissions)
     source = WorkNewsProjection(reader, e.link, item, work=direct.work, protected=direct.protected)
+    assert "detail" not in source.work
     admission = await prepare_attention(e.reader, e.link)
     await admission(projection=DigestProjection(e.link, [source]))
     assert source.source.values["excerpt"] == (text if permitted else None)
     assert bool(source.source.values["thread_id"]) is permitted
+
+
+@pytest.mark.asyncio
+async def test_complete_news_projection_preserves_prepared_dates_without_clock(work_delivery):
+    from test_telegram_attempt_notices import ended
+
+    from app.telegram_bots.work_news_sources import WorkNewsProjection, WorkNewsReader
+
+    e = work_delivery
+    item = await ended(e, "attempt.no_result")
+    reader = WorkNewsReader(work=e.human.work, authority=e.live.authority, links=e.db.links)
+    source = await reader.read(e.link, item)
+    projection = WorkNewsProjection(reader, e.link, item, source)
+    admission = await prepare_attention(e.reader, e.link)
+    await admission(projection=projection)
+    assert projection.source == source

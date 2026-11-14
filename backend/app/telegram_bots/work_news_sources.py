@@ -64,22 +64,22 @@ class WorkNewsReader(WorkDetailsReader):
         super().__init__(work=work, authority=authority, links=links)
         self.clock = clock or (lambda: datetime.now(UTC))
 
-    async def read(self, link, item):
+    async def read(self, link, item, *, include_detail=True):
         try:
-            return await await_drained(self._read(link, item))
+            return await await_drained(self._read(link, item, include_detail=include_detail))
         except (AccessOff, CeilingRefused, AgentConflict, AgentDenied):
             raise ProductSourceRetired() from None
 
     async def prepare_clock(self, link, item):
         return await prepare_news_clock(self, link, item)
 
-    async def _read(self, link, item):
+    async def _read(self, link, item, *, include_detail=True):
         authority = await self._current(link)
         current = await self.work.get(actor=PrincipalRef("human", link.owner_user_id), instance_id=link.agent_ref, work_id=item.work_id)
         work = {key: current[key] for key in _WORK}
         from app.telegram_bots.work_news_carriers import read_news_detail
 
-        detail = await read_news_detail(self, link, item)
+        detail = await read_news_detail(self, link, item) if include_detail else None
         projection = WorkNewsProjection(self, link, item, work=work, protected=authority[1][1] == "protected", clock=await self.prepare_clock(link, item), detail=detail)
         admission = await prepare_attention(self, link)
         await admission(projection=projection)
@@ -90,7 +90,8 @@ class WorkNewsProjection:
     def __init__(self, reader, link, item, source=None, *, work=None, protected=None, clock=None, detail=None, origin=None, activation_id=None, historical=False):
         self.reader, self.link, self.item, self.source = reader, link, item, source
         self.origin = origin
-        self.work = {key: source.work[key] for key in _WORK} if source else work
+        snapshot = source.work if source else work
+        self.work = {key: snapshot[key] for key in _WORK} if snapshot is not None else None
         self.protected = source.protected if source else protected
         self.stop = StopNews(link, item, clock) if item.payload.get("work_event_intent", {}).get("key") in STOP_KEYS else None
         self.answer = AnswerNews(item) if item.payload.get("work_event_intent", {}).get("key") == "request.answered" else None
@@ -258,7 +259,8 @@ class WorkNewsProjection:
             detail = self.detail.source
             if detail is None:
                 raise ProductSourceRetired()
-            data = {**data, "detail": thaw(asdict(detail)), "detail_dates": detail_dates(detail, self.clock)}
+            dates = detail_dates(detail, self.clock) if self.clock is not None else self.source.work["detail_dates"]
+            data = {**data, "detail": thaw(asdict(detail)), "detail_dates": dates}
         fresh = WorkNewsRead(work.id, key, values, self.protected, data, signature, digest([signature, data, values, fields(attempt, _ATTEMPT), None if activation is None else event_signature(activation, None, {})]))
         if self.origin is not None:
             if (fresh.work_id, fresh.key, fresh.event_signature) != (self.origin.work_id, self.origin.key, self.origin.event_signature):

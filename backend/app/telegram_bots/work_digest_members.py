@@ -112,7 +112,7 @@ class DigestMembers:
         basis, previous, _ = frozen_news(SimpleNamespace(link=link, item=item, part=None), pending=True)
         if basis.get("reveal") or item.class_ in {"reply", "progress"}:
             raise ProductSourceRetired()
-        source = await self.news.read(link, item)
+        source = await self.news.read(link, item, include_detail=False)
         if not same_news_origin(previous, source):
             raise ProductSourceRetired()
         view = present_news(source.key, values=source.values, locale=locale, protected=source.protected)

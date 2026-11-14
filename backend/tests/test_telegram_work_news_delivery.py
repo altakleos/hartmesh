@@ -196,7 +196,10 @@ async def test_multipart_news_show_retains_cleanup_and_consumed_proof(work_deliv
     async with e.db.sessions() as reader:
         row = await reader.get(TelegramOutboxRow, identity)
         assert row.payload["work_news_basis"]["cleanup_id"]
-        assert len(row.parts) == 3
+        assert len(row.parts) == 4
+        source = row.payload["work_news_basis"]["source"]
+        start = await reader.scalar(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == row.parts[-1]["callback_group_id"], TelegramCallbackRow.kind == "work_start"))
+        assert start.target_id == source["work_id"] and start.message_id is None
     message(sdk, "editMessageReplyMarkup", identity=2201)
     clock.advance(2)
     assert await e.sender.tick() == 1
@@ -208,17 +211,20 @@ async def test_multipart_news_show_retains_cleanup_and_consumed_proof(work_deliv
     await _sweep_outbox(e.db.sessions, clock.now(), e.channel._services.callbacks.config.callbacks.max_age_days)
     async with e.db.sessions() as reader:
         assert await reader.get(TelegramOutboxRow, cleanup_id) is not None
-    for message_id in (2202, 2203):
+    for message_id in (2202, 2203, 2204):
         message(sdk, identity=message_id)
         clock.advance(2)
         assert await e.sender.tick() == 1
         await e.sender.drain()
     assert not e.dispatch_errors, e.dispatch_errors
     calls = [call for call in sdk.calls if call.endpoint in {"sendMessage", "editMessageReplyMarkup"}]
-    assert [call.endpoint for call in calls] == ["sendMessage", "editMessageReplyMarkup", "sendMessage", "sendMessage"]
+    assert [call.endpoint for call in calls] == ["sendMessage", "editMessageReplyMarkup", "sendMessage", "sendMessage", "sendMessage"]
     assert "x" * 4070 in "".join(call.parameters.get("text", "") for call in calls)
-    assert calls[-1].parameters["reply_markup"]["inline_keyboard"][0][0]["url"].startswith("https://app.example.test/")
+    assert source["work"]["detail"]["record"]["objective"] in "".join(call.parameters.get("text", "") for call in calls)
+    assert calls[-1].parameters["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
     assert all(call.parameters["protect_content"] for call in calls if call.endpoint == "sendMessage")
+    async with e.db.sessions() as reader:
+        assert (await reader.get(TelegramCallbackRow, start.id)).message_id == 2204
     callbacks = e.channel._services.callbacks
     await callbacks.sweep(callbacks.clock() + timedelta(days=callbacks.config.callbacks.max_age_days + 1))
     async with e.db.sessions() as reader:
