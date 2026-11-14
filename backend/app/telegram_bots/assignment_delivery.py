@@ -126,7 +126,9 @@ class AssignmentPlans(WorkNewsPlans):
                             raise ProductSourceRetired()
                         inbox = InboxRow.from_row(mark)
                         if index == 0:
-                            inbox = await self.outbox.inbox.route(inbox, kind="assignment_draft", target_id=draft_id, basis={"draft_id": draft_id}, operation_ids=[], session=writer)
+                            from app.telegram_bots.assignment_drafts import draft_route_basis
+
+                            inbox = await self.outbox.inbox.route(inbox, kind="assignment_draft", target_id=draft_id, basis=draft_route_basis(inbox, draft_id), operation_ids=[], session=writer)
                         await self.outbox.inbox.register_delivery([inbox], outbox_id=row.id, primary=mark.outbox_id is None, finish=True, session=writer)
                 identity = row.id
             await self.materialize(link, identity)

@@ -2036,6 +2036,8 @@ current permission and a complete confirmed preview.
 The same services support explicit combined decision or spoken-answer confirmations:
 the saved answer or decision keeps its own receipt and delivery, while Resume
 retains one original activation request. Ordinary answers keep saving without starting.
+Spoken assignment prompts reuse the private draft flow, preserving the original
+prompt and displaying the heard text before the complete review card and its controls.
 The managed-bot command and button integration follows separately.
 
 ![Assignment proposal in a synthetic conversation](docs/images/assignment-proposal.png)

@@ -1477,6 +1477,30 @@ original route stays open while the criteria prompt awaits an answer. Completed
 input replays observe their existing exact card through Save, Discard and expiry;
 they never reconstruct a draft or allocate another operation.
 
+`voice_inputs.py` optionally routes captured transcript consumers around the
+existing Work/ordinary fallback. Runtime installation is separate. Assignment
+speech captures the actual prompt and its whole ACK before calling the provider,
+then rechecks original input/descriptor, physical scope, source signature and
+prompt lifetime before the private draft writer. Quoted sources scan every
+same-scope page and retain ownership when their prompt or part ACK is missing.
+Expired/closed inputs never fall through to an ordinary turn. The closed
+`work_voice` V3 assignment owner keeps `held=True`, so an older Work voice
+consumer holds it when this optional router is absent.
+
+The completed transcript remains `work_card_hold` until the existing assignment
+admission atomically transfers it into the private draft route. Borrowed route
+checks retain and validate the voice descriptor while comparing the strict
+draft-only basis. Replay retains one transcription/extraction and the same card.
+A caller recovering ready held rows invokes the router explicitly; default recovery
+installation is separate. Missing, closed or expired original prompts produce one
+heard/closed delivery. Transient selection or authority failures keep custody, and
+an already-admitted draft retains its own route and consumed prompt.
+Heard-text parts precede the canonical objective/criteria and final controls in
+one source-qualified card; manual criteria use the same complete prompt ACK and
+can retain two spoken inputs without a second extraction. No Work or run is
+created by transcription, extraction or card delivery. Only the complete card's
+explicit Save/Start gesture admits its existing generic operation.
+
 `assignment_editing.py` proves the original full card, callback group, draft and
 input after provider waits. A correction gets its own extraction and private
 draft. Adoption closes the original draft and consumes its controls in the same

@@ -39,7 +39,7 @@ def assignment_intent(item):
     return intent
 
 
-def private_source(link, root, *, instance, permissions, policy, held, clock, config, journal=None, detail=None):
+def private_source(link, root, *, instance, permissions, policy, held, clock, config, journal=None, detail=None, transcripts=()):
     draft = snapshot_draft(link, root)
     if root.cancel_requested_at is not None:
         raise ProductSourceRetired()
@@ -67,6 +67,8 @@ def private_source(link, root, *, instance, permissions, policy, held, clock, co
         "can_start": {"agents:write", "runs:create", "threads:write"}.issubset(held),
     }
     values = {"name": instance.name, "due": due}
+    if phase == "draft" and transcripts:
+        values["heard"] = list(transcripts)
     if root.operation_ids:
         from app.telegram_bots.assignment_journals import action_facts, event_facts, journal_state
 
@@ -248,6 +250,17 @@ class AssignmentProjection:
             journal = (_snapshot(parent), _snapshot(child) if child else None, event, child_event)
             self.family.check(rows, parent)
             self.consent.check(rows, root, journal[0], journal[1])
-        self.source = private_source(self.link, root, instance=rows[0][1], permissions=rows[0][2], policy=rows[0][3], held=held, clock=self.clock, config=self.reader.config, journal=journal, detail=detail)
+        from app.telegram_bots.assignment_drafts import draft_input_basis
+        from app.telegram_bots.assignment_voice_inputs import voice_basis
+
+        originals = [rows[0][self.projection.column + 1]]
+        if self.projection.criteria_origin is not None:
+            originals.append(rows[0][self.projection.criteria_column])
+        transcripts = []
+        for mark in originals:
+            if voice_basis(mark) is not None:
+                draft_input_basis(mark)
+                transcripts.append(mark.sanitized_input["text"])
+        self.source = private_source(self.link, root, instance=rows[0][1], permissions=rows[0][2], policy=rows[0][3], held=held, clock=self.clock, config=self.reader.config, journal=journal, detail=detail, transcripts=transcripts)
         if self.expected is not None and not same_body(self.source.__dict__, self.expected.__dict__):
             raise ProductSourceRetired()

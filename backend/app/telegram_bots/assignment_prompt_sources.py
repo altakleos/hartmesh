@@ -131,8 +131,17 @@ class AssignmentPromptProjection:
                 raise ProductSourceRetired()
         data = {"intent": self.intent, "root": private_facts(root) if root is not None else None}
         instance, permissions, policy = rows[0][1:4]
+        values = {"name": instance.name}
+        if self.intent["purpose"] == "assign_done":
+            from app.telegram_bots.assignment_drafts import draft_input_basis
+            from app.telegram_bots.assignment_voice_inputs import voice_basis
+
+            if voice_basis(mark) is not None:
+                draft_input_basis(mark)
+                values["heard"] = [mark.sanitized_input["text"]]
+        identity_values = values if "heard" in values else instance.name
         self.source = WorkNewsRead(
-            None, "assignment.prompt", {"name": instance.name}, instance.custody != "personal" and policy == "protected", data, digest([self.link.id, self.link.binding_generation, self.intent]), digest([data, instance.name, permissions])
+            None, "assignment.prompt", values, instance.custody != "personal" and policy == "protected", data, digest([self.link.id, self.link.binding_generation, self.intent]), digest([data, identity_values, permissions])
         )
         if self.expected is not None and not same_body(asdict(self.source), asdict(self.expected)):
             raise ProductSourceRetired()
