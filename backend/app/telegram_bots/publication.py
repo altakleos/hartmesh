@@ -495,6 +495,7 @@ class PublicationCoordinator:
                     return settings.timezone
 
             human_kwargs = {**human_kwargs, "person_timezone": await await_drained(timezone())}
+
         message = InboundMessage(
             channel_name="telegram",
             chat_id=str(link.chat_id),
@@ -550,6 +551,21 @@ class PublicationCoordinator:
             # Raw SDK descriptors must never enter the legacy thread uploader.
             message.files = []
         await admission.authorize("run_create")
+        if link.agent_kind == "instance":
+            from app.telegram_bots.attention_authority import current_attention
+            from app.telegram_bots.authority import AuthorityUnavailable, CeilingRefused
+            from deerflow.agent_instances.contract import AgentDenied
+
+            cards = []
+            work_chat = getattr(self.host, "work_chat", None)
+            if work_chat is not None:
+                try:
+                    await current_attention(work_chat.views.reader, link)
+                except (AgentDenied, AuthorityUnavailable, CeilingRefused):
+                    pass
+                else:
+                    cards = ["assignment_card"]
+            message.metadata["human_message_kwargs"]["shows_cards"] = cards
         reservation = self.bus.reserve_inbound(message)
         try:
             won = await self.inbox.mark_dispatch_started(record, guard=create_guard)

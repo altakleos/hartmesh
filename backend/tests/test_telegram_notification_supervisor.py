@@ -168,3 +168,29 @@ async def test_notification_shutdown_drains_after_failure(failed_owner, cancel):
     finally:
         release.set()
         await asyncio.gather(stopping, *runtime._operations, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_default_startup_shares_proposal_source_across_live_recovery_and_sdk(work_pages, monkeypatch):
+    e = work_pages
+    host = build(e.db, monkeypatch).supervisor
+    host.app, host.authority, host._app_config, host.thread_client = e.http_app, e.live.authority, e.live.config, e.http_client
+
+    async def no_poll(*args, **kwargs):
+        # Polling transport is outside this default-owner construction check.
+        return None
+
+    monkeypatch.setattr(host, "_launch_contained", no_poll)
+    monkeypatch.setattr(host, "_periodic", lambda *args, **kwargs: None)
+    try:
+        await host.start()
+        assert host.cause() is None
+        proposals = host.work_chat.proposals
+        assert host.publications.assignment_proposal_planner.__self__ is proposals
+        assert proposals.source is host.assignment_proposal_source
+        assert host.model_source._assignment_proposal_source is proposals.source
+        assert proposals.source.coordinator is host.publications
+        assert proposals.source.http_owner is host.thread_client
+        assert host.work_chat.assignment_answers.assignments is host.work_chat.assignments
+    finally:
+        await host.stop()

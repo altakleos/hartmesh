@@ -97,8 +97,9 @@ The page tool returns a plain `ToolMessage` so the conversation continues.
 aware optional due date and the newest visible human message's card marks. A
 supported card ends the turn with one issuing-message-scoped ToolMessage; missing support or
 Just answer returns model guidance and continues. It creates no Work/thread/run,
-performs no service call and grants no authority. Registration/card marks belong
-to the adapter integration; normal assembly does not yet offer this primitive.
+performs no service call and grants no authority. Normal instance chat assembly
+offers it only when the adopted definition enables Work. The adapter decides
+card support from current Use+Inspect for each actual message.
 `chat_tools(execution)` registers `show_web_page` for normal instance conversations in lead
 assembly, before tool authorization; Work attempts and subagents do not receive it.
 

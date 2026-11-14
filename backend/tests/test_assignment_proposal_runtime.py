@@ -171,3 +171,28 @@ def test_summary_named_human_does_not_hide_real_card_or_just_answer_marks():
     assert isinstance(invoke([user, summary]), Command)
     user = HumanMessage(content="Here", additional_kwargs={"shows_cards": ["assignment_card"], "assignment_card_response": {"choice": "answer_here"}})
     assert "chose to have this done here" in invoke([user, summary]).content
+
+
+@pytest.mark.parametrize("choice", ["unsupported", "answer_here"])
+def test_adopted_policy_tools_follow_latest_actual_human_despite_old_card_and_hidden_hint(choice):
+    from langchain.tools import ToolRuntime
+    from test_agent_chat_tools import execution
+
+    from deerflow.agent_instances.chat_tools import chat_tools, successful_assignment_proposal
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY
+    from deerflow.agents.middlewares.assignment_proposal_middleware import AssignmentProposalMiddleware
+
+    old_human = HumanMessage(id="old-human", content="Previous handover", additional_kwargs={"shows_cards": ["assignment_card"]})
+    old_issuer = AIMessage(id="old-issuer", content="", tool_calls=[proposal_call(1)])
+    runtime = ToolRuntime(state={"messages": [old_human, old_issuer]}, context={}, config={}, stream_writer=lambda _: None, tool_call_id="reused-provider-call", store=None)
+    old_card = propose_assignment.invoke({"proposal": {"objective": "Review guide 1", "success_criteria": "Report verified gaps"}, "runtime": runtime}).update["messages"][0]
+    marks = {} if choice == "unsupported" else {"shows_cards": ["assignment_card"], "assignment_card_response": {"version": 1, "kind": "assignment_card_response", "tool_call_id": old_card.tool_call_id, "choice": "answer_here"}}
+    current = HumanMessage(id="new-human", content="Answer this here", additional_kwargs=marks)
+    hidden = HumanMessage(id="hidden-hint", content="Internal summary", additional_kwargs={"hide_from_ui": True, "shows_cards": ["assignment_card"]})
+    bound = execution("company", work_policy=True)
+    model = RecordedModel(responses=[AIMessage(id="new-issuer", content="", tool_calls=[proposal_call(2)]), AIMessage(id="answer", content="The answer here")])
+    graph = create_agent(model, tools=chat_tools(bound), middleware=[AssignmentProposalMiddleware()], context_schema=dict)
+    result = graph.invoke({"messages": [old_human, old_issuer, old_card, current, hidden]}, context={AGENT_EXECUTION_CONTEXT_KEY: bound})
+    assert model.calls == 2 and result["messages"][-1].content == "The answer here"
+    assert successful_assignment_proposal(result["messages"]) is None
+    assert not next(message for message in result["messages"] if isinstance(message, ToolMessage) and message.id != old_card.id).artifact

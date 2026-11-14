@@ -1,5 +1,6 @@
 """An acknowledged proposal choice owns one new message in its original chat."""
 
+import logging
 import re
 from copy import deepcopy
 from dataclasses import replace
@@ -24,6 +25,8 @@ from app.telegram_bots.render import render_plain
 from app.telegram_bots.work_actions import same_body
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow, TelegramPersonSettingsRow
 from deerflow.utils.file_io import await_drained
+
+logger = logging.getLogger(__name__)
 
 
 def _hex(value, length=32):
@@ -221,7 +224,13 @@ class AssignmentAnswers:
                 await current(session=writer, projection=_AnswerFrame(link, root, parent, locale=settings.locale))
                 admission_guard.current()
                 result = SubmissionInputStage(saved.origins, saved.text, saved.human_message_kwargs, saved.thread_id, document["parent_publication"], callback_id, saved.record, saved.route_complete)
-            await self.assignments.observe(link, root.id)
+            try:
+                await self.assignments.observe(link, root.id, guard=guard)
+            except Exception as error:
+                # The input already committed. Its handoff must not depend on
+                # repairing a presentation that has its own durable owner.
+                logger.warning("Telegram assignment answer presentation deferred: action=%s cause=%s", root.id, type(error).__name__)
+            guard.current()
             return result
 
         return await await_drained(perform())

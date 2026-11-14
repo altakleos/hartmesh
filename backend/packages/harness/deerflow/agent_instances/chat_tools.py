@@ -41,7 +41,13 @@ def show_web_page(page: WebPageKey, runtime: ToolRuntime[dict | None]) -> ToolMe
 
 def chat_tools(execution: AgentExecution) -> list:
     """Tools for a normal conversation with an AI assistant or AI employee."""
-    return [show_web_page]
+    from deerflow.config.agents_config import AgentConfig
+
+    tools = [show_web_page]
+    policy = AgentConfig.model_validate(execution.definition.config).work_policy
+    if execution.work is None and policy is not None and policy.enabled:
+        tools.append(propose_assignment)
+    return tools
 
 
 class ProposeAssignment(StrictModel):

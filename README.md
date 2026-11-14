@@ -2025,6 +2025,10 @@ when several can be stopped. Choices retain their original targets through
 restart; a later answer or attempt cannot inherit them. Expired choices require
 a new gesture, while an uncertain cancellation keeps its original receipt.
 Ordinary messages continue into the conversation when no assignment prompt is waiting.
+When Work is enabled and you can inspect the agent, a handover can produce a
+proposed assignment card. Start now, Save for later and Edit remain explicit
+choices; Just answer continues in the same conversation. The proposal itself
+saves no assignment and starts no work.
 
 Capacity counts include every occupied place. Running-assignment details require
 access to inspect the corresponding assistant or employee; missing start dates
