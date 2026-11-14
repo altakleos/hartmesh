@@ -541,7 +541,7 @@ class TelegramSupervisor:
             poll.wake()
         if self.notifications is not None:
             if self.notifications.events is not None:
-                self._periodic(self.notifications.events.tick, self.config.producer.poll_seconds, "work-events", refused_too=True)
+                self._periodic(self.notifications.tick_events, self.config.producer.poll_seconds, "work-events", refused_too=True)
                 self._periodic(self.notifications.summaries.tick, 60, "summaries")
                 self._periodic(self.notifications.tick_acts, 5, "work-acts")
             self._periodic(self.notifications.tick_maintenance, 5, "notification-recovery")

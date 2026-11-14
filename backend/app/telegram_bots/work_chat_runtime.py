@@ -16,7 +16,9 @@ from app.telegram_bots.assignment_voice_inputs import AssignmentVoiceInputs
 from app.telegram_bots.notification_runtime import _RuntimeGuard
 from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.voice_inputs import VoiceInputRouter
+from app.telegram_bots.work_capacity_offers import WorkCapacityOffers
 from app.telegram_bots.work_capacity_reads import WorkCapacityReader
+from app.telegram_bots.work_capacity_sources import WorkCapacityOfferReader
 from app.telegram_bots.work_execution_delivery import WorkExecutionPlans
 from app.telegram_bots.work_execution_sources import WorkExecutionReader
 from app.telegram_bots.work_management_delivery import WorkManagementPlans
@@ -47,6 +49,8 @@ class WorkChatRuntime:
         self.views.reader.acts = host.acts
         host.work_view_sources = WorkNewsSources(self.views)
         self.capacity = WorkCapacityReader(gateway=host.thread_client, **shared)
+        self.offers = WorkCapacityOffers(reader=WorkCapacityOfferReader(capacity=self.capacity, **shared), acts=host.acts, guard_factory=self.offer_guard, available=runtime.available, **delivery)
+        host.work_capacity_sources = WorkNewsSources(self.offers)
         self.executions = WorkExecutionPlans(reader=WorkExecutionReader(capacity=self.capacity, **shared), acts=host.acts, product=host.product_name, **delivery)
         host.work_execution_sources = WorkNewsSources(self.executions)
         self.starts = WorkStartAdmissions(self.views, host.acts)
@@ -78,6 +82,7 @@ class WorkChatRuntime:
             "assignment_prompt_intent": self.assignment_prompts,
             "work_management_intent": self.management,
             "management_prompt_intent": self.management_edits.prompts,
+            "capacity_offer_intent": self.offers,
         }
         found = [owner for key, owner in owners.items() if key in item.payload]
         if len(found) > 1:
@@ -86,6 +91,12 @@ class WorkChatRuntime:
 
     def guard(self, channel, link):
         return _RuntimeGuard(self.runtime, self.host.commands._guard(channel, link))
+
+    def offer_guard(self, link):
+        channel = self.host.channel(link.id)
+        if channel is None:
+            raise ProductSourceRetired()
+        return self.guard(channel, link)
 
     async def handle_command(self, channel, update, word):
         link = channel._admission(update).link

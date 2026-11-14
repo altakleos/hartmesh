@@ -1860,3 +1860,21 @@ Unexpected failures and already-owned private requests retain their existing
 recovery custody. Discard/Back observers receive their caller's original guard,
 and execution-notice creation checks it again after flushing and before commit.
 Receipt settlement remains separate from fresh presentation admission.
+
+The installed runtime also owns `WorkCapacityOffers`, using its existing global
+database arbitration and owner-authenticated HTTP capacity reader. Maintenance
+checks at least once a minute and at the configured offer-hold boundary; newly
+consumed Work events wake the next check. The event wrapper preserves cursor
+progress while sends are refused, and all admitted event/maintenance work drains
+through the same runtime operation set. Event wakeups schedule a read; they are
+not capacity or permission evidence.
+
+Each offer captures its actual channel/binding guard before source preparation.
+Global arbitration keeps its existing global → sorted bots → journal/control
+lock order; original guards and runtime availability are checked before and
+after fresh metadata writes, including after flush. Recovered partless offers
+use that same guarded materializer. Shutdown cannot admit a late offer, and
+unknown reads preserve the original waiting activation without retrying it.
+Service delivery ignores proactive-notification preferences but retains current
+source/privacy/claim SDK checks. Only the fresh acknowledged Start gesture
+transfers the original wait and admits a new activation.
