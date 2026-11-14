@@ -28,8 +28,14 @@ successor pointer; its actual ACK closes the old Retry warning. Retention keeps
 that predecessor while its successor remains unsettled.
 
 Message preferences, quiet-hour prompts, cross-bot rejected-token notices and
-summary Stop are installed with this graph. Start/Resume/Stop assignment links
-continue to open the web; no assignment execution controller is installed.
+summary Stop are installed with this graph. Eligible colleague and terminal
+assignment news embeds the complete current objective and success criteria with
+Start/Resume. Its ordered SDK acknowledgements enable only the final keyboard.
+The saved activation binds that actual event, callback and original presentation;
+entry and native launch reread the canonical event in their borrowed SQL snapshot.
+Its own reservation may advance Work without replacing the original event proof.
+Missing proof holds the original operation. Status and summary carriers retain
+their separate source owners.
 
 `work_file_exports.py` exports one indexed source of the current Work outcome
 as the human recipient. Outcome, evidence and assignment revisions, source

@@ -59,11 +59,11 @@ async def test_proposal_delivers_complete_details_web_link_and_dismiss(work_deli
     assert "Done when: List every broken reference &amp; its source" in body["text"]
     assert "Not started." in body["text"]
     buttons = [button for row in body["reply_markup"]["inline_keyboard"] for button in row]
-    assert [button["text"] for button in buttons] == ["Open assignment", "Not now"]
-    assert buttons[0]["url"].startswith("https://app.example.test/")
+    assert [button["text"] for button in buttons] == ["Start now", "Not now"]
+    assert "callback_data" in buttons[0]
     async with e.db.sessions() as reader:
         controls = list(await reader.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.payload["anchor_outbox_id"].as_string() == item.id)))
-        assert [control.kind for control in controls] == ["dismiss"]
+        assert {control.kind for control in controls} == {"work_start", "dismiss"}
     current = await e.human.work.get(actor=e.actor, instance_id=e.instance.id, work_id=item.work_id)
     assert current["attempt"] is None and current["revision"] == 1
 
@@ -94,13 +94,13 @@ async def test_not_now_clears_only_the_acknowledged_keyboard_without_changing_wo
     assert await e.sender.tick() == 1
     await e.sender.drain()
 
-    async def control():
+    async def control(kind):
         async with e.db.sessions() as reader:
             row = await reader.get(TelegramOutboxRow, item.id)
-            return await reader.scalar(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == row.parts[-1]["callback_group_id"]))
+            return await reader.scalar(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == row.parts[-1]["callback_group_id"], TelegramCallbackRow.kind == kind))
 
     if protected:
-        show = await control()
+        show = await control("reveal")
         assert show.kind == "reveal"
         assert [call for call in e.channel.bot.request.calls if call.endpoint == "sendMessage"][-1].parameters["text"] == "A new assignment is proposed."
         await press_work(e, show, message_id=2611)
@@ -108,7 +108,7 @@ async def test_not_now_clears_only_the_acknowledged_keyboard_without_changing_wo
         clock.advance(2)
         assert await e.sender.tick() == 1
         await e.sender.drain()
-    dismiss = await control()
+    dismiss = await control("dismiss")
     assert dismiss.kind == "dismiss"
     if protected:
         # Dismissal is presentation-only, including after a web withdrawal.
@@ -208,7 +208,7 @@ async def test_proposal_final_sdk_snapshot_rechecks_source_and_complete_preview(
         # presentation before a subsequent attempt may dispatch it.
         message(e.channel.bot.request, identity=2621)
         for _ in range(2):
-            clock.advance(2)
+            clock.advance(10)
             assert await e.sender.tick() == 1
             await e.sender.drain()
         async with e.db.sessions() as reader:

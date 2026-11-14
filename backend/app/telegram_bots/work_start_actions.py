@@ -275,12 +275,20 @@ def answered_calls(act):
         return 0
     if (
         not isinstance(value, Mapping)
-        or set(value) - {"activation_retry", "activation_parent"} != {"version"}
-        or not {"activation_retry", "activation_parent"}.intersection(value)
+        or set(value) - {"activation_retry", "activation_parent", "news_origin"} != {"version"}
+        or not {"activation_retry", "activation_parent", "news_origin"}.intersection(value)
         or type(value["version"]) is not int
         or value["version"] != 1
     ):
         raise ValueError("invalid-activation-retry")
+    if "news_origin" in value:
+        from app.telegram_bots.work_news_carriers import require_news_origin
+
+        require_news_origin(value["news_origin"])
+        if "activation_parent" in value:
+            raise ValueError("invalid-activation-news-origin")
+        if "activation_retry" not in value:
+            return 0
     if "activation_parent" in value:
         parent = value["activation_parent"]
         if not isinstance(parent, Mapping) or set(parent) != {"version", "act_id", "source_signature", "authorized_at"} or type(parent["version"]) is not int or parent["version"] != 1:

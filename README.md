@@ -2019,6 +2019,9 @@ an Edit prompt also accepts a voice note and shows its transcript with the revis
 draft. Saving an edit or confirming withdrawal is a separate gesture. Stopping targets the selected attempt;
 a newer attempt cannot inherit an earlier cancellation request. An acknowledgement
 of the request is separate from confirmed settlement.
+Eligible assignment news also offers Start or Resume beneath the complete current
+objective and success criteria. The button becomes usable after every preview
+part is delivered, and retains its original event through restart.
 When an answer and running assignments are active, `/stop` offers The answer,
 an assignment, or Everything. With only assignments, choose one or Everything
 when several can be stopped. Choices retain their original targets through

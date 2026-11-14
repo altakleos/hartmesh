@@ -39,7 +39,8 @@ async def prepare_startable(e, monkeypatch):
     async with e.db.engine.begin() as connection:
         await connection.run_sync(lambda sync: SpaceGrantRow.__table__.create(sync, checkfirst=True))
     async with e.db.sessions.begin() as writer:
-        writer.add(SpaceGrantRow(space_id=e.instance.home_id, principal_kind="nonhuman", subject_id=e.instance.principal.subject_id, permissions=3))
+        if await writer.get(SpaceGrantRow, (e.instance.home_id, "nonhuman", e.instance.principal.subject_id)) is None:
+            writer.add(SpaceGrantRow(space_id=e.instance.home_id, principal_kind="nonhuman", subject_id=e.instance.principal.subject_id, permissions=3))
     e.work = await e.human.work.delegate(actor=e.actor, instance_id=e.instance.id, request=DelegateWork(operation_id=operation(), objective="Review the documentation", success_criteria="Report verified gaps"))
     monkeypatch.setattr(agent_instances, "get_agents_api_config", lambda: type("Config", (), {"enabled": True})())
     e.manager, e.launches = RunManager(store=MemoryRunStore()), []

@@ -32,7 +32,9 @@ class NewsClock:
 
 
 async def prepare_news_clock(reader, link, item):
-    if item.payload.get("work_event_intent", {}).get("key") != "attempt.stopped":
+    from app.telegram_bots.work_news_carriers import ACTION_NEWS_KEYS
+
+    if item.payload.get("work_event_intent", {}).get("key") not in ACTION_NEWS_KEYS:
         return None
     async with reader.links.session_factory() as session:
         row = await session.get(TelegramPersonSettingsRow, link.owner_user_id)

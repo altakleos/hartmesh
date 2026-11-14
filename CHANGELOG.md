@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Offer Start or Resume beneath complete assignment news previews, retaining the
+  original acknowledged event through admission and native launch checks.
 - Offer assignment proposals in eligible agent conversations, with explicit
   Start, Save, Edit or Just answer choices and verified original-run adoption.
 - Let `/stop` choose the original active answer, running assignments, or both,

@@ -12,13 +12,15 @@ from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, Agent
 
 
 class ProposalNews:
-    def __init__(self, link, item):
+    def __init__(self, link, item, *, activation_id=None, historical=False):
         self.link, self.item = link, item
+        self.activation_id = activation_id
+        self.historical = historical
 
     def extend(self, query):
         self.column = len(query.column_descriptions)
         source, child_attempt = aliased(AgentWorkRow), aliased(AgentWorkAttemptRow)
-        started = exists(select(child_attempt.id).where(child_attempt.work_id == AgentWorkRow.id).correlate(AgentWorkRow))
+        started = exists(select(child_attempt.id).where(child_attempt.work_id == AgentWorkRow.id, child_attempt.activation_id != self.activation_id if self.activation_id is not None else True).correlate(AgentWorkRow))
         return query.add_columns(source, started).outerjoin(source, source.id == AgentWorkAttemptRow.work_id)
 
     def qualify(self, rows, event, work, instance, attempt, activation, intent):
@@ -36,12 +38,15 @@ class ProposalNews:
             or event.revision != 1
             or event.assignment_revision != 1
             or started
+            and not self.historical
             or work.status != "open"
+            and not self.historical
             or not isinstance(work.objective, str)
             or not isinstance(work.success_criteria, str)
         ):
             raise ProductSourceRetired()
         # The source attempt may have settled or advanced; its identity and
-        # requester remain the provenance. The child has no start in chat.
+        # requester remain the provenance. A receipt-only origin may outlive the
+        # child's completion; fresh publication and mutation entry stay strict.
         signature = digest([event_signature(event, None, intent), fields(attempt, ("id", "work_id", "activation_id", "requester_id")), event_signature(activation, None, {})])
         return signature, {"objective_full": work.objective, "success_criteria": work.success_criteria}
