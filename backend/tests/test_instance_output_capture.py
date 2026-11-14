@@ -5,6 +5,7 @@ native container; native qualification is covered by the Compose CI acceptance.
 """
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
@@ -27,7 +28,7 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["text", "legacy_text", "produced_file", "network_denial", "network_question", "missing_root", "revoked_home"])
+@pytest.mark.parametrize("case", ["text", "legacy_text", "produced_file", "network_denial", "network_question", "missing_root", "revoked_home", "proposal"])
 async def test_instance_worker_seals_current_home_inventory(instances, capture_environment, monkeypatch, case):
     from deerflow.agent_instances import runtime as instance_runtime
     from deerflow.agents.lead_agent import agent
@@ -52,10 +53,16 @@ async def test_instance_worker_seals_current_home_inventory(instances, capture_e
     with_tool = case in {"produced_file", "network_denial", "network_question"}
     e = capture_environment
     tools = [present_file_tool] if with_tool else []
+    if case == "proposal":
+        from deerflow.agent_instances import chat_tools
+
+        monkeypatch.setattr(chat_tools, "chat_tools", lambda _execution: [chat_tools.show_web_page, chat_tools.propose_assignment])
     if case == "network_question":
         tools.append(ask_clarification_tool)
     assembly, built, model = await asyncio.to_thread(assemble_offline, monkeypatch, runtime_context={AGENT_EXECUTION_CONTEXT_KEY: execution}, tools=tools)
     model.responses = [AIMessage("Exact instance answer", id="instance-answer")]
+    if case == "proposal":
+        model.responses = [AIMessage("", id="proposal-issuer", tool_calls=[{"id": "proposal-call", "name": "propose_assignment", "args": {"proposal": {"objective": "Review the guide", "success_criteria": "Report verified gaps"}}}])]
     if with_tool:
         filename = "current.txt" if case == "produced_file" else "result.txt"
         model.responses.insert(0, AIMessage("", tool_calls=[{"id": "present-current", "name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/" + filename]}}]))
@@ -63,6 +70,9 @@ async def test_instance_worker_seals_current_home_inventory(instances, capture_e
             model.responses[1] = AIMessage("", tool_calls=[{"id": "question-current", "name": "ask_clarification", "args": {"question": "Which source should I use?"}}])
     assert any(type(m).__name__ == "InstanceAuthorityMiddleware" for m in built["middleware"])
     assert assembly.inventory_profile is not None
+    if case == "proposal":
+        assert any(item.name == "propose_assignment" for item in built["tools"])
+        assert any(type(item).__name__ == "AssignmentProposalMiddleware" for item in built["middleware"])
     # No ordinary owner path or viewless qualifier may supply instance evidence.
     for name in ("capture_output_snapshot", "capture_workspace_snapshot"):
         monkeypatch.setattr(worker, name, AsyncMock(side_effect=AssertionError("Instance cannot scan requester paths")))
@@ -99,11 +109,22 @@ async def test_instance_worker_seals_current_home_inventory(instances, capture_e
 
     owner, thread = execution.requester.subject_id, execution.thread_id
     capture = {"version": 1} if case == "legacy_text" else {"version": 2, "inventory_document_version": 2}
-    record = await e.manager.create_or_reject(thread, "lead_agent", user_id=owner, kwargs={"output_capture": capture})
+    kwargs = {"output_capture": capture}
+    if case == "proposal":
+        from _telegram_human_input_test_support import record as publication
+
+        from app.gateway.channel_execution import ChannelExecutionReceipt
+
+        original = publication()
+        original = replace(original, scope=replace(original.scope, agent_kind="instance", agent_ref=execution.instance.id, owner_user_id=owner, thread_id=thread), run_id=None)
+        kwargs["channel_execution"] = ChannelExecutionReceipt(version=1, publication_id=original.publication_id, owner_user_id=owner, thread_id=thread, assistant_id="lead_agent", agent_name=None).model_dump(mode="json")
+    record = await e.manager.create_or_reject(thread, "lead_agent", user_id=owner, kwargs=kwargs)
     ctx = RunContext(checkpointer=None, event_store=e.event_store, app_config=agent.get_app_config(), agent_execution=execution, schedule_stream_cleanup=cleanup, qualify_output_view=OutputViewQualifier(ordinary_qualifier))
     token = set_current_user(SimpleNamespace(id=owner))
     try:
         graph_input = {"messages": [HumanMessage("Question")]}
+        if case == "proposal":
+            graph_input["messages"][0].additional_kwargs["shows_cards"] = ["assignment_card"]
         if baseline is not None:
             graph_input["sandbox"] = {"sandbox_id": sandbox.id}
         await run_agent(bridge, e.manager, record, ctx=ctx, agent_factory=lambda **kwargs: assembly, graph_input=graph_input, config={"run_id": uuid4(), "configurable": {"thread_id": thread}})
@@ -121,7 +142,7 @@ async def test_instance_worker_seals_current_home_inventory(instances, capture_e
     assert len(events) == 1
     doc = validate_inventory_document(events[0]["content"])
     assert doc.version == 2
-    assert row["kwargs"]["output_evidence"]["kind"] == ("unavailable" if case in {"revoked_home", "network_question"} else "text")
+    assert row["kwargs"]["output_evidence"]["kind"] == ("unavailable" if case in {"revoked_home", "network_question", "proposal"} else "text")
     assert row["kwargs"]["inventory_evidence"]["inventory_event_seq"] == events[0]["seq"]
     if case == "text":
         assert row["status"] == "success" and doc.coverage == "complete" and doc.items == ()
@@ -129,6 +150,38 @@ async def test_instance_worker_seals_current_home_inventory(instances, capture_e
     elif case == "produced_file":
         assert doc.coverage == "complete"
         assert any(getattr(item, "path", None) == "/mnt/user-data/outputs/current.txt" for item in doc.items)
+    elif case == "proposal":
+        from app.telegram_bots.assignment_proposal_source import validate_proposal_basis
+        from app.telegram_bots.inbox import publication_identity
+
+        rows = await e.event_store.list_messages_by_run(thread, record.run_id, user_id=owner)
+        assert row["status"] == "success" and doc.coverage == "complete" and len(doc.items) == 1
+        assert row["kwargs"]["output_evidence"]["reason"] == "unsupported_output"
+        original = replace(original, run_id=record.run_id)
+        basis = {
+            "version": 1,
+            "publication": publication_identity(original),
+            "messages": rows,
+            "projection": {
+                "version": 2,
+                "output": {
+                    "version": 1,
+                    "owner_user_id": owner,
+                    "thread_id": thread,
+                    "run_id": record.run_id,
+                    "run_status": "success",
+                    "state": "unavailable",
+                    "source": None,
+                    "reason": "unsupported_output",
+                    "channel_execution": kwargs["channel_execution"],
+                    "output_evidence": row["kwargs"]["output_evidence"],
+                },
+                "inventory": {"state": "matched", "document": events[0]["content"], "evidence": row["kwargs"]["inventory_evidence"], "reason": None},
+            },
+        }
+        result = validate_proposal_basis(original, basis)
+        assert result.objective == "Review the guide" and result.success_criteria == "Report verified gaps"
+        assert len([item for item in rows if item["event_type"] == "llm.tool.result"]) == 1
     elif case in {"network_denial", "network_question"}:
         from deerflow.runtime.runs.output_inventory import presentation_fragment_digest
 

@@ -1283,6 +1283,21 @@ or model effect. Its tool registration, Telegram draft conversion and card
 marks remain adapter integration work. Web history validates the artifact and
 renders only passive details and a Work link in an instance conversation.
 
+Successful proposals leave an active Goal waiting with `needs_user_input`, without
+an evaluator call or automatic continuation. The worker and middleware share the
+same current-human-turn, issuing-call and artifact recognizer. The checkpoint must
+have no pending writes; errors, stale cards and a later answer cannot authorize
+this stop. The goal remains active, and Just answer permits normal evaluation.
+
+`assignment_proposal_source.py` qualifies only the original successful instance
+run's single proposal artifact. It checks the admitted channel/publication, actual
+human input and card marks, lead issuing call, exact result and complete inventory
+witness. It holds unsupported mixtures rather than dropping other output. The
+shared `terminal_source.py` reader captures output on both sides of bounded message
+pagination through the retained HTTP owner and original-attempt fences. Its JSON
+checks are consistency evidence; only an opaque qualified source retains the
+live read guard. Proposal adoption and Just answer remain adapter integration.
+
 `assign.draft_assignment` reuses that strict schema for one bounded non-graph
 model call. The constant extraction instruction carries no user-controlled
 values; words, agent name, prior draft and local date/time zone travel together

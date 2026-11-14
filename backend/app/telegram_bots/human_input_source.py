@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
-from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePosixPath
 
+from app.telegram_bots.terminal_source import MAX_SOURCE_MESSAGES, plain_source
+from app.telegram_bots.terminal_source import MAX_SOURCE_PAGES as MAX_SOURCE_PAGES
 from deerflow.runtime.runs.output_inventory import content_items
 from deerflow.utils.file_io import await_drained
 
-MAX_SOURCE_MESSAGES = 4096
-MAX_SOURCE_PAGES = 32
 _ISSUER = object()
 _RESERVED_NAMES = frozenset(
     {"__proto__", "constructor", "prototype", "toString", "toLocaleString", "valueOf", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable", "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__"}
@@ -27,15 +25,10 @@ def _refuse():
 
 
 def _plain(value):
-    if isinstance(value, Mapping):
-        if any(type(key) is not str for key in value):
-            _refuse()
-        return {key: _plain(child) for key, child in value.items()}
-    if type(value) in {list, tuple}:
-        return [_plain(child) for child in value]
-    if value is None or type(value) in {str, bool, int} or type(value) is float and math.isfinite(value):
-        return value
-    _refuse()
+    try:
+        return plain_source(value)
+    except ValueError:
+        _refuse()
 
 
 def _text(value):
@@ -480,95 +473,31 @@ class HumanInputSource:
         self.coordinator, self.http_owner, self.capture_attempt = coordinator, http_owner, capture_attempt
 
     async def read_request(self, record, link, *, guard=None):
-        from app.channels.execution_client import ChannelExecutionFacade
         from app.telegram_bots.inbox import publication_identity
-        from app.telegram_bots.links import prepare_publication_guard
-        from app.telegram_bots.publication import channel_execution_scope
+        from app.telegram_bots.terminal_source import capture_terminal_source
 
-        record, link = deepcopy(record), deepcopy(link)
-        if guard is not None:
-            if not callable(getattr(guard, "current", None)) or guard.current() is not True:
-                _refuse()
-            await prepare_publication_guard(guard)
-            if guard.current() is not True:
-                _refuse()
-            # Recovery supplies an already matched exact run. A new unbounded
-            # lookup operation cannot extend that caller's original control.
-            if record.run_id is None:
-                return None
-        if record.run_id is None:
-            observed = await self.coordinator.locate_run(record, link, max_pages=1)
-            if observed.state != "matched":
-                return None
-            record = observed.record
-        attempt = await self.capture_attempt(link, thread_id=record.scope.thread_id, endpoint_id=record.scope.endpoint_id)
-
-        class Admission:
-            def current(self, operation):
-                return attempt.admission.current(operation) is True and (guard is None or guard.current() is True)
-
-            async def authorize(self, operation):
-                if self.current(operation) is not True:
-                    _refuse()
-                await attempt.admission.authorize(operation)
-                if guard is not None:
-                    await prepare_publication_guard(guard)
-                if self.current(operation) is not True:
-                    _refuse()
-
-        admission = Admission()
-        facade = ChannelExecutionFacade(self.http_owner, scope=channel_execution_scope(record), admission=admission, capture_output=True, capture_inventory=True, inventory_document_version=2)
-        output = await facade.get_run_output(record.run_id) if guard is not None else await self.coordinator.read_output(record, link)
-        if output is None or output.output.state != "unavailable" or output.output.reason != "human_input_required":
+        captured = await capture_terminal_source(
+            self,
+            record,
+            link,
+            guard=guard,
+            accept=lambda output: output.output.state == "unavailable" and output.output.reason == "human_input_required",
+        )
+        if captured is None:
             return None
-        rows, after = [], None
-        for _ in range(MAX_SOURCE_PAGES):
-            page = await facade.list_run_messages(record.run_id, limit=200, after_seq=after)
-            rows.extend(_plain(page.data))
-            if len(rows) > MAX_SOURCE_MESSAGES:
-                _refuse()
-            if not page.has_more:
-                break
-            if page.next_after_seq is None or after is not None and page.next_after_seq <= after:
-                _refuse()
-            after = page.next_after_seq
-        else:
-            _refuse()
-        # A source may have changed during the page walk. Freeze only the exact
-        # pair observed on both sides, with one final original-attempt fence.
-        fresh = await facade.get_run_output(record.run_id) if guard is not None else await self.coordinator.read_output(record, link)
-        if fresh is None or fresh.model_dump(mode="json") != output.model_dump(mode="json"):
-            _refuse()
-        await admission.authorize("source_read")
+        fresh, record = captured.projection, captured.record
         mixed = getattr(fresh.inventory.document, "version", None) == 2 and any(item.kind == "file" for item in getattr(fresh.inventory.document, "items", ()))
-        basis = {"version": 2 if mixed else 1, "publication": publication_identity(record), "projection": fresh.model_dump(mode="json"), "messages": rows}
+        basis = {"version": 2 if mixed else 1, "publication": publication_identity(record), "projection": fresh.model_dump(mode="json"), "messages": captured.messages}
         request = await await_drained(asyncio.to_thread(validate_request_basis, record, basis))
-        if admission.current("source_read") is not True:
+        if captured.current() is not True:
             _refuse()
-
-        class SourceGuard:
-            captured_link = attempt.read_guard.captured_link
-
-            async def prepare(self):
-                await admission.authorize("source_read")
-
-            async def check(self, writer):
-                if admission.current("source_read") is not True:
-                    _refuse()
-                result = await attempt.read_guard.check(writer)
-                if guard is not None:
-                    result = await guard.check(writer)
-                if admission.current("source_read") is not True:
-                    _refuse()
-                return result
-
         result = object.__new__(QualifiedHumanInput)
         for key, value in {
             "_basis": deepcopy(basis),
             "_request": request,
             "_record": record,
-            "_guard": SourceGuard() if guard is not None else attempt.read_guard,
-            "_check": lambda: admission.current("source_read"),
+            "_guard": captured.guard,
+            "_check": captured.current,
             "_issuer": _ISSUER,
         }.items():
             object.__setattr__(result, key, value)

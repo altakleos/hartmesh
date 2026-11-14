@@ -208,6 +208,9 @@ answers for paginated history. See `docs/skill-usage-ui.md`.
 **Workspace change detection:** Truncated snapshots cannot prove absence. Mark skipped delivery verification in the receipt. Details: `backend/docs/runtime-guidance-details.md`.
 
 Unmet goals stand down on run-level token/loop hard stops and retain the original stop reason; a step-limit stop (`recursion_capped`) stands down without an evaluator call. Hidden continuations must not re-enter that run's shared safety state. Operation-based no-progress counting: `backend/docs/runtime-guidance-details.md`.
+Checkpointed current-turn assignment proposals stand down with `needs_user_input`
+without evaluating or continuing. Use the same exact-call recognizer as proposal
+middleware; stale, answered, malformed and pending-write results grant no wait.
 
 **Deferred terminal commit:** Keep terminal commit authority on the owning
 Worker's confirmed ACK; row reads never grant it. Renew leases through receipt,
