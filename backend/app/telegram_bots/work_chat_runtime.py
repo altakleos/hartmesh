@@ -75,13 +75,20 @@ class WorkChatRuntime:
         self.management = WorkManagementPlans(reader=WorkManagementReader(host.acts), **delivery)
         self.management_edits = WorkManagementEdits(self.management)
         self.command_stops = WorkCommandStops(self)
+        from app.telegram_bots.assignment_closed_prompts import AssignmentClosedPrompts
+
+        self.closed_prompts = AssignmentClosedPrompts(self)
+        host.work_callbacks.closed.typing_owner = self.closed_prompts
         host.voice_inputs = VoiceInputRouter(
             host.work_text_inputs.voice,
-            {"assignment": AssignmentVoiceInputs(self.assignment_inputs, guard_factory=self.guard), "management": ManagementVoiceInputs(self.management_edits, guard_factory=self.guard)},
+            {
+                "assignment": AssignmentVoiceInputs(self.assignment_inputs, guard_factory=self.guard, closed=self.closed_prompts),
+                "management": ManagementVoiceInputs(self.management_edits, guard_factory=self.guard, closed=self.closed_prompts),
+            },
         )
         self.detail_plans = {"work_view_intent": self.views, "work_management_intent": self.management, "work_execution_intent": self.executions}
         self.review_views = WorkViewReviews(host.work_callbacks.interactions, self.detail_plans)
-        self.assignment_commands = AssignmentCommands(self.assignment_inputs, management=self.management_edits)
+        self.assignment_commands = AssignmentCommands(self.assignment_inputs, management=self.management_edits, closed=self.closed_prompts)
         host.work_management_sources = WorkNewsSources(self.management)
         host.work_management_prompt_sources = WorkNewsSources(self.management_edits.prompts)
 
@@ -152,6 +159,10 @@ class WorkChatRuntime:
         if origin.route_kind == "work_card_hold" and isinstance(voice, Mapping) and voice.get("owner") in {"assignment", "management"}:
             return await self.host.voice_inputs.resume(channel, origin, recovery_guard=guard)
         link = guard.captured_link
+        if origin.route_kind == "work_card_hold" and isinstance(origin.route_basis.get("closed_typing"), Mapping):
+            source = origin.route_basis["closed_typing"]
+            await self.closed_prompts.offer(link, origin, source={key: source[key] for key in ("prompt_id", "source_outbox_id", "ambiguous")}, guard=guard)
+            return True
         if origin.route_kind == "command_stop":
             return await self.command_stops.recover(link, origin, guard=guard)
         if origin.route_kind == "assignment_hold":

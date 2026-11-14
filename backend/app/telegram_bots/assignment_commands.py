@@ -32,8 +32,9 @@ def typing_notice(origin, prompt, parent, callbacks, *, max_chars, ambiguous=Fal
 
 
 class AssignmentCommands:
-    def __init__(self, inputs, *, management=None):
+    def __init__(self, inputs, *, management=None, closed=None):
         self.inputs, self.management = inputs, management
+        self.closed = closed
         self.outbox, self.callbacks = inputs.outbox, inputs.callbacks
 
     async def handle(self, channel, update, link, *, guard):
@@ -78,7 +79,14 @@ class AssignmentCommands:
             return await self.inputs.prompts.plan(link, origin, purpose="assign_done", draft_id=value.id, guard=guard)
         return value
 
-    async def notice(self, link, origin, key, *, guard, session=None):
+    async def notice(self, link, origin, key, *, guard, session=None, closed_source=None):
+        if key == "prompt.closed" and self.closed is not None:
+            from app.telegram_bots.assignment_closed_prompts import ClosedTypingNotice
+
+            if session is not None:
+                captured = await self.closed.capture(link, origin, source=closed_source, guard=guard, session=session)
+                return ClosedTypingNotice(captured, closed_source)
+            return await self.closed.offer(link, origin, source=closed_source, guard=guard)
         button = None
         if key == "assign.no_work":
             from app.telegram_bots.pages import page_address
@@ -180,6 +188,10 @@ class AssignmentCommands:
                 if parent is None and prompt is not None:
                     parent = await writer.get(TelegramOutboxRow, prompt.payload.get("anchor_outbox_id"))
                 key = typing_notice(origin, prompt, parent, self.callbacks, max_chars=self.outbox.config.assign.max_chars, ambiguous=len(sources) > 1)
+                if key == "prompt.closed" and self.closed is not None:
+                    from app.telegram_bots.assignment_closed_prompts import selected_prompt
+
+                    origin = await self.closed.capture(link, origin, source=selected_prompt(prompt, parent, ambiguous=len(sources) > 1), guard=guard, session=writer)
                 if key is None:
                     mark = (await self.outbox.inbox._rows(writer, [origin]))[0]
                     self.outbox.inbox._current(link, mark)
@@ -192,7 +204,9 @@ class AssignmentCommands:
                     require_owner(link, origin, prompt, parent)
                     await self.outbox.inbox.register_delivery([origin], outbox_id=parent.id, primary=False, finish=False, session=writer)
             if key is not None:
-                await self.notice(link, origin, key, guard=guard)
+                from app.telegram_bots.assignment_closed_prompts import selected_prompt
+
+                await self.notice(link, origin, key, guard=guard, closed_source=selected_prompt(prompt, parent))
             else:
                 await self.resume(link, origin, guard=guard)
             return True
@@ -243,6 +257,8 @@ class AssignmentCommands:
             return True
 
     async def resume(self, link, origin, *, guard):
+        from app.telegram_bots.assignment_closed_prompts import ClosedTypingNotice, selected_prompt
+
         async def perform():
             async with self.callbacks.writer(link, guard) as writer:
                 mark = (await self.outbox.inbox._rows(writer, [origin]))[0]
@@ -262,7 +278,9 @@ class AssignmentCommands:
                     except (ProductSourceRetired, PermanentDeliveryError, KeyError, TypeError, ValueError):
                         key = "prompt.closed"
                 if key is not None:
-                    await self.notice(link, captured, key, guard=guard, session=writer)
+                    notice = await self.notice(link, captured, key, guard=guard, session=writer, closed_source=selected_prompt(prompt, parent))
+                    if isinstance(notice, ClosedTypingNotice):
+                        return notice
                     return True
             processor = self.management if owner["owner"] == "management" else self.inputs
             if processor is None:
@@ -278,7 +296,16 @@ class AssignmentCommands:
                         parent = await writer.get(TelegramOutboxRow, owner["source_outbox_id"])
                         key = typing_notice(InboxRow.from_row(mark), prompt, parent, self.callbacks, max_chars=self.outbox.config.assign.max_chars)
                         if key is not None:
-                            await self.notice(link, InboxRow.from_row(mark), key, guard=guard, session=writer)
+                            notice = await self.notice(link, InboxRow.from_row(mark), key, guard=guard, session=writer, closed_source=selected_prompt(prompt, parent))
+                            if isinstance(notice, ClosedTypingNotice):
+                                return notice
             return True
 
-        return await await_drained(perform())
+        async def settled():
+            result = await perform()
+            if isinstance(result, ClosedTypingNotice):
+                await self.closed.offer(link, result.origin, source=result.source, guard=guard)
+                return True
+            return result
+
+        return await await_drained(settled())

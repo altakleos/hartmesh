@@ -23,20 +23,40 @@ PURPOSES = {"assign_words": "assign.prompt", "assign_done": "assign.ask_done", "
 
 
 def require_publication(mark, item, intent):
+    if intent["version"] == 2:
+        # The actual Reopen choice, qualified separately, owns this new
+        # delivery. Its completed original command must stay immutable.
+        return
     if item.id not in mark.delivery_ids:
         raise ProductSourceRetired()
-    if intent["purpose"] == "assign_words" and (mark.route_kind != "assignment_prompt" or mark.route_target_id != intent["prompt_id"] or not same_body(_basis(mark), {"prompt_id": intent["prompt_id"]})):
+    if intent["purpose"] == "assign_words" and intent["version"] == 1 and (mark.route_kind != "assignment_prompt" or mark.route_target_id != intent["prompt_id"] or not same_body(_basis(mark), {"prompt_id": intent["prompt_id"]})):
         raise ProductSourceRetired()
 
 
 def prompt_intent(item):
     value = thaw(item.payload.get("assignment_prompt_intent"))
-    if type(value) is not dict or set(value) != {"version", "purpose", "prompt_id", "origin", "draft_id", "edit_origin", "query_key"} or type(value["version"]) is not int or value["version"] != 1 or value["purpose"] not in PURPOSES:
+    if (
+        type(value) is not dict
+        or set(value) != {"version", "purpose", "prompt_id", "origin", "draft_id", "edit_origin", "query_key"} | ({"reopen"} if value.get("version") == 2 else set())
+        or type(value["version"]) is not int
+        or value["version"] not in {1, 2}
+        or value["purpose"] not in PURPOSES
+    ):
         raise ProductSourceRetired()
+    if value["version"] == 2:
+        from app.telegram_bots.assignment_prompt_reopen import require_reopen
+
+        reopened = require_reopen(value["reopen"])
+        if value["prompt_id"] != digest(["assignment-prompt-reopen", item.link_id, item.binding_generation, reopened["callback_id"]])[:32]:
+            raise ProductSourceRetired()
     if type(value["prompt_id"]) is not str or len(value["prompt_id"]) != 32 or (value["draft_id"] is None) != (value["purpose"] == "assign_words") or (value["edit_origin"] is not None) != (value["purpose"] == "assign_edit"):
         raise ProductSourceRetired()
     if value["query_key"] is not None and (value["purpose"] != "assign_edit" or type(value["query_key"]) is not str or len(value["query_key"]) != 64 or any(ch not in "0123456789abcdef" for ch in value["query_key"])):
         raise ProductSourceRetired()
+    if value["version"] == 1:
+        original = ["assignment-prompt", value["origin"], value["purpose"], value["draft_id"], *([value["edit_origin"], value["query_key"]] if value["edit_origin"] is not None else [])]
+        if value["prompt_id"] != digest(original)[:32]:
+            raise ProductSourceRetired()
     return value
 
 
@@ -45,7 +65,7 @@ class AssignmentPromptReader(WorkViewReader):
         super().__init__(work=acts.work, authority=acts.authority, links=acts.links, clock=acts.outbox.clock)
         self.acts, self.config = acts, acts.outbox.config
 
-    async def read(self, link, item):
+    async def read(self, link, item, *, allow_closed=False):
         async def perform():
             intent = prompt_intent(item)
             async with self.links.session_factory() as reader:
@@ -57,7 +77,7 @@ class AssignmentPromptReader(WorkViewReader):
                 if intent["draft_id"] and root is None:
                     raise ProductSourceRetired()
                 saved = _snapshot(root) if root else None
-            projection = AssignmentPromptProjection(self, link, item, inbox=inbox, root=saved, clock=await self.prepare_clock(link, item))
+            projection = AssignmentPromptProjection(self, link, item, inbox=inbox, root=saved, clock=await self.prepare_clock(link, item), allow_closed=allow_closed)
             current = await prepare_attention(self, link)
             await current(projection=projection)
             return projection.source
@@ -66,12 +86,18 @@ class AssignmentPromptReader(WorkViewReader):
 
 
 class AssignmentPromptProjection:
-    def __init__(self, reader, link, item, source=None, *, inbox=None, root=None, clock=None, allow_answered=False):
+    def __init__(self, reader, link, item, source=None, *, inbox=None, root=None, clock=None, allow_answered=False, allow_closed=False):
         self.reader, self.link, self.item, self.expected, self.clock = reader, link, item, source, clock
         self.intent = prompt_intent(item)
         self.root = private_snapshot(source.work["root"]) if source is not None and source.work["root"] else root
         self.inbox = inbox
         self.allow_answered = allow_answered
+        self.allow_closed = allow_closed
+        self.reopen = None
+        if self.intent["version"] == 2:
+            from app.telegram_bots.assignment_prompt_reopen import AssignmentReopenProof
+
+            self.reopen = AssignmentReopenProof(link, self.intent["reopen"], self.intent, completed=item.id, sqlite=reader.links.session_factory.kw["bind"].dialect.name == "sqlite")
         self.edit = self.fresh = None
         if self.intent["purpose"] == "assign_edit":
             from app.telegram_bots.assignment_editing import EditProof
@@ -88,13 +114,18 @@ class AssignmentPromptProjection:
             result = self.fresh.extend(self.edit.extend(result))
         self.delivery_column = len(result.column_descriptions)
         delivery, settings, prompt = aliased(TelegramOutboxRow), aliased(TelegramPersonSettingsRow), aliased(TelegramCallbackRow)
-        return result.add_columns(delivery, settings, prompt).join(delivery, delivery.id == self.item.id).join(settings, settings.owner_user_id == self.link.owner_user_id).outerjoin(prompt, prompt.id == self.intent["prompt_id"])
+        result = result.add_columns(delivery, settings, prompt).join(delivery, delivery.id == self.item.id).join(settings, settings.owner_user_id == self.link.owner_user_id).outerjoin(prompt, prompt.id == self.intent["prompt_id"])
+        return self.reopen.extend(result) if self.reopen is not None else result
 
     def check(self, rows):
         raise ProductSourceRetired()
 
     def check_with_permissions(self, rows, held):
         self.facts.check_with_permissions(rows, held)
+        if self.reopen is not None:
+            self.reopen.check(rows)
+            if "agents:write" not in held or not self.facts.permissions & 2:
+                raise ProductSourceRetired()
         delivery, settings = rows[0][self.delivery_column : self.delivery_column + 2]
         mark = rows[0][self.facts.column + 1]
         prompt = rows[0][self.delivery_column + 2]
@@ -119,7 +150,11 @@ class AssignmentPromptProjection:
             from app.telegram_bots.assignment_typing import validate_prompt
 
             validate_prompt(_item(delivery), prompt, attached=True)
-            if (prompt.consumed_at is not None or "prompt_successor" in prompt.payload) and not (self.allow_answered and prompt.consumed_at is not None and prompt.closed_reason == "answered" and prompt.payload.get("assignment_input")):
+            if (
+                (prompt.consumed_at is not None or "prompt_successor" in prompt.payload)
+                and not self.allow_closed
+                and not (self.allow_answered and prompt.consumed_at is not None and prompt.closed_reason == "answered" and prompt.payload.get("assignment_input"))
+            ):
                 raise ProductSourceRetired()
         if root is not None:
             value = request_snapshot(self.link, root) if self.intent["purpose"] == "assign_done" else snapshot_draft(self.link, root)
@@ -130,6 +165,10 @@ class AssignmentPromptProjection:
             if self.reader.clock() >= value.created_at + timedelta(hours=self.reader.config.callbacks.draft_ttl_hours):
                 raise ProductSourceRetired()
         data = {"intent": self.intent, "root": private_facts(root) if root is not None else None}
+        if self.intent["version"] == 2:
+            from app.telegram_bots.assignment_typing import prompt_preview
+
+            data["preview"] = prompt_preview(self.link, root, self.intent["purpose"], self.clock)
         instance, permissions, policy = rows[0][1:4]
         values = {"name": instance.name}
         if self.intent["purpose"] == "assign_done":

@@ -361,7 +361,7 @@ pause. Recipient refusal never disables the actor's account. Canonical receipt
 recovery happens before this fresh-effect gate and never repeats the command. Review commands
 use the complete displayed basis and captured Work CAS. The bounded worker only
 retries admitted service calls with no conclusive refusal, never settings, files,
-network or transcription. Current chat controls do not start an assignment.
+network or transcription. Explicit activation has its own source and receipt owner.
 
 `work_start_actions.py` journals explicit activation requests without installing
 chat controls or capacity offers. A fresh intent checks the displayed
@@ -795,6 +795,34 @@ identifies the old prompt. Detached spent-card contexts never replace an active
 typing prompt. Unsettled choices retain the original prompt context through
 cleanup. Reopened V3 delivery rechecks the actual held input, consumed Reopen
 choice, acknowledged notice, and current Work/Space authority at dispatch. The runtime installs these controllers.
+
+`assignment_closed_prompts.py` extends that recovery to assignment and saved-edit
+typing, including accepted speech. It captures the original input before source
+or authority reads. Ambiguous quoted receipts, including matches across prompt
+owners, cannot choose a target. Older speech without a uniqueness receipt stays
+held with Send as new and Discard. The transcript and its original recording
+ledger remain owned; an explicit choice never transcribes it again.
+
+`assignment_prompt_reopen.py` creates one deterministic fresh prompt from the
+actual acknowledged choice, original presentation and current target. Version 2
+prompt intents retain that evidence; existing version 1 assignment intents keep
+their original planner identities. A completed command is immutable. Recovery
+finds the original primary publication before fresh admission and repairs that
+same prompt after interrupted materialization. Final SQL rechecks current rights,
+the held input, consumed group, original ACK and new keyboard-cleanup receipt.
+Completion-criteria and Edit prompts preserve their original purpose and full
+current private preview; reopening never extends the original draft's 24-hour
+lifetime. All preview parts must be acknowledged before the fresh prompt activates.
+Only a new human reply supplies an answer or revised private draft.
+
+`closed_voice_echo.py` qualifies a previously acknowledged separate transcript
+before omitting it from recovery delivery. Callback staging and reopened delivery
+recheck that actual receipt. `assignment_reopen_retention.py` retains the complete
+verified source; `closed_prompt_history.py` separately follows actual primary
+input receipts and registered, scoped deliveries when proof needs repair. These
+retention holds grant no action authority. Missing notice data does not erase
+independent source, command or echo ownership, and a group locator cannot retain
+another notice's controls.
 
 Completed decision/review comments can use outcome V5: the canonical response
 receipt owns a complete current request and fresh controls in the same delivered

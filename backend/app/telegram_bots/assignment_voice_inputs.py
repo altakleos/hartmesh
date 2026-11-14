@@ -31,6 +31,12 @@ def voice_basis(mark, *, owner="assignment"):
     return value
 
 
+def closed_voice_source(mark, value):
+    selection = mark.route_basis.get("work_voice_selection")
+    ambiguous = not (type(selection) is dict and set(selection) == {"version", "ambiguous"} and type(selection["version"]) is int and selection["version"] == 1 and selection["ambiguous"] is False)
+    return {"prompt_id": None if ambiguous else value["prompt_id"], "source_outbox_id": None if ambiguous else value["source_outbox_id"], "ambiguous": ambiguous}
+
+
 def check_voice_prompt(link, mark, prompt, parent, *, ready=False, owner="assignment", purposes=PURPOSES):
     value = voice_basis(mark, owner=owner)
     if value is None or value["phase"] != ("ready" if ready else "captured") or prompt is None or parent is None:
@@ -65,15 +71,16 @@ class AssignmentVoiceInputs:
     def _check(self, link, mark, prompt, parent, *, ready=False):
         return check_voice_prompt(link, mark, prompt, parent, ready=ready, owner=self.owner, purposes=self.purposes)
 
-    def __init__(self, inputs, *, guard_factory=None):
+    def __init__(self, inputs, *, guard_factory=None, closed=None):
         self.inputs = inputs
         self.outbox, self.callbacks = inputs.outbox, inputs.callbacks
         self.guard_factory = guard_factory
+        self.closed = closed
 
     async def quoted_sources(self, link, message_id, topic):
         from app.telegram_bots.assignment_prompt_owners import quoted_assignment_sources
 
-        return await quoted_assignment_sources(self.outbox, link, message_id, topic, intents=(self.intent_key,))
+        return await quoted_assignment_sources(self.outbox, link, message_id, topic, intents=("assignment_prompt_intent", "management_prompt_intent"))
 
     async def capture(self, channel, link, origin, *, forwarded, forward_origin, guard):
         if forwarded or link.agent_kind != "instance":
@@ -93,8 +100,12 @@ class AssignmentVoiceInputs:
                     return InboxRow.from_row(mark) if self._basis(mark) is not None else None
                 parent = None
                 if sources:
-                    parent = await writer.get(TelegramOutboxRow, sources[0])
-                    intent = parent.payload[self.intent_key] if parent is not None else {}
+                    candidates = [await writer.get(TelegramOutboxRow, identity) for identity in sources]
+                    own = [row for row in candidates if row is not None and isinstance(row.payload.get(self.intent_key), dict)]
+                    if not own:
+                        return None
+                    parent = own[0]
+                    intent = parent.payload[self.intent_key]
                     prompt = await writer.get(TelegramCallbackRow, intent["prompt_id"]) if type(intent.get("prompt_id")) is str else None
                 elif quote is None:
                     selected = await Prompts(self.callbacks).current(link, mark.chat_id, mark.message_thread_id, guard=guard, session=writer)
@@ -118,8 +129,8 @@ class AssignmentVoiceInputs:
                 intent = parent.payload.get(self.intent_key, {}) if parent is not None else {}
                 if not sources and intent.get("purpose") not in self.purposes and (prompt is None or prompt.payload.get("purpose") not in self.purposes):
                     return None
-                source_id = sources[0] if sources else prompt.payload["anchor_outbox_id"]
-                prompt_id = intent.get("prompt_id") or prompt.id
+                source_id = parent.id if sources else prompt.payload["anchor_outbox_id"]
+                prompt_id = intent.get("prompt_id") or (prompt.id if prompt is not None else None)
                 value = {
                     "version": 3,
                     "owner": self.owner,
@@ -132,13 +143,14 @@ class AssignmentVoiceInputs:
                     "signature": anchor_signature(_item(parent)) if parent is not None else None,
                     "original": thaw(mark.sanitized_input),
                 }
+                selection = {"version": 1, "ambiguous": len(sources) > 1}
                 mark.route_basis = {**mark.route_basis, "work_voice": value}
                 try:
                     self._check(link, mark, prompt, parent)
                     self.callbacks._usable(prompt)
                 except (CallbackRefused, ProductSourceRetired, KeyError, TypeError, ValueError):
                     value = {**value, "phase": "closed"}
-                mark.route_basis = {**mark.route_basis, "work_voice": value}
+                mark.route_basis = {**mark.route_basis, "work_voice": value, "work_voice_selection": selection}
                 captured = InboxRow.from_row(mark)
                 routed = await self.outbox.inbox.route(captured, kind="voice", target_id="working", basis={"forwarded": False, "origin": forward_origin, "work_voice": value}, operation_ids=[], session=writer)
                 if parent is not None and (parent.link_id, parent.owner_user_id, parent.binding_generation, parent.chat_id, parent.message_thread_id) == (
@@ -226,6 +238,9 @@ class AssignmentVoiceInputs:
         if origin.route_complete:
             return True
         value = self._basis(origin)
+        if value["phase"] == "closed" and self.closed is not None:
+            await self.closed.offer(link, origin, source=closed_voice_source(origin, value), guard=guard)
+            return True
         if value["phase"] != "ready" or len(origin.sanitized_input["text"]) > self.outbox.config.assign.max_chars:
             from app.telegram_bots.voice import _echo
 

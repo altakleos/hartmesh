@@ -35,6 +35,7 @@ TEXTS: dict[str, str] = {
     "assign.no_access": 'To give {name} assignments you need "Can see all work" as well as "Can chat". Ask {supervisor}.',
     "work.need_inspect": 'To see {name}\'s assignments you need "Can see all work" as well as "Can chat". Ask {supervisor}.',
     "assign.prompt": "What should {name} do? Say it in your own words, with a deadline if there is one.",
+    "assign.original_request": "Assignment: {words}",
     "assign.resend": "This message could not be answered. Please send it again.",
     "assign.ask_done": "How will it be clear that this is done? One sentence is enough.",
     "assign.too_long": "That is more than {max} characters, too long to make an assignment from. Send a shorter description and put the details in a file.",
