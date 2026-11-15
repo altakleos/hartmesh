@@ -724,6 +724,35 @@ async def test_reopen_recovers_the_same_committed_prompt_before_materialization(
 
 
 @pytest.mark.asyncio
+async def test_unregistered_out_of_scope_parent_offers_only_owned_input_choices(work_delivery, monkeypatch):
+    e = work_delivery
+    owner, calls = await installed_prompt(e, monkeypatch)
+    e.services, e.request = owner.host, e.channel.bot.request
+    turns, _state, _reached = await controlled_execution(e, monkeypatch)
+    source_id = e.identity
+    try:
+        async with e.db.sessions.begin() as writer:
+            (await writer.get(TelegramOutboxRow, source_id)).message_thread_id = 9901
+        assert await e.channel.handle_update(reply(e, quoted=True))
+        await e.channel._drain_ingress()
+        async with e.db.sessions() as reader:
+            held = await reader.get(TelegramInboundMarkRow, (e.link.id, 6151, e.link.chat_id))
+            assert held.route_kind == "work_card_hold" and not held.route_complete
+            assert held.route_basis["closed_typing"]["source_outbox_id"] == source_id
+            assert source_id not in held.delivery_ids
+            notice = await reader.get(TelegramOutboxRow, held.route_basis["work_closed"]["notice_id"])
+            choices = list(await reader.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == notice.parts[-1]["callback_group_id"])))
+            assert {choice.kind for choice in choices} == {"prompt_send_new", "prompt_discard"}
+        for index in range(len(notice.parts)):
+            await dispatch(e, 6501 + index)
+        assert not e.dispatch_errors, e.dispatch_errors
+        assert not calls and not turns._turns
+    finally:
+        await turns.stop()
+        await owner.stop()
+
+
+@pytest.mark.asyncio
 async def test_interrupted_closed_source_read_replays_original_input_after_a_new_prompt(work_delivery, monkeypatch):
     from app.telegram_bots.authority import AuthorityUnavailable
 

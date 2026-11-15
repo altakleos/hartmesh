@@ -85,9 +85,11 @@ class AssignmentClosedPrompts:
             available = False
             scope = (link.id, link.owner_user_id, link.binding_generation, origin.chat_id, origin.message_thread_id)
             if parent is not None and (parent.link_id, parent.owner_user_id, parent.binding_generation, parent.chat_id, parent.message_thread_id) != scope:
-                raise CallbackRefused()
+                # Unavailable source facts cannot take custody of this person's
+                # original input, or enter its delivery/retention graph.
+                parent, item = None, None
             if prompt is not None and (prompt.link_id, prompt.binding_generation, prompt.chat_id, prompt.message_thread_id) != (link.id, link.binding_generation, origin.chat_id, origin.message_thread_id):
-                raise CallbackRefused()
+                prompt = None
             if parent is not None and prompt is not None and not actual_source["ambiguous"]:
                 try:
                     shown_prompt(item, prompt, accepted_at=origin.accepted_at)
