@@ -60,6 +60,8 @@ def present_assignment(source, basis, link):
                 ]
         else:
             raise ValueError("unsupported-assignment-phase")
+        if data.get("settings_url"):
+            keyboard.append([{"label": "label.open_agent_settings", "url": data["settings_url"]}])
     parts = tuple({"kind": "text", "html": chunk, "visible_text": visible_text(chunk), "protect_content": source.protected} for chunk in split_html(html))
     if phase == "draft" and "heard" in source.values:
         from app.telegram_bots.voice import _echo

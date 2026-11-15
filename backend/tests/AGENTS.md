@@ -62,6 +62,10 @@ head alone cannot detect a skipped revision inserted behind an applied head.
 
 ## Telegram compatibility and persistence
 
+`test_telegram_assignment_refusal_delivery.py` and its strict wrapper qualify
+disabled-Work save wording, same-operation SDK Retry, current policy/manager links
+and final grant or canonical-receipt changes on both SQL dialects.
+
 Output-capture tests combine real offline LangGraph/model callbacks with both
 SQL dialects. Assert the actual SDK-assigned human ID, canonical AI ID, committed
 event sequence and exact text digest, then consume a worker seal through the

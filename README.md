@@ -123,6 +123,8 @@ set success criteria and manage an AI employee’s shared commitments across
 conversations. Enable Work in a custom definition’s settings, then explicitly
 adopt that definition for the instance. **Work on this** and **Resume** explicitly
 start an AI employee attempt; saving an assignment or response never starts a run.
+If Work is switched off during a save, its private card explains the refusal and
+keeps the original retry; only current managers receive a settings link.
 The Work page separates progress, blockers, execution attempts and human review.
 A reviewer’s request-for-changes note stays in later attempts’ context until the
 result is accepted or the assignment is cancelled or reopened.

@@ -269,6 +269,7 @@ class DraftProjection:
             raise AuthorityUnavailable()
         snapshot = DefinitionSnapshot.capture(owner_id=definition.owner_id, config=definition.config, soul=definition.soul)
         policy = AgentConfig.model_validate(definition.config).work_policy
+        self.work_enabled = policy is not None and policy.enabled
         if snapshot.revision != instance.definition_revision:
             raise AuthorityUnavailable()
         if self.require_work_policy and (policy is None or not policy.enabled):

@@ -2164,3 +2164,21 @@ unknown reads preserve the original waiting activation without retrying it.
 Service delivery ignores proactive-notification preferences but retains current
 source/privacy/claim SDK checks. Only the fresh acknowledged Start gesture
 transfers the original wait and admits a new activation.
+
+
+### Policy-disabled save replies
+
+A conclusively refused `work-off` delegation with no canonical save event may
+render its private card while the adopted Work policy is disabled. Only this
+read-only presentation bypasses `DraftProjection`'s enabled-policy predicate;
+draft identity, lineage, original consent, current Use/Inspect, account, role,
+binding and final SQL source fences remain required. Effect admission retains
+the enabled-policy check. Unknown or committed saves retain their existing
+receipt/recovery priority.
+
+The final joined definition decides current wording: after Work is re-enabled,
+the card says the assignment was not saved rather than claiming Work remains
+disabled. The settings URL needs current Manage and `agents:write`. Its old
+acknowledged Retry still owns the same immutable delegation operation. Preparing
+product identity runs off the Gateway loop; the SDK fence rejects changed
+permissions or a newly committed receipt before sending stale refusal content.
