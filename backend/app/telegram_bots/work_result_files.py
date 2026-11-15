@@ -60,12 +60,12 @@ def result_media(files, *, capacity, max_bytes, protected):
     return tuple(parts)
 
 
-def present_review_files(source, *, locale, capacity, max_bytes, concealed=False, outbox_id=None):
+def present_review_files(source, *, locale, capacity, max_bytes, concealed=False, outbox_id=None, suggestion_controls=False):
     if source.request["purpose"] != "review":
         raise ValueError("work-review-required")
     files = result_files(source.work, locale=locale)
     media = result_media(files, capacity=capacity, max_bytes=max_bytes, protected=source.protected)
-    card = present_request(source, locale=locale, concealed=concealed, outbox_id=outbox_id, files_above=tuple(file["filename"] for file in files))
+    card = present_request(source, locale=locale, concealed=concealed, outbox_id=outbox_id, files_above=tuple(file["filename"] for file in files), suggestion_controls=suggestion_controls)
     return WorkRequestPresentation((() if concealed else media) + card.parts, card.keyboard)
 
 

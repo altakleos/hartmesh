@@ -100,7 +100,7 @@ class WorkRequestReader(AttentionReader):
         return WorkRequestRead(request, record, tuple(responses), seen_basis(record, request, responses), people, authority[1][1] == "protected")
 
 
-def present_request(source, *, locale, concealed=False, outbox_id=None, files_above=()):
+def present_request(source, *, locale, concealed=False, outbox_id=None, files_above=(), suggestion_controls=False):
     """Full text precedes action controls; a concealed teaser conveys no basis."""
     request, record = source.request, source.work
     purpose = request["purpose"]
@@ -149,6 +149,10 @@ def present_request(source, *, locale, concealed=False, outbox_id=None, files_ab
                 keyboard.append([button("decide_own", "label.decide_own")])
             elif purpose == "review" and request["can_manage"]:
                 keyboard = [[button("accept_open", "label.accept")], [button("changes_open", "label.request_changes")]]
+        if purpose == "review" and suggestion_controls and record.get("suggestion"):
+            suggestion = record["suggestion"]
+            html += "\n\n" + render("result.suggestion", locale, name=request["instance_name"], suggestion=suggestion["statement"])
+            keyboard.append([{"label": "label.make_assignment", "kind": "assign_from_suggestion", "target_kind": "work", "target_id": record["id"], "payload": {"work_id": record["id"], "event_id": suggestion["id"]}}])
         if files_above:
             if purpose != "review" or any(type(name) is not str or not name for name in files_above):
                 raise ValueError("invalid-result-file-names")

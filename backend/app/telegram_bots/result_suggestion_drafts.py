@@ -4,8 +4,7 @@ from app.telegram_bots.assignment_drafts import AssignmentDraft, draft_identity
 from app.telegram_bots.assignment_origins import CallbackAssignmentInput
 from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.producer import ProductSourceRetired
-from app.telegram_bots.result_notice_sources import ResultNoticeProjection
-from app.telegram_bots.result_suggestion_source import SuggestionOriginProjection, acknowledged_result, result_signature
+from app.telegram_bots.result_suggestion_source import SuggestionAdmissionProjection, SuggestionOriginProjection, acknowledged_result, fresh_result_projection, result_signature
 from app.telegram_bots.work_outcome_proof import event_facts
 from app.telegram_bots.work_result_identity import digest
 from deerflow.persistence.agent_instances.work import AgentWorkEventRow
@@ -57,20 +56,19 @@ class ResultSuggestionDrafts:
                     raise ProductSourceRetired()
             current = await prepare_attention(self.results.reader, link)
             facts = SuggestionOriginProjection(link, origin)
-            fresh = ResultNoticeProjection(self.results.reader, link, item, source)
+            fresh = fresh_result_projection(self.results.reader, link, item, source)
+            final = SuggestionAdmissionProjection(fresh, facts) if existing is None else facts
 
             async def admission(writer):
                 await self.callbacks.lock_current(link, callback_id, **scope, session=writer)
-                await current(session=writer, projection=facts)
-                if existing is None:
-                    await current(session=writer, projection=fresh)
+                await current(session=writer, projection=final)
                 root = await writer.get(TelegramActRow, identity)
                 selected = await writer.get(TelegramCallbackRow, callback_id)
                 marker = selected.payload.get("suggestion_draft_id")
                 if (marker is None) != (root is None) or marker is not None and marker != identity:
                     raise ProductSourceRetired()
                 await guard.check(writer)
-                await current(session=writer, projection=facts)
+                await current(session=writer, projection=final)
 
             async def record_origin(writer, root):
                 if root.id != identity or root.body["request"]["phase"] != "new":

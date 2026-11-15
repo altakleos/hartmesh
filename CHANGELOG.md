@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Include stored follow-up suggestions on reviewer result cards, with private
+  drafting from the complete acknowledged result and preserved legacy rendering.
 - Turn a result's stored suggestion into a private assignment draft on its own
   button press, with editing, manual criteria and separate explicit Save or Start.
 - Offer acknowledged Resume beneath complete saved-action previews and manager

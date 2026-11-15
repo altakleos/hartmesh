@@ -90,6 +90,17 @@ URL-button/plain-address fallback. Historical warning proofs retain their own
 navigation snapshot when the current card changes.
 The runtime installs these initial-delivery components with the other source owners.
 
+New reviewer result cards also show their canonical suggestion and offer Make this
+an assignment. `work_suggestion_projection.py` qualifies the actual latest
+nonhuman report and its recorded attempt during materialization, recovery and
+final SDK admission. The persisted `suggestion_controls:1` generation survives
+Show and refresh; older unflagged cards keep their exact text and keyboard.
+The read-kind can prepare a private draft with current Use+Inspect; review
+actions and Save/Start retain their separate write/Manage checks. Both result
+carrier families retain their real ACK, consumed Show and cleanup. Fresh carrier
+facts and the original suggestion receipt share one final joined read after
+the last awaited guard, including during Root conversion.
+
 `result_notice_sources.py` owns non-review `result.done` and
 `result.waiting_review` facts. Its joined provider-final read binds the exact
 settlement, outcome attempt and requester/creator eligibility to the current

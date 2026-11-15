@@ -28,8 +28,10 @@ async def work_exports(work_delivery, tmp_path, monkeypatch, request):
     if album:
         mode = "done_event"
     long_suggestion = mode == "done_long_suggestion_event"
-    suggestion = mode in {"done_suggestion_event", "done_long_suggestion_event"}
-    if suggestion:
+    suggestion = mode in {"done_suggestion_event", "done_long_suggestion_event", "review_suggestion_event"}
+    if mode == "review_suggestion_event":
+        mode = "review_event"
+    elif suggestion:
         mode = "done_event"
     if mode in {"review_event", "review_empty_event", "done_event", "waiting_event", "unrouted_event"}:
         from app.telegram_bots.work_event_cursors import WorkEventCursors

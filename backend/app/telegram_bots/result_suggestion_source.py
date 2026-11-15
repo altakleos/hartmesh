@@ -1,7 +1,9 @@
 """Canonical stored suggestions and actual result receipts behind private drafts."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 
+from sqlalchemy import func
 from sqlalchemy.orm import aliased
 
 from app.telegram_bots.assignment_origins import CallbackAssignmentInput
@@ -18,14 +20,51 @@ from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, Telegr
 
 def acknowledged_result(link, parent):
     item = _item(parent)
-    basis, source, _ = frozen_notice(SimpleNamespace(link=link, item=item, part=item.parts[-1]), acknowledged=True)
+    from app.telegram_bots.work_request_source import frozen
+
+    frozen_result = frozen_notice if result_family(item) == "result_notice_basis" else frozen
+    basis, source, _ = frozen_result(SimpleNamespace(link=link, item=item, part=item.parts[-1]), acknowledged=True)
     if basis["concealed"] or basis.get("suggestion_controls") != 1:
         raise ProductSourceRetired()
     return item, source
 
 
+def result_family(item):
+    keys = {"result_notice_basis", "work_request_basis"}.intersection(item.payload)
+    if len(keys) != 1:
+        raise ProductSourceRetired()
+    family = next(iter(keys))
+    if family == "work_request_basis" and "result_files" not in item.payload[family]:
+        raise ProductSourceRetired()
+    return family
+
+
+def fresh_result_projection(reader, link, item, source):
+    if result_family(item) == "result_notice_basis":
+        from app.telegram_bots.result_notice_sources import ResultNoticeProjection
+
+        return ResultNoticeProjection(reader, link, item, source)
+    from app.telegram_bots.work_result_recovery import _ResultRecoveryProjection
+
+    return _ResultRecoveryProjection(replace(source, work={**source.work, "result_identity": item.payload["work_result_identity"], "result_navigation": item.payload["work_result_navigation"]}), require_manage=False)
+
+
+class SuggestionAdmissionProjection:
+    """Fresh carrier and original receipt share the same provider-final SQL read."""
+
+    def __init__(self, fresh, original):
+        self.fresh, self.original = fresh, original
+
+    def extend(self, query):
+        return self.original.extend(self.fresh.extend(query))
+
+    def check_with_permissions(self, rows, held):
+        self.fresh.check(rows)
+        self.original.check_with_permissions(rows, held)
+
+
 def result_signature(item):
-    return digest([item.id, item.payload["presentation_version"], item.payload["result_notice_basis"], item.payload["product_keyboard_basis"], item.parts])
+    return digest([item.id, item.payload["presentation_version"], item.payload[result_family(item)], item.payload["product_keyboard_basis"], item.parts])
 
 
 def validate_origin(origin):
@@ -76,8 +115,10 @@ class SuggestionOriginProjection:
             .join(event, event.id == self.origin["event_id"])
             .join(attempt, attempt.id == event.request["attempt_id"].as_string())
             .join(work, work.id == self.origin["work_id"])
-            .outerjoin(show, show.id == parent.payload["result_notice_basis"]["reveal"].as_string())
-            .outerjoin(cleanup, cleanup.id == parent.payload["result_notice_basis"]["cleanup_id"].as_string())
+            .outerjoin(
+                show, show.id == func.coalesce(parent.payload["result_notice_basis"]["reveal"].as_string(), parent.payload["work_request_basis"]["reveal"].as_string(), parent.payload["work_request_basis"]["reply_origin"].as_string())
+            )
+            .outerjoin(cleanup, cleanup.id == func.coalesce(parent.payload["result_notice_basis"]["cleanup_id"].as_string(), parent.payload["work_request_basis"]["cleanup_id"].as_string()))
         )
 
     def check_with_permissions(self, rows, held):
@@ -107,7 +148,8 @@ class SuggestionOriginProjection:
         parts = [part for part in original.parts if part["presentation_version"] == original.payload["presentation_version"]]
         if not parts or parts[-1].get("callback_group_id") != selected.group_id or parts[-1]["message_ids"] != [origin["message_id"]]:
             raise ProductSourceRetired()
-        if original.payload["result_notice_basis"].get("reveal"):
+        basis = original.payload[result_family(original)]
+        if basis.get("reveal") or basis.get("reply_origin"):
             show, cleanup = rows[0][self.column + 6 : self.column + 8]
             require_show(show, parent)
             if not cleanup_ready(parent, cleanup) or cleanup.payload["target_message_id"] != show.message_id:

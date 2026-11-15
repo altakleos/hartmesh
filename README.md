@@ -2014,7 +2014,8 @@ answering a question never starts or resumes an assignment. Type `/work` (or
 `/status`) to list assignments and open their details. Detail cards offer Start,
 Resume and Stop when your current access allows them. Use `/assign` followed by
 your instructions, or answer its prompt with text or voice, to review a private
-draft before saving or starting it. A result's suggested next step offers
+draft before saving or starting it. A result's suggested next step, including
+on a reviewer’s result card, offers
 Make this an assignment: review and edit its private draft, then explicitly Save
 or Start it. Change and Withdraw open their own previews;
 an Edit prompt also accepts a voice note and shows its transcript with the revised
