@@ -223,6 +223,7 @@ class WorkNewsRecovery:
         fresh_basis = {
             "version": 3,
             **({"work_navigation": basis["work_navigation"]} if "work_navigation" in basis else {}),
+            **({"manager_navigation": basis["manager_navigation"]} if "manager_navigation" in basis else {}),
             "source": asdict(source),
             "locale": settings.locale,
             "concealed": conceal_news(source) and reveal_id is None and navigation_origin is None,

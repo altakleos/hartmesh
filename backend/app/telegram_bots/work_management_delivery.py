@@ -86,7 +86,7 @@ class WorkManagementPlans(WorkNewsPlans):
                     raise CallbackRefused()
                 parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id)
                 original = acknowledged_view(link, parent, group.presentation_version)
-                if original.payload["work_news_basis"]["concealed"]:
+                if original.payload.get("work_news_basis", {}).get("concealed"):
                     raise CallbackRefused()
                 origin = {**origin_for(original, selected), "gesture_id": uuid4().hex, "group_id": selected.group_id}
                 work_id, kind = selected.target_id, "edit" if selected.kind == "work_change" else "cancel"

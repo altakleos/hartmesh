@@ -2027,6 +2027,9 @@ offers Resume beneath its complete current preview; ended attempts lose Stop.
 Eligible assignment news also offers Start or Resume beneath the complete current
 objective and success criteria. The button becomes usable after every preview
 part is delivered, and retains its original event through restart.
+Eligible saved answers, decisions and requests for changes also offer Resume
+beneath the current preview. Managers can open Change after a cannot-help reply
+or an attempt that ended without a result; saving the edit remains a separate press.
 When an answer and running assignments are active, `/stop` offers The answer,
 an assignment, or Everything. With only assignments, choose one or Everything
 when several can be stopped. Choices retain their original targets through

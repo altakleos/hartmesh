@@ -5,6 +5,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -34,6 +35,7 @@ from deerflow.utils.file_io import await_drained
 def context(read):
     act, source = read.act, read.source
     value = {
+        **({"work_controls": 1, "detail": thaw(asdict(read.detail)), "detail_dates": read.detail_dates, "origin_proof": read.origin_proof} if read.detail is not None else {}),
         **({"file_answer": read.file_answer.shown} if read.file_answer is not None else {}),
         "act": {"id": act.id, "kind": act.kind, "state": act.state, "reason": act.reason, "body": thaw(act.body), "attempts": act.attempts},
         "work_id": act.work_id,
@@ -86,6 +88,10 @@ def materialize(link, data, *, locale, timezone, product, routing=None, comment=
     )
     if shown is None:
         return None
+    if data.get("work_controls") == 1:
+        from app.telegram_bots.work_outcome_controls import native_outcome
+
+        return native_outcome(link, data, shown, locale=locale, timezone=timezone)
     keyboard = []
     if shown.text.open_assignment:
         address = page_address("web.work", link, work_id=data["work_id"], permissions=data["permissions"])
@@ -333,7 +339,7 @@ class WorkOutcomePlans:
 
     async def plan(self, link, act_id, *, guard):
         async def perform():
-            read = await self.reader.read(link, act_id)
+            read = await self.reader.read(link, act_id, native=True)
             settings = await self.settings.get(link.owner_user_id)
             if settings is None:
                 raise ProductSourceRetired()
@@ -569,11 +575,15 @@ def _followup_candidates(plans, link, data, routing):
 
 class _ContextProjection(_OutcomeProjection):
     def __init__(self, read, *, routing=None, references=None):
-        super().__init__(read.act, read.source, read.receipt, file_answer=read.file_answer)
+        super().__init__(read.act, read.source, read.receipt, file_answer=read.file_answer, native=read.detail is not None)
         self.read, self.routing, self.references = read, routing, references
+        from app.telegram_bots.work_details import WorkDetailProjection
+
+        self.detail = WorkDetailProjection(read.detail_reader, read.detail_link, read.detail.record, read.detail.request, reusable=read.detail.can_reuse_conversation, expected=read.detail) if read.detail is not None else None
 
     def extend(self, query):
         result = super().extend(query)
+        result = self.detail.extend(result) if self.detail is not None else result
         result = self.routing.extend(result) if self.routing is not None else result
         return result.add_columns(self.references.expression()) if self.references is not None else result
 
@@ -585,6 +595,13 @@ class _ContextProjection(_OutcomeProjection):
             self.routing.check(rows)
         if self.references is not None:
             self.references.check(rows[0][-1])
+        if self.read.detail is not None and not same_body(self.proof, self.read.origin_proof):
+            raise ProductSourceRetired()
+
+    def check_with_permissions(self, rows, held):
+        self.check(rows)
+        if self.detail is not None:
+            self.detail.check_with_permissions(rows, held)
 
 
 class _OutcomeGuard:
@@ -642,7 +659,7 @@ class WorkOutcomeSources:
                 raise ValueError()
             if callback is None and (origin is None or origin["operation_id"] != act_id):
                 raise ValueError()
-            read = await self.plans.reader.read(captured.link, act_id)
+            read = await self.plans.reader.read(captured.link, act_id, native="detail" in basis["context"])
             if not same_body(context(read), basis["context"]):
                 raise ProductSourceRetired()
             settings = await self.plans.settings.get(captured.link.owner_user_id)
@@ -736,10 +753,10 @@ class _DeliveryProjection(_ContextProjection):
         source_callback, source_parent = aliased(TelegramCallbackRow), aliased(TelegramOutboxRow)
         refresh_callback, refresh_parent = aliased(TelegramCallbackRow), aliased(TelegramOutboxRow)
         refresh = self.captured.item.payload["work_outcome_basis"].get("refresh")
+        result = super().extend(query)
+        self.delivery_column = len(result.column_descriptions)
         result = (
-            super()
-            .extend(query)
-            .add_columns(delivery, settings, callback, mark, source_callback, source_parent, refresh_callback, refresh_parent)
+            result.add_columns(delivery, settings, callback, mark, source_callback, source_parent, refresh_callback, refresh_parent)
             .join(delivery, delivery.id == self.captured.item.id)
             .join(settings, settings.owner_user_id == delivery.owner_user_id)
             .outerjoin(callback, callback.group_id == self.controls_part["callback_group_id"] if self.controls_part else false())
@@ -756,7 +773,8 @@ class _DeliveryProjection(_ContextProjection):
     def check(self, rows):
         super().check(rows)
         link = rows[0][0]
-        delivery, settings = rows[0][17:19]
+        column = self.delivery_column
+        delivery, settings = rows[0][column : column + 2]
         actual = self.plans.outbox._sending(link, delivery, link_id=link.id, part_id=self.captured.part["part_id"], claim_owner=self.captured.claim_owner, claim_id=self.captured.claim_id, token_revision=self.captured.token_revision)
         if actual != self.captured or _snapshot(settings) != self.settings:
             raise DeliveryClaimRetired()
@@ -766,16 +784,16 @@ class _DeliveryProjection(_ContextProjection):
         recent = link.last_update_at is not None and self.now - aware(link.last_update_at) <= timedelta(seconds=self.plans.outbox.config.outbox.recent_act_seconds)
         if bool(delivery.silent or self.captured.part.get("silent") or quiet and not recent) != bool(self.silent):
             raise DeliveryClaimRetired()
-        validate_origin(rows[0][21], rows[0][22], delivery.payload["work_outcome_basis"], delivery)
-        validate_edit(rows[0][21], rows[0][22], delivery.payload["work_outcome_basis"], delivery)
+        validate_origin(rows[0][column + 4], rows[0][column + 5], delivery.payload["work_outcome_basis"], delivery)
+        validate_edit(rows[0][column + 4], rows[0][column + 5], delivery.payload["work_outcome_basis"], delivery)
         if "refresh" in delivery.payload["work_outcome_basis"]:
             from app.telegram_bots.work_followup_refresh import validate_refresh
 
-            validate_refresh(rows[0][23], rows[0][24], delivery.payload["work_outcome_basis"], delivery)
+            validate_refresh(rows[0][column + 6], rows[0][column + 7], delivery.payload["work_outcome_basis"], delivery)
         if delivery.payload["work_outcome_basis"]["input"] is not None:
-            validate_input(rows[0][20], delivery.payload["work_outcome_basis"], delivery)
+            validate_input(rows[0][column + 3], delivery.payload["work_outcome_basis"], delivery)
         if self.controls_part is not None:
-            callbacks = {row[19].id: row[19] for row in rows if row[19] is not None}
+            callbacks = {row[column + 2].id: row[column + 2] for row in rows if row[column + 2] is not None}
             _validate_rows(delivery, list(callbacks.values()), part=self.controls_part, allow_pending=True)
             for control in callbacks.values():
                 self.plans.callbacks._usable(control)

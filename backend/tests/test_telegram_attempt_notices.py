@@ -230,5 +230,5 @@ async def test_no_result_navigation_keeps_original_attempt_after_later_activatio
     await e.sender.drain()
     assert not e.dispatch_errors, e.dispatch_errors
     call = [call for call in e.channel.bot.request.calls if call.endpoint == "sendMessage"][0]
-    urls = [button["url"] for row in call.parameters["reply_markup"]["inline_keyboard"] for button in row]
+    urls = [button["url"] for row in call.parameters["reply_markup"]["inline_keyboard"] for button in row if "url" in button]
     assert any(e.ended_run.thread_id in url for url in urls) and all(chat["thread_id"] not in url for url in urls)

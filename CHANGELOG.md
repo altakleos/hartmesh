@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Offer acknowledged Resume beneath complete saved-action previews and manager
+  Change after cannot-help replies or attempts that ended without a result.
 - Keep late assignment and Edit replies until an explicit recovery choice;
   reopen complete current previews without submitting held text or repeating speech recognition.
 - Open current assignment previews from summary Start/Resume items and saved-answer

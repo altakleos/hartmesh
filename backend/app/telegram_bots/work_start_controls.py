@@ -24,10 +24,11 @@ def displayed_start(link, parent, callback):
     saved_assignment = source["key"] == "assignment.card" and source.get("work", {}).get("phase") == "saved"
     management = source["key"] in {"management.edit", "management.withdraw"} and source.get("work", {}).get("phase") in {"saved", "changed", "back"}
     stopped = source["key"] == "status.stopped"
+    outcome = source["key"] in {"outcome.respond", "outcome.decide", "outcome.changes_requested"} and "work_outcome_basis" in original.payload
     if stopped:
         status_record(source)
     if (
-        (source["key"] not in {"view.detail", "capacity.offer"} and not preview and not saved_assignment and not management and not news and not stopped)
+        (source["key"] not in {"view.detail", "capacity.offer"} and not preview and not saved_assignment and not management and not news and not stopped and not outcome)
         or callback.kind != "work_start"
         or callback.target_kind != "work"
         or original.payload.get("work_news_basis", {}).get("concealed")

@@ -70,7 +70,7 @@ class ManagementOpening:
                 or (selected.kind, selected.target_kind, selected.target_id, selected.payload.get("work_id")) != (expected, "work", self.intent["work_id"], self.intent["work_id"])
                 or selected.message_id != gesture.message_id
                 or (parent.link_id, parent.owner_user_id, parent.binding_generation, parent.chat_id, parent.instance_id) != (self.link.id, self.link.owner_user_id, self.link.binding_generation, self.link.chat_id, self.link.agent_ref)
-                or original.payload["work_news_basis"]["concealed"]
+                or original.payload.get("work_news_basis", {}).get("concealed")
             ):
                 raise ValueError()
         except (ValueError, TypeError, KeyError, AttributeError, StopIteration, CallbackRefused):
