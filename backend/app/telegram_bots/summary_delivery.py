@@ -40,6 +40,7 @@ def recipes(basis, link, identity):
         outbox_id=identity,
         link_id=link.id,
         time=f"{minute // 60:02d}:{minute % 60:02d}",
+        work_controls=basis.get("work_controls") == 1,
         work_url=page_address("web.work", link, permissions=AgentPermission.INSPECT, public_base_url=basis["public_base_url"]),
     )
     keyboard = [list(line) for line in shown.keyboard]
@@ -75,10 +76,12 @@ def frozen_summary(captured, *, pending=False, acknowledged=False, _history=True
         version = item.payload["presentation_version"]
         if type(basis) is not dict or set(basis) != {"version", "date", "as_of", "since", "sections", "protected", "concealed", "locale", "timezone", "summary_minute", "public_base_url", "parts", "keyboard"} | (
             {"history"} if basis.get("version") == 2 else set()
-        ):
+        ) | ({"work_controls"} if "work_controls" in basis else set()):
             raise ValueError()
         if (
-            type(basis["version"]) is not int
+            "work_controls" in basis
+            and (type(basis["work_controls"]) is not int or basis["work_controls"] != 1)
+            or type(basis["version"]) is not int
             or basis["version"] not in {1, 2}
             or date.fromisoformat(basis["date"]).isoformat() != basis["date"]
             or datetime.fromisoformat(basis["as_of"]).utcoffset() is None
@@ -202,6 +205,7 @@ class SummaryPlans:
             origin = NavigationOrigin()
             basis = {
                 "version": 1,
+                "work_controls": 1,
                 "date": scheduled,
                 "as_of": now.isoformat(),
                 "since": source.since.isoformat(),

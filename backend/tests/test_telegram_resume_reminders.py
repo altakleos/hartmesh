@@ -14,7 +14,7 @@ from test_telegram_work_source_delivery import work_delivery as work_delivery
 from test_work_attention_pages import work_pages as work_pages
 
 from app.telegram_bots.producer import _item
-from deerflow.persistence.telegram_bots.model import TelegramOutboxRow, TelegramPersonSettingsRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow, TelegramPersonSettingsRow
 
 
 async def quiet_window_at_delivery(e, clock):
@@ -63,7 +63,7 @@ async def reminder(e, *, other_requester=False):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("delay", [20, 86420])
-async def test_reminder_waits_an_hour_then_sends_silently_with_only_a_web_link(work_delivery, delay):
+async def test_reminder_waits_an_hour_then_sends_silently_with_native_detail_navigation(work_delivery, delay):
     e = work_delivery
     clock = ManualClock(e.sender.outbox.clock())
     e.sender.outbox.clock = clock.now
@@ -82,11 +82,34 @@ async def test_reminder_waits_an_hour_then_sends_silently_with_only_a_web_link(w
     assert len(calls) == 1 and calls[0].parameters["disable_notification"] is True
     assert 'Ready to resume: "Report findings"' in calls[0].parameters["text"]
     buttons = [button for row in calls[0].parameters["reply_markup"]["inline_keyboard"] for button in row]
-    assert len(buttons) == 1 and buttons[0]["text"] == "Open assignment" and "callback_data" not in buttons[0]
+    assert len(buttons) == 1 and buttons[0]["text"] == 'Resume "Report findings"' and "callback_data" in buttons[0]
     assert await e.human.work.get(actor=e.actor, instance_id=e.instance.id, work_id=item.work_id) == before
     async with e.db.sessions() as reader:
         row = await reader.get(TelegramOutboxRow, item.id)
         assert row.state == "sent" and row.class_ == "reminder" and row.payload["kind"] == "resume_reminder"
+        control = await reader.scalar(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == row.parts[-1]["callback_group_id"], TelegramCallbackRow.kind == "work_details"))
+        assert control.message_id == 2701 and control.target_id == item.work_id
+    from test_telegram_work_interaction_delivery import guard_for
+
+    from app.telegram_bots.work_news_delivery import WorkNewsSources
+    from app.telegram_bots.work_view_delivery import WorkViewPlans
+    from app.telegram_bots.work_view_sources import WorkViewReader
+
+    views = WorkViewPlans(reader=WorkViewReader(work=e.human.work, authority=e.live.authority, links=e.db.links, clock=clock.now), outbox=e.sender.outbox, callbacks=e.channel._services.callbacks)
+    e.channel._services.work_view_sources = WorkNewsSources(views)
+    args = dict(query_id="reminder-current-detail", chat_id=e.link.chat_id, message_id=2701, message_thread_id=None)
+    target = await views.open(e.link, control.id, **args, guard=await guard_for(e))
+    assert await views.open(e.link, control.id, **args, guard=await guard_for(e)) == target
+    clock.advance(10)
+    message(e.channel.bot.request, identity=2702)
+    assert await e.sender.tick() == 1
+    await e.sender.drain()
+    async with e.db.sessions() as reader:
+        row = await reader.get(TelegramOutboxRow, target)
+        assert row.state == "sent", e.dispatch_errors
+        assert row.work_id == item.work_id and row.payload["work_view_intent"]["key"] == "view.detail"
+        assert not list(await reader.scalars(select(TelegramActRow)))
+    assert await e.human.work.get(actor=e.actor, instance_id=e.instance.id, work_id=item.work_id) == before
 
 
 @pytest.mark.asyncio

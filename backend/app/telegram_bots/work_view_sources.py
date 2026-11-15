@@ -110,8 +110,9 @@ class WorkViewProjection:
         self.delivery_column = len(result.column_descriptions)
         delivery, mark, gesture, parent, control, settings = TelegramOutboxRow, aliased(TelegramInboundMarkRow), aliased(TelegramCallbackRow), aliased(TelegramOutboxRow), aliased(TelegramCallbackRow), aliased(TelegramPersonSettingsRow)
         origin = self.source.work["origin"]
+        summary_root, summary_control = aliased(TelegramOutboxRow), aliased(TelegramCallbackRow)
         return (
-            result.add_columns(delivery, mark, gesture, parent, control, settings)
+            result.add_columns(delivery, mark, gesture, parent, control, settings, summary_root, summary_control)
             .join(delivery, delivery.id == self.item.id)
             .outerjoin(mark, and_(mark.link_id == self.link.id, mark.chat_id == self.link.chat_id, mark.message_id == origin.get("message_id")) if origin.get("kind") == "inbox" else false())
             .outerjoin(gesture, gesture.id == origin.get("gesture_id") if origin.get("kind") == "callback" else false())
@@ -125,6 +126,8 @@ class WorkViewProjection:
                 ),
             )
             .join(settings, settings.owner_user_id == self.link.owner_user_id)
+            .outerjoin(summary_root, summary_root.id == parent.payload["summary_view_basis"]["parent_id"].as_string())
+            .outerjoin(summary_control, summary_control.group_id == select(TelegramCallbackRow.group_id).where(TelegramCallbackRow.id == parent.payload["summary_view_basis"]["callback_id"].as_string()).correlate(parent).scalar_subquery())
         )
 
     def check_with_permissions(self, rows, held):
@@ -155,6 +158,12 @@ class WorkViewProjection:
         if self.source.event_signature != digest([self.link.id, self.link.binding_generation, intent]) or self.source.signature != digest([self.source.work, self.source.values]):
             raise ProductSourceRetired()
         qualify_origin(self.link, self.item, intent["origin"], rows, self.delivery_column + 1, self.clock.now)
+        parent = rows[0][self.delivery_column + 3]
+        if parent is not None and "summary_view_basis" in parent.payload:
+            from app.telegram_bots.work_summary_origins import qualify_summary_parent
+
+            controls = {row[self.delivery_column + 7].id: row[self.delivery_column + 7] for row in rows if row[self.delivery_column + 7] is not None}
+            qualify_summary_parent(self.link, _item(parent), rows[0][self.delivery_column + 6], controls, self.clock.now)
 
 
 def source_key(intent):

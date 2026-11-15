@@ -15,6 +15,10 @@ from app.telegram_bots.work_result_identity import digest
 
 def acknowledged_view(link, parent, version):
     """Reconstruct an acknowledged original even after a source refresh."""
+    if {"summary_basis", "summary_view_basis"}.intersection(parent.payload):
+        from app.telegram_bots.work_summary_origins import acknowledged_summary
+
+        return acknowledged_summary(link, parent, version)
     if "work_status_update" in parent.payload:
         from app.telegram_bots.work_status_control_origins import acknowledged_update
 
@@ -42,6 +46,10 @@ def acknowledged_view(link, parent, version):
 
 
 def anchor_signature(item):
+    if {"summary_basis", "summary_view_basis"}.intersection(item.payload):
+        from app.telegram_bots.work_summary_origins import family
+
+        return digest([item.id, item.payload["presentation_version"], item.payload[family(item.payload)], item.payload["product_keyboard_basis"], item.parts])
     basis = item.payload["work_status_update"] if "work_status_update" in item.payload else item.payload["work_news_basis"]
     return digest([item.id, item.payload["presentation_version"], basis, item.payload["product_keyboard_basis"], item.parts])
 
@@ -67,7 +75,7 @@ def qualify_origin(link, item, origin, rows, column, clock):
         ):
             raise ProductSourceRetired()
         return
-    if origin.get("kind") != "callback" or set(origin) != {"kind", "gesture_id", "callback_id", "anchor_outbox_id", "presentation_version", "anchor_signature"}:
+    if origin.get("kind") != "callback" or set(origin) != {"kind", "gesture_id", "callback_id", "anchor_outbox_id", "presentation_version", "anchor_signature"} | ({"list_cursor"} if "list_cursor" in origin else set()):
         raise ProductSourceRetired()
     if (
         gesture is None
@@ -91,8 +99,20 @@ def qualify_origin(link, item, origin, rows, column, clock):
         raise ProductSourceRetired() from None
     selected = controls.get(origin["callback_id"])
     final = [part for part in original.parts if part["presentation_version"] == origin["presentation_version"]][-1]
-    if selected is None or gesture.message_id != selected.message_id or selected.message_id != final["message_ids"][0] or selected.group_id != final.get("callback_group_id") or selected.kind not in {"work_details", "work_list_page"}:
+    if (
+        selected is None
+        or gesture.message_id != selected.message_id
+        or selected.message_id != final["message_ids"][0]
+        or selected.group_id != final.get("callback_group_id")
+        or selected.kind not in {"work_details", "work_list_page", "work_list_open"}
+    ):
         raise ProductSourceRetired()
-    expected = {"key": "view.detail", "work_id": selected.payload.get("work_id")} if selected.kind == "work_details" else {"key": "view.list", "cursor": selected.payload.get("cursor")}
+    if (selected.kind == "work_list_open") != ("list_cursor" in origin):
+        raise ProductSourceRetired()
+    expected = (
+        {"key": "view.detail", "work_id": selected.payload.get("work_id")}
+        if selected.kind == "work_details"
+        else {"key": "view.list", "cursor": origin["list_cursor"] if selected.kind == "work_list_open" else selected.payload.get("cursor")}
+    )
     if not same_body({key: value for key, value in item.payload["work_view_intent"].items() if key not in {"version", "origin"}}, expected):
         raise ProductSourceRetired()

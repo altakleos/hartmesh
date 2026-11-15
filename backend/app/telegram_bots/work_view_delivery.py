@@ -11,6 +11,7 @@ from app.telegram_bots.notifications import aware
 from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_news_delivery import WorkNewsPlans
 from app.telegram_bots.work_result_identity import digest
+from app.telegram_bots.work_summary_origins import qualify_summary_anchor
 from app.telegram_bots.work_view_origins import acknowledged_view, anchor_signature
 from app.telegram_bots.work_view_sources import WorkViewProjection
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
@@ -35,7 +36,7 @@ class WorkViewPlans(WorkNewsPlans):
                     raise ProductSourceRetired()
                 cursor = current.route_basis.get("cursor") if current.route_kind == "work_view" else None
             if cursor is None:
-                cursor = await self.reader.open_list(link)
+                cursor = await self.reader.open_list(link, guard=guard, snapshot_id=digest([link.id, link.binding_generation, "work-command", inbox.update_id])[:32])
             async with self.callbacks.writer(link, guard) as writer:
                 routed = await self.outbox.inbox.route(inbox, kind="work_view", target_id=cursor, basis={"cursor": cursor}, operation_ids=[], session=writer)
                 row = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == key).with_for_update())
@@ -58,6 +59,31 @@ class WorkViewPlans(WorkNewsPlans):
 
         async def perform():
             key = "notice:work-view:callback:" + query_key
+            # List collection owns its own read/write lifetime, outside the
+            # callback writer. Exact gesture replay reuses the saved cursor.
+            cursor = None
+            async with self.outbox.sessions() as reader:
+                existing = await reader.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == key))
+                candidate = await reader.get(TelegramCallbackRow, callback_id)
+                new_list = (
+                    existing is None
+                    and candidate is not None
+                    and candidate.kind == "work_list_open"
+                    and (candidate.link_id, candidate.chat_id, candidate.binding_generation, candidate.message_id) == (link.id, chat_id, link.binding_generation, message_id)
+                )
+            if new_list:
+
+                async def admit(writer):
+                    group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=guard, session=writer)
+                    if group.selected.kind != "work_list_open":
+                        raise CallbackRefused()
+                    parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id)
+                    original = acknowledged_view(link, parent, group.presentation_version)
+                    if not {"summary_basis", "summary_view_basis"}.intersection(original.payload):
+                        raise CallbackRefused()
+                    await qualify_summary_anchor(link, original, writer, self.outbox.clock)
+
+                cursor = await self.reader.open_list(link, guard=guard, admit=admit, snapshot_id=digest([link.id, link.binding_generation, "work-list-callback", query_key])[:32])
             async with self.callbacks.writer(link, guard) as writer:
                 row = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == key).with_for_update())
                 if row is not None:
@@ -70,14 +96,21 @@ class WorkViewPlans(WorkNewsPlans):
                 else:
                     group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=guard, session=writer)
                     selected = group.selected
-                    if selected.kind not in {"work_details", "work_list_page"}:
+                    if selected.kind not in {"work_details", "work_list_page", "work_list_open"}:
                         raise CallbackRefused()
                     parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id)
                     original = acknowledged_view(link, parent, group.presentation_version)
-                    if original.payload["work_news_basis"]["source"]["key"] not in {"view.list", "view.detail"}:
+                    await qualify_summary_anchor(link, original, writer, self.outbox.clock)
+                    if not {"summary_basis", "summary_view_basis"}.intersection(original.payload) and original.payload["work_news_basis"]["source"]["key"] not in {"view.list", "view.detail", "remind.ready_to_resume"}:
                         raise CallbackRefused()
                     origin = {"kind": "callback", "gesture_id": uuid4().hex, "callback_id": selected.id, "anchor_outbox_id": parent.id, "presentation_version": group.presentation_version, "anchor_signature": anchor_signature(original)}
-                    intent = {"key": "view.detail", "work_id": selected.payload["work_id"]} if selected.kind == "work_details" else {"key": "view.list", "cursor": selected.payload["cursor"]}
+                    if selected.kind == "work_list_open":
+                        if cursor is None or not {"summary_basis", "summary_view_basis"}.intersection(original.payload):
+                            raise CallbackRefused()
+                        origin["list_cursor"] = cursor
+                    intent = {"key": "view.detail", "work_id": selected.payload["work_id"]} if selected.kind == "work_details" else {"key": "view.list", "cursor": selected.payload.get("cursor")}
+                    if selected.kind == "work_list_open":
+                        intent = {"key": "view.list", "cursor": cursor}
                     row = self._row(link, key, {"version": 1, **intent, "origin": origin}, topic=message_thread_id)
                     writer.add(row)
                     expires = aware(selected.created_at) + timedelta(days=self.callbacks.config.callbacks.max_age_days)

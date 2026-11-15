@@ -32,6 +32,7 @@ from deerflow.utils.file_io import await_drained
 def summary_basis(snapshot):
     original, settings = snapshot.item.payload["summary_basis"], snapshot.settings
     return {
+        **({"work_controls": original["work_controls"]} if "work_controls" in original else {}),
         "date": original["date"],
         "as_of": original["as_of"],
         "since": original["since"],
@@ -55,6 +56,7 @@ def recipes(basis, link, identity):
         outbox_id=identity,
         link_id=link.id,
         time=f"{minute // 60:02d}:{minute % 60:02d}",
+        work_controls=summary.get("work_controls") == 1,
         work_url=page_address("web.work", link, permissions=AgentPermission.INSPECT, public_base_url=summary["public_base_url"]),
     )
     part = {**shown.parts[0], "silent": True, "stored_keyboard": True, "source_ref": {"key": "summary.view", "values": {"outbox_id": identity}}}
@@ -91,7 +93,9 @@ def frozen_view(captured, *, pending=False, acknowledged=False, _history=True):
             or (item.link_id, item.owner_user_id, item.binding_generation, item.chat_id, item.instance_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id, link.agent_ref)
             or any(value is not None for value in (item.work_id, item.request_id, item.event_id, item.message_thread_id))
             or type(summary) is not dict
-            or set(summary) != {"date", "as_of", "since", "sections", "protected", "locale", "timezone", "summary_minute", "public_base_url"}
+            or set(summary) != {"date", "as_of", "since", "sections", "protected", "locale", "timezone", "summary_minute", "public_base_url"} | ({"work_controls"} if "work_controls" in summary else set())
+            or "work_controls" in summary
+            and (type(summary["work_controls"]) is not int or summary["work_controls"] != 1)
             or type(summary["protected"]) is not bool
             or summary["locale"] not in {"en-US", "zh-CN"}
             or type(summary["summary_minute"]) is not int

@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Keep late assignment and Edit replies until an explicit recovery choice;
   reopen complete current previews without submitting held text or repeating speech recognition.
+- Open current assignment previews from summary Start/Resume items and saved-answer
+  reminders, with native Work-list navigation for omitted waiting items.
 - Offer Stop on acknowledged status messages and Resume beneath a stopped assignment's
   complete preview, preserving original proof and clearing replaced message controls.
 - Put Work and Assign first in agent-bot menus, upgrade existing profiles, and

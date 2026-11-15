@@ -8,7 +8,7 @@ from app.telegram_bots.work_digest_text import _identity
 from app.telegram_bots.work_requests import WorkRequestPresentation
 
 
-def present_summary(sections, *, locale, protected, concealed, outbox_id, link_id, time, work_url):
+def present_summary(sections, *, locale, protected, concealed, outbox_id, link_id, time, work_url, work_controls=False):
     if not _identity(outbox_id) or not _identity(link_id) or type(protected) is not bool or type(concealed) is not bool or concealed and not protected:
         raise ValueError("invalid-summary-presentation")
     if set(sections) != {"finished", "working", "interrupted", "waiting"}:
@@ -30,16 +30,29 @@ def present_summary(sections, *, locale, protected, concealed, outbox_id, link_i
                 lines.extend(render("summary." + kind, locale, objective=" ".join(item["objective"].split())) for item in shown)
             if len(items) > len(shown):
                 lines.append(render("summary.more", locale, n=len(items) - len(shown)))
-        requests = [item for item in sections["waiting"] if item["kind"] in {"question", "decision", "review"}]
+        requests = sections["waiting"] if work_controls else [item for item in sections["waiting"] if item["kind"] in {"question", "decision", "review"}]
         for item in requests[:SUMMARY_BUTTONS_MAX]:
-            if not _identity(item["request_id"]):
+            navigation = item["kind"] in {"start", "resume"}
+            if not _identity(item["work_id"] if navigation else item["request_id"]):
                 raise ValueError("invalid-summary-request")
             label = _clip(render_plain("summary.button." + item["kind"], locale, objective=" ".join(item["objective"].split())), 32)
             keyboard.append(
-                [{"label": "label.choice", "label_values": {"label": label}, "kind": "digest_item", "target_kind": "request", "target_id": item["request_id"], "payload": {"summary_id": outbox_id, "request_id": item["request_id"]}}]
+                [
+                    {
+                        "label": "label.choice",
+                        "label_values": {"label": label},
+                        "kind": "work_details" if navigation else "digest_item",
+                        "target_kind": "work" if navigation else "request",
+                        "target_id": item["work_id"] if navigation else item["request_id"],
+                        "payload": {"work_id": item["work_id"]} if navigation else {"summary_id": outbox_id, "request_id": item["request_id"]},
+                    }
+                ]
             )
-        if len(sections["waiting"]) > SUMMARY_BUTTONS_MAX and work_url is not None:
-            keyboard.append([{"label": "label.open_work", "url": work_url}])
+        if len(sections["waiting"]) > SUMMARY_BUTTONS_MAX:
+            if work_controls:
+                keyboard.append([{"label": "label.choice", "label_values": {"label": render_plain("summary.button.work_list", locale)}, "kind": "work_list_open", "target_kind": "link", "target_id": link_id, "payload": {}}])
+            elif work_url is not None:
+                keyboard.append([{"label": "label.open_work", "url": work_url}])
         keyboard.append([{"label": "label.choice", "label_values": {"label": render_plain("summary.button.off", locale)}, "kind": "summary_off", "target_kind": "link", "target_id": link_id, "payload": {}}])
         html = "\n".join(lines)
     if len(split_html(html)) != 1:

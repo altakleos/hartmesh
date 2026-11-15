@@ -222,6 +222,7 @@ class WorkNewsRecovery:
         history.append({"basis": archived, "parts": deepcopy(current), "class": item.class_, "presentation_version": version})
         fresh_basis = {
             "version": 3,
+            **({"work_navigation": basis["work_navigation"]} if "work_navigation" in basis else {}),
             "source": asdict(source),
             "locale": settings.locale,
             "concealed": conceal_news(source) and reveal_id is None and navigation_origin is None,

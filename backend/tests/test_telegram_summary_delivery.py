@@ -12,6 +12,19 @@ from test_work_attention_pages import work_pages as work_pages
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow, TelegramPersonSettingsRow
 
 
+def legacy_summary_generation(monkeypatch):
+    """Produce the saved pre-native format through its unchanged renderer."""
+    from app.telegram_bots import summary_delivery
+
+    original = summary_delivery.recipes
+
+    def recipes(basis, link, identity):
+        basis.pop("work_controls", None)
+        return original(basis, link, identity)
+
+    monkeypatch.setattr(summary_delivery, "recipes", recipes)
+
+
 async def prepare(e):
     from app.telegram_bots.summary_delivery import SummaryPlans, SummarySources
     from app.telegram_bots.summary_sources import SummaryReader

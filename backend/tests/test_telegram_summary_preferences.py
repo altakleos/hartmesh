@@ -179,15 +179,18 @@ async def test_summary_stop_expired_controls_do_not_change_preference(work_deliv
 
 
 @pytest.mark.asyncio
-async def test_summary_stop_edit_falls_back_from_omitted_work_url(work_delivery):
+async def test_summary_stop_edit_falls_back_from_omitted_work_url(work_delivery, monkeypatch):
     from copy import deepcopy
     from datetime import timedelta
     from uuid import uuid4
+
+    from test_telegram_summary_delivery import legacy_summary_generation
 
     from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
     from deerflow.persistence.agent_instances.work import AgentWorkRow
 
     e = work_delivery
+    legacy_summary_generation(monkeypatch)
     e.live.config.model_extra["telegram_bots"] = {"public_base_url": "https://app.example.test"}
     now = e.sender.outbox.clock()
     async with e.db.sessions.begin() as writer:
