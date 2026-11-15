@@ -86,11 +86,14 @@ def frozen(captured, *, acknowledged=False, pending=False, replay=False):
             | ({"reply_origin"} if basis.get("version") in {2, 6} and "reply_origin" in basis else set())
             | ({"choice_origin"} if basis.get("version") == 6 and "choice_origin" in basis else set())
             | ({"result_files"} if basis.get("version") in {1, 2} and "result_files" in basis else set())
+            | ({"suggestion_controls"} if basis.get("version") in {1, 2} and "suggestion_controls" in basis else set())
             | ({"navigation_origin"} if basis.get("version") in {1, 2, 5, 6} and "navigation_origin" in basis else set())
             | ({"prompt_id"} if basis.get("version") == 3 and type(basis.get("interaction")) is dict and basis["interaction"].get("view") == "prompt" else set())
             or type(basis["version"]) is not int
             or basis["version"] not in {1, 2, 3, 4, 5, 6}
         ):
+            raise ValueError()
+        if "suggestion_controls" in basis and (type(basis["suggestion_controls"]) is not int or basis["suggestion_controls"] != 1 or "result_files" not in basis):
             raise ValueError()
         if (
             captured.item.class_ != ("reply" if basis["version"] in {3, 4} or basis.get("reply_origin") is not None or basis.get("choice_origin") is not None or "navigation_origin" in basis else "question")
@@ -202,7 +205,7 @@ def frozen(captured, *, acknowledged=False, pending=False, replay=False):
         elif "result_files" in basis:
             from app.telegram_bots.work_result_files import present_review_files, result_options
 
-            presentation = present_review_files(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id, **result_options(basis["result_files"]))
+            presentation = present_review_files(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id, suggestion_controls=basis.get("suggestion_controls") == 1, **result_options(basis["result_files"]))
         else:
             presentation = present_request(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id)
         if reveal is not None and (len(presentation.parts) > 1 or "result_files" in basis) and cleanup_id is None:
@@ -355,7 +358,14 @@ class WorkRequestSources:
         if not (current.request["can_respond"] if current.request["purpose"] == "information" else current.request["can_manage"]):
             raise ProductSourceRetired()
         revealed = bool(basis.get("reveal") or basis.get("reply_origin") or basis.get("choice_origin") or basis.get("navigation_origin"))
-        changed = not same_displayed_basis(current, source) or current.protected != basis["concealed"] and not revealed and basis["version"] not in {3, 4}
+        changed = (
+            not same_displayed_basis(current, source)
+            or current.protected != basis["concealed"]
+            and not revealed
+            and basis["version"] not in {3, 4}
+            or basis.get("suggestion_controls") == 1
+            and current.work.get("suggestion") != source.work.get("suggestion")
+        )
         if basis["version"] in {3, 4} and changed:
             raise ProductSourceRetired()
         if self.recovery is not None and basis["version"] not in {3, 4}:

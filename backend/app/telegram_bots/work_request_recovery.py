@@ -117,6 +117,9 @@ class WorkRequestRecovery:
     def _extras(self, source):
         return {}
 
+    def _replacement_extras(self, source, previous):
+        return self._extras(source)
+
     def _owns_basis(self, basis):
         return "result_files" not in basis
 
@@ -195,7 +198,7 @@ class WorkRequestRecovery:
         snapshot["responses"] = list(snapshot["responses"])
         basis = {
             "version": self.basis_version,
-            **self._extras(source),
+            **self._replacement_extras(source, row.payload["work_request_basis"]),
             "source": snapshot,
             "locale": settings.locale,
             "concealed": concealed,
@@ -266,8 +269,9 @@ class _RecoveryGuard:
 class _RecoveryProjection:
     """Current source, pending actions and privacy in the final account read."""
 
-    def __init__(self, source, *, allowed_act_id=None):
+    def __init__(self, source, *, allowed_act_id=None, require_manage=True):
         self.source, self.allowed_act_id = source, allowed_act_id
+        self.require_manage = require_manage
 
     def extend(self, query):
         work, request, bot = AgentWorkRow, HumanInputRequestRow, TelegramBotLinkRow
@@ -291,7 +295,7 @@ class _RecoveryProjection:
     def check(self, rows):
         bot, target, permissions, policy = rows[0][:4]
         work, request, unresolved = rows[0][8:11]
-        if self.source.request["purpose"] != "information" and permissions & 6 != 6:
+        if self.require_manage and self.source.request["purpose"] != "information" and permissions & 6 != 6:
             raise AgentDenied("The request is unavailable")
         if work.revision != self.source.seen["work_revision"] or request.revision != self.source.seen["revision"] or unresolved or (target.custody == "company" and policy == "protected") != self.source.protected:
             raise DeliveryRetry(timedelta(seconds=5))

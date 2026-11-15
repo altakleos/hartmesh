@@ -17,6 +17,7 @@ from app.telegram_bots.work_result_history import archive_media, qualified_histo
 from app.telegram_bots.work_result_identity import result_identity
 from app.telegram_bots.work_result_ledger import carry_media, initial_ledger
 from app.telegram_bots.work_result_navigation import NavigationOrigin, capture_navigation, require_navigation
+from app.telegram_bots.work_suggestion_projection import WorkSuggestionProjection
 from deerflow.agent_instances.contract import AgentDenied
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkRow
 from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
@@ -81,8 +82,17 @@ class WorkResultRecovery(WorkRequestRecovery):
     def _extras(self, source):
         return self.plans._extras(source)
 
+    def _replacement_extras(self, source, previous):
+        extras = self._extras(source)
+        extras.pop("suggestion_controls", None)
+        if "suggestion_controls" in previous:
+            extras["suggestion_controls"] = previous["suggestion_controls"]
+        return extras
+
     def _presentation(self, source, settings, link, row, concealed):
-        return present_review_files(source, locale=settings.locale, concealed=concealed, outbox_id=row.id, **result_options(self._extras(source)["result_files"]))
+        return present_review_files(
+            source, locale=settings.locale, concealed=concealed, outbox_id=row.id, suggestion_controls=row.payload["work_request_basis"].get("suggestion_controls") == 1, **result_options(self._extras(source)["result_files"])
+        )
 
     async def _replace(self, writer, link, row, source, settings, *, reveal=None, force_new=False, choice=None, repair=False, navigation_origin=None):
         basis = row.payload.get("work_request_basis", {})
@@ -131,17 +141,19 @@ class WorkResultRecovery(WorkRequestRecovery):
 
 
 class _ResultRecoveryProjection(_RecoveryProjection):
-    def __init__(self, source):
-        super().__init__(source)
+    def __init__(self, source, *, require_manage=True):
+        super().__init__(source, require_manage=require_manage)
         self.navigation_origin = NavigationOrigin()
+        self.suggestion = WorkSuggestionProjection(source.work)
 
     def extend(self, query):
         result = super().extend(query)
         self.navigation_column = len(result.column_descriptions)
         attempt = aliased(AgentWorkAttemptRow)
-        return result.add_columns(attempt).outerjoin(attempt, and_(attempt.id == self.source.work["result_navigation"]["attempt_id"], attempt.work_id == AgentWorkRow.id))
+        return self.suggestion.extend(result.add_columns(attempt).outerjoin(attempt, and_(attempt.id == self.source.work["result_navigation"]["attempt_id"], attempt.work_id == AgentWorkRow.id)))
 
     def check(self, rows):
+        self.suggestion.check(rows)
         self.navigation_origin.check(self.source.work["result_navigation"])
         if result_identity(rows[0][8]) != self.source.work.get("result_identity"):
             raise ProductSourceRetired()

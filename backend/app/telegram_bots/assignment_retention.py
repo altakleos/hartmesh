@@ -415,7 +415,7 @@ async def assignment_dependencies(session, now, *, max_age_days, draft_ttl_hours
                 anchor = await session.get(TelegramOutboxRow, origin.get("anchor_outbox_id"), populate_existing=True) if type(origin.get("anchor_outbox_id")) is str else None
                 if anchor is not None and in_scope(anchor, family.scope) and (anchor.work_id, anchor.message_thread_id) == (origin.get("work_id"), origin.get("message_thread_id")):
                     result.deliveries.add(anchor.id)
-                    basis = anchor.payload.get("result_notice_basis", {}) if isinstance(anchor.payload, Mapping) else {}
+                    basis = anchor.payload.get("result_notice_basis", anchor.payload.get("work_request_basis", {})) if isinstance(anchor.payload, Mapping) else {}
                     cleanup = await session.get(TelegramOutboxRow, basis["cleanup_id"], populate_existing=True) if isinstance(basis, Mapping) and type(basis.get("cleanup_id")) is str else None
                     cleanup_payload = cleanup.payload if cleanup is not None and isinstance(cleanup.payload, Mapping) else {}
                     reveal = next((control for control in by_anchor[anchor.id] if control.id == basis.get("reveal")), None) if isinstance(basis, Mapping) else None

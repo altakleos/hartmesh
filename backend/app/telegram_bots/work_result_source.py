@@ -10,6 +10,7 @@ from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_request_source import WorkRequestSources, _RequestProjection
 from app.telegram_bots.work_result_identity import result_identity
 from app.telegram_bots.work_result_navigation import NavigationOrigin, require_navigation
+from app.telegram_bots.work_suggestion_projection import WorkSuggestionProjection
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkRow
 from deerflow.utils.file_io import await_drained
 
@@ -44,6 +45,7 @@ class _ResultProjection(_RequestProjection):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.navigation_origin = NavigationOrigin() if "work_result_navigation" in self.captured.item.payload else None
+        self.suggestion = WorkSuggestionProjection(self.source.work)
 
     def extend(self, query):
         result = super().extend(query)
@@ -53,9 +55,10 @@ class _ResultProjection(_RequestProjection):
             attempt = aliased(AgentWorkAttemptRow)
             self.navigation_column = len(result.column_descriptions)
             result = result.add_columns(attempt).outerjoin(attempt, and_(attempt.id == navigation["attempt_id"], attempt.work_id == AgentWorkRow.id))
-        return result
+        return self.suggestion.extend(result)
 
     def check(self, rows):
+        self.suggestion.check(rows)
         if result_identity(rows[0][self.column]) != self.captured.item.payload.get("work_result_identity"):
             raise ProductSourceRetired()
         if self.navigation_column is not None:
