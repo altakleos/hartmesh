@@ -51,6 +51,7 @@ ACCESS_CASES = [
     ("work_start", "closed-before"),
     ("work_start", "closed-other"),
     ("work_start", "closed-owner"),
+    ("work_start", "force-reply"),
 ]
 
 
@@ -192,6 +193,11 @@ async def test_actual_start_press_explains_lost_inspect(capture_environment, mon
             assert denial is not None
             intent = denial.payload["work_callback_denial"]
         assert validate_intent(intent) == intent
+        if change == "force-reply":
+            async with e.e.sf.begin() as writer:
+                saved = await writer.get(TelegramOutboxRow, denial.id)
+                saved.parts = [{**part, "force_reply": True} for part in saved.parts]
+            changed.append(change)
         if change is not None and change.startswith("replay-"):
             from app.telegram_bots.callbacks import CallbackRefused, _row
 
@@ -225,7 +231,7 @@ async def test_actual_start_press_explains_lost_inspect(capture_environment, mon
         if change == "quiet":
             async with e.e.sf.begin() as writer:
                 (await writer.get(TelegramBotLinkRow, e.link.id)).last_update_at = e.clock.now() - timedelta(seconds=e.host.config.outbox.recent_act_seconds + 1)
-        withheld = change in {"inspect", "use", "reserved", "ack", "age", "replay-pending", "replay-sent", "closed-before", "closed-other", "closed-owner"}
+        withheld = change in {"inspect", "use", "reserved", "ack", "age", "replay-pending", "replay-sent", "closed-before", "closed-other", "closed-owner", "force-reply"}
         if withheld:
             for _ in range(3):
                 e.clock.advance(5)
@@ -254,7 +260,7 @@ async def test_actual_start_press_explains_lost_inspect(capture_environment, mon
                 assert sent[-1]["disable_notification"] is True
         assert all(work["objective"] not in call["text"] for call in sent)
         async with e.e.sf() as reader:
-            if change == "inspect":
+            if change in {"inspect", "force-reply"}:
                 retired = await reader.get(TelegramOutboxRow, denial.id)
                 assert retired.state == "skipped", (retired.state, retired.skip_reason)
             assert await reader.get(TelegramActRow, control.id) is None

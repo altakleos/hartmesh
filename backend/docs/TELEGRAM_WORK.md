@@ -2186,6 +2186,8 @@ available for a later explicit press; restoring permission retires the stale
 denial. Current metadata, protection and quiet/recent-activity preferences are
 checked with the actual SDK claim after off-writer timezone preparation.
 The first committed query intent is immutable, including after SDK ACK.
+Fixed denials reject added ForceReply markup in the actual delivery part;
+the reply target remains bound to the original acknowledged control.
 Delivery may retain original ACK history when a read-only refresh supersedes
 controls after that reply was committed; fresh creation still needs current
 unconsumed controls. Earlier consumption, other closure kinds, new ownership

@@ -290,7 +290,12 @@ class WorkCallbackDenials:
             or not same_body(item.payload.get("product_basis"), basis)
         ):
             raise ProductSourceRetired()
-        if any(captured.part.get(key) != value for key, value in expected.items()) or any(captured.part.get(key) is not None for key in ("url_button", "stored_keyboard", "callback_group_id")):
+        if (
+            any(captured.part.get(key) != value for key, value in expected.items())
+            or any(captured.part.get(key) is not None for key in ("url_button", "stored_keyboard", "callback_group_id"))
+            or captured.part.get("force_reply") is not None
+            and captured.part.get("force_reply") is not False
+        ):
             raise ProductSourceRetired()
         return intent
 
