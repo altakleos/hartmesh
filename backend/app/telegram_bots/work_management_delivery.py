@@ -29,11 +29,28 @@ class WorkManagementPlans(WorkNewsPlans):
     def __init__(self, **kwargs):
         super().__init__(**kwargs, projection=WorkManagementProjection)
         self.acts = self.reader.acts
+        self.fixed_refusals = None
 
     async def confirm(self, link, callback_id, **kwargs):
         from app.telegram_bots.work_management_controls import WorkManagementAdmissions
 
         return await WorkManagementAdmissions(self).stage(link, callback_id, **kwargs)
+
+    async def refuse(self, link, callback_id, *, query_id, guard):
+        if self.fixed_refusals is None:
+            return False
+        async with self.outbox.sessions() as reader:
+            control = await reader.get(TelegramCallbackRow, callback_id)
+            row = await reader.get(TelegramOutboxRow, control.payload.get("anchor_outbox_id")) if control is not None else None
+            if row is None:
+                return False
+            item = _item(row)
+            intent = management_intent(item)
+        gesture = {"callback_id": callback_id, "query_id": query_id} if intent["act_id"] is None else None
+        fixed = await self.fixed_refusals.offer(link, item, guard=guard, gesture=gesture)
+        # A recorded command keeps its original recovery owner even when its
+        # outcome cannot qualify this minimal metadata reply.
+        return fixed is not None or intent["act_id"] is not None
 
     async def back(self, link, callback_id, **kwargs):
         from app.telegram_bots.work_management_navigation import WorkManagementNavigation
@@ -198,8 +215,22 @@ class WorkManagementPlans(WorkNewsPlans):
                 if row is None:
                     raise ProductSourceRetired()
                 item = _item(row)
-                if any(getattr(row, field) is not None for field in ("claim_owner", "claim_id", "claimed_at")):
-                    return identity
+                claimed = any(getattr(row, field) is not None for field in ("claim_owner", "claim_id", "claimed_at"))
+            act_id = management_intent(item)["act_id"]
+            if act_id is not None:
+                try:
+                    await self.acts.reconcile_receipt(act_id)
+                except Exception:
+                    # An unreadable receipt does not prove absence. The fixed
+                    # source separately qualifies any conclusive no-effect
+                    # denial, including global SQL native/event absence.
+                    pass
+            if self.fixed_refusals is not None:
+                fixed = await self.fixed_refusals.offer(link, item, guard=guard)
+                if fixed is not None:
+                    return fixed
+            if claimed:
+                return identity
             source = await self.reader.read(link, item)
             if not item.parts:
                 await self.materialize(link, identity, guard=guard)

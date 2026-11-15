@@ -17,6 +17,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.telegram_bots.config import TelegramBotsConfig
+from app.telegram_bots.sql_readers import reader_session
 from deerflow.persistence.telegram_bots.model import TelegramPersonSettingsRow
 from deerflow.utils.file_io import await_drained
 
@@ -115,7 +116,7 @@ class SettingsRepository:
             yield session
 
     async def get(self, owner_user_id: str) -> PersonSettings | None:
-        async with self.session_factory() as session:
+        async with reader_session(self.session_factory) as session:
             row = await session.get(TelegramPersonSettingsRow, owner_user_id)
             return _snapshot(row) if row is not None else None
 

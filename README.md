@@ -142,6 +142,9 @@ Saved Starts report current lifecycle and execution-readiness refusals. When
 access and execution are restored, a fresh preview requires a new Start press.
 Unattempted saved assignments explain current lifecycle and permission loss
 while preserving their original Save or Save and Start operation.
+Saved Change, Withdraw and Stop refusals explain current permission loss without
+reissuing the command. Typed Stop replies remain tied to every selected attempt.
+Restoring Stop access offers a full preview and requires a new press.
 Current Inspect grants control visibility; referenced files retain separate access
 checks. Uncertain execution requires qualified containment and explicit recovery.
 The Work command API can stop one exact running attempt without cancelling the

@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Keep retained Change, Withdraw and Stop replies current as access changes,
+  reconcile committed receipts first, and wait for every typed Stop target's
+  actual delivery. Unanswered replacements preserve sealed input history.
+- Schedule management prompt cleanup before claiming the dependent prompt.
 - Explain current Change, Withdraw and Stop permission refusals without creating
   another action or changing the original launch reservation.
 - Explain current callback permission loss without exposing Work contents;

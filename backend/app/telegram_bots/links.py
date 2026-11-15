@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.settings import SettingsRepository
+from app.telegram_bots.sql_readers import reader_session
 from app.telegram_bots.token_pattern import TOKEN_BODY
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow, ChannelConversationRow, ChannelCredentialRow, ChannelOAuthStateRow
 from deerflow.persistence.channel_connections.sql import ChannelConnectionRepository
@@ -597,24 +598,24 @@ class BotLinkRepository:
         return row
 
     async def _owner_of(self, identity: str) -> str:
-        async with self.session_factory() as session:
+        async with reader_session(self.session_factory) as session:
             owner = await session.scalar(select(TelegramBotLinkRow.owner_user_id).where(TelegramBotLinkRow.id == identity))
             if owner is None:
                 raise ValueError("link-not-found")
             return owner
 
     async def get(self, link_id: str) -> BotLink | None:
-        async with self.session_factory() as session:
+        async with reader_session(self.session_factory) as session:
             row = await session.get(TelegramBotLinkRow, link_id)
             return _snapshot(row) if row is not None else None
 
     async def get_by_bot(self, bot_id: int) -> BotLink | None:
-        async with self.session_factory() as session:
+        async with reader_session(self.session_factory) as session:
             row = await session.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.bot_id == bot_id))
             return _snapshot(row) if row is not None else None
 
     async def _list(self, *where) -> list[BotLink]:
-        async with self.session_factory() as session:
+        async with reader_session(self.session_factory) as session:
             result = await session.scalars(select(TelegramBotLinkRow).where(*where).order_by(TelegramBotLinkRow.created_at, TelegramBotLinkRow.id))
             return [_snapshot(row) for row in result]
 
@@ -625,7 +626,7 @@ class BotLinkRepository:
         return await self._list()
 
     async def token(self, link_id: str) -> tuple[str, int]:
-        async with self.session_factory() as session:
+        async with reader_session(self.session_factory) as session:
             result = (await session.execute(select(TelegramBotLinkRow.encrypted_token, TelegramBotLinkRow.token_revision).where(TelegramBotLinkRow.id == link_id))).one_or_none()
             if result is None:
                 raise ValueError("link-not-found")
@@ -852,7 +853,7 @@ class BotLinkRepository:
                 raise ValueError("invalid-error-classification")
         if not facts:
             # A guard writes nothing, and a poll cycle guards six times, so it waits for no writer.
-            async with self.session_factory() as session:
+            async with reader_session(self.session_factory) as session:
                 row = await session.get(TelegramBotLinkRow, link_id)
                 return _snapshot(row) if row is not None and row.token_revision == token_revision else None
         try:
@@ -878,7 +879,7 @@ class BotLinkRepository:
         await session.flush()
 
     async def codes_waiting(self, owner_user_id: str, *, except_link_id: str | None = None) -> int:
-        async with self.session_factory() as session:
+        async with reader_session(self.session_factory) as session:
             return await self._codes_waiting(session, owner_user_id, except_link_id=except_link_id)
 
     async def _codes_waiting(self, session: AsyncSession, owner: str, *, except_link_id: str | None = None) -> int:
@@ -1804,7 +1805,7 @@ class BotLinkRepository:
     async def replacement_receipt(self, owner_user_id: str, operation_id: str, request_digest: str) -> dict | None:
         """Read an exact receipt before a caller looks up an old link or token."""
         self._operation(operation_id, request_digest)
-        async with self.session_factory() as session:
+        async with reader_session(self.session_factory) as session:
             return await self._receipt(session, owner_user_id, operation_id, request_digest)
 
     async def replace_from_token(
@@ -2025,7 +2026,7 @@ class BotLinkRepository:
         return links
 
     async def removed_for_owner(self, owner_user_id: str) -> list[dict]:
-        async with self.session_factory() as session:
+        async with reader_session(self.session_factory) as session:
             events = await session.scalars(
                 select(TelegramBotLinkEventRow)
                 .where(TelegramBotLinkEventRow.owner_user_id == owner_user_id, TelegramBotLinkEventRow.action.in_(("managed_given_away", "agent_removed")), TelegramBotLinkEventRow.seen_at.is_(None))

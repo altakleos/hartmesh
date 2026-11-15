@@ -16,6 +16,7 @@ from app.telegram_bots.render import render, render_plain
 from app.telegram_bots.route_permissions import prepare_routes
 from app.telegram_bots.settings import _snapshot as settings_snapshot
 from app.telegram_bots.work_actions import same_body, thaw
+from app.telegram_bots.work_command_stop_origins import source_marker
 from app.telegram_bots.work_execution_readiness import conclusive_refusal, readiness_signature
 from app.telegram_bots.work_execution_sources import act_facts, execution_origin_rows, qualify_execution_origin, require_execution_scope
 from app.telegram_bots.work_result_identity import digest
@@ -48,6 +49,17 @@ class Metadata:
 
 class SavedStartProof:
     assignment = False
+    management_kind = None
+    required_routes = frozenset()
+    optional_journal = False
+    stop_requester = None
+
+    @staticmethod
+    def eligible(root, effective):
+        return conclusive_refusal(root, effective)
+
+    def metadata_options(self):
+        return {"assignment": self.assignment, "management_kind": self.management_kind, "required_routes": self.required_routes, "stop_requester": self.stop_requester}
 
     def __init__(self, owner, link, item, root, effective, origin, callback, parent, primary):
         self.owner, self.link, self.item = owner, link, item
@@ -60,7 +72,13 @@ class SavedStartProof:
         self.silent = self.now = None
 
     @classmethod
-    async def read(cls, owner, link, item):
+    async def read(cls, owner, link, item, *, gesture=None):
+        if cls is SavedStartProof and "work_management_intent" in item.payload:
+            from app.telegram_bots.work_saved_management_refusals import SavedManagementProof
+
+            return await SavedManagementProof.read(owner, link, item, gesture=gesture)
+        if gesture is not None:
+            raise ProductSourceRetired()
         if cls is SavedStartProof and "assignment_intent" in item.payload:
             from app.telegram_bots.work_saved_assignment_refusals import SavedAssignmentProof
 
@@ -68,20 +86,29 @@ class SavedStartProof:
         intent = item.payload.get("work_execution_intent")
         if type(intent) is not dict or set(intent) != {"version", "act_id", "origin"} or type(intent["version"]) is not int or intent["version"] != 1:
             raise ProductSourceRetired()
+        proof_type = cls
         async with owner.host.outbox.sessions() as session:
             row = await session.get(TelegramActRow, intent["act_id"])
             if row is None:
                 raise ProductSourceRetired()
             root = _snapshot(row)
             require_execution_scope(link, root)
-            if root.kind != "activate":
+            if root.kind == "stop" and cls is SavedStartProof:
+                from app.telegram_bots.work_saved_stop_refusals import SavedStopProof
+
+                if source_marker(root) is not None:
+                    from app.telegram_bots.work_saved_stop_refusals import SavedCommandStopProof
+
+                    return await SavedCommandStopProof.prepare(owner, link, item, root, session)
+                proof_type = SavedStopProof
+            if root.kind not in {"activate", "stop"}:
                 return None
             marker = context_plan(root) if (root.continuation or {}).get("activation_context") is not None else None
             child = await session.get(TelegramActRow, marker["child_id"]) if marker is not None else row
             if child is None:
                 return None
             effective = _snapshot(child)
-            if not conclusive_refusal(root, effective):
+            if not proof_type.eligible(root, effective):
                 return None
             callback, parent, controls, primary, _context = await execution_origin_rows(session, row)
             if callback is None or parent is None:
@@ -89,7 +116,7 @@ class SavedStartProof:
             origin = qualify_execution_origin(link, root, callback, parent, controls, activation_parent=primary)
             if not same_body(origin, intent["origin"]):
                 raise ProductSourceRetired()
-        return cls(owner, link, item, root, effective, origin, callback, parent, primary)
+        return proof_type(owner, link, item, root, effective, origin, callback, parent, primary)
 
     def extend(self, query):
         self.column = len(query.column_descriptions)
@@ -131,8 +158,8 @@ class SavedStartProof:
                 select(AgentWorkEventRow.id).where(AgentWorkEventRow.operation_id.in_(ids)).exists(),
                 limit,
             )
-            .join(root, root.id == self.root_id)
-            .join(effective, effective.id == self.effective_id)
+            .join(root, root.id == self.root_id, isouter=self.optional_journal)
+            .join(effective, effective.id == self.effective_id, isouter=self.optional_journal)
             .join(canonical, canonical.id == self.item.id)
             .join(parent, parent.id == self.parent_id)
             .outerjoin(control, control.group_id == self.group_id)
@@ -150,7 +177,7 @@ class SavedStartProof:
 
     def check_source(self, rows, root, effective, canonical, parent, primary, native, event):
         require_execution_scope(self.link, root)
-        if not conclusive_refusal(root, effective) or readiness_signature(root, effective) != self.signature or native is not False or event is not False:
+        if not self.eligible(root, effective) or readiness_signature(root, effective) != self.signature or native is not False or event is not False:
             raise ProductSourceRetired()
         if primary_signature(_snapshot(primary) if primary is not None else None) != self.primary_signature:
             raise ProductSourceRetired()
@@ -168,7 +195,7 @@ class SavedStartProof:
 
     def check(self, rows):
         root, effective, canonical, parent, _control, primary, instance, settings, supervisor, user, _disabled, connection, permissions, delivery, native, event = rows[0][self.column : self.column + 16]
-        root, effective = _snapshot(root), _snapshot(effective)
+        root, effective = _snapshot(root) if root is not None else None, _snapshot(effective) if effective is not None else None
         self.check_source(rows, root, effective, canonical, parent, primary, native, event)
         if (connection.owner_user_id, connection.provider, connection.status, connection.external_account_id, connection.workspace_id, connection.bot_user_id) != (
             self.link.owner_user_id,
@@ -189,7 +216,16 @@ class SavedStartProof:
                 if instance.status != "active" or type(permissions) is not int or not permissions & 1 or permissions & 2:
                     raise ProductSourceRetired()
             elif meta.key == "denied.other":
-                if instance.status != "active" or type(permissions) is not int or permissions & 3 != 3 or "agents:write" in meta.decision.held:
+                if instance.status != "active" or type(permissions) is not int or permissions & 3 != 3 or (self.required_routes or {"agents:write"}).issubset(meta.decision.held):
+                    raise ProductSourceRetired()
+            elif meta.key == "work.need_inspect":
+                if instance.status != "active" or type(permissions) is not int or not permissions & 1 or permissions & 2:
+                    raise ProductSourceRetired()
+            elif meta.key == "stop.not_yours":
+                if instance.status != "active" or type(permissions) is not int or permissions & 3 != 3 or permissions & 4 or self.stop_requester == self.link.owner_user_id or not self.required_routes.issubset(meta.decision.held):
+                    raise ProductSourceRetired()
+            elif meta.key in {"denied.change", "denied.withdraw"}:
+                if instance.status != "active" or type(permissions) is not int or not permissions & 1 or permissions & 6 == 6 and self.required_routes.issubset(meta.decision.held):
                     raise ProductSourceRetired()
             elif meta.key in {"agent.paused", "agent.retired"}:
                 if instance.status != {"agent.paused": "suspended", "agent.retired": "archived"}[meta.key] or type(permissions) is not int or not permissions & 1:
@@ -216,7 +252,7 @@ class WorkSavedRefusals:
     def __init__(self, chat):
         self.chat, self.host = chat, chat.host
 
-    async def metadata(self, link, *, assignment=False):
+    async def metadata(self, link, *, assignment=False, management_kind=None, required_routes=frozenset(), stop_requester=None):
         routes = await prepare_routes(self.host.links.session_factory)
         decision = await routes.evaluate(await routes.users.get_user_by_id(link.owner_user_id))
         key, identity = await self.host.authority.instance_lifecycle(link)
@@ -224,7 +260,20 @@ class WorkSavedRefusals:
             view = await self.host.authority.instance_view(link)
             if view.status != "active":
                 return None
-            if not view.permissions & 2:
+            if stop_requester is not None:
+                if not view.permissions & 2:
+                    key = "work.need_inspect"
+                elif not required_routes.issubset(decision.held):
+                    key = "denied.other"
+                elif not view.permissions & 4 and stop_requester != link.owner_user_id:
+                    key = "stop.not_yours"
+                else:
+                    return None
+            elif management_kind is not None:
+                if view.permissions & 6 == 6 and required_routes.issubset(decision.held):
+                    return None
+                key = "denied.change" if management_kind == "edit" else "denied.withdraw"
+            elif not view.permissions & 2:
                 key = "assign.no_access" if assignment else "denied.start"
             elif assignment and "agents:write" not in decision.held:
                 key = "denied.other"
@@ -236,7 +285,12 @@ class WorkSavedRefusals:
             raise ProductSourceRetired()
         zone = await asyncio.to_thread(ZoneInfo, settings.timezone)
         values = {"name": identity.name, "product": self.host.product_name}
-        if key in {"denied.start", "assign.no_access", "denied.other", "access.agent_off"}:
+        if key == "stop.not_yours":
+            person = await get_local_provider().get_user(stop_requester)
+            if person is None:
+                raise ProductSourceRetired()
+            values["person"] = str(person.email)
+        if key in {"denied.start", "assign.no_access", "denied.other", "access.agent_off", "work.need_inspect"}:
             person = await get_local_provider().get_user(identity.supervisor.subject_id)
             values["supervisor"] = person.email if person is not None else None
         live = await self.host.authority.prepare_live_owner(link.owner_user_id)
@@ -249,28 +303,118 @@ class WorkSavedRefusals:
     def recipe(key):
         return {"kind": "text", "source_ref": {"key": key, "values": {}}}
 
-    async def offer(self, link, item, *, guard):
+    @staticmethod
+    def source_id(link, act_id, key, gesture):
+        return "work-saved-refusal:" + digest([link.id, link.binding_generation, act_id, key, *([gesture] if gesture is not None else [])])
+
+    @staticmethod
+    def intent(item):
+        intent = item.payload.get("work_saved_refusal")
+        if (
+            type(intent) is not dict
+            or set(intent) not in ({"version", "act_id", "canonical_id", "signature", "key"}, {"version", "act_id", "canonical_id", "signature", "key", "gesture"})
+            or type(intent["version"]) is not int
+            or intent["version"] != 1
+            or type(intent["key"]) is not str
+            or intent["key"] not in _LIFECYCLE | {"denied.start", "assign.no_access", "denied.other", "denied.change", "denied.withdraw", "work.need_inspect", "stop.not_yours"}
+        ):
+            raise ProductSourceRetired()
+        if "gesture" in intent and (type(intent["gesture"]) is not dict or set(intent["gesture"]) != {"callback_id", "query_id"}):
+            raise ProductSourceRetired()
+        if (
+            any(type(intent[key]) is not str or not 1 <= len(intent[key]) <= 128 for key in ("act_id", "canonical_id"))
+            or type(intent["signature"]) is not str
+            or len(intent["signature"]) != 64
+            or any(value not in "0123456789abcdef" for value in intent["signature"])
+        ):
+            raise ProductSourceRetired()
+        return intent
+
+    @classmethod
+    def validate_item(cls, link, item, canonical, *, act_id, signature, key, part=None):
+        intent = cls.intent(item)
+        if (intent["act_id"], intent["canonical_id"], intent["signature"], intent["key"]) != (act_id, canonical.id, signature, key) or len(item.parts) != 1:
+            raise ProductSourceRetired()
+        part = item.parts[0] if part is None else part
+        recipe = cls.recipe(intent["key"])
+        source = "notice:" + cls.source_id(link, act_id, key, intent.get("gesture"))
+        scope = {name: getattr(link, name) for name in ("owner_user_id", "agent_kind", "agent_ref", "bot_id", "connection_id", "telegram_user_id", "binding_generation", "chat_id")}
+        status = key in _LIFECYCLE
+        allowed = {"presentation_version", "work_saved_refusal", "notification_reserved_at"} | ({"delivery_kind", "status_basis"} if status else {"product_basis"})
+        if (
+            set(item.payload) - allowed
+            or type(item.payload.get("presentation_version")) is not int
+            or item.payload["presentation_version"] != 0
+            or any(getattr(item, key) is not None for key in ("instance_id", "work_id", "request_id", "event_id"))
+        ):
+            raise ProductSourceRetired()
+        expected = (
+            {"scope": scope, "origins": [], "message_thread_id": item.message_thread_id, "finish_route": False, "parts": [recipe]}
+            if status
+            else {"origins": [], "chat_id": link.chat_id, "message_thread_id": item.message_thread_id, "finish_route": False, "parts": [recipe]}
+        )
+        if (
+            item.class_ != "reply"
+            or item.dedupe_key != source
+            or item.message_thread_id != canonical.message_thread_id
+            or not same_body(item.payload.get("status_basis" if status else "product_basis"), expected)
+            or (item.payload.get("delivery_kind") == "status_notice") is not status
+        ):
+            raise ProductSourceRetired()
+        if (
+            len(item.parts) != 1
+            or any(part.get(key) != value for key, value in recipe.items())
+            or any(part.get(key) is not None for key in ("url_button", "callback_group_id", "stored_keyboard", "reply_to_message_id"))
+            or part.get("force_reply") is not None
+            and part.get("force_reply") is not False
+        ):
+            raise ProductSourceRetired()
+
+    async def offer(self, link, item, *, guard, gesture=None):
         async def perform():
-            proof = await SavedStartProof.read(self, link, item)
+            proof = await SavedStartProof.read(self, link, item, gesture=gesture)
             if proof is None:
                 return None
-            metadata = await self.metadata(link, assignment=proof.assignment)
+            metadata = await self.metadata(link, **proof.metadata_options())
             if metadata is None:
+                return None
+            if proof.stop_requester is not None and metadata.key in {"denied.other", "stop.not_yours"}:
+                # Current Inspect allows the canonical Stop source to render
+                # its own proven denial, without a second competing reply.
                 return None
             proof.metadata = metadata
             intent = {"version": 1, "act_id": proof.root_id, "canonical_id": item.id, "signature": proof.signature, "key": metadata.key}
-            source = "work-saved-refusal:" + digest([link.id, link.binding_generation, proof.root_id, metadata.key])
+            if gesture is not None:
+                intent["gesture"] = gesture
+            source = self.source_id(link, proof.root_id, metadata.key, gesture)
             async with self.host.callbacks.writer(link, guard) as writer:
                 await guard.check_projection(writer, proof)
                 existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == "notice:" + source).with_for_update())
                 if existing is not None and not same_body(existing.payload.get("work_saved_refusal"), intent):
                     raise ProductSourceRetired()
+                if hasattr(proof, "command_mode"):
+                    incoming = await proof.command_mode.proof.read(writer)
+                    canonical = await writer.get(TelegramOutboxRow, item.id, with_for_update=True, populate_existing=True)
+                    if existing is None or existing.id not in incoming.delivery_ids:
+                        if not self.host.outbox.inbox.unanswered_delivery(canonical):
+                            return None
                 planner = self.host.outbox.plan_status_notice if metadata.key in _LIFECYCLE else self.host.outbox.plan_product
                 identity = await planner(link, source_id=source, parts=[self.recipe(metadata.key)], message_thread_id=item.message_thread_id, session=writer)
                 if existing is None:
                     row = await writer.get(TelegramOutboxRow, identity)
                     row.payload = {**row.payload, "work_saved_refusal": intent}
                 await guard.check_projection(writer, proof)
+                if hasattr(proof, "command_mode"):
+                    from app.telegram_bots.work_command_stop_completion import complete_selected
+                    from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow
+
+                    if identity not in incoming.delivery_ids:
+                        await self.host.outbox.inbox.replace_unanswered_delivery([incoming], previous_id=item.id, outbox_id=identity, session=writer)
+                    else:
+                        await self.host.outbox.inbox.register_delivery([incoming], outbox_id=identity, finish=False, session=writer)
+                    mark = await writer.get(TelegramInboundMarkRow, (incoming.link_id, incoming.message_id, incoming.chat_id), populate_existing=True)
+                    await complete_selected(self.chat.executions, link, mark, writer, guard=guard)
+                    await guard.check_projection(writer, proof)
             return identity
 
         return await await_drained(perform())
@@ -278,67 +422,20 @@ class WorkSavedRefusals:
     async def read_part(self, captured, *, silent=None, now=None):
         async def read():
             item, link = captured.item, captured.link
-            intent = item.payload.get("work_saved_refusal")
-            if (
-                type(intent) is not dict
-                or set(intent) != {"version", "act_id", "canonical_id", "signature", "key"}
-                or type(intent["version"]) is not int
-                or intent["version"] != 1
-                or type(intent["key"]) is not str
-                or intent["key"] not in _LIFECYCLE | {"denied.start", "assign.no_access", "denied.other"}
-            ):
-                raise ProductSourceRetired()
-            if (
-                any(type(intent[key]) is not str or not 1 <= len(intent[key]) <= 128 for key in ("act_id", "canonical_id"))
-                or type(intent["signature"]) is not str
-                or len(intent["signature"]) != 64
-                or any(value not in "0123456789abcdef" for value in intent["signature"])
-            ):
-                raise ProductSourceRetired()
+            intent = self.intent(item)
             async with self.host.outbox.sessions() as session:
                 canonical = await session.get(TelegramOutboxRow, intent["canonical_id"])
                 if canonical is None:
                     raise ProductSourceRetired()
                 canonical_item = _item(canonical)
-            proof = await SavedStartProof.read(self, link, canonical_item)
+            proof = await SavedStartProof.read(self, link, canonical_item, gesture=intent.get("gesture"))
             if proof is None or (proof.root_id, proof.signature) != (intent["act_id"], intent["signature"]):
                 raise ProductSourceRetired()
-            metadata = await self.metadata(link, assignment=proof.assignment)
+            metadata = await self.metadata(link, **proof.metadata_options())
             if metadata is None or metadata.key != intent["key"]:
                 raise ProductSourceRetired()
-            recipe = self.recipe(intent["key"])
-            source = "notice:work-saved-refusal:" + digest([link.id, link.binding_generation, proof.root_id, metadata.key])
-            scope = {name: getattr(link, name) for name in ("owner_user_id", "agent_kind", "agent_ref", "bot_id", "connection_id", "telegram_user_id", "binding_generation", "chat_id")}
+            self.validate_item(link, item, proof.item, act_id=proof.root_id, signature=proof.signature, key=metadata.key, part=captured.part)
             status = metadata.key in _LIFECYCLE
-            allowed = {"presentation_version", "work_saved_refusal", "notification_reserved_at"} | ({"delivery_kind", "status_basis"} if status else {"product_basis"})
-            if (
-                set(item.payload) - allowed
-                or type(item.payload.get("presentation_version")) is not int
-                or item.payload["presentation_version"] != 0
-                or any(getattr(item, key) is not None for key in ("instance_id", "work_id", "request_id", "event_id"))
-            ):
-                raise ProductSourceRetired()
-            expected = (
-                {"scope": scope, "origins": [], "message_thread_id": captured.item.message_thread_id, "finish_route": False, "parts": [recipe]}
-                if status
-                else {"origins": [], "chat_id": link.chat_id, "message_thread_id": captured.item.message_thread_id, "finish_route": False, "parts": [recipe]}
-            )
-            if (
-                item.class_ != "reply"
-                or item.dedupe_key != source
-                or item.message_thread_id != proof.item.message_thread_id
-                or not same_body(item.payload.get("status_basis" if status else "product_basis"), expected)
-                or (item.payload.get("delivery_kind") == "status_notice") is not status
-            ):
-                raise ProductSourceRetired()
-            if (
-                len(item.parts) != 1
-                or any(captured.part.get(key) != value for key, value in recipe.items())
-                or any(captured.part.get(key) is not None for key in ("url_button", "callback_group_id", "stored_keyboard", "reply_to_message_id"))
-                or captured.part.get("force_reply") is not None
-                and captured.part.get("force_reply") is not False
-            ):
-                raise ProductSourceRetired()
             proof.metadata, proof.captured, proof.silent, proof.now = metadata, captured, silent, now
             policy = await self.host.authority.instance_send_policy(link, require_use=not status, expected_lifecycle=metadata.key if status else None, projection=proof)
             if policy in {"off", "restoring", "protected"} and not captured.part.get("protect_content"):

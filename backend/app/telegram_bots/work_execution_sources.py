@@ -256,6 +256,8 @@ class WorkExecutionProjection:
         self.capacity_projection = None
         self.activation_parent = None
         self.command = None
+        self.stop_refusal = None
+        self.stop_requester = None
         if self.capacity is not None:
             from app.telegram_bots.work_capacity_reads import CapacityProjection
 
@@ -271,6 +273,23 @@ class WorkExecutionProjection:
             captured = _snapshot(act)
         if source_marker(captured) is not None:
             self.command = CommandStopProof(self.link, captured)
+        if captured.kind == "stop":
+            from app.telegram_bots.work_stop_refusals import StopRefusalProof, permission_refusal
+
+            if permission_refusal(captured):
+                self.stop_refusal = StopRefusalProof(captured)
+                if self.command is None:
+                    from app.telegram_bots.work_detail_cards import full_detail
+                    from app.telegram_bots.work_status_control_origins import carrier_source, status_record
+
+                    async with self.reader.links.session_factory() as reader:
+                        callback, parent, _controls, _primary, _context = await execution_origin_rows(reader, captured)
+                        original, _work_id, _attempt_id = displayed_stop(self.link, parent, callback)
+                    carrier = carrier_source(original)
+                    record = status_record(carrier) if carrier["key"].startswith("status.") else full_detail(carrier)["record"]
+                    self.stop_requester = (record.get("attempt") or {}).get("requester_id")
+                    if type(self.stop_requester) is not str:
+                        raise ProductSourceRetired()
         if captured.kind == "activate":
             self.activation_parent = ActivationParentProjection(captured, for_effect=False)
             try:
@@ -335,7 +354,7 @@ class WorkExecutionProjection:
                 select(AgentWorkAttemptRow.id).where(or_(AgentWorkAttemptRow.activation_id == act.id, AgentWorkAttemptRow.activation_id == context_operation)).exists(),
                 select(AgentWorkEventRow.id).where(or_(AgentWorkEventRow.operation_id == act.id, AgentWorkEventRow.operation_id == context_operation)).exists(),
             )
-        return result
+        return self.stop_refusal.extend(result) if self.stop_refusal is not None else result
 
     def check(self, rows):
         raise ProductSourceRetired()
@@ -435,10 +454,30 @@ class WorkExecutionProjection:
         else:
             notice_act = act
         notice = execution_notice(notice_act, original=original_facts, dispatch=effective.stop_dispatch)
+        from app.telegram_bots.work_stop_refusals import permission_refusal
+
+        if permission_refusal(act) and self.stop_refusal is None:
+            raise ProductSourceRetired()
+        if self.stop_refusal is not None:
+            from app.telegram_bots.execution_notices import ExecutionNotice
+
+            self.stop_refusal.check(rows, act)
+            if original is None or original.status not in {"starting", "running"}:
+                raise ProductSourceRetired()
+            if self.stop_requester is not None and original.requester_id != self.stop_requester:
+                raise ProductSourceRetired()
+            if not {"agents:write", "runs:cancel"}.issubset(held):
+                notice = ExecutionNotice("denied.other")
+            elif not detail.permissions & 4 and original.requester_id != self.link.owner_user_id:
+                if person is None:
+                    raise ProductSourceRetired()
+                notice = ExecutionNotice("stop.not_yours")
+            else:
+                notice = ExecutionNotice("tap.failed", preview=True)
         readiness = None
         from app.telegram_bots.work_execution_readiness import NO_EFFECT_REASONS
 
-        if notice is not None and notice.key in {"unavailable.fix", "denied.start", "tap.failed"} and effective.reason in NO_EFFECT_REASONS:
+        if notice_act.kind == "activate" and notice is not None and notice.key in {"unavailable.fix", "denied.start", "tap.failed"} and effective.reason in NO_EFFECT_REASONS:
             from dataclasses import replace
 
             from app.telegram_bots.work_execution_readiness import RefusalClock, readiness_signature

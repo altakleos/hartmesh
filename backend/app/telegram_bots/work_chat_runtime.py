@@ -87,6 +87,7 @@ class WorkChatRuntime:
         host.assignment_sources = WorkNewsSources(self.assignments)
         host.assignment_prompt_sources = WorkNewsSources(self.assignment_prompts)
         self.management = WorkManagementPlans(reader=WorkManagementReader(host.acts), **delivery)
+        self.management.fixed_refusals = self.saved_refusals
         self.management_edits = WorkManagementEdits(self.management)
         self.command_stops = WorkCommandStops(self)
         from app.telegram_bots.assignment_closed_prompts import AssignmentClosedPrompts
@@ -355,7 +356,12 @@ class WorkChatRuntime:
             elif management_parent is not None and row.kind == "assign_discard":
                 await self.management.discard(link, row.id, **scope)
             elif row.kind in {"work_change_save", "work_withdraw_confirm"}:
-                act = await self.management.confirm(link, row.id, **scope)
+                try:
+                    act = await self.management.confirm(link, row.id, **scope)
+                except (AgentDenied, CeilingRefused, ProductSourceRetired):
+                    if await self.management.refuse(link, row.id, query_id=query_id, guard=guard):
+                        return True
+                    raise
                 try:
                     await self.host.acts.check(act.id, expected={"id": act.id, "kind": act.kind, "body": act.body, "attempts": act.attempts}, attempt_current=current)
                     guard.current()

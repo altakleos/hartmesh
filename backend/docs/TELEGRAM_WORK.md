@@ -2306,3 +2306,38 @@ disabled. The settings URL needs current Manage and `agents:write`. Its old
 acknowledged Retry still owns the same immutable delegation operation. Preparing
 product identity runs off the Gateway loop; the SDK fence rejects changed
 permissions or a newly committed receipt before sending stale refusal content.
+
+
+### Retained management and Stop refusals
+
+`work_saved_management_refusals.py` binds actual confirmed Change/Withdraw
+journals or an explicit unadmitted confirmation gesture to the complete original
+acknowledged management preview and edit lineage. Only conclusive typed denials
+with globally absent operation events and native effects may use a minimal
+reply. Receipt reconciliation runs first. An entered cancellation follow-up,
+unknown receipt or source corruption retains the original recovery owner.
+
+`work_stop_refusals.py` preserves the actual Stop body and exact original native
+attempt. Current route capability loss precedes foreign-requester Manage advice;
+Inspect loss uses only current Use-visible metadata. The final SDK statement
+checks global children/events, requester/scope, current metadata and delivery
+claim. Restored permission renders a full preview with new explicit Stop consent.
+Read-only typed replies may arrive after the effect deadline; they never renew
+that deadline or retry the original operation.
+
+A typed Stop's fixed reply joins its actual input and every selected target.
+`InboxRepository.replace_unanswered_delivery` may replace only a real declared,
+unclaimed, zero-attempt non-turn reply before any SDK dispatch or ACK across its
+whole history. It locks and verifies all actual input owners, rejects callback
+publication owners and retires only matching unshown controls. All old IDs,
+payload, parts and the sealed route remain recorded; the real replacement is
+appended before settlement. The old row uses a non-resumable replacement reason.
+Claimed, partial, ambiguous and malformed history stays with the old owner. A
+normal registration still cannot append to a sealed route. Real SDK ACKs, not
+plan creation or a synthesized receipt, complete the input.
+
+Management prompts declare their actual cleanup dependency before scheduler
+claim. The SDK projection rechecks that same row, so a prompt cannot occupy the
+only sender while waiting for cleanup queued behind it. Qualification uses both
+SQL dialects and the default in-process supervisor with recorded SDK/directory
+adapters; it does not claim native containment or deployment acceptance.

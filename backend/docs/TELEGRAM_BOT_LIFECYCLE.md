@@ -108,8 +108,12 @@ acknowledgements, profile/takeover mutations and raw delivery. The mandatory
 `TransportServices.send_allowed()` must return exactly True after the adapter's
 last awaited authority/SQL guard. Retired startup buffers cannot retain Updates
 after the decision; live failed admission suffixes remain owned and ordered.
-`begin_shutdown` drains producers/pollers/workers while retaining the listener;
-the Gateway drains existing channels before `stop` confirms safe offsets,
+`begin_shutdown` drains producers/pollers/workers while retaining the listener.
+Owned sender, link and settings readers close their real SQL session through
+`sql_readers.reader_session`. Their bodies remain cancellable; rollback and
+connection return drain before cancellation leaves the reader, including repeated
+cancellation during close. Borrowed sessions and transaction owners stay separate.
+The Gateway drains existing channels before `stop` confirms safe offsets,
 unsubscribes and closes clients. The Gateway owns the single five-second stop
 grace. Only its expiration calls `drain_after_stop_timeout`: retire future latch
 retries, wake/drain backoff, then join the active SQL attempt and the same owned

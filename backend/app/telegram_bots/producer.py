@@ -33,6 +33,7 @@ from app.telegram_bots.errors import CAPACITY_KEYS, INSTANCE_RUN_STOP_REASONS
 from app.telegram_bots.links import BotLink
 from app.telegram_bots.notifications import DELIVERY_CLASSES, ESSENTIAL_DELIVERY_CLASSES, budget_retry_at, preference_skip
 from app.telegram_bots.settings import SettingsRepository
+from app.telegram_bots.sql_readers import reader_session
 from app.telegram_bots.token_pattern import TOKEN_IN_TEXT
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow
 from deerflow.runtime.runs.terminal import failure_chain
@@ -756,7 +757,7 @@ class Outbox:
 
         if session is not None:
             return await read(session)
-        async with self.sessions() as reader:
+        async with reader_session(self.sessions) as reader:
             return await read(reader)
 
     async def list_human_inputs(self, link, *, topic, session=None):
@@ -796,7 +797,7 @@ class Outbox:
 
         if session is not None:
             return await read(session)
-        async with self.sessions() as reader:
+        async with reader_session(self.sessions) as reader:
             return await read(reader)
 
     async def plan_human_input_reply(self, record, source, *, parts, keyboard, callbacks, guard, session=None, file_plan=None):
@@ -2312,7 +2313,7 @@ class OutboxSender:
         # An absent live admission is an explicit process fact, never an age
         # heuristic. Revisit finished own claims whose cleanup SQL failed.
         ownership = TelegramOutboxRow.claim_owner == self.run_id if current_process else or_(TelegramOutboxRow.claim_owner != self.run_id, TelegramOutboxRow.claim_owner.is_(None))
-        async with self.outbox.sessions() as session:
+        async with reader_session(self.outbox.sessions) as session:
             links = list(await session.scalars(select(TelegramOutboxRow.link_id).where(TelegramOutboxRow.state == "sending", ownership).distinct()))
         count = 0
         for identity in sorted(links):
@@ -2366,7 +2367,7 @@ class OutboxSender:
         if binding is None:
             return DeliveryEligibility.skip("link-not-connected")
         if row.payload.get("kind") == "delivery_failure_notice":
-            async with self.outbox.sessions() as session:
+            async with reader_session(self.outbox.sessions) as session:
                 original = await session.get(TelegramOutboxRow, row.payload.get("repair_outbox_id"))
                 if original is None or original.binding_generation != row.binding_generation or original.state in {"sent", "skipped"}:
                     return DeliveryEligibility.skip("superseded")
@@ -2385,20 +2386,27 @@ class OutboxSender:
             return DeliveryEligibility.wait()
         work_basis = row.payload.get("work_news_basis", row.payload.get("result_notice_basis", row.payload.get("work_request_basis", {})))
         dependency = work_basis.get("cleanup_id") if type(work_basis) is dict else None
+        if "management_prompt_intent" in row.payload:
+            direct = row.payload.get("management_prompt_cleanup_id")
+            if dependency is not None and dependency != direct:
+                return DeliveryEligibility.skip("source-gone")
+            dependency = direct
         if dependency is not None:
             from app.telegram_bots.work_request_source import cleanup_ready
 
-            async with self.outbox.sessions() as reader:
+            if type(dependency) is not str or len(dependency) != 32 or any(value not in "0123456789abcdef" for value in dependency):
+                return DeliveryEligibility.skip("source-gone")
+            async with reader_session(self.outbox.sessions) as reader:
                 cleanup = await reader.get(TelegramOutboxRow, dependency)
                 try:
-                    if not cleanup_ready(row, cleanup):
+                    if not cleanup_ready(row, cleanup, identity=dependency):
                         return DeliveryEligibility.wait()
                 except ProductSourceRetired:
                     return DeliveryEligibility.skip("source-gone")
         return decision
 
     async def _snapshot(self, link_id: str, row_id: str) -> tuple[BotLink | None, OutboxItem | None]:
-        async with self.outbox.sessions() as session:
+        async with reader_session(self.outbox.sessions) as session:
             link = await session.get(TelegramBotLinkRow, link_id)
             row = await session.get(TelegramOutboxRow, row_id)
             return BotLink.from_row(link) if link else None, _item(row) if row else None
@@ -2423,7 +2431,7 @@ class OutboxSender:
             free = min(self.concurrency - len(self._workers), OUTBOX_SEND_CONCURRENCY - len(_LIVE_CLAIMS))
             if free <= 0:
                 return 0
-            async with self.outbox.sessions() as session:
+            async with reader_session(self.outbox.sessions) as session:
                 due = list(
                     (
                         await session.execute(

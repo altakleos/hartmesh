@@ -1,7 +1,6 @@
 """Private saved-edit prompts use the same complete deferred ACK barrier."""
 
 from dataclasses import asdict
-from types import SimpleNamespace
 
 from sqlalchemy import false
 from sqlalchemy.orm import aliased
@@ -129,18 +128,10 @@ class WorkManagementPromptProjection:
             if not self.allow_closed and (prompt.consumed_at is not None or "prompt_successor" in prompt.payload):
                 raise ProductSourceRetired()
         cleanup = rows[0][self.delivery_column + 3]
-        expected = SimpleNamespace(
-            id=delivery.id,
-            link_id=delivery.link_id,
-            owner_user_id=delivery.owner_user_id,
-            binding_generation=delivery.binding_generation,
-            chat_id=delivery.chat_id,
-            payload={"work_news_basis": {"cleanup_id": delivery.payload.get("management_prompt_cleanup_id")}},
-        )
         target = self.reopen.selected.message_id if self.reopen is not None else rows[0][self.frame.column + 2].message_id
         if cleanup is None or cleanup.payload.get("target_message_id") != target:
             raise ProductSourceRetired()
-        if not cleanup_ready(expected, cleanup) and delivery.state == "sending":
+        if not cleanup_ready(_item(delivery), cleanup, identity=delivery.payload.get("management_prompt_cleanup_id")) and delivery.state == "sending":
             raise DeliveryRetry(5)
         data = thaw({"intent": self.intent, "root": private_facts(self.frame.root), "detail": asdict(self.frame.detail.source), "opening": self.opening, "history": self.history, "owner_key": self.dedupe_key})
         if self.intent["version"] == 2:

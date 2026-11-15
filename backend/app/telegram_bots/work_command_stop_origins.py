@@ -196,9 +196,10 @@ class CommandStopProof:
 class CommandStopModeProof:
     """Independent reverse ownership prevents a Stop from losing its source mode."""
 
-    def __init__(self, link, root, *, clock):
+    def __init__(self, link, root, *, clock, for_effect=True):
         self.link, self.root, self.marker = link, root, source_marker(root)
         self.clock = clock
+        self.for_effect = for_effect
         self.proof = CommandStopProof(link, root) if self.marker is not None else None
 
     def extend(self, query):
@@ -235,7 +236,7 @@ class CommandStopModeProof:
         if inputs != {(incoming["link_id"], incoming["message_id"], incoming["chat_id"])}:
             raise ProductSourceRetired()
         self.proof.check(rows)
-        if saved.state != "done" and not saved.operation_ids and self.clock() >= self.proof.accepted_at + timedelta(hours=1):
+        if self.for_effect and saved.state != "done" and not saved.operation_ids and self.clock() >= self.proof.accepted_at + timedelta(hours=1):
             raise ProductSourceRetired()
         for row in notices.values():
             if (row.link_id, row.owner_user_id, row.binding_generation, row.chat_id, row.message_thread_id, row.instance_id, row.work_id, row.dedupe_key) != (

@@ -252,9 +252,8 @@ class WorkManagementProjection:
     def check(self, rows):
         raise ProductSourceRetired()
 
-    def check_with_permissions(self, rows, held):
-        if self.detail is not None:
-            self.detail.check_with_permissions(rows, held)
+    def check_ownership(self, rows):
+        """Qualify actual preview/command custody independently of rendering."""
         self.opening.check(rows)
         if self.consent is not None:
             self.consent.check(rows, allow_closed=True)
@@ -269,9 +268,7 @@ class WorkManagementProjection:
         if reserved != expected or markers != expected:
             raise ProductSourceRetired()
         if (
-            not self.origin_only
-            and (rows[0][2] & 6 != 6 or "agents:write" not in held)
-            or _item(delivery) != self.item
+            _item(delivery) != self.item
             or (delivery.link_id, delivery.owner_user_id, delivery.binding_generation, delivery.chat_id, delivery.instance_id, delivery.work_id, delivery.class_, delivery.request_id, delivery.event_id)
             != (self.link.id, self.link.owner_user_id, self.link.binding_generation, self.link.chat_id, self.link.agent_ref, self.intent["work_id"], "reply", None, None)
             or (act is None) != (self.intent["act_id"] is None)
@@ -280,6 +277,14 @@ class WorkManagementProjection:
             or act is not None
             and not same_body(private_facts(act), private_facts(self.act))
         ):
+            raise ProductSourceRetired()
+        return root, act, event, delivery, settings
+
+    def check_with_permissions(self, rows, held):
+        if self.detail is not None:
+            self.detail.check_with_permissions(rows, held)
+        root, act, event, delivery, settings = self.check_ownership(rows)
+        if not self.origin_only and (rows[0][2] & 6 != 6 or "agents:write" not in held):
             raise ProductSourceRetired()
         source = management_source(
             self.link,
