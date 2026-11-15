@@ -336,7 +336,12 @@ class WorkChatRuntime:
             elif row.kind in {"work_details", "work_list_page", "work_list_open"}:
                 await self.views.open(link, row.id, query_id=query_id, **scope)
             elif row.kind in {"work_change", "work_withdraw"}:
-                await self.management.open(link, row.id, query_id=query_id, **scope)
+                try:
+                    await self.management.open(link, row.id, query_id=query_id, **scope)
+                except (AgentDenied, CeilingRefused):
+                    if await self.denials.offer(link, row, guard=guard, query_id=query_id):
+                        return True
+                    raise
             elif row.kind == "back":
                 await self.management.back(link, row.id, **scope)
             elif management_parent is not None and row.kind == "assign_edit":

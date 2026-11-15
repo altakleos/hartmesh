@@ -2193,6 +2193,24 @@ controls after that reply was committed; fresh creation still needs current
 unconsumed controls. Earlier consumption, other closure kinds, new ownership
 and source corruption cannot use that delivery exception.
 
+Fresh Change and Withdraw permission failures use their existing current
+management predicate. Inspect, Manage and route-capability losses receive a
+fixed callback-owned denial without a Work mutation. The complete actual ACK,
+group, age and operation-absence proof remains required. An actual management
+opening, its retained gesture, or its independently derived edit Root vetoes a
+new denial, including when other ownership metadata is missing.
+
+Fresh Stop denials preserve the original acknowledged attempt. Missing route
+capabilities take the capability-denial path even for an original requester
+without Manage. A foreign-requester denial needs current Inspect and absent
+Manage, the exact original native attempt/Work/requester, its current active
+state and actual instance scope. Current requester email is prepared only
+through the authorized Work view and compared with the joined User row before
+SDK entry. Inspect loss uses minimal instance metadata without a requester name.
+Permission restoration and changed requester/scope retire stale replies; name
+changes retry with current text. No denial creates a Stop journal, issues a
+Work command or cancels a run. Existing action/native owners keep recovery.
+
 Unadmitted Start, Save and Save + Start callbacks may reuse the supervisor's
 current lifecycle notice. The exact original callback, binding, payload and age
 must still match, with no consumed/reserved control, actual journal, global

@@ -24,6 +24,10 @@ def work_start_permissions(record, *, can_reuse_conversation=False):
     return frozenset({"agents:write", "runs:create"} | (set() if reusable else {"threads:write"}))
 
 
+def work_management_permissions(record):
+    return frozenset({"agents:write"} | ({"runs:cancel"} if (record.get("attempt") or {}).get("status") in UNRESOLVED else set()))
+
+
 def work_buttons(record, *, owner_id, permissions, held, request=None, lifecycle_pending=False, can_reuse_conversation=False):
     """Caller supplies a source-qualified record and current owner ceilings."""
     if type(permissions) is not int or not 1 <= permissions <= 7 or permissions & 3 != 3 or "agents:read" not in held:
@@ -64,7 +68,7 @@ def work_buttons(record, *, owner_id, permissions, held, request=None, lifecycle
         and work_start_permissions(record, can_reuse_conversation=can_reuse_conversation).issubset(held)
     ):
         keyboard.append([_button("label.resume" if attempt else "label.start_now", "work_start", "work", work_id, {"work_id": work_id, "assignment_revision": record["assignment_revision"]})])
-    if manager and not closed and (not active or "runs:cancel" in held):
+    if manager and not closed and work_management_permissions(record).issubset(held):
         changes = []
         if record["status"] in {"open", "blocked"}:
             changes.append(_button("label.change", "work_change", "work", work_id, {"work_id": work_id}))

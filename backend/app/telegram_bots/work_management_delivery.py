@@ -93,6 +93,14 @@ class WorkManagementPlans(WorkNewsPlans):
             fresh = await self.reader.detail(link, work_id)
             controls = work_buttons(fresh.record, owner_id=link.owner_user_id, permissions=fresh.permissions, held=fresh.held, request=fresh.request)
             if not any(button.get("kind") == selected.kind for line in controls for button in line):
+                from app.telegram_bots.authority import CeilingRefused
+                from app.telegram_bots.work_views import work_management_permissions
+                from deerflow.agent_instances.contract import AgentDenied
+
+                if fresh.permissions & 6 != 6:
+                    raise AgentDenied("Management requires current Manage and Inspect")
+                if not work_management_permissions(fresh.record).issubset(fresh.held):
+                    raise CeilingRefused()
                 raise CallbackRefused()
             detail_current = await self.reader.prepare_detail(link, fresh)
             identity = uuid4().hex
