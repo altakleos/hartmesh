@@ -98,10 +98,22 @@ async def test_stop_all_waits_for_each_actual_refusal_delivery(capture_environme
         with suppress(ProductSourceRetired, AgentDenied):
             await plans.observe(e.link, recorded[1][0], guard=guard)
         monkeypatch.setattr(e.host.sender, "tick", tick)
-        for _ in range(4):
-            e.clock.advance(5)
-            await tick()
-            await e.host.sender.drain()
+
+        async def delivered(*, first_target=False):
+            while True:
+                e.clock.advance(1)
+                await tick()
+                await e.host.sender.drain()
+                async with e.e.sf() as reader:
+                    if first_target:
+                        reply = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.payload["work_saved_refusal"]["act_id"].as_string() == recorded[0][0]))
+                        if reply is not None and reply.state == "sent" and reply.parts[0]["message_ids"]:
+                            return
+                    elif (await reader.get(TelegramInboundMarkRow, (e.link.id, 7050, e.link.chat_id))).state == "done":
+                        return
+                await asyncio.sleep(0.05)
+
+        await asyncio.wait_for(delivered(first_target=True), 30)
         async with e.e.sf() as reader:
             mark = await reader.get(TelegramInboundMarkRow, (e.link.id, 7050, e.link.chat_id))
             assert mark.route_complete and mark.state == "reply_pending"
@@ -117,10 +129,7 @@ async def test_stop_all_waits_for_each_actual_refusal_delivery(capture_environme
         async with e.e.sf.begin() as writer:
             (await writer.get(AgentInstanceGrantRow, (e.instance.id, e.link.owner_user_id))).permissions = 3
         await plans.observe(e.link, recorded[1][0], guard=guard)
-        for _ in range(4):
-            e.clock.advance(5)
-            await tick()
-            await e.host.sender.drain()
+        await asyncio.wait_for(delivered(), 30)
         async with e.e.sf() as reader:
             mark = await reader.get(TelegramInboundMarkRow, (e.link.id, 7050, e.link.chat_id))
             assert mark.state == "done" and mark.route_complete and set(original_deliveries) <= set(mark.delivery_ids)
