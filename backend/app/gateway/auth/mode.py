@@ -184,4 +184,7 @@ async def owner_is_refused(owner_user_id: str) -> str | None:
         return None
     if owner is None:
         return None
-    return account_refusal(owner)
+    from deerflow.utils.file_io import run_file_io
+
+    mode = await run_file_io(sign_on_only)
+    return account_refusal(owner, sign_on_only_mode=mode)

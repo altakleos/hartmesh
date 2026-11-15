@@ -2481,7 +2481,7 @@ async def _start_run(
             raise HTTPException(403, "Output capture requires a trusted internal caller")
         try:
             run_mgr = get_run_manager(request)
-            run_ctx = get_run_context(request)
+            run_ctx = await await_drained(run_file_io(get_run_context, request))
         except Exception:
             raise HTTPException(503, "Run output evidence is unavailable") from None
         capture_intent = _output_capture_preflight(body.output_capture, run_manager=run_mgr, event_store=run_ctx.event_store, qualify_output_view=getattr(run_ctx, "qualify_output_view", None))
@@ -2518,7 +2518,7 @@ async def _start_run(
     bridge = get_stream_bridge(request)
     if capture_intent is None:
         run_mgr = get_run_manager(request)
-        run_ctx = get_run_context(request)
+        run_ctx = await await_drained(run_file_io(get_run_context, request))
     admission_run_id: str | None = None
     producer_lease_started = False
     producer_lease_handed_off = False
@@ -2533,7 +2533,7 @@ async def _start_run(
 
     # Validate model against the allowlist when a model_name is provided.
     if model_name:
-        app_config = get_app_config()
+        app_config = await await_drained(run_file_io(get_app_config))
         resolved = app_config.get_model_config(model_name)
         if resolved is None:
             raise HTTPException(
@@ -2669,7 +2669,7 @@ async def _start_run(
         if isinstance(request_config, dict) and "metadata" in request_config:
             request_config["metadata"] = _without_channel_marker(request_config["metadata"])
         try:
-            config = build_run_config(thread_id, request_config, run_metadata, assistant_id=body.assistant_id)
+            config = await await_drained(run_file_io(build_run_config, thread_id, request_config, run_metadata, assistant_id=body.assistant_id))
         except ValueError as exc:
             # Raised only for the caller's own config sections or assistant_id.
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -2819,7 +2819,7 @@ async def _start_run(
                 user_id=owner_user_id or (str(user.id) if user is not None else None),
                 run_context=run_ctx,
                 run_manager=run_mgr,
-                app_config=get_app_config(),
+                app_config=await await_drained(run_file_io(get_app_config)),
             )
             reader, source_ids = prepared
             run_ctx = replace(run_ctx, conversation_reader=reader)

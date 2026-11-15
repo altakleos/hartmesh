@@ -1994,6 +1994,21 @@ drains its extraction work on shutdown.
 
 ## Installed Work chat runtime
 
+`test_telegram_work_worker.py` follows the default supervisor's actual instance
+chat through a worker-produced proposal, full SDK acknowledgement, explicit
+Save and Start, a separate Work conversation, `read_work_context`, `report_work`
+and a source-qualified review delivery. It uses the real provider SDK and Gateway
+worker with recorded network transports, one SQL engine, directory-backed
+prepared storage, an explicit ready host/health route, memory checkpoints and
+stream transport. Strict I/O exercises the same journey on both SQL dialects.
+This proves worker provenance and default-owner composition; shipped Compose
+CI separately qualifies native workspace preparation and containment.
+
+Live account policy, run context and run configuration are prepared off the
+Gateway loop. Request configuration overrides cross that boundary, and cancelled
+admission drains owned construction before returning. SQL and async run owners
+continue on the Gateway loop.
+
 Assignment prompt probing captures ordinary text with the canonical
 `{"type": "text", "text": ...}` input shape. An unclaimed message can then
 enter the existing chat-turn parser with the same immutable Inbox identity.
