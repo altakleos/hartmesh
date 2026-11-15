@@ -1,6 +1,7 @@
 """Simplified Chinese fixed texts for stage-one managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "label.make_assignment": "设为任务",
     "stop.which": "要停止哪一项？",
     "label.stop_assignment": "“{objective}”",
     "label.stop_everything": "全部停止",
@@ -39,6 +40,7 @@ TEXTS: dict[str, str] = {
     "assign.resend": "这条消息未能得到回答，请重新发送。",
     "assign.ask_done": "怎样才算完成？一句话就够了。",
     "assign.too_long": "内容超过{max}个字符，无法据此拟定任务。请发送简短描述，并将详细内容放在文件中。",
+    "assign.suggestion_too_long": "这条建议超过{max}个字符。请使用 /assign 发送简短描述，并将详细内容放在文件中。",
     "assign.card": "要做的事：{objective_full}\n完成标准：{success_criteria}",
     "assign.due": "截止时间：{due}",
     "assign.card_title": "给{name}的新任务",

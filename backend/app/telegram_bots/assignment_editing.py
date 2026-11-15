@@ -41,8 +41,10 @@ class EditProof:
                 control.kind != "assign_edit"
                 or consent_origin(original, control) != self.origin
                 or root.id != control.target_id
-                or card.id not in mark.delivery_ids
-                or mark.state == "interrupted"
+                or mark is not None
+                and (card.id not in mark.delivery_ids or mark.state == "interrupted")
+                or mark is None
+                and root.body["origin"].get("kind") != "result_suggestion"
                 or any(getattr(root, key) != frozen[key] for key in _ACT_SCOPE)
                 or not same_body(root.body, frozen["body"])
                 or root.operation_ids

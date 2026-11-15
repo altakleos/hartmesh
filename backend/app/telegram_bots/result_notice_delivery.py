@@ -39,6 +39,7 @@ def presentation(source, basis, identity):
         locale=basis["locale"],
         concealed=basis["concealed"],
         outbox_id=identity,
+        suggestion_controls=basis.get("suggestion_controls") == 1,
         **result_options(basis["result_files"]),
     )
 
@@ -58,7 +59,12 @@ def frozen_notice(captured, *, acknowledged=False, pending=False):
         if (
             type(basis) is not dict
             or set(basis)
-            != {"version", "source", "locale", "concealed", "result_files", "parts", "keyboard"} | ({"reveal", "cleanup_id"} if basis.get("version") == 2 else set()) | ({"navigation_origin"} if "navigation_origin" in basis else set())
+            != {"version", "source", "locale", "concealed", "result_files", "parts", "keyboard"}
+            | ({"reveal", "cleanup_id"} if basis.get("version") == 2 else set())
+            | ({"navigation_origin"} if "navigation_origin" in basis else set())
+            | ({"suggestion_controls"} if "suggestion_controls" in basis else set())
+            or "suggestion_controls" in basis
+            and (type(basis["suggestion_controls"]) is not int or basis["suggestion_controls"] != 1)
             or type(basis["version"]) is not int
             or basis["version"] not in {1, 2}
         ):
@@ -139,6 +145,7 @@ class ResultNoticePlans:
             await admission(session=writer, projection=_MaterializationProjection(self.reader, link, item, source))
             basis = {
                 "version": 1,
+                "suggestion_controls": 1,
                 "source": asdict(source),
                 "locale": settings.locale,
                 "concealed": source.protected,

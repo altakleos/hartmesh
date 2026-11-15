@@ -9,7 +9,7 @@ from app.telegram_bots.work_requests import WorkRequestPresentation
 from app.telegram_bots.work_result_files import result_files, result_media
 
 
-def present_result(work, *, key, name, person, protected, locale, capacity, max_bytes, concealed=False, outbox_id=None):
+def present_result(work, *, key, name, person, protected, locale, capacity, max_bytes, concealed=False, outbox_id=None, suggestion_controls=False):
     """Pure rendering; callers must separately qualify the canonical source."""
     if key not in {"result.done", "result.waiting_review"} or key == "result.waiting_review" and (type(person) is not str or not person):
         raise ValueError("invalid-result-notice")
@@ -25,6 +25,8 @@ def present_result(work, *, key, name, person, protected, locale, capacity, max_
         html = render(key, locale, objective=work["objective"], name=name, statement=work["outcome"]["statement"], person=person or "")
         if work.get("suggestion"):
             html += "\n\n" + render("result.suggestion", locale, name=name, suggestion=work["suggestion"]["statement"])
+            if suggestion_controls:
+                keyboard.append([{"label": "label.make_assignment", "kind": "assign_from_suggestion", "target_kind": "work", "target_id": work["id"], "payload": {"work_id": work["id"], "event_id": work["suggestion"]["id"]}}])
         if files:
             html += "\n\n" + render("result.files_above", locale) + "\n" + "\n".join(escape(file["filename"]) for file in files)
     parts = tuple({"kind": "text", "html": chunk, "visible_text": visible_text(chunk), "protect_content": protected} for chunk in split_html(html))

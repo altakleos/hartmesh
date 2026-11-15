@@ -43,6 +43,7 @@ _RESERVED = frozenset(
         "prompt_visibility",
         "work_action_id",
         "work_followup_outbox_id",
+        "suggestion_draft_id",
     }
 )
 CALLBACK_METADATA_KEYS = _RESERVED

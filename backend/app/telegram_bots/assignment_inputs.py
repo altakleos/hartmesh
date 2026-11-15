@@ -201,12 +201,13 @@ class _CompletedCriteria(DraftProjection):
 
         super().check_with_permissions(rows, held)
         original, criterion = rows[0][self.column + 1], rows[0][self.criteria_column]
-        require_publication(original, self.item, self.intent)
+        if self.callback is None:
+            require_publication(original, self.item, self.intent)
+        elif self.intent["draft_id"] != self.saved.id or not same_body(self.intent["origin"], self.saved.body["origin"]):
+            raise ProductSourceRetired()
         if (
-            original.state == "interrupted"
-            or original.route_kind != "assignment_draft"
-            or original.route_target_id != self.saved.id
-            or not same_body(draft_input_basis(original), {"draft_id": self.saved.id})
+            self.callback is None
+            and (original.state == "interrupted" or original.route_kind != "assignment_draft" or original.route_target_id != self.saved.id or not same_body(draft_input_basis(original), {"draft_id": self.saved.id}))
             or criterion.state == "interrupted"
             or criterion.route_kind != "assignment_criteria"
             or criterion.route_target_id != self.saved.id

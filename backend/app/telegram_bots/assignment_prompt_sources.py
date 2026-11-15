@@ -7,6 +7,7 @@ from sqlalchemy.orm import aliased
 
 from app.telegram_bots.acts import _snapshot
 from app.telegram_bots.assignment_drafts import DraftProjection, origin_facts, snapshot_draft
+from app.telegram_bots.assignment_origins import load_assignment_input
 from app.telegram_bots.assignment_requests import RequestProjection, request_snapshot
 from app.telegram_bots.assignment_sources import private_facts, private_snapshot
 from app.telegram_bots.attention_authority import prepare_attention
@@ -16,7 +17,7 @@ from app.telegram_bots.work_actions import same_body, thaw
 from app.telegram_bots.work_news_sources import WorkNewsRead
 from app.telegram_bots.work_result_identity import digest
 from app.telegram_bots.work_view_sources import WorkViewReader
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow, TelegramPersonSettingsRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow, TelegramPersonSettingsRow
 from deerflow.utils.file_io import await_drained
 
 PURPOSES = {"assign_words": "assign.prompt", "assign_done": "assign.ask_done", "assign_edit": "assign.edit_prompt"}
@@ -69,10 +70,7 @@ class AssignmentPromptReader(WorkViewReader):
         async def perform():
             intent = prompt_intent(item)
             async with self.links.session_factory() as reader:
-                raw = await reader.get(TelegramInboundMarkRow, (intent["origin"]["link_id"], intent["origin"]["message_id"], intent["origin"]["chat_id"]))
-                if raw is None:
-                    raise ProductSourceRetired()
-                inbox = InboxRow.from_row(raw)
+                inbox = await load_assignment_input(reader, intent["origin"])
                 root = await reader.get(TelegramActRow, intent["draft_id"]) if intent["draft_id"] else None
                 if intent["draft_id"] and root is None:
                     raise ProductSourceRetired()
@@ -134,17 +132,20 @@ class AssignmentPromptProjection:
             _item(delivery) != self.item
             or (delivery.link_id, delivery.owner_user_id, delivery.chat_id, delivery.binding_generation, delivery.instance_id, delivery.work_id, delivery.request_id, delivery.event_id, delivery.class_)
             != (self.link.id, self.link.owner_user_id, self.link.chat_id, self.link.binding_generation, self.link.agent_ref, None, None, None, "reply")
-            or delivery.message_thread_id != mark.message_thread_id
+            or delivery.message_thread_id != self.intent["origin"]["message_thread_id"]
             or delivery.dedupe_key != "notice:assignment-prompt:" + self.intent["prompt_id"]
             or settings.timezone != self.clock.settings.timezone
         ):
             raise ProductSourceRetired()
-        if mark.state == "interrupted" or not same_body(origin_facts(InboxRow.from_row(mark)), self.intent["origin"]):
+        if self.facts.callback is None:
+            if mark.state == "interrupted" or not same_body(origin_facts(InboxRow.from_row(mark)), self.intent["origin"]):
+                raise ProductSourceRetired()
+        elif root is None or root.id != self.intent["draft_id"] or not same_body(root.body["origin"], self.intent["origin"]) or self.intent["purpose"] == "assign_words":
             raise ProductSourceRetired()
         if self.edit is not None:
             self.edit.check(rows, root, mark)
             self.fresh.check(rows, rows[0][self.edit.column + 1])
-        else:
+        elif self.facts.callback is None:
             require_publication(mark, self.item, self.intent)
         if delivery.parts:
             from app.telegram_bots.assignment_typing import validate_prompt
@@ -175,7 +176,7 @@ class AssignmentPromptProjection:
             from app.telegram_bots.assignment_drafts import draft_input_basis
             from app.telegram_bots.assignment_voice_inputs import voice_basis
 
-            if voice_basis(mark) is not None:
+            if mark is not None and voice_basis(mark) is not None:
                 draft_input_basis(mark)
                 values["heard"] = [mark.sanitized_input["text"]]
         identity_values = values if "heard" in values else instance.name

@@ -27,7 +27,8 @@ async def work_exports(work_delivery, tmp_path, monkeypatch, request):
     album = mode == "done_album_event"
     if album:
         mode = "done_event"
-    suggestion = mode == "done_suggestion_event"
+    long_suggestion = mode == "done_long_suggestion_event"
+    suggestion = mode in {"done_suggestion_event", "done_long_suggestion_event"}
     if suggestion:
         mode = "done_event"
     if mode in {"review_event", "review_empty_event", "done_event", "waiting_event", "unrouted_event"}:
@@ -98,7 +99,7 @@ async def work_exports(work_delivery, tmp_path, monkeypatch, request):
     await scope.bind(execution, run, execution.thread_incarnation)
     current = (await scope.context(execution))["work"]
     if suggestion:
-        await scope.report(execution, ReportWork(operation_id=uuid4().hex, expected_revision=current["revision"], action="suggest", statement="Review the older evidence next."))
+        await scope.report(execution, ReportWork(operation_id=uuid4().hex, expected_revision=current["revision"], action="suggest", statement="S" * 4096 if long_suggestion else "Review the older evidence next."))
         current = (await scope.context(execution))["work"]
     await scope.report(execution, ReportWork(operation_id=uuid4().hex, expected_revision=current["revision"], action="outcome", statement="The findings are verified.", sources=sources))
     await scope.finish(execution, run, settled=True)
