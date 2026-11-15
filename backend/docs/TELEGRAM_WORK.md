@@ -2174,6 +2174,25 @@ recovery custody. Discard/Back observers receive their caller's original guard,
 and execution-notice creation checks it again after flushing and before commit.
 Receipt settlement remains separate from fresh presentation admission.
 
+`work_callback_denials.py` owns fixed permission replies for actual unadmitted
+Start, Save and Save + Start gestures. Inspect loss uses only current Use-visible
+identity and supervisor metadata. Capability loss reuses the actual Save and
+Start permission predicates; conditional conversation reuse joins the current
+`WorkDetailProjection`. Manage absence alone does not deny these actions.
+Creation and SDK checks bind the complete actual group, full original ACK,
+signature, age, unadmitted draft lineage, current denial and global operation
+absence. Provider/SQL uncertainty holds the reply. The original control remains
+available for a later explicit press; restoring permission retires the stale
+denial. Current metadata, protection and quiet/recent-activity preferences are
+checked with the actual SDK claim after off-writer timezone preparation.
+The first committed query intent is immutable, including after SDK ACK.
+Fixed denials reject added ForceReply markup in the actual delivery part;
+the reply target remains bound to the original acknowledged control.
+Delivery may retain original ACK history when a read-only refresh supersedes
+controls after that reply was committed; fresh creation still needs current
+unconsumed controls. Earlier consumption, other closure kinds, new ownership
+and source corruption cannot use that delivery exception.
+
 Unadmitted Start, Save and Save + Start callbacks may reuse the supervisor's
 current lifecycle notice. The exact original callback, binding, payload and age
 must still match, with no consumed/reserved control, actual journal, global

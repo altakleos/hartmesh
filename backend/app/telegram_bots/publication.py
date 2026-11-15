@@ -228,6 +228,8 @@ async def fixed_source(host, link, key):
         "start.ws_1",
         "assign.no_work",
         "assign.no_access",
+        "denied.start",
+        "denied.other",
         "work.need_inspect",
         "start.ws_30",
         "busy.two_conversations",
@@ -254,9 +256,11 @@ async def fixed_source(host, link, key):
 
         view = await await_drained(host.authority.instance_view(link))
         values = {"name": view.name, "reader_is_administrator": await await_drained(is_administrator(link.owner_user_id))}
-        if key in {"refused.files_full", "net.blocked_ask", "net.blocked", "file.files_full", "file.too_large_in", "file.no_access", "assign.no_access", "work.need_inspect"}:
+        if key in {"refused.files_full", "net.blocked_ask", "net.blocked", "file.files_full", "file.too_large_in", "file.no_access", "assign.no_access", "denied.start", "denied.other", "work.need_inspect"}:
             manager = bool(view.permissions & AgentPermission.MANAGE)
-            person = await await_drained(get_local_provider().get_user(view.supervisor.subject_id)) if not manager or key in {"net.blocked_ask", "file.no_access", "assign.no_access", "work.need_inspect"} else None
+            person = (
+                await await_drained(get_local_provider().get_user(view.supervisor.subject_id)) if not manager or key in {"net.blocked_ask", "file.no_access", "assign.no_access", "denied.start", "denied.other", "work.need_inspect"} else None
+            )
             values.update(reader_is_manager=manager, supervisor=person.email if person is not None else None)
     elif key == "refused.interrupted":
         values = {"name": (await host.prepare_ingress_values(link))["name"]}

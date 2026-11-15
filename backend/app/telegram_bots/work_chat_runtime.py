@@ -14,6 +14,7 @@ from app.telegram_bots.assignment_prompt_delivery import AssignmentPromptPlans
 from app.telegram_bots.assignment_prompt_sources import AssignmentPromptReader
 from app.telegram_bots.assignment_sources import AssignmentReader
 from app.telegram_bots.assignment_voice_inputs import AssignmentVoiceInputs
+from app.telegram_bots.authority import CeilingRefused
 from app.telegram_bots.notification_runtime import _RuntimeGuard
 from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.voice_inputs import VoiceInputRouter
@@ -96,6 +97,10 @@ class WorkChatRuntime:
         self.detail_plans = {"work_view_intent": self.views, "work_management_intent": self.management, "work_execution_intent": self.executions}
         self.review_views = WorkViewReviews(host.work_callbacks.interactions, self.detail_plans)
         self.assignment_commands = AssignmentCommands(self.assignment_inputs, management=self.management_edits, closed=self.closed_prompts)
+        from app.telegram_bots.work_callback_denials import WorkCallbackDenials
+
+        self.denials = WorkCallbackDenials(self)
+        host.work_callback_denials = self.denials
         host.work_management_sources = WorkNewsSources(self.management)
         host.work_management_prompt_sources = WorkNewsSources(self.management_edits.prompts)
 
@@ -355,6 +360,10 @@ class WorkChatRuntime:
                 controller = self.assignment_admissions if assignment else self.stops if row.kind == "stop_attempt" else self.starts
                 try:
                     act = await controller.stage(link, row.id, **scope)
+                except (AgentDenied, CeilingRefused):
+                    if await self.denials.offer(link, row, guard=guard, query_id=query_id):
+                        return True
+                    raise
                 except AgentConflict as error:
                     if row.kind == "work_start" and error.reason == "awaiting-review":
                         await self.start_reviews.open(link, row.id, query_id=query_id, **scope)

@@ -2,11 +2,12 @@
 
 from sqlalchemy import select
 
+from app.telegram_bots.authority import CeilingRefused
 from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
 from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_view_origins import acknowledged_view, anchor_signature
-from app.telegram_bots.work_views import work_buttons
+from app.telegram_bots.work_views import work_buttons, work_start_permissions
 from deerflow.agent_instances.contract import AgentConflict
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
@@ -99,6 +100,8 @@ class WorkStartAdmissions:
             if not any(item.get("kind") == "work_start" for line in controls for item in line):
                 if fresh.record["status"] == "submitted" and fresh.request is not None and fresh.request["state"] == "pending" and fresh.request["purpose"] == "review":
                     raise AgentConflict("Review the current result", reason="awaiting-review")
+                if not work_start_permissions(fresh.record, can_reuse_conversation=fresh.can_reuse_conversation).issubset(fresh.held):
+                    raise CeilingRefused()
                 raise CallbackRefused()
             detail_current = await self.plans.reader.prepare_detail(link, fresh, ignore_activation=callback_id)
             from app.telegram_bots.work_news_carriers import prepare_news_origin
