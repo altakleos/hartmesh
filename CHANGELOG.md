@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Explain current callback permission loss without exposing Work contents;
+  preserve reply ownership across replay, quiet hours and read-only refreshes.
 - Open the current complete review from a refused Start, retaining original
   admission evidence, file acknowledgements and explicit review confirmation.
 - Explain a refused save when Work is switched off, keeping the original retry

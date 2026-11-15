@@ -134,6 +134,8 @@ Review controls become available after the complete reply arrives; accepting a
 result still requires confirmation.
 An unadmitted Start in an agent bot shows the agent's current paused or retired
 status, with the existing access-loss notice taking precedence.
+If permissions change after a preview, Start and Save explain missing access
+without showing assignment contents. Restored access requires another press.
 Current Inspect grants control visibility; referenced files retain separate access
 checks. Uncertain execution requires qualified containment and explicit recovery.
 The Work command API can stop one exact running attempt without cancelling the

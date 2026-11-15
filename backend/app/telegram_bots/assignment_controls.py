@@ -133,6 +133,10 @@ class AssignmentAdmissions:
         return await await_drained(perform())
 
 
+def assignment_permissions(*, start):
+    return frozenset({"agents:write", "runs:create", "threads:write"} if start else {"agents:write"})
+
+
 class SaveProjection(DraftProjection):
     def __init__(self, link, saved, *, start):
         super().__init__(link, saved.body["origin"], saved=saved)
@@ -140,5 +144,5 @@ class SaveProjection(DraftProjection):
 
     def check_with_permissions(self, rows, held):
         super().check_with_permissions(rows, held)
-        if not ({"agents:write", "runs:create", "threads:write"} if self.start else {"agents:write"}).issubset(held):
+        if not assignment_permissions(start=self.start).issubset(held):
             raise CeilingRefused()

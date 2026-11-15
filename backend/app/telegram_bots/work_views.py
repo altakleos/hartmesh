@@ -19,6 +19,11 @@ def _button(label, kind, target_kind, target_id, payload):
     return {"label": label, "kind": kind, "target_kind": target_kind, "target_id": target_id, "payload": payload}
 
 
+def work_start_permissions(record, *, can_reuse_conversation=False):
+    reusable = can_reuse_conversation is True and (record.get("attempt") or {}).get("thread_id")
+    return frozenset({"agents:write", "runs:create"} | (set() if reusable else {"threads:write"}))
+
+
 def work_buttons(record, *, owner_id, permissions, held, request=None, lifecycle_pending=False, can_reuse_conversation=False):
     """Caller supplies a source-qualified record and current owner ceilings."""
     if type(permissions) is not int or not 1 <= permissions <= 7 or permissions & 3 != 3 or "agents:read" not in held:
@@ -56,9 +61,7 @@ def work_buttons(record, *, owner_id, permissions, held, request=None, lifecycle
         and record["execution_available"]
         and not record["needs_mandate_reconciliation"]
         and not lifecycle_pending
-        and writable
-        and "runs:create" in held
-        and ("threads:write" in held or can_reuse_conversation is True and attempt.get("thread_id"))
+        and work_start_permissions(record, can_reuse_conversation=can_reuse_conversation).issubset(held)
     ):
         keyboard.append([_button("label.resume" if attempt else "label.start_now", "work_start", "work", work_id, {"work_id": work_id, "assignment_revision": record["assignment_revision"]})])
     if manager and not closed and (not active or "runs:cancel" in held):
