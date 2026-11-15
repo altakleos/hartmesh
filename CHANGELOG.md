@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Explain current Change, Withdraw and Stop permission refusals without creating
+  another action or changing the original launch reservation.
 - Explain current callback permission loss without exposing Work contents;
   preserve reply ownership across replay, quiet hours and read-only refreshes.
 - Open the current complete review from a refused Start, retaining original
