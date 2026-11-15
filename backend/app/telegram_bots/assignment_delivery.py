@@ -129,6 +129,10 @@ class AssignmentPlans(WorkNewsPlans):
                     from app.telegram_bots.inbox import InboxRow
 
                     for index, origin in enumerate([root.body["origin"], *([root.body["criteria_origin"]] if "criteria_origin" in root.body else [])]):
+                        from app.telegram_bots.assignment_origins import callback_origin
+
+                        if callback_origin(origin):
+                            continue
                         mark = await writer.get(TelegramInboundMarkRow, (origin["link_id"], origin["message_id"], origin["chat_id"]), populate_existing=True)
                         if mark is None:
                             raise ProductSourceRetired()

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Turn a result's stored suggestion into a private assignment draft on its own
+  button press, with editing, manual criteria and separate explicit Save or Start.
 - Offer acknowledged Resume beneath complete saved-action previews and manager
   Change after cannot-help replies or attempts that ended without a result.
 - Keep late assignment and Edit replies until an explicit recovery choice;

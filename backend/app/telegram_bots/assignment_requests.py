@@ -12,6 +12,7 @@ from sqlalchemy import select
 from app.telegram_bots.acts import _snapshot
 from app.telegram_bots.assign import DraftAssignment, draft_assignment
 from app.telegram_bots.assignment_drafts import AssignmentDrafts, DraftProjection, draft_identity, draft_input_basis, draft_route_basis, draft_scope, origin_facts
+from app.telegram_bots.assignment_origins import CallbackAssignmentInput, callback_origin, load_assignment_input
 from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.callbacks import CallbackRefused
 from app.telegram_bots.inbox import InboxRow
@@ -21,7 +22,7 @@ from app.telegram_bots.settings import SettingsRepository
 from app.telegram_bots.work_actions import same_body, thaw
 from app.telegram_bots.work_result_identity import digest
 from deerflow.agent_instances.work_contract import Statement
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramInboundMarkRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.utils.file_io import await_drained
 
@@ -55,7 +56,8 @@ def request_snapshot(link, row):
             or set(body) != {"version", "request", "source", "origin"}
             or type(body["version"]) is not int
             or body["version"] != 2
-            or body["source"] not in {"command", "edit"}
+            or body["source"] not in {"command", "edit", "suggestion"}
+            or (body["source"] == "suggestion") != callback_origin(body["origin"])
         ):
             raise ValueError()
         request = body["request"]
@@ -108,22 +110,24 @@ class AssignmentDraftRequests:
         if self._tasks:
             await await_drained(asyncio.gather(*tuple(self._tasks), return_exceptions=True))
 
-    async def request(self, link, inbox, *, words, previous=None, source="command", admission=None):
+    async def request(self, link, inbox, *, words, previous=None, source="command", admission=None, on_create=None):
         self._current()
         if type(words) is not str or not words.strip():
             raise ValueError("assign-words-required")
         if len(words) > self.config.assign.max_chars:
             raise ValueError("assign-too-long")
-        if previous is not None and type(previous) is not DraftAssignment or source not in {"command", "edit"}:
+        if previous is not None and type(previous) is not DraftAssignment or source not in {"command", "edit", "suggestion"}:
             raise ValueError("invalid-draft-request")
-        task = asyncio.create_task(self._request(link, inbox, words=words, previous=previous, source=source, admission=admission))
+        if (source == "suggestion") != (type(inbox) is CallbackAssignmentInput):
+            raise ValueError("invalid-draft-origin")
+        task = asyncio.create_task(self._request(link, inbox, words=words, previous=previous, source=source, admission=admission, on_create=on_create))
         self._tasks.add(task)
         try:
             return await await_drained(task)
         finally:
             self._tasks.discard(task)
 
-    async def _request(self, link, inbox, *, words, previous, source, admission):
+    async def _request(self, link, inbox, *, words, previous, source, admission, on_create):
         identity = draft_identity(link, inbox)
         async with self._locks.hold(identity):
             self._current()
@@ -141,7 +145,10 @@ class AssignmentDraftRequests:
                     row = TelegramActRow(id=identity, **draft_scope(link), body=body, state="draft", operation_ids=[], attempts=0, created_at=now, updated_at=now)
                     writer.add(row)
                     await writer.flush()
-                    await self.outbox.inbox.route(inbox, kind="assignment_draft", target_id=identity, basis=draft_route_basis(inbox, identity), operation_ids=[], session=writer)
+                    if on_create is not None:
+                        await on_create(writer, row)
+                    if type(inbox) is InboxRow:
+                        await self.outbox.inbox.route(inbox, kind="assignment_draft", target_id=identity, basis=draft_route_basis(inbox, identity), operation_ids=[], session=writer)
                 elif row.body.get("version") != 1:
                     value = request_snapshot(link, row)
                     if value.words != words or not same_body(row.body["request"]["previous"], body["request"]["previous"]) or value.source != source:
@@ -248,13 +255,12 @@ class AssignmentDraftRequests:
             row = await reader.get(TelegramActRow, identity)
             value = request_snapshot(link, row)
             origin = row.body["origin"]
-            mark = await reader.get(TelegramInboundMarkRow, (origin["link_id"], origin["message_id"], origin["chat_id"]))
-            inbox = InboxRow.from_row(mark) if mark else None
+            inbox = await load_assignment_input(reader, origin)
             body = thaw(row.body)
             saved = _snapshot(row)
         if value.signature != expected.signature:
             return await self._read(link, identity)
-        if inbox is None or inbox.route_kind != "assignment_draft" or inbox.route_target_id != identity:
+        if not callback_origin(origin) and (inbox.route_kind != "assignment_draft" or inbox.route_target_id != identity):
             raise ProductSourceRetired()
         own, install = await self.drafts.prepare_create(link, inbox, draft=draft, source=source, criteria=criteria)
         if own != identity:
@@ -285,6 +291,17 @@ class AssignmentDraftRequests:
             raise ProductSourceRetired()
         result = DraftAssignment(objective=value.words, success_criteria=text)
         return await self._complete(link, identity, expected=value, draft=result, source="fallback", criteria=inbox, admission=admission)
+
+    async def reconcile_request(self, link, identity, *, admission):
+        """An explicit source can recover one unknown extraction without retry."""
+        self._current()
+        if identity in self._active:
+            return None
+        async with self._locks.hold(identity):
+            value = await self._value(link, identity)
+            if isinstance(value, DraftRequest) and value.phase == "extracting":
+                return await self._phase(link, identity, expected=value, phase=fallback_phase(value), claim_id=value.claim_id, admission=admission)
+            return value
 
     async def recover(self, link, *, guard=None):
         self._current()
@@ -326,7 +343,7 @@ class RequestProjection(DraftProjection):
     def check_with_permissions(self, rows, held):
         super().check_with_permissions(rows, held)
         mark = rows[0][self.column + 1]
-        if (
+        if self.callback is None and (
             mark.route_kind != "assignment_draft"
             or mark.route_target_id != self.saved.id
             or mark.state == "interrupted"

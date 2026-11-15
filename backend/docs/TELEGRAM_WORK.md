@@ -100,7 +100,23 @@ exact recorded attempt provenance, including when the stored suggestion is from
 an earlier attempt. Redaction never substitutes the raw source identity.
 
 `result_notices.py` renders the full statement and optional suggestion, with
-files before the card and no review or activation controls. Titles use the
+files before the card. New notices offer Make this an assignment after the full
+SDK acknowledgement; saved notices without `suggestion_controls:1` retain their
+original keyboard. Rendering performs no extraction. `result_suggestion_drafts.py`
+owns one private drafting attempt per actual callback and canonical suggestion;
+`result_suggestion_source.py` rejoins the original event, complete SDK receipt
+and server-owned draft marker through extraction, prompts, editing and Save.
+The marker is recorded only with the first request insert; later writes never
+repair its loss. Protected results retain their consumed Show and exact keyboard
+cleanup. Suggestions above the configured drafting limit get a fixed /assign
+instruction; the canonical words are never truncated or sent for extraction.
+An explicit later press reconciles its own interrupted extraction into manual
+criteria; it never repeats an unknown provider call or accepts its late result.
+Callback origins remain distinct from real human inbox rows. Manual done-when
+criteria and corrections retain their genuine input; no Work is created before
+explicit Save or Start. Assignment retention keeps the original result and group
+while its draft family remains held. There are no review or activation controls
+on the result notice. Titles use the
 existing bounded first-line rule. An unnamed reviewer uses the existing localized
 colleague label; it does not suppress an otherwise valid unrouted-review result.
 `result_notice_delivery.py` preserves the intent's delivery identity and qualifies

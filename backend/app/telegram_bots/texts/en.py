@@ -1,6 +1,7 @@
 """English fixed texts for managed Telegram bots."""
 
 TEXTS: dict[str, str] = {
+    "label.make_assignment": "Make this an assignment",
     "stop.which": "What should stop?",
     "label.stop_assignment": '"{objective}"',
     "label.stop_everything": "Everything",
@@ -39,6 +40,7 @@ TEXTS: dict[str, str] = {
     "assign.resend": "This message could not be answered. Please send it again.",
     "assign.ask_done": "How will it be clear that this is done? One sentence is enough.",
     "assign.too_long": "That is more than {max} characters, too long to make an assignment from. Send a shorter description and put the details in a file.",
+    "assign.suggestion_too_long": "That suggestion is more than {max} characters. Use /assign with a shorter description and include any details in a file.",
     "assign.card": "Do: {objective_full}\nDone when: {success_criteria}",
     "assign.due": "Due: {due}",
     "assign.card_title": "New assignment for {name}",

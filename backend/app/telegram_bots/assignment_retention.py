@@ -12,6 +12,7 @@ from sqlalchemy import delete, select
 from app.telegram_bots.acts import _snapshot
 from app.telegram_bots.assignment_drafts import draft_scope, snapshot_draft
 from app.telegram_bots.assignment_journals import exact_delegation, saved_receipt
+from app.telegram_bots.assignment_origins import callback_origin
 from app.telegram_bots.assignment_sources import private_snapshot
 from app.telegram_bots.links import BotLink
 from app.telegram_bots.notifications import aware
@@ -366,7 +367,12 @@ async def assignment_dependencies(session, now, *, max_age_days, draft_ttl_hours
                 continue
             for key in ("origin", "criteria_origin"):
                 origin = body.get(key)
-                if isinstance(origin, Mapping) and (origin.get("link_id"), origin.get("chat_id"), origin.get("binding_generation")) == (scope.id, scope.chat_id, scope.binding_generation) and type(origin.get("message_id")) is int:
+                if (
+                    isinstance(origin, Mapping)
+                    and not callback_origin(origin)
+                    and (origin.get("link_id"), origin.get("chat_id"), origin.get("binding_generation")) == (scope.id, scope.chat_id, scope.binding_generation)
+                    and type(origin.get("message_id")) is int
+                ):
                     inputs.add((scope.id, origin["message_id"], scope.chat_id))
         # Proposal cards seal every input in the original human turn. The Root
         # names only the first one; raw same-scope locators pin custody here,
@@ -404,6 +410,38 @@ async def assignment_dependencies(session, now, *, max_age_days, draft_ttl_hours
             result.deliveries.update(row.id for row in family.deliveries)
             result.groups.update(control.group_id for control in family.controls)
             result.inputs.update(family.inputs)
+            origin = family.root.body.get("origin") if isinstance(family.root.body, Mapping) else None
+            if callback_origin(origin) and (origin.get("link_id"), origin.get("chat_id"), origin.get("binding_generation")) == (family.scope.id, family.scope.chat_id, family.scope.binding_generation):
+                anchor = await session.get(TelegramOutboxRow, origin.get("anchor_outbox_id"), populate_existing=True) if type(origin.get("anchor_outbox_id")) is str else None
+                if anchor is not None and in_scope(anchor, family.scope) and (anchor.work_id, anchor.message_thread_id) == (origin.get("work_id"), origin.get("message_thread_id")):
+                    result.deliveries.add(anchor.id)
+                    basis = anchor.payload.get("result_notice_basis", {}) if isinstance(anchor.payload, Mapping) else {}
+                    cleanup = await session.get(TelegramOutboxRow, basis["cleanup_id"], populate_existing=True) if isinstance(basis, Mapping) and type(basis.get("cleanup_id")) is str else None
+                    cleanup_payload = cleanup.payload if cleanup is not None and isinstance(cleanup.payload, Mapping) else {}
+                    reveal = next((control for control in by_anchor[anchor.id] if control.id == basis.get("reveal")), None) if isinstance(basis, Mapping) else None
+                    if (
+                        cleanup is not None
+                        and reveal is not None
+                        and (cleanup.link_id, cleanup.owner_user_id, cleanup.binding_generation, cleanup.chat_id, cleanup.message_thread_id)
+                        == (anchor.link_id, anchor.owner_user_id, anchor.binding_generation, anchor.chat_id, anchor.message_thread_id)
+                        and (cleanup.instance_id, cleanup.work_id, cleanup.request_id, cleanup.event_id) == (None, None, None, None)
+                        and cleanup.class_ == "reply"
+                        and cleanup_payload.get("kind") == "keyboard_cleanup"
+                        and cleanup_payload.get("work_request_parent_id") == anchor.id
+                        and cleanup_payload.get("target_message_id") == reveal.message_id
+                    ):
+                        result.deliveries.add(cleanup.id)
+                    parts = anchor.parts if isinstance(anchor.parts, list) else []
+                    groups = {part["callback_group_id"] for part in parts if isinstance(part, Mapping) and type(part.get("callback_group_id")) is str} | {control.group_id for control in by_anchor[anchor.id]}
+                    for group in groups:
+                        members = by_group[group]
+                        if members and all(
+                            isinstance(control.payload, Mapping)
+                            and (control.link_id, control.chat_id, control.binding_generation, control.message_thread_id, control.payload.get("anchor_outbox_id"))
+                            == (anchor.link_id, anchor.chat_id, anchor.binding_generation, anchor.message_thread_id, anchor.id)
+                            for control in members
+                        ):
+                            result.groups.add(group)
         elif family.actual and family.closed and all(member in journals and aware(journals[member].created_at) < now - timedelta(days=400) for member in family.members):
             result.expired_history.update(family.members)
     result.expired_history.difference_update(result.acts)

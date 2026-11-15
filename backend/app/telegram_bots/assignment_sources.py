@@ -258,7 +258,7 @@ class AssignmentProjection:
             originals.append(rows[0][self.projection.criteria_column])
         transcripts = []
         for mark in originals:
-            if voice_basis(mark) is not None:
+            if mark is not None and voice_basis(mark) is not None:
                 draft_input_basis(mark)
                 transcripts.append(mark.sanitized_input["text"])
         self.source = private_source(self.link, root, instance=rows[0][1], permissions=rows[0][2], policy=rows[0][3], held=held, clock=self.clock, config=self.reader.config, journal=journal, detail=detail, transcripts=transcripts)

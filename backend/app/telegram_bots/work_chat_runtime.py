@@ -68,6 +68,9 @@ class WorkChatRuntime:
             host.publications.assignment_proposal_planner = self.proposals.plan_terminal
         self.assignment_prompts = AssignmentPromptPlans(reader=AssignmentPromptReader(host.acts), **delivery)
         self.assignment_inputs = AssignmentInputs(self.assignment_prompts, self.assignments)
+        from app.telegram_bots.result_suggestion_drafts import ResultSuggestionDrafts
+
+        self.suggestion_drafts = ResultSuggestionDrafts(self)
         self.assignment_admissions = AssignmentAdmissions(self.assignments, host.acts)
         self.assignment_navigation = AssignmentDraftNavigation(self.assignments)
         host.assignment_sources = WorkNewsSources(self.assignments)
@@ -192,6 +195,7 @@ class WorkChatRuntime:
             "assign_edit",
             "assign_discard",
             "assign_answer",
+            "assign_from_suggestion",
             "work_change",
             "work_withdraw",
             "work_change_save",
@@ -241,7 +245,9 @@ class WorkChatRuntime:
                 except Exception:
                     return False
 
-            if row.kind == "assign_answer":
+            if row.kind == "assign_from_suggestion":
+                await self.suggestion_drafts.open(link, row.id, **scope)
+            elif row.kind == "assign_answer":
                 stage = await self.assignment_answers.stage(link, row.id, update_id=update_id, **scope)
                 await self.host.turns.accept_staged(channel, stage, admission_current=current)
             elif row.kind == "stop_which":

@@ -5,6 +5,7 @@ from uuid import uuid4
 from app.telegram_bots.acts import _snapshot
 from app.telegram_bots.assignment_controls import consent_origin, displayed_assignment
 from app.telegram_bots.assignment_drafts import DraftProjection, origin_facts
+from app.telegram_bots.assignment_origins import CallbackAssignmentInput, load_assignment_input
 from app.telegram_bots.assignment_prompt_sources import AssignmentPromptProjection
 from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.callbacks import CallbackRefused, Prompts, _visibility
@@ -12,7 +13,7 @@ from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_news_delivery import WorkNewsPlans
 from app.telegram_bots.work_result_identity import digest
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
 
@@ -26,8 +27,6 @@ class AssignmentPromptPlans(WorkNewsPlans):
             raise ValueError("invalid-callback-query")
 
         async def perform():
-            from app.telegram_bots.inbox import InboxRow
-
             async with self.callbacks.writer(link, guard) as writer:
                 control = await writer.get(TelegramCallbackRow, callback_id)
                 parent = await writer.get(TelegramOutboxRow, control.payload.get("anchor_outbox_id")) if control else None
@@ -41,10 +40,7 @@ class AssignmentPromptPlans(WorkNewsPlans):
                 if control.kind != "assign_edit":
                     raise CallbackRefused()
                 origin = source["work"]["root"]["body"]["origin"]
-                mark = await writer.get(TelegramInboundMarkRow, (origin["link_id"], origin["message_id"], origin["chat_id"]))
-                if mark is None:
-                    raise CallbackRefused()
-                inbox = InboxRow.from_row(mark)
+                inbox = await load_assignment_input(writer, origin)
                 identity, edit_origin = control.target_id, consent_origin(original, control)
             query_key = digest([link.id, link.binding_generation, callback_id, query_id]) if query_id is not None else None
             return await self.plan(link, inbox, purpose="assign_edit", draft_id=identity, edit_origin=edit_origin, query_key=query_key, guard=guard)
@@ -97,7 +93,7 @@ class AssignmentPromptPlans(WorkNewsPlans):
                     await writer.flush()
                     if purpose == "assign_words":
                         await self.outbox.inbox.route(inbox, kind="assignment_prompt", target_id=prompt_id, basis={"prompt_id": prompt_id}, operation_ids=[], session=writer)
-                    if purpose != "assign_edit":
+                    if purpose != "assign_edit" and type(inbox) is not CallbackAssignmentInput:
                         await self.outbox.inbox.register_delivery([inbox], outbox_id=row.id, primary=inbox.outbox_id is None, finish=purpose == "assign_words", session=writer)
                 elif not same_body(row.payload.get("assignment_prompt_intent"), intent):
                     raise ProductSourceRetired()

@@ -181,6 +181,7 @@ class ResultNoticeRecovery:
                 part["state"] = "retired"
         fresh_basis = {
             "version": 2,
+            **({"suggestion_controls": basis["suggestion_controls"]} if "suggestion_controls" in basis else {}),
             "source": asdict(source),
             "locale": settings.locale,
             "concealed": source.protected and origin is None and navigation_origin is None,

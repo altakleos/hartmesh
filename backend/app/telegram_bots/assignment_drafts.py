@@ -3,11 +3,12 @@
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import and_
+from sqlalchemy import and_, false
 from sqlalchemy.orm import aliased
 
 from app.telegram_bots.acts import _snapshot
 from app.telegram_bots.assign import DraftAssignment, prepare_due_date
+from app.telegram_bots.assignment_origins import CallbackAssignmentInput, callback_origin
 from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.authority import AuthorityUnavailable
 from app.telegram_bots.callbacks import CallbackRefused
@@ -36,6 +37,8 @@ class AssignmentDraft:
 
 
 def origin_facts(inbox):
+    if type(inbox) is CallbackAssignmentInput:
+        return thaw(inbox.origin)
     return {**{key: getattr(inbox, key) for key in ("link_id", "chat_id", "message_id", "update_id", "binding_generation", "message_thread_id")}, "input_signature": digest(thaw(inbox.sanitized_input))}
 
 
@@ -102,7 +105,11 @@ def snapshot_draft(link, row):
             or set(body) not in ({"version", "draft", "original", "source", "due_note", "origin"}, {"version", "draft", "original", "source", "due_note", "origin", "criteria_origin"})
             or type(body["version"]) is not int
             or body["version"] != 1
-            or body["source"] not in {"command", "tool", "edit", "fallback"}
+            or body["source"] not in {"command", "tool", "edit", "fallback", "suggestion"}
+            or callback_origin(body["origin"])
+            and body["source"] not in {"suggestion", "fallback"}
+            or body["source"] == "suggestion"
+            and not callback_origin(body["origin"])
             or type(body["due_note"]) is not bool
         ):
             raise ValueError()
@@ -137,8 +144,10 @@ class AssignmentDrafts:
 
     async def prepare_create(self, link, inbox, *, draft, source, criteria=None, projection=None):
         """Prepare providers off-writer; install in an owning or borrowed writer."""
-        if type(draft) is not DraftAssignment or source not in {"command", "tool", "edit", "fallback"} or type(inbox) is not InboxRow:
+        if type(draft) is not DraftAssignment or source not in {"command", "tool", "edit", "fallback", "suggestion"} or type(inbox) not in {InboxRow, CallbackAssignmentInput}:
             raise ValueError("invalid-assignment-draft")
+        if type(inbox) is CallbackAssignmentInput and source not in {"suggestion", "fallback"} or source == "suggestion" and type(inbox) is not CallbackAssignmentInput:
+            raise ValueError("invalid-draft-origin")
         origin = origin_facts(inbox)
         identity = draft_identity(link, inbox)
         admission = await prepare_attention(self, link)
@@ -222,6 +231,11 @@ class DraftProjection:
         self.require_work_policy = require_work_policy
         self.permissions = None
         self.name = None
+        self.callback = None
+        if callback_origin(origin):
+            from app.telegram_bots.result_suggestion_source import SuggestionOriginProjection
+
+            self.callback = SuggestionOriginProjection(link, origin, saved=saved)
         self.criteria_origin = origin_facts(criteria) if criteria is not None else saved.body.get("criteria_origin") if saved is not None else None
 
     def extend(self, query):
@@ -229,25 +243,24 @@ class DraftProjection:
 
         self.column = len(query.column_descriptions)
         definition, mark, draft = aliased(AgentDefinitionRevisionRow), aliased(TelegramInboundMarkRow), aliased(TelegramActRow)
-        query = (
-            query.add_columns(definition, mark)
-            .join(definition, definition.revision == AgentInstanceRow.definition_revision)
-            .join(mark, and_(mark.link_id == self.origin["link_id"], mark.chat_id == self.origin["chat_id"], mark.message_id == self.origin["message_id"]))
-        )
+        query = query.add_columns(definition, mark).join(definition, definition.revision == AgentInstanceRow.definition_revision)
+        query = query.outerjoin(mark, false()) if self.callback is not None else query.join(mark, and_(mark.link_id == self.origin["link_id"], mark.chat_id == self.origin["chat_id"], mark.message_id == self.origin["message_id"]))
         if self.saved is not None:
             query = query.add_columns(draft).join(draft, draft.id == self.saved.id)
         if self.criteria_origin is not None:
             criterion = aliased(TelegramInboundMarkRow)
             self.criteria_column = len(query.column_descriptions)
             query = query.add_columns(criterion).join(criterion, and_(criterion.link_id == self.criteria_origin["link_id"], criterion.chat_id == self.criteria_origin["chat_id"], criterion.message_id == self.criteria_origin["message_id"]))
-        return query
+        return self.callback.extend(query) if self.callback is not None else query
 
     def check_with_permissions(self, rows, held):
         instance, permissions = rows[0][1:3]
         self.name = instance.name
         definition, mark = rows[0][self.column : self.column + 2]
-        current = InboxRow.from_row(mark)
-        if (
+        current = InboxRow.from_row(mark) if self.callback is None else None
+        if self.callback is not None:
+            self.callback.check_with_permissions(rows, held)
+        elif (
             not same_body(origin_facts(current), self.origin)
             or self.inbox is not None
             and not same_body(current.sanitized_input, self.inbox.sanitized_input)
@@ -269,7 +282,7 @@ class DraftProjection:
                 self.link.id,
                 self.link.chat_id,
                 self.link.binding_generation,
-                current.message_thread_id,
+                self.origin["message_thread_id"],
             ):
                 raise AuthorityUnavailable()
         if self.saved is not None:
