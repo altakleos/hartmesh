@@ -16,6 +16,7 @@ from typing import Literal
 from sqlalchemy import func, select
 from sqlalchemy import text as sql_text
 
+from app.gateway.auth import mode as auth_mode
 from app.gateway.auth.mode import account_refusal
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, is_auth_disabled
@@ -1252,8 +1253,9 @@ def human_lookup(repository):
         # development adapter, never by missing request context or a missing row.
         if reference.subject_id == AUTH_DISABLED_USER_ID and is_auth_disabled():
             return ResolvedPrincipal(reference, can_provision_company=True)
+        mode = await run_file_io(auth_mode.sign_on_only)
         user = await repository.get_user_by_id(reference.subject_id, session=session) if session is not None else await repository.get_user_by_id(reference.subject_id)
-        if user is None or str(user.id) != reference.subject_id or account_refusal(user) is not None:
+        if user is None or str(user.id) != reference.subject_id or account_refusal(user, sign_on_only_mode=mode) is not None:
             return None
         return ResolvedPrincipal(reference, can_provision_company=user.system_role == "admin" and getattr(user, "role_limit", None) != "user")
 

@@ -2006,6 +2006,9 @@ and obsolete lists retire without delaying later replies. The ordinary bot offer
 chats without starting an assignment. Existing bots receive the updated command
 menu at their next start.
 
+Account-policy checks and run configuration preparation keep file reads off the
+Gateway event loop so Telegram admission can continue serving other requests.
+
 Connected AI assistants and AI employees can now message you when a question,
 result or problem needs your attention. Reply to questions, review complete
 results and files, decide, accept results, request changes, or pass a question to

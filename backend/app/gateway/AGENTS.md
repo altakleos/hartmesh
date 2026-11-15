@@ -5,6 +5,8 @@ resident exact-replay probes too. An existing runless promise may still launch;
 its original consent must pass the final borrowed Work transaction.
 
 Storage and operator CLI: [guide](../../../docs/STORAGE_SPACES.md).
+Human lookup prepares sign-on policy off-loop before account SQL, including borrowed reads.
+Run admission drains synchronous live-config/context construction off-loop; async collaborators keep their loop.
 CLI `settle` edits file-op rows; other verbs use domain APIs. No slot release.
 Storage-init census skips ENOENT/ESRCH only after the PID directory disappears;
 unreadable facts for a visible PID still refuse.

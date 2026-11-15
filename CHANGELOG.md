@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Refresh a changed assignment or legacy Start button into a complete current
   preview, requiring a new acknowledged Start without replacing owned launches.
+- Keep live account-policy configuration reads off the Gateway loop, including
+  shared storage checks, internal owner authentication and run preparation used
+  by Work admission and result delivery. Cancelled run preparation drains its work.
 - Include stored follow-up suggestions on reviewer result cards, with private
   drafting from the complete acknowledged result and preserved legacy rendering.
 - Turn a result's stored suggestion into a private assignment draft on its own

@@ -112,6 +112,8 @@ post-route/precheck boundaries to prove retirement cannot admit a later leaf.
 Strict items cover the whole command/press lifetime and cold preference validation.
 Default-supervisor tests omit injected repositories so wiring cannot be qualified
 only by richer test fixtures. Do not add routine local full-suite runs here.
+`test_telegram_work_worker.py` joins the default owners to actual worker-produced
+proposal/report evidence; its explicit adapters and scope are in [Work guidance](../docs/TELEGRAM_WORK.md#installed-work-chat-runtime).
 
 Human-input tests distinguish explicitly seeded request proofs from actual worker
 provenance. The recorded-SDK composition runs a real request, saved choice/form
