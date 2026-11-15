@@ -131,7 +131,7 @@ async def test_default_spoken_correction_stays_private_and_needs_fresh_save(work
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("damage", ["closed", "ack", "topic"])
+@pytest.mark.parametrize("damage", ["closed", "ack", "topic", "parent_topic"])
 async def test_spoken_correction_keeps_captured_editor_across_provider_wait(work_delivery, monkeypatch, damage):
     import asyncio
 
@@ -159,11 +159,16 @@ async def test_spoken_correction_keeps_captured_editor_across_provider_wait(work
         async with e.db.sessions.begin() as writer:
             mark = await writer.get(TelegramInboundMarkRow, (e.link.id, 6181, e.link.chat_id))
             assert mark.route_kind == "voice" and mark.route_basis["work_voice"]["owner"] == "management"
+            source_id = mark.route_basis["work_voice"]["source_outbox_id"]
+            assert source_id in mark.delivery_ids
             prompt = await writer.get(TelegramCallbackRow, mark.route_basis["work_voice"]["prompt_id"])
             if damage == "closed":
                 prompt.consumed_at, prompt.closed_reason = e.sender.outbox.clock(), "cancelled"
             elif damage == "topic":
                 prompt.message_thread_id = 9901
+            elif damage == "parent_topic":
+                parent = await writer.get(TelegramOutboxRow, prompt.payload["anchor_outbox_id"])
+                parent.message_thread_id = 9901
             else:
                 parent = await writer.get(TelegramOutboxRow, prompt.payload["anchor_outbox_id"])
                 parent.parts = [{**part, "message_ids": []} for part in parent.parts]
@@ -172,8 +177,28 @@ async def test_spoken_correction_keeps_captured_editor_across_provider_wait(work
         assert proposal.await_count == 0 and owner.host.turns.accept_transcript.await_count == 0
         async with e.db.sessions() as reader:
             mark = await reader.get(TelegramInboundMarkRow, (e.link.id, 6181, e.link.chat_id))
-            assert mark.route_kind == "work_card_hold" and mark.route_complete
+            assert mark.route_kind == "work_card_hold" and not mark.route_complete
             assert mark.route_basis["work_voice"]["phase"] == "closed"
+            assert mark.route_basis["work_voice"]["prompt_id"] == prompt.id
+            assert mark.sanitized_input["text"] == "Include the additional chapter"
+            if damage == "parent_topic":
+                assert mark.route_basis["closed_typing"]["source_outbox_id"] == source_id
+                assert mark.delivery_ids.count(source_id) == 1
+            closed = mark.route_basis.get("work_closed")
+            assert closed is not None
+            notice = await reader.get(TelegramOutboxRow, closed["notice_id"])
+            choices = list(await reader.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == notice.parts[-1]["callback_group_id"])))
+            assert {choice.kind for choice in choices} == {"prompt_send_new", "prompt_discard"} | ({"prompt_reopen"} if damage == "closed" else set())
+            assert all(choice.message_id is None for choice in choices)
+        for index in range(len(notice.parts)):
+            await dispatch(e, 6182 + index)
+        assert not e.dispatch_errors, e.dispatch_errors
+        async with e.db.sessions() as reader:
+            for choice in choices:
+                assert (await reader.get(TelegramCallbackRow, choice.id)).message_id == 6181 + len(notice.parts)
+            mark = await reader.get(TelegramInboundMarkRow, (e.link.id, 6181, e.link.chat_id))
+            assert not mark.route_complete and mark.thread_id is None and mark.turn_id is None
+        assert proposal.await_count == 0 and owner.host.turns.accept_transcript.await_count == 0
     finally:
         release.set()
         if task is not None:

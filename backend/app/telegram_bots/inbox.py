@@ -35,7 +35,9 @@ if TYPE_CHECKING:
     from app.telegram_bots.links import BotLink, PublicationGuard
 
 _TOKEN = re.compile(TOKEN_IN_TEXT)
-SERVER_BOOKKEEPING_KEYS = frozenset({"publications", "current_publication_id", "thread_preparation", "publication_recovery", "callback_choice", "prepublication_group", "human_input_ui", "pending_files", "voice_note"})
+SERVER_BOOKKEEPING_KEYS = frozenset(
+    {"publications", "current_publication_id", "thread_preparation", "publication_recovery", "callback_choice", "prepublication_group", "human_input_ui", "pending_files", "voice_note", "work_voice_selection"}
+)
 _INPUT_KEYS = {"text", "caption", "files", "voice", "command", "type", "reply_to_message_id", "prompt_id", "media_group_id"}
 _UNSAFE_KEYS = {"raw_update", "update", "token", "bot_token", "access_token", "download_url", "file_path", "audio_bytes", "bytes", "_content", "content_bytes"}
 _FILE_KEYS = {"type", "file_id", "file_unique_id", "filename", "mime_type", "size", "message_id", "telegram_bot_id", "duration", "width", "height"}
@@ -1192,9 +1194,11 @@ class InboxRepository:
                 mark = await writer.get(TelegramInboundMarkRow, (link.id, payload["message_id"], chat_id), with_for_update=True)
                 closed_voice = kind == "prompt_send_new" and mark is not None and "voice_note" in mark.route_basis
                 if closed_voice:
+                    from app.telegram_bots.closed_voice_echo import echo_identity
                     from app.telegram_bots.work_closed_inputs import validate_closed_voice
 
-                    validate_closed_voice(parent, mark)
+                    echo_id = echo_identity(mark)
+                    validate_closed_voice(parent, mark, echo=await writer.get(TelegramOutboxRow, echo_id) if echo_id else None, link=link)
                 expected = [[link.id, payload["message_id"], chat_id]]
                 if (
                     type(basis) is not dict
@@ -3088,7 +3092,7 @@ class InboxRepository:
         self._current(current, mark)
         original = _input(mark.sanitized_input)
         forwarded, origin = mark.route_basis.get("forwarded"), mark.route_basis.get("origin")
-        if _canonical({"work_voice": mark.route_basis.get("work_voice")}) != _canonical({"work_voice": row.route_basis.get("work_voice")}):
+        if _canonical({key: mark.route_basis.get(key) for key in ("work_voice", "work_voice_selection")}) != _canonical({key: row.route_basis.get(key) for key in ("work_voice", "work_voice_selection")}):
             raise ValueError("voice-note-conflict") from None
         if mark.route_kind != "voice" or mark.route_target_id != "working" or mark.route_complete or original.get("type") != "voice" or type(forwarded) is not bool or type(text) is not str or not text.strip():
             raise ValueError("voice-note-conflict") from None
@@ -3096,7 +3100,7 @@ class InboxRepository:
         profile = {"version": 2, "kind": "chat_input", "forwarded": True, "origin": origin} if forwarded else {"version": 1, "kind": "plain_text", "forwarded": False}
         mark.sanitized_input = _input({"type": "text", "text": text, **quoted})
         mark.route_kind, mark.route_target_id = "turn", link.agent_ref
-        work_voice = {"work_voice": deepcopy(mark.route_basis["work_voice"])} if "work_voice" in mark.route_basis else {}
+        work_voice = {key: deepcopy(mark.route_basis[key]) for key in ("work_voice", "work_voice_selection") if key in mark.route_basis}
         mark.route_basis = {"input_profile": profile, "voice_note": {"version": 1, "original": original}, **work_voice}
         await session.flush()
         await guard.check(session)
@@ -3122,7 +3126,7 @@ class InboxRepository:
             if mark.route_complete:
                 raise ValueError("inbox-route-complete")
             # Host facts written before route selection remain server-owned.
-            saved_host = {key: deepcopy(value) for key, value in mark.route_basis.items() if key in {"human_input_ui", "pending_files", "voice_note", "work_voice"}}
+            saved_host = {key: deepcopy(value) for key, value in mark.route_basis.items() if key in {"human_input_ui", "pending_files", "voice_note", "work_voice", "work_voice_selection"}}
             routed_basis = {**basis, **saved_host}
             mark.route_kind, mark.route_target_id, mark.route_basis, mark.operation_ids = kind, target_id, routed_basis, deepcopy(operation_ids)
             await session.flush()

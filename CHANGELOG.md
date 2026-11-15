@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Keep late assignment and Edit replies until an explicit recovery choice;
+  reopen complete current previews without submitting held text or repeating speech recognition.
 - Put Work and Assign first in agent-bot menus, upgrade existing profiles, and
   explain assignment controls and paused changes in English and Chinese.
 - Offer Start or Resume beneath complete assignment news previews, retaining the

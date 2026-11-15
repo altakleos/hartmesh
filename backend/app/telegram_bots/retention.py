@@ -145,6 +145,9 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int,
     """The ids and ``reply:`` keys of outbox rows a live control or unfinished delivery needs."""
     generations = dict((await session.execute(select(TelegramBotLinkRow.id, TelegramBotLinkRow.binding_generation))).all())
     pinned: set[str] = {anchor for _prompt, anchor in await settings_prompt_dependencies(session) if type(anchor) is str}
+    from app.telegram_bots.assignment_reopen_retention import reopen_dependencies
+
+    pinned.update((await reopen_dependencies(session, now)).deliveries)
     from app.telegram_bots.work_start_retention import reserved_starts
 
     _groups, start_anchors = await reserved_starts(session)
@@ -527,6 +530,9 @@ async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int, dra
         management = await management_dependencies(session, now, max_age_days=callback_max_age_days, draft_ttl_hours=draft_ttl_hours)
         requests = await request_dependencies(session, now, max_age_days=callback_max_age_days)
         command_stops = await command_stop_dependencies(session, now, max_age_days=callback_max_age_days)
+        from app.telegram_bots.assignment_reopen_retention import reopen_dependencies
+
+        reopened = await reopen_dependencies(session, now)
         candidates = list(
             (
                 await session.execute(
@@ -541,7 +547,7 @@ async def sweep_rows(sessions, now: datetime, *, callback_max_age_days: int, dra
                 )
             ).all()
         )
-        eligible = sorted(set(candidates) - assignments.inputs - management.inputs - requests.inputs - command_stops.inputs)
+        eligible = sorted(set(candidates) - assignments.inputs - management.inputs - requests.inputs - command_stops.inputs - reopened.inputs)
         inbound = 0
         for start in range(0, len(eligible), _BATCH):
             inbound += (await session.execute(delete(mark).where(tuple_(mark.link_id, mark.message_id, mark.chat_id).in_(eligible[start : start + _BATCH])))).rowcount

@@ -23,12 +23,14 @@ def reply(e, *, quoted=True):
     return Update.de_json(raw, e.channel.bot)
 
 
-async def closed(e):
+async def closed(e, *, available):
     async with e.db.sessions() as reader:
         mark = await reader.get(TelegramInboundMarkRow, (e.link.id, 6151, e.link.chat_id))
-        assert mark is not None and mark.route_kind == "assignment_notice" and mark.route_complete
-        rows = list(await reader.scalars(select(TelegramOutboxRow)))
-        assert len([row for row in rows if any(part.get("source_ref", {}).get("key") == "prompt.closed" for part in row.parts)]) == 1
+        assert mark is not None and mark.route_kind == "work_card_hold" and not mark.route_complete
+        notice = await reader.get(TelegramOutboxRow, mark.route_basis["work_closed"]["notice_id"])
+        assert notice.parts[-1]["source_ref"]["key"] == ("prompt.closed" if available else "prompt.unavailable")
+        choices = list(await reader.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == notice.parts[-1]["callback_group_id"])))
+        assert {row.kind for row in choices} == {"prompt_send_new", "prompt_discard"} | ({"prompt_reopen"} if available else set())
 
 
 @pytest.mark.asyncio
@@ -53,10 +55,10 @@ async def test_installed_retired_prompt_typing_is_closed_without_ordinary_chat(w
         assert await e.channel.handle_update(update)
         await e.channel._drain_ingress()
         assert calls == [] and owner.host.turns.accept.await_count == 0
-        await closed(e)
+        await closed(e, available=damage == "expired")
         assert await e.channel.handle_update(update)
         await e.channel._drain_ingress()
-        await closed(e)
+        await closed(e, available=damage == "expired")
     finally:
         await owner.stop()
 
@@ -103,7 +105,7 @@ async def test_prompt_deleted_between_typed_selection_and_admission_gets_one_clo
         assert await e.channel.handle_update(reply(e))
         await e.channel._drain_ingress()
         assert calls == [] and owner.host.turns.accept.await_count == 0
-        await closed(e)
+        await closed(e, available=False)
     finally:
         await owner.stop()
 

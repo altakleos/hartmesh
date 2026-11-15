@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from app.telegram_bots.callbacks import CallbackRefused, Prompts, normalize_callback_topic
 from app.telegram_bots.inbox import InboxRow
+from app.telegram_bots.producer import ProductSourceRetired
 from app.telegram_bots.work_card_inputs import WorkCardInputs
 from app.telegram_bots.work_input_lifetime import input_current
 from deerflow.persistence.telegram_bots.model import TelegramInboundMarkRow, TelegramOutboxRow
@@ -25,6 +26,7 @@ class WorkCardText:
         async def perform():
             message = update.message
             guard = self.services.commands._guard(channel, link)
+            closed_typing = None
             async with self.services.callbacks.writer(link, guard) as writer:
                 mark = await writer.get(TelegramInboundMarkRow, (link.id, message.message_id, message.chat_id))
                 if mark is not None and mark.route_kind is not None:
@@ -33,9 +35,17 @@ class WorkCardText:
                     if mark.route_complete:
                         return True
                     origin = InboxRow.from_row(mark)
+                    if mark.route_kind == "work_card_hold" and mark.route_basis.get("closed_typing") is not None:
+                        closed_typing = mark.route_basis["closed_typing"]
                     source_id = mark.route_basis["source_outbox_id"] if mark.route_kind == "work_card_hold" else mark.route_basis["work_input"]["source_outbox_id"]
                 else:
                     origin, source_id = None, None
+            if closed_typing is not None:
+                owner = getattr(self.closed, "typing_owner", None)
+                if owner is None:
+                    raise ProductSourceRetired()
+                await owner.offer(link, origin, source={key: closed_typing[key] for key in ("prompt_id", "source_outbox_id", "ambiguous")}, guard=guard)
+                return True
             prompt_id = None
             if source_id is None:
                 if message.reply_to_message is None:

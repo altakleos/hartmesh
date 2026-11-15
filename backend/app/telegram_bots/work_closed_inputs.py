@@ -15,16 +15,22 @@ from deerflow.utils.file_io import await_drained
 
 def closed_parts(mark, *, available):
     parts = []
-    if "voice_note" in mark.route_basis:
+    if "voice_note" in mark.route_basis and "closed_voice_echo" not in mark.route_basis:
         parts.extend({"kind": "text", "source_ref": {"key": "voice.transcript_part", "values": {"text": visible_text(chunk)}}, "reply_to_message_id": mark.message_id} for chunk in split_html(escape(mark.sanitized_input["text"])))
     refusal = "prompt.unavailable" if not available else "voice.answer_too_long" if mark.route_basis.get("work_voice_refusal") == "too_long" else "prompt.closed"
     parts.append({"kind": "text", "source_ref": {"key": refusal, "values": {}}, "reply_to_message_id": mark.message_id})
     return parts
 
 
-def validate_closed_voice(parent, mark):
+def validate_closed_voice(parent, mark, *, echo=None, link=None):
     if "voice_note" not in mark.route_basis:
         return
+    if "closed_voice_echo" in mark.route_basis:
+        from app.telegram_bots.closed_voice_echo import qualify_echo
+
+        if link is None:
+            raise CallbackRefused()
+        qualify_echo(link, mark, echo)
     from app.telegram_bots.work_actions import same_body
     from app.telegram_bots.work_outcome_delivery import acknowledged_parts
 
@@ -155,7 +161,10 @@ class WorkClosedInputs:
                 link,
                 source_id="work-closed-unavailable:" + selected.id,
                 parts=closed_parts(mark, available=False) if "voice_note" in mark.route_basis else [{"kind": "edit", "source_ref": {"key": "prompt.unavailable", "values": {}}, "target_message_id": selected.message_id}],
-                keyboard=[[{"kind": kind, "label": label, "target_kind": "request", "target_id": closed["request_id"], "payload": payload}] for kind, label in (("prompt_send_new", "label.send_new"), ("prompt_discard", "label.discard"))],
+                keyboard=[
+                    [{"kind": kind, "label": label, "target_kind": "request" if closed["request_id"] else None, "target_id": closed["request_id"], "payload": payload}]
+                    for kind, label in (("prompt_send_new", "label.send_new"), ("prompt_discard", "label.discard"))
+                ],
                 callbacks=self.callbacks,
                 guard=guard,
                 inbox_rows=[InboxRow.from_row(mark)],
@@ -185,13 +194,22 @@ class WorkClosedInputs:
                 parent = await writer.get(TelegramOutboxRow, row.payload.get("anchor_outbox_id"))
                 if parent is None:
                     raise CallbackRefused()
-                validate_closed_voice(parent, mark)
+                from app.telegram_bots.closed_voice_echo import echo_identity
+
+                echo_id = echo_identity(mark)
+                validate_closed_voice(parent, mark, echo=await writer.get(TelegramOutboxRow, echo_id) if echo_id else None, link=link)
                 origin = InboxRow.from_row(mark)
             if row.kind == "prompt_send_new" and origin.sanitized_input.get("type") == "media":
                 from app.telegram_bots.work_file_handoff import send_file_as_new
 
                 return await send_file_as_new(self, channel, link, row, update_id=update_id, guard=guard)
             if row.kind == "prompt_reopen":
+                if origin.route_basis.get("closed_typing") is not None:
+                    owner = getattr(self, "typing_owner", None)
+                    if owner is None:
+                        raise ProductSourceRetired()
+                    await owner.reopen(channel, link, row, origin, guard=guard)
+                    return True
                 from app.telegram_bots.work_reopen import WorkReopen
 
                 await WorkReopen(self).open(channel, link, row, origin, guard=guard)
@@ -205,7 +223,8 @@ class WorkClosedInputs:
                     raise CallbackRefused()
                 self.inbox._current(link, mark)
                 parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id)
-                validate_closed_voice(parent, mark)
+                echo_id = echo_identity(mark)
+                validate_closed_voice(parent, mark, echo=await writer.get(TelegramOutboxRow, echo_id) if echo_id else None, link=link)
                 closed = mark.route_basis.get("work_closed", {})
                 if (
                     mark.message_thread_id != selected.message_thread_id

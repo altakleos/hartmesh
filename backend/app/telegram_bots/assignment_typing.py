@@ -10,9 +10,44 @@ from app.telegram_bots.split import split_html, visible_text
 from app.telegram_bots.work_views import WorkViewPresentation
 
 
+def prompt_preview(link, root, purpose, clock):
+    """Project the actual current private target without submitting any text."""
+    from app.telegram_bots.assignment_drafts import snapshot_draft
+    from app.telegram_bots.assignment_requests import request_snapshot
+    from app.telegram_bots.work_actions import thaw
+
+    if root is None:
+        return None
+    words, due_note = None, False
+    if purpose == "assign_done":
+        saved = request_snapshot(link, root)
+        words = saved.words
+        draft = saved.previous.model_dump(mode="json") if saved.previous is not None else None
+    elif purpose == "work_edit":
+        draft = thaw(root.body["draft"])
+    else:
+        saved = snapshot_draft(link, root)
+        draft, due_note = saved.draft.model_dump(mode="json"), saved.due_note
+    due = datetime.fromisoformat(draft["due_at"]).astimezone(clock.zone).strftime("%Y-%m-%d %H:%M") if draft is not None and draft["due_at"] is not None else None
+    return {"draft": draft, "words": words, "due": due, "due_note": due_note}
+
+
 def present_prompt(source, basis):
     intent = source.work["intent"]
     text = render("assign.edit_prompt" if source.key == "management.prompt" else PURPOSES[intent["purpose"]], basis["locale"], name=source.values["name"])
+    preview = source.work.get("preview")
+    if preview is not None:
+        fields = []
+        if preview["draft"] is not None:
+            draft = preview["draft"]
+            fields.append(render("assign.card", basis["locale"], objective_full=draft["objective"], success_criteria=draft["success_criteria"]))
+            if preview["due"] is not None:
+                fields.append(render("assign.due", basis["locale"], due=preview["due"]))
+            if preview["due_note"]:
+                fields.append(render("assign.due_note", basis["locale"], name=source.values["name"]))
+        if preview["words"] is not None:
+            fields.append(render("assign.original_request", basis["locale"], words=preview["words"]))
+        text = "\n\n".join([*fields, text])
     parts = [{"kind": "text", "html": html, "visible_text": visible_text(html), "protect_content": source.protected} for html in split_html(text)]
     parts[-1]["force_reply"] = True
     if "heard" in source.values:
