@@ -147,8 +147,9 @@ class AssignmentProjection:
 
         return assignment_key(root, self.item.payload)
 
-    def __init__(self, reader, link, item, source=None, *, root=None, journal=None, detail=None, clock):
+    def __init__(self, reader, link, item, source=None, *, root=None, journal=None, detail=None, clock, origin_only=False):
         self.reader, self.link, self.item, self.expected, self.clock = reader, link, item, source, clock
+        self.origin_only = origin_only
         if source is not None:
             root = private_snapshot(source.work["root"])
             if source.work.get("act") is not None:
@@ -178,7 +179,7 @@ class AssignmentProjection:
             from app.telegram_bots.assignment_lineage import FreshDraft
 
             self.fresh = FreshDraft(root.id, item.id)
-        self.detail_projection = WorkDetailProjection(reader, link, detail.record, detail.request, reusable=detail.can_reuse_conversation, expected=detail) if detail is not None else None
+        self.detail_projection = WorkDetailProjection(reader, link, detail.record, detail.request, reusable=detail.can_reuse_conversation, expected=detail) if detail is not None and not origin_only else None
         self.projection = DraftProjection(link, root.body["origin"], saved=root)
         from app.telegram_bots.assignment_proposal_records import ProposalInputs, proposal_primary
 
@@ -217,7 +218,7 @@ class AssignmentProjection:
         self.projection.check_with_permissions(rows, held)
         if self.proposal is not None:
             self.proposal.check(rows)
-        detail = None
+        detail = self.detail if self.origin_only else None
         if self.detail_projection is not None:
             self.detail_projection.check_with_permissions(rows, held)
             detail = self.detail_projection.source
@@ -250,6 +251,16 @@ class AssignmentProjection:
             journal = (_snapshot(parent), _snapshot(child) if child else None, event, child_event)
             self.family.check(rows, parent)
             self.consent.check(rows, root, journal[0], journal[1])
+        if self.origin_only:
+            from app.telegram_bots.assignment_journals import journal_state
+
+            if journal is None or self.expected.work.get("phase") != "saved":
+                raise ProductSourceRetired()
+            phase, _notice, receipt = journal_state(self.link, root, *journal, now=self.clock.now(), config=self.reader.config)
+            if phase != "saved" or receipt["id"] != self.detail.record["id"]:
+                raise ProductSourceRetired()
+            self.source = self.expected
+            return
         from app.telegram_bots.assignment_drafts import draft_input_basis
         from app.telegram_bots.assignment_voice_inputs import voice_basis
 

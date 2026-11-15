@@ -151,7 +151,7 @@ def callback_facts(sessions, condition):
     for column in callback.__table__.columns:
         args.extend((column.name, func.json(column) if sqlite and isinstance(column.type, JSON) else column))
     aggregate = func.json_group_array(func.json_object(*args)) if sqlite else func.json_agg(func.json_build_object(*args))
-    return select(aggregate).where(condition).scalar_subquery()
+    return select(aggregate).where(condition).correlate_except(callback).scalar_subquery()
 
 
 class WorkAnswerNotice:

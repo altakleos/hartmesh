@@ -227,7 +227,8 @@ ambiguous retry; ACK alone marks members in-digest. Pre-ACK retirement consumes
 controls before freeing owned members. Digest cards have one text part; invalid
 historical partial ACKs retain members for reconciliation. Retention follows
 transitive source edges. Reservations have no parts until source materialization;
-source dispatch and item/reveal controllers are not installed by this primitive.
+`NotificationRuntime` installs source dispatch and the item/reveal controllers
+around these reservations and the supervisor's existing sender.
 Reservations recognize canonical `event:` intents as well as retained `ev:` rows.
 A digest is silent only if every member would be silent; quiet hours are still
 applied at dispatch. Silent preview prefixes do not silence an audible final part.
@@ -497,8 +498,8 @@ part; that ACK starts prompt visibility and expiry. SDK authority joins the
 pending prompt and its source: closed/replaced prompts never publish or revive.
 The origin control's age still bounds delayed publication. Prompt ownership is
 not dispatch authority; the full source and current-authority fence remains
-mandatory. Typing submission and stale-draft recovery controllers are not yet
-installed.
+mandatory. `WorkTextInputs` and the installed callback recovery owners submit
+typing input or preserve its unsubmitted content through a fresh complete preview.
 
 `work_control_admission.py` reserves one acknowledged answer choice or second-tap
 decision/acceptance with its immutable Acts operation in the same guarded writer.
@@ -1668,8 +1669,9 @@ together or both roll back. `stage_activation` admits intent without performing
 its immediate host call; its pending Act remains eligible for the existing
 worker. Saved replay observes the original body. An unresolved owner's Start
 suppresses fresh Start controls across current bots. The admitting writer alone
-can exclude its own new Act while proving the original detail. These owners do
-not yet install public commands or replace existing execution surfaces.
+can exclude its own new Act while proving the original detail. `WorkChatRuntime`
+installs these owners for `/work`, `/status`, `/assign` and their callbacks;
+the existing Acts worker performs the admitted commands.
 
 
 Unknown Start reservations, including missing/malformed journals, suppress fresh
@@ -1700,8 +1702,9 @@ runless activation promise remains an unknown outcome, never permission for a
 fresh start. Cancellation of a queued Start removes mutation retries while its
 receipt remains uncertain. Successful activation retains the existing canonical
 status root. English and Chinese copy includes configured wait-duration labels.
-These controllers and pure wording choices remain dormant until runtime wiring;
-they do not change the public command menu or claim delivery of own-action replies.
+`WorkChatRuntime` installs the Start and Stop controllers and the instance Work
+command menu. `WorkExecutionPlans` publishes their own-action replies through
+the supervisor's durable sender and full source checks.
 
 
 ## Own execution replies and recovery
@@ -1737,6 +1740,39 @@ current assignment preview. The callback source validates that preview instead
 of treating the earlier short notice as consent. Waiting copy reads the actual
 activation worker's current configured interval. English and Chinese rendering
 reuse the complete-preview and protected-content rules.
+
+A pre-admission assignment/source conflict opens a read-only current Work detail
+prefixed with `start.changed`, using the actual acknowledged old Start as its
+origin. A legacy Start missing its assignment revision follows the same path;
+only this read-only validation permits that absent field. The old group is
+consumed with keyboard cleanup, and every new preview part must be acknowledged
+before a new Start is usable. `work_start_refresh.py` rejects any saved action
+marker, journal, independent witness, activation attempt or service event, both
+at admission and in the final joined SDK source read. Missing or unreadable
+owned launch evidence cannot become a new operation. Post-admission refusals
+continue through their original execution reply and immutable request body.
+Origin-only source projections reuse the acknowledged carrier's actual journal,
+consent, event and attempt proofs without treating its old Work fields as current
+authority. A separate current Work-detail projection shares their final SQL
+statement. The source chain persists through the replacement Start and native
+admission; cycles, missing carriers and unknown prior operations hold it closed.
+Capacity-derived previews retain the independently qualified waiting Act and
+transfer that exact owner through the existing capacity-offer machinery. The
+old keyboard cleanup is a scoped acknowledgement dependency, ordered before
+the replacement preview, and retained without renewing the old callback age.
+Each historical Work-view frame packs its real SQL rows into a compact subquery,
+with one correlated callback-group array. Final proof remains in the same SQL
+statement without multiplying groups across the bounded ancestry. Absence of
+any prior operation is checked with indexed global `EXISTS` predicates, never
+by filtering away conflicting targets. Migration 0053 adds only the leading-key
+activation/operation indexes; existing records and scoped uniqueness stay intact.
+`work_start_refresh_retention.py` follows the actual private gesture and frozen
+SDK signature through historical parents, cleanup and their canonical owner
+families. Scoped callback groups and individual gestures survive unresolved
+admissions even after binding changes or damaged view descriptors. Retention
+does not grant execution authority; a fresh Start still needs current access,
+an unexpired control and complete source proof. Malformed or foreign locators
+cannot pin unrelated groups, and one damaged parent cannot abort the sweep.
 
 WorkNews direct edits carry the exact historical acknowledged part, message and
 protection proof. A source refresh or repair preserves that destination; when

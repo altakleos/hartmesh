@@ -12,11 +12,11 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCal
 from deerflow.utils.file_io import await_drained
 
 
-def displayed_start(link, parent, callback):
+def displayed_start(link, parent, callback, *, readonly_start_refresh=False):
     from app.telegram_bots.work_status_control_origins import carrier_source, status_record
 
-    original = acknowledged_view(link, parent, callback.payload.get("presentation_version"))
-    source = carrier_source(original)
+    original = acknowledged_view(link, parent, callback.payload.get("presentation_version"), readonly_start_refresh=readonly_start_refresh)
+    source = carrier_source(original, readonly_start_refresh=readonly_start_refresh)
     from app.telegram_bots.work_news_carriers import ACTION_NEWS_KEYS
 
     news = source["key"] in ACTION_NEWS_KEYS and "work_event_intent" in original.payload and "detail" in source.get("work", {})
@@ -40,7 +40,12 @@ def displayed_start(link, parent, callback):
 
         if created_work(source, link) != detail["id"]:
             raise CallbackRefused()
-    if (callback.target_id, callback.payload.get("work_id"), callback.payload.get("assignment_revision")) != (detail["id"], detail["id"], detail["assignment_revision"]) or type(callback.payload.get("assignment_revision")) is not int:
+    missing = readonly_start_refresh and "assignment_revision" not in callback.payload
+    if (
+        (callback.target_id, callback.payload.get("work_id")) != (detail["id"], detail["id"])
+        or not missing
+        and (callback.payload.get("assignment_revision") != detail["assignment_revision"] or type(callback.payload.get("assignment_revision")) is not int)
+    ):
         raise CallbackRefused()
     return original, detail
 
@@ -82,7 +87,9 @@ class WorkStartAdmissions:
             from app.telegram_bots.work_status_control_origins import carrier_source
 
             offered = carrier_source(original)
-            waiting_id = offered["work"]["waiting_act"]["id"] if offered["key"] == "capacity.offer" else None
+            from app.telegram_bots.work_start_refresh import waiting_act
+
+            waiting_id = waiting_act(offered)
             fresh = await self.plans.reader.detail(link, displayed["id"], **({"ignore_activation": waiting_id} if waiting_id else {}))
             if any(not same_body(fresh.record.get(key), displayed.get(key)) for key in ("id", "objective", "success_criteria", "assignment_revision", "due_at")):
                 raise AgentConflict("Review the current assignment", reason="work-changed")
@@ -94,7 +101,7 @@ class WorkStartAdmissions:
             detail_current = await self.plans.reader.prepare_detail(link, fresh, ignore_activation=callback_id)
             from app.telegram_bots.work_news_carriers import prepare_news_origin
 
-            news_current = await prepare_news_origin(self.plans.reader, link, parent, original)
+            news_current = await prepare_news_origin(self.plans.reader, link, parent, original, activation_id=callback_id)
 
             async def admit(writer, act):
                 await guard.check(writer)

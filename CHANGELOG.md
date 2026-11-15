@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Schema changes
+
+- Migration 0053 adds nonunique indexes for Work activation and operation lookups.
+  It changes no existing records or scoped uniqueness constraints.
+
 ### Telegram Work chat
 
+- Refresh a changed assignment or legacy Start button into a complete current
+  preview, requiring a new acknowledged Start without replacing owned launches.
 - Include stored follow-up suggestions on reviewer result cards, with private
   drafting from the complete acknowledged result and preserved legacy rendering.
 - Turn a result's stored suggestion into a private assignment draft on its own

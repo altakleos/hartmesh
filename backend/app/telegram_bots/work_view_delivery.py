@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from app.telegram_bots.callbacks import CallbackRefused, Prompts
 from app.telegram_bots.notifications import aware
-from app.telegram_bots.producer import ProductSourceRetired
+from app.telegram_bots.producer import ProductSourceRetired, keyboard_cleanup_row
 from app.telegram_bots.work_news_delivery import WorkNewsPlans
 from app.telegram_bots.work_result_identity import digest
 from app.telegram_bots.work_summary_origins import qualify_summary_anchor
@@ -52,13 +52,13 @@ class WorkViewPlans(WorkNewsPlans):
 
         return await await_drained(perform())
 
-    async def open(self, link, callback_id, *, query_id, chat_id, message_id, message_thread_id, guard):
-        if type(query_id) is not str or not 1 <= len(query_id) <= 256:
+    async def open(self, link, callback_id, *, query_id, chat_id, message_id, message_thread_id, guard, refusal=False):
+        if type(query_id) is not str or not 1 <= len(query_id) <= 256 or type(refusal) is not bool:
             raise CallbackRefused()
         query_key = digest([link.id, link.binding_generation, callback_id, query_id])
 
         async def perform():
-            key = "notice:work-view:callback:" + query_key
+            key = ("notice:work-start-refresh:" if refusal else "notice:work-view:callback:") + query_key
             # List collection owns its own read/write lifetime, outside the
             # callback writer. Exact gesture replay reuses the saved cursor.
             cursor = None
@@ -74,11 +74,11 @@ class WorkViewPlans(WorkNewsPlans):
             if new_list:
 
                 async def admit(writer):
-                    group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=guard, session=writer)
+                    group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=guard, session=writer, readonly_start_refresh=refusal)
                     if group.selected.kind != "work_list_open":
                         raise CallbackRefused()
                     parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id)
-                    original = acknowledged_view(link, parent, group.presentation_version)
+                    original = acknowledged_view(link, parent, group.presentation_version, readonly_start_refresh=refusal)
                     if not {"summary_basis", "summary_view_basis"}.intersection(original.payload):
                         raise CallbackRefused()
                     await qualify_summary_anchor(link, original, writer, self.outbox.clock)
@@ -94,24 +94,45 @@ class WorkViewPlans(WorkNewsPlans):
                     if (row.owner_user_id, row.chat_id, row.binding_generation, row.message_thread_id) != (link.owner_user_id, chat_id, link.binding_generation, message_thread_id) or origin.get("callback_id") != callback_id:
                         raise CallbackRefused()
                 else:
-                    group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=guard, session=writer)
+                    group = await self.callbacks.lock_current(link, callback_id, chat_id=chat_id, message_id=message_id, message_thread_id=message_thread_id, guard=guard, session=writer, readonly_start_refresh=refusal)
                     selected = group.selected
-                    if selected.kind not in {"work_details", "work_list_page", "work_list_open"}:
+                    if selected.kind not in ({"work_start"} if refusal else {"work_details", "work_list_page", "work_list_open"}):
                         raise CallbackRefused()
                     parent = await writer.get(TelegramOutboxRow, group.anchor_outbox_id)
-                    original = acknowledged_view(link, parent, group.presentation_version)
+                    original = acknowledged_view(link, parent, group.presentation_version, readonly_start_refresh=refusal)
                     await qualify_summary_anchor(link, original, writer, self.outbox.clock)
-                    if not {"summary_basis", "summary_view_basis"}.intersection(original.payload) and original.payload["work_news_basis"]["source"]["key"] not in {"view.list", "view.detail", "remind.ready_to_resume"}:
+                    if not refusal and not {"summary_basis", "summary_view_basis"}.intersection(original.payload) and original.payload["work_news_basis"]["source"]["key"] not in {"view.list", "view.detail", "remind.ready_to_resume"}:
                         raise CallbackRefused()
                     origin = {"kind": "callback", "gesture_id": uuid4().hex, "callback_id": selected.id, "anchor_outbox_id": parent.id, "presentation_version": group.presentation_version, "anchor_signature": anchor_signature(original)}
+                    if refusal:
+                        from app.telegram_bots.work_start_controls import displayed_start
+                        from app.telegram_bots.work_start_refresh import require_unreserved, unadmitted_start
+
+                        _original, record = displayed_start(link, parent, selected, readonly_start_refresh=True)
+                        require_unreserved(group.rows)
+                        await unadmitted_start(writer, link, selected.id, record["id"])
+                        origin["refusal"] = "start.changed"
+                        from app.telegram_bots.work_start_refresh import waiting_act
+                        from app.telegram_bots.work_status_control_origins import carrier_source
+
+                        waiting = waiting_act(carrier_source(original, readonly_start_refresh=True))
+                        if waiting is not None:
+                            origin["waiting_act_id"] = waiting
+                        await self.callbacks.consume_group(group, reason="work-refresh", session=writer)
+                        cleanup = keyboard_cleanup_row(selected, owner_user_id=link.owner_user_id, now=self.outbox.clock())
+                        origin["cleanup_id"] = cleanup.id
+                        writer.add(cleanup)
                     if selected.kind == "work_list_open":
                         if cursor is None or not {"summary_basis", "summary_view_basis"}.intersection(original.payload):
                             raise CallbackRefused()
                         origin["list_cursor"] = cursor
-                    intent = {"key": "view.detail", "work_id": selected.payload["work_id"]} if selected.kind == "work_details" else {"key": "view.list", "cursor": selected.payload.get("cursor")}
+                    intent = {"key": "view.detail", "work_id": selected.payload["work_id"]} if selected.kind in {"work_details", "work_start"} else {"key": "view.list", "cursor": selected.payload.get("cursor")}
                     if selected.kind == "work_list_open":
                         intent = {"key": "view.list", "cursor": cursor}
                     row = self._row(link, key, {"version": 1, **intent, "origin": origin}, topic=message_thread_id)
+                    if refusal:
+                        cleanup.payload = {**cleanup.payload, "work_request_parent_id": row.id}
+                        row.created_at = cleanup.created_at + timedelta(microseconds=1)
                     writer.add(row)
                     expires = aware(selected.created_at) + timedelta(days=self.callbacks.config.callbacks.max_age_days)
                     if selected.expires_at is not None:

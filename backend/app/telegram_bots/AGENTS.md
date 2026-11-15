@@ -1,6 +1,6 @@
 # Managed Telegram bots
 
-Work, proposals, news, status, outcomes and typing: [guide](../../docs/TELEGRAM_WORK.md).
+Work, Start refresh and input recovery: [guide](../../docs/TELEGRAM_WORK.md).
 
 `config.py` validates optional `AppConfig.model_extra["telegram_bots"]` without
 starting services. Nested models forbid unknown keys and coercion; absence returns

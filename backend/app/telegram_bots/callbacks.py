@@ -241,7 +241,32 @@ def _row(value):
     return CallbackRow(**values)
 
 
-def _validate_rows(parent, rows, *, part=None, allow_pending=False):
+def _start_refresh_payload(kind, actual, expected):
+    if json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True):
+        return True
+    return (
+        kind == "work_start"
+        and type(actual) is dict
+        and "assignment_revision" not in actual
+        and type(expected) is dict
+        and type(expected.get("assignment_revision")) is int
+        and json.dumps(actual, sort_keys=True) == json.dumps({key: value for key, value in expected.items() if key != "assignment_revision"}, sort_keys=True)
+    )
+
+
+def start_refresh_keyboard(actual, expected):
+    """Only an absent Start revision may differ during read-only recovery."""
+    if len(actual) != len(expected) or any(len(left) != len(right) for left, right in zip(actual, expected, strict=True)):
+        return False
+    return all(
+        json.dumps({key: value for key, value in left.items() if key != "payload"}, sort_keys=True) == json.dumps({key: value for key, value in right.items() if key != "payload"}, sort_keys=True)
+        and _start_refresh_payload(left.get("kind"), left.get("payload"), right.get("payload"))
+        for left_line, right_line in zip(actual, expected, strict=True)
+        for left, right in zip(left_line, right_line, strict=True)
+    )
+
+
+def _validate_rows(parent, rows, *, part=None, allow_pending=False, readonly_start_refresh=False):
     """A stored row cannot change what its frozen keyboard offered."""
     version = parent.payload.get("presentation_version", 0)
     if type(version) is not int or version < 0:
@@ -278,7 +303,7 @@ def _validate_rows(parent, rows, *, part=None, allow_pending=False):
             or (type(row.payload.get("presentation_pending")) is not bool or row.payload["presentation_pending"] and not allow_pending)
             or (row.link_id, row.chat_id, row.binding_generation, row.message_thread_id, row.payload.get("anchor_outbox_id")) != (parent.link_id, parent.chat_id, parent.binding_generation, parent.message_thread_id, parent.id)
             or (row.kind, row.target_kind, row.target_id, row.payload.get("label")) != (spec["kind"], spec["target_kind"], spec["target_id"], spec["label"])
-            or json.dumps(payload, sort_keys=True) != json.dumps(spec["payload"], sort_keys=True)
+            or not (_start_refresh_payload(row.kind, payload, spec["payload"]) if readonly_start_refresh else json.dumps(payload, sort_keys=True) == json.dumps(spec["payload"], sort_keys=True))
             or json.dumps(row.payload.get("label_values"), sort_keys=True) != json.dumps(spec.get("label_values"), sort_keys=True)
             or (_aware(row.expires_at).isoformat() if row.expires_at else None) != spec["expires_at"]
         ):
@@ -554,7 +579,7 @@ class CallbackRepository:
         await session.flush()
         return WrittenCallbackGroup(group, tuple(ids))
 
-    async def _locked(self, session, link, callback_id):
+    async def _locked(self, session, link, callback_id, *, readonly_start_refresh=False):
         await self._binding(session, link)
         selected = await session.get(TelegramCallbackRow, callback_id)
         if selected is None or selected.link_id != link.id:
@@ -579,7 +604,7 @@ class CallbackRepository:
         selected = next((row for row in rows if row.id == callback_id), None)
         if selected is None:
             raise CallbackRefused() from None
-        _validate_rows(parent, rows)
+        _validate_rows(parent, rows, readonly_start_refresh=readonly_start_refresh)
         return parent, rows, selected
 
     def _usable(self, row):
@@ -596,7 +621,7 @@ class CallbackRepository:
         if too_old or row.expires_at is not None and now >= _aware(row.expires_at):
             raise CallbackRefused() from None
 
-    async def adopt(self, link, group_id, message_id, *, chat_id, message_thread_id, outbox_id, presentation_version, check_current):
+    async def adopt(self, link, group_id, message_id, *, chat_id, message_thread_id, outbox_id, presentation_version, check_current, readonly_start_refresh=False):
         if type(message_id) is not int or message_id <= 0 or type(chat_id) is not int or chat_id != link.chat_id or type(presentation_version) is not int:
             return False
 
@@ -607,7 +632,7 @@ class CallbackRepository:
                 async with self._writer() as session:
                     # Discover one pointer, then always lock anchor before group.
                     identity = await session.scalar(select(TelegramCallbackRow.id).where(TelegramCallbackRow.group_id == group_id, TelegramCallbackRow.link_id == link.id).order_by(TelegramCallbackRow.id).limit(1))
-                    parent, rows, _ = await self._locked(session, link, identity)
+                    parent, rows, _ = await self._locked(session, link, identity, readonly_start_refresh=readonly_start_refresh)
                     if (
                         parent.id != outbox_id
                         or parent.payload.get("presentation_version", 0) != presentation_version
@@ -629,11 +654,13 @@ class CallbackRepository:
 
         return await await_drained(perform())
 
-    async def lock_current(self, link, callback_id, *, chat_id, message_id, message_thread_id, guard, session):
+    async def lock_current(self, link, callback_id, *, chat_id, message_id, message_thread_id, guard, session, readonly_start_refresh=False):
         current = await guard.check(session)
         if not isinstance(current, BotLink) or any(getattr(current, name) != getattr(link, name) for name in _SCOPE):
             raise CallbackRefused() from None
-        parent, rows, selected = await self._locked(session, link, callback_id)
+        parent, rows, selected = await self._locked(session, link, callback_id, readonly_start_refresh=readonly_start_refresh)
+        if readonly_start_refresh and selected.kind != "work_start":
+            raise CallbackRefused()
         if type(message_id) is not int or message_id <= 0 or type(chat_id) is not int or (selected.chat_id, selected.message_id, selected.message_thread_id) != (chat_id, message_id, _topic(message_thread_id)):
             raise CallbackRefused() from None
         self._usable(selected)
@@ -883,9 +910,14 @@ class CallbackRepository:
                 from app.telegram_bots.work_start_retention import reserved_starts
 
                 start_groups, start_anchors = await reserved_starts(session)
+                from app.telegram_bots.work_start_refresh_retention import refresh_dependencies
+
+                refresh = await refresh_dependencies(session, now, max_age_days=self.config.callbacks.max_age_days)
+                start_groups.update(refresh.groups)
+                start_anchors.update(refresh.deliveries)
                 from app.telegram_bots.work_execution_retention import execution_dependencies
 
-                execution_groups, execution_anchors, _execution_acts = await execution_dependencies(session)
+                execution_groups, execution_anchors, _execution_acts = await execution_dependencies(session, now=now, max_age_days=self.config.callbacks.max_age_days)
                 start_groups.update(execution_groups)
                 start_anchors.update(execution_anchors)
                 from app.telegram_bots.work_command_stop_retention import command_stop_dependencies
@@ -1061,6 +1093,8 @@ class CallbackRepository:
                     show_proofs.add(candidate.id)
                 removed = 0
                 for row in rows:
+                    if row.id in refresh.callbacks:
+                        continue
                     if row.id in command_stops.callbacks:
                         continue
                     if row.id in show_proofs:
@@ -1395,6 +1429,7 @@ class CallbackHandler:
                     outbox_id=row.payload.get("anchor_outbox_id"),
                     presentation_version=row.payload.get("presentation_version"),
                     check_current=current,
+                    readonly_start_refresh=row.kind == "work_start" and "assignment_revision" not in row.payload,
                 ):
                     raise CallbackRefused()
                 if not current():

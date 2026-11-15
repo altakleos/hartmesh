@@ -114,11 +114,12 @@ class WorkCapacityOfferReader(WorkViewReader):
 
 
 class WorkCapacityOfferProjection:
-    def __init__(self, reader, link, item, source=None, *, detail=None, clock):
+    def __init__(self, reader, link, item, source=None, *, detail=None, clock, origin_only=False, activation_id=None):
         self.reader, self.link, self.item, self.source, self.clock = reader, link, item, source, clock
+        self.origin_only, self.activation_id = origin_only, activation_id
         self.intent = offer_intent(item)
         self.detail = detail or detail_read(source.work["detail"])
-        self.projection = WorkDetailProjection(reader, link, self.detail.record, self.detail.request, reusable=self.detail.can_reuse_conversation, expected=self.detail, ignore_activation=self.intent["act_id"])
+        self.projection = None if origin_only else WorkDetailProjection(reader, link, self.detail.record, self.detail.request, reusable=self.detail.can_reuse_conversation, expected=self.detail, ignore_activation=self.intent["act_id"])
         self.activation_parent = None
 
     async def prepare_source(self):
@@ -144,7 +145,7 @@ class WorkCapacityOfferProjection:
         return current
 
     def extend(self, query):
-        query = self.projection.extend(query)
+        query = self.projection.extend(query) if self.projection is not None else query
         self.delivery_column = len(query.column_descriptions)
         delivery, act, callback, parent, control, attempt, settings = (
             TelegramOutboxRow,
@@ -175,7 +176,8 @@ class WorkCapacityOfferProjection:
         raise ProductSourceRetired()
 
     def check_with_permissions(self, rows, held):
-        self.projection.check_with_permissions(rows, held)
+        if self.projection is not None:
+            self.projection.check_with_permissions(rows, held)
         delivery, journal, callback, parent, _control, attempt, settings = rows[0][self.delivery_column : self.delivery_column + 7]
         controls = list({r[self.delivery_column + 4].id: r[self.delivery_column + 4] for r in rows if r[self.delivery_column + 4] is not None}.values())
         try:
@@ -183,25 +185,45 @@ class WorkCapacityOfferProjection:
         except (ValueError, KeyError, TypeError):
             raise ProductSourceRetired() from None
         primary = rows[0][self.activation_parent.column]
-        act = qualify_waiting(self.link, journal, attempt, callback, parent, controls, self.intent["origin"], activation_parent=_snapshot(primary) if primary is not None else None)
+        transfer = {"capacity_transfer": {"outbox_id": self.item.id, "operation_id": self.activation_id}} if self.origin_only and self.activation_id is not None else None
+        act = qualify_waiting(
+            self.link,
+            journal,
+            attempt,
+            callback,
+            parent,
+            controls,
+            self.intent["origin"],
+            expected=self.source.work["waiting_act"] if self.origin_only else None,
+            transfer=transfer,
+            activation_parent=_snapshot(primary) if primary is not None else None,
+        )
         from app.telegram_bots.work_capacity_reads import capacity_scope
 
         if (
-            not self.clock.capacity.capacity.available
-            or self.clock.capacity.scope != capacity_scope(self.link)
+            not self.origin_only
+            and not self.clock.capacity.capacity.available
+            or not self.origin_only
+            and self.clock.capacity.scope != capacity_scope(self.link)
             or capacity_scope(rows[0][0]) != capacity_scope(self.link)
-            or rows[0][self.delivery_column + 7] != self.item.id
+            or not self.origin_only
+            and rows[0][self.delivery_column + 7] != self.item.id
             or _item(delivery) != self.item
             or (delivery.link_id, delivery.owner_user_id, delivery.binding_generation, delivery.chat_id, delivery.instance_id, delivery.work_id, delivery.event_id, delivery.request_id)
             != (self.link.id, self.link.owner_user_id, self.link.binding_generation, self.link.chat_id, self.link.agent_ref, act.work_id, None, None)
             or delivery.dedupe_key != "free:" + act.id + ":" + str(self.intent["ordinal"])
             or delivery.class_ != ("reply" if self.item.payload.get("work_news_basis", {}).get("reveal") else "service")
             or parent.message_thread_id != delivery.message_thread_id
-            or settings.locale != self.clock.settings.locale
-            or settings.timezone != self.clock.settings.timezone
-            or not startable_detail(self.projection.source, self.link)
+            or not self.origin_only
+            and settings.locale != self.clock.settings.locale
+            or not self.origin_only
+            and settings.timezone != self.clock.settings.timezone
+            or not self.origin_only
+            and not startable_detail(self.projection.source, self.link)
         ):
             raise ProductSourceRetired()
+        if self.origin_only:
+            return
         record = self.projection.source.record
 
         def date(value):

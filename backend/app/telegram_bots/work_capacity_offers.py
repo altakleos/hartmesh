@@ -255,6 +255,11 @@ class WorkCapacityOffers(WorkNewsPlans):
 
 async def transfer_offer(writer, link, original, operation_id, *, now):
     source = original.payload["work_news_basis"]["source"]
+    if source["key"] == "view.detail":
+        from app.telegram_bots.work_start_refresh import original_capacity_offer
+
+        original = await original_capacity_offer(writer, link, original)
+        source = original.payload["work_news_basis"]["source"]
     if source["key"] != "capacity.offer":
         return
     expected = source["work"]["waiting_act"]

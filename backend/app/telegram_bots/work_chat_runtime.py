@@ -33,7 +33,7 @@ from app.telegram_bots.work_stop_controls import WorkStopAdmissions
 from app.telegram_bots.work_view_delivery import WorkViewPlans
 from app.telegram_bots.work_view_reviews import WorkViewReviews
 from app.telegram_bots.work_view_sources import WorkViewReader
-from deerflow.agent_instances.contract import AgentDenied
+from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -213,6 +213,9 @@ class WorkChatRuntime:
             guard = self.guard(channel, link)
             await guard.prepare()
             scope = dict(chat_id=row.chat_id, message_id=row.message_id, message_thread_id=row.message_thread_id, guard=guard)
+            if row.kind == "work_start" and "assignment_revision" not in row.payload:
+                await self.views.open(link, row.id, query_id=query_id, refusal=True, **scope)
+                return True
             management_parent = None
             if row.kind in {"assign_edit", "assign_discard", "work_change_save", "work_withdraw_confirm", "back", "act_check", "cancel_wait", "accept_open", "changes_open"}:
                 from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
@@ -282,7 +285,13 @@ class WorkChatRuntime:
             else:
                 assignment = row.kind in {"assign_save", "assign_start"}
                 controller = self.assignment_admissions if assignment else self.stops if row.kind == "stop_attempt" else self.starts
-                act = await controller.stage(link, row.id, **scope)
+                try:
+                    act = await controller.stage(link, row.id, **scope)
+                except AgentConflict as error:
+                    if row.kind != "work_start" or error.reason not in {"work-changed", "sources-changed"}:
+                        raise
+                    await self.views.open(link, row.id, query_id=query_id, refusal=True, **scope)
+                    return True
                 try:
                     await self.host.acts.check(
                         act.id,

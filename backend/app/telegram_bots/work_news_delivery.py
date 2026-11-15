@@ -127,7 +127,7 @@ def conceal_news(source):
     )
 
 
-def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
+def frozen_news(captured, *, acknowledged=False, pending=False, _history=None, readonly_start_refresh=False):
     try:
         item = captured.item
         basis = item.payload["work_news_basis"]
@@ -194,7 +194,7 @@ def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
                     parts=[*prefix, *previous["parts"]],
                     payload={**item.payload, "presentation_version": index, "work_news_basis": previous["basis"], "product_keyboard_basis": previous["basis"]["keyboard"]},
                 )
-                _prior, prior_source, _recipe = frozen_news(SimpleNamespace(link=captured.link, item=old, part=None), _history=qualified)
+                _prior, prior_source, _recipe = frozen_news(SimpleNamespace(link=captured.link, item=old, part=None), _history=qualified, readonly_start_refresh=readonly_start_refresh)
                 retired = deepcopy(previous["parts"])
                 for part in retired:
                     if part["state"] in {"pending", "sending"}:
@@ -215,11 +215,14 @@ def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
                 raise ValueError()
             origin = basis["origin"]
             old = replace(item, class_=news_class(source.key), parts=historical, payload={**item.payload, "presentation_version": 0, "work_news_basis": origin, "product_keyboard_basis": origin["keyboard"]})
-            _origin, previous, _recipe = frozen_news(SimpleNamespace(link=captured.link, item=old, part=historical[-1]), acknowledged=True)
+            _origin, previous, _recipe = frozen_news(SimpleNamespace(link=captured.link, item=old, part=historical[-1]), acknowledged=True, readonly_start_refresh=readonly_start_refresh)
             if not origin["concealed"] or previous.event_signature != source.event_signature or previous.work_id != source.work_id:
                 raise ValueError()
         expected, keyboard = recipes(source, basis, item.id, captured.link)
-        if not same_body(expected, basis["parts"]) or not same_body(keyboard, basis["keyboard"]) or not same_body(keyboard, item.payload["product_keyboard_basis"]) or len(parts) != len(expected):
+        from app.telegram_bots.callbacks import start_refresh_keyboard
+
+        matches = start_refresh_keyboard(basis["keyboard"], keyboard) if readonly_start_refresh else same_body(keyboard, basis["keyboard"])
+        if not same_body(expected, basis["parts"]) or not matches or not same_body(basis["keyboard"], item.payload["product_keyboard_basis"]) or len(parts) != len(expected):
             raise ValueError()
         if version:
             cleanup = basis["cleanup_id"]

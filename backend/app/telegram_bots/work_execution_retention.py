@@ -1,6 +1,7 @@
 """Original execution consent survives unresolved delivery and cancellation."""
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 
 from sqlalchemy import or_, select
 
@@ -56,7 +57,7 @@ def closed_stop(root, journals, attempts, events):
         return False
 
 
-async def execution_dependencies(session):
+async def execution_dependencies(session, *, now=None, max_age_days=180):
     """Conservative same-binding evidence pins; never renew callback age."""
     deliveries = list(
         await session.scalars(
@@ -65,6 +66,9 @@ async def execution_dependencies(session):
     )
     if not deliveries:
         return set(), set(), set()
+    from app.telegram_bots.work_start_refresh_retention import refresh_dependencies
+
+    refresh = await refresh_dependencies(session, now or datetime.now(UTC), max_age_days=max_age_days)
     links = {row.id: row for row in await session.scalars(select(TelegramBotLinkRow))}
     controls = {row.id: row for row in await session.scalars(select(TelegramCallbackRow))}
     identities = {intent["act_id"] for row in deliveries if type((intent := row.payload.get("work_execution_intent", row.payload.get("capacity_offer_intent")))["act_id"]) is str}
@@ -106,7 +110,7 @@ async def execution_dependencies(session):
                     closed = closed_activation(journal, link, activation_attempts.get((journal.work_id, journal.id)), work_id=delivery.work_id) if journal.kind == "activate" else closed_stop(journal, journals, attempts, events)
             except (ProductSourceRetired, KeyError, TypeError, ValueError, AttributeError):
                 pass
-        if not closed or delivery.state in {"pending", "sending", "failed"}:
+        if not closed or delivery.state in {"pending", "sending", "failed"} or delivery.id in refresh.deliveries:
             anchors.add(delivery.id)
             if type(intent.get("act_id")) is str:
                 held_acts.add(intent["act_id"])
