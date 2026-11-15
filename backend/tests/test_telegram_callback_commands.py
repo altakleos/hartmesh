@@ -34,7 +34,7 @@ async def setup(db, monkeypatch, *, with_threads=False, off_loop=False):
     return e
 
 
-def press(e, identity, callback, *, message_id=501):
+def press(e, identity, callback, *, message_id=501, topic=None):
     return Update.de_json(
         {
             "update_id": identity,
@@ -43,7 +43,7 @@ def press(e, identity, callback, *, message_id=501):
                 "from": {"id": e.link.telegram_user_id, "first_name": "Fixture", "is_bot": False},
                 "chat_instance": "fixture-chat",
                 "data": "h1:" + callback,
-                "message": {"message_id": message_id, "date": 1_893_456_000, "chat": {"id": e.link.chat_id, "type": "private"}, "text": "Fixed settings"},
+                "message": {"message_id": message_id, "date": 1_893_456_000, "chat": {"id": e.link.chat_id, "type": "private"}, "text": "Fixed settings", **({"message_thread_id": topic} if topic is not None else {})},
             },
         },
         e.channel.bot,

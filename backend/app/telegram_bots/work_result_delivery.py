@@ -12,8 +12,16 @@ class WorkReviewPlans(WorkRequestPlans):
     def _extras(self, source):
         return {"result_files": {"version": 1, "capacity": self.outbox.config.files.in_memory_max_bytes, "max_bytes": self.outbox.config.files.max_outbound_bytes}, "suggestion_controls": 1}
 
-    def _presentation(self, source, settings, identity, *, concealed=None):
-        return present_review_files(source, locale=settings.locale, concealed=source.protected if concealed is None else concealed, outbox_id=identity, suggestion_controls=True, **result_options(self._extras(source)["result_files"]))
+    def _presentation(self, source, settings, identity, *, concealed=None, start_refusal=False):
+        return present_review_files(
+            source,
+            locale=settings.locale,
+            concealed=source.protected if concealed is None else concealed,
+            outbox_id=identity,
+            suggestion_controls=True,
+            start_refusal=start_refusal,
+            **result_options(self._extras(source)["result_files"]),
+        )
 
     async def _freeze(self, writer, link, row, source, settings, *, pending=True, navigation_origin=None):
         from app.telegram_bots.work_result_identity import result_identity

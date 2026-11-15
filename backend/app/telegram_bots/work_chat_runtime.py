@@ -57,6 +57,10 @@ class WorkChatRuntime:
         self.executions = WorkExecutionPlans(reader=WorkExecutionReader(capacity=self.capacity, **shared), acts=host.acts, product=host.product_name, **delivery)
         host.work_execution_sources = WorkNewsSources(self.executions)
         self.starts = WorkStartAdmissions(self.views, host.acts)
+        from app.telegram_bots.work_start_review_replies import WorkStartReviewReplies
+
+        self.start_reviews = WorkStartReviewReplies(self)
+        self.executions.review_handoffs = self.start_reviews
         self.stops = WorkStopAdmissions(self.views, host.acts)
         self.assignments = AssignmentPlans(reader=AssignmentReader(host.acts), **delivery)
         self.assignment_answers = AssignmentAnswers(self.assignments)
@@ -108,6 +112,7 @@ class WorkChatRuntime:
             "management_prompt_intent": self.management_edits.prompts,
             "command_stop_intent": self.command_stops.choices,
             "capacity_offer_intent": self.offers,
+            "work_start_refusal_intent": self.start_reviews,
         }
         found = [owner for key, owner in owners.items() if key in item.payload]
         if len(found) > 1:
@@ -288,6 +293,9 @@ class WorkChatRuntime:
                 try:
                     act = await controller.stage(link, row.id, **scope)
                 except AgentConflict as error:
+                    if row.kind == "work_start" and error.reason == "awaiting-review":
+                        await self.start_reviews.open(link, row.id, query_id=query_id, **scope)
+                        return True
                     if row.kind != "work_start" or error.reason not in {"work-changed", "sources-changed"}:
                         raise
                     await self.views.open(link, row.id, query_id=query_id, refusal=True, **scope)

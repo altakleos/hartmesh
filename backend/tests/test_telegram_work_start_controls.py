@@ -16,15 +16,15 @@ from deerflow.persistence.agent_instances.work import AgentWorkRow
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow
 
 
-async def start_control(e, monkeypatch):
+async def start_control(e, monkeypatch, *, topic=None):
     e.acts = Acts(e.db.sessions, settings=e.db.settings, callbacks=e.channel._services.callbacks, outbox=e.sender.outbox, work=e.human.work, authority=e.live.authority, links=e.db.links)
     await prepare_startable(e, monkeypatch)
-    plans, _ = await prepare_view(e)
-    await dispatch(e, 3501)
+    plans, _ = await prepare_view(e, topic=topic)
+    await dispatch(e, 3501, topic=topic)
     async with e.db.sessions() as reader:
         detail = await reader.scalar(select(TelegramCallbackRow).where(TelegramCallbackRow.kind == "work_details", TelegramCallbackRow.target_id == e.work["id"]))
-    e.identity = await plans.open(e.link, detail.id, query_id="start-preview", chat_id=e.link.chat_id, message_id=3501, message_thread_id=None, guard=await guard_for(e))
-    await dispatch(e, 3502)
+    e.identity = await plans.open(e.link, detail.id, query_id="start-preview", chat_id=e.link.chat_id, message_id=3501, message_thread_id=topic, guard=await guard_for(e))
+    await dispatch(e, 3502, topic=topic)
     async with e.db.sessions() as reader:
         button = await reader.scalar(select(TelegramCallbackRow).where(TelegramCallbackRow.kind == "work_start", TelegramCallbackRow.target_id == e.work["id"]))
     assert button and not e.dispatch_errors, e.dispatch_errors

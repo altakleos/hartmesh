@@ -1,6 +1,7 @@
 """Detached result media plans; only current-recipient exports authorize bytes."""
 
-from app.telegram_bots.render import render_plain
+from app.telegram_bots.render import render, render_plain
+from app.telegram_bots.split import split_html, visible_text
 from app.telegram_bots.work_requests import WorkRequestPresentation, present_request
 from deerflow.agent_instances.work_contract import WorkOutcome, WorkSource
 
@@ -60,12 +61,17 @@ def result_media(files, *, capacity, max_bytes, protected):
     return tuple(parts)
 
 
-def present_review_files(source, *, locale, capacity, max_bytes, concealed=False, outbox_id=None, suggestion_controls=False):
+def present_review_files(source, *, locale, capacity, max_bytes, concealed=False, outbox_id=None, suggestion_controls=False, start_refusal=False):
     if source.request["purpose"] != "review":
         raise ValueError("work-review-required")
     files = result_files(source.work, locale=locale)
     media = result_media(files, capacity=capacity, max_bytes=max_bytes, protected=source.protected)
     card = present_request(source, locale=locale, concealed=concealed, outbox_id=outbox_id, files_above=tuple(file["filename"] for file in files), suggestion_controls=suggestion_controls)
+    if start_refusal:
+        if concealed:
+            raise ValueError("start-review-requires-full-preview")
+        html = render("start.needs_review", locale) + "\n\n" + "".join(part["html"] for part in card.parts)
+        card = WorkRequestPresentation(tuple({"kind": "text", "html": chunk, "visible_text": visible_text(chunk), "protect_content": source.protected} for chunk in split_html(html)), card.keyboard)
     return WorkRequestPresentation((() if concealed else media) + card.parts, card.keyboard)
 
 

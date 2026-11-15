@@ -1,5 +1,12 @@
 # Backend Tests
 
+`test_telegram_start_review_reply.py` uses actual acknowledged Start/Save + Start
+gestures and Native Work report/settlement to test full review handoffs. Recorded
+SDK checks cover files, topics, held repair, full ACK, confirmation, restart,
+retention and late source/permission/admission loss; the strict wrapper repeats
+these paths. Its directory-Space and run-record adapters prove protocol behavior,
+not native containment or default worker composition.
+
 Start context tests join actual SQL/native admission to recorded SDK ancestry.
 Keep original CAS/deadlines; cover missing journals, receipt drift and aged sweeps.
 

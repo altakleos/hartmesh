@@ -440,8 +440,11 @@ async def saved(db, identity):
         return await session.get(TelegramOutboxRow, identity)
 
 
-def message(request, endpoint="sendMessage", *, identity=501, chat=7_000_000_001):
-    return request.enqueue(endpoint, result={"message_id": identity, "date": 1_893_456_000, "chat": {"id": chat, "type": "private"}, "text": "Saved product text"})
+def message(request, endpoint="sendMessage", *, identity=501, chat=7_000_000_001, topic=None):
+    result = {"message_id": identity, "date": 1_893_456_000, "chat": {"id": chat, "type": "private"}, "text": "Saved product text"}
+    if topic is not None:
+        result["message_thread_id"] = topic
+    return request.enqueue(endpoint, result=result)
 
 
 @pytest.mark.parametrize("fallback", [None, "url-first", "plain-first"])

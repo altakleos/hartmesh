@@ -91,7 +91,13 @@ class WorkResultRecovery(WorkRequestRecovery):
 
     def _presentation(self, source, settings, link, row, concealed):
         return present_review_files(
-            source, locale=settings.locale, concealed=concealed, outbox_id=row.id, suggestion_controls=row.payload["work_request_basis"].get("suggestion_controls") == 1, **result_options(self._extras(source)["result_files"])
+            source,
+            locale=settings.locale,
+            concealed=concealed,
+            outbox_id=row.id,
+            suggestion_controls=row.payload["work_request_basis"].get("suggestion_controls") == 1,
+            start_refusal=row.payload["work_request_basis"].get("navigation_origin", {}).get("kind") == "start",
+            **result_options(self._extras(source)["result_files"]),
         )
 
     async def _replace(self, writer, link, row, source, settings, *, reveal=None, force_new=False, choice=None, repair=False, navigation_origin=None):

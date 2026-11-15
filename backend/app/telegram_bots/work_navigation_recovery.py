@@ -76,7 +76,11 @@ class WorkNavigationRecovery(WorkRequestRecovery):
     held_reason = None
 
     def _held(self, row):
-        return self.held_reason is not None and row is not None and row.state == "failed" and row.failed_reason == self.held_reason and claim_of(row) == (None, None, None) and row.message_thread_id is None
+        if self.held_reason is None or row is None or row.state != "failed" or row.failed_reason != self.held_reason or claim_of(row) != (None, None, None):
+            return False
+        # A manual Start handoff has an exact original-topic proof. Repair
+        # restores that proof before writing; it never moves the destination.
+        return row.message_thread_id is None or self.held_reason == "work-result-refresh-required" and row.payload.get("work_request_basis", {}).get("navigation_origin", {}).get("kind") == "start"
 
     async def _replace_held(self, writer, link, row, source, settings, origin):
         await self._replace(writer, link, row, source, settings, force_new=True, navigation_origin=origin.value)
@@ -202,6 +206,11 @@ class _NavigationRepairProjection(NavigationOriginProjection):
 
 class WorkReviewNavigationRecovery(WorkNavigationRecovery, WorkResultRecovery):
     held_reason = "work-result-refresh-required"
+
+    def _repairable(self, row):
+        if row is not None and row.payload.get("work_request_basis", {}).get("navigation_origin", {}).get("kind") == "start":
+            return self._held(row)
+        return WorkResultRecovery._repairable(row)
 
     async def _replace_held(self, writer, link, row, source, settings, origin):
         await self._replace(writer, link, row, source, settings, repair=True, navigation_origin=origin.value)

@@ -288,7 +288,7 @@ class WorkExecutionProjection:
         result = self.projection.extend(query) if self.projection is not None else query
         self.delivery_column = len(result.column_descriptions)
         delivery, act, callback, parent, control, original, child, event, settings, requester = (
-            TelegramOutboxRow,
+            aliased(TelegramOutboxRow),
             aliased(TelegramActRow),
             aliased(TelegramCallbackRow),
             aliased(TelegramOutboxRow),
