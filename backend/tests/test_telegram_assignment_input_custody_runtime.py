@@ -8,6 +8,7 @@ from _telegram_bot_test_support import make_update
 from _telegram_repository_test_support import db as db
 from sqlalchemy import select
 from test_telegram_assignment_entrypoints import installed_prompt
+from test_telegram_work_preview_recovery import dispatch
 from test_telegram_work_source_delivery import work_delivery as work_delivery
 from test_work_attention_pages import work_pages as work_pages
 
@@ -47,8 +48,27 @@ async def test_selected_prompt_keeps_original_custody_when_answer_fails_before_c
         assert ordinary == [] and calls == []
         async with e.db.sessions() as reader:
             mark = await reader.get(TelegramInboundMarkRow, (e.link.id, 6231, e.link.chat_id))
-            assert mark.route_kind == "assignment_notice" and mark.route_complete
+            assert mark.route_kind == "work_card_hold" and not mark.route_complete
+            assert mark.sanitized_input["text"] == "Review the handbook"
+            assert mark.thread_id is None and mark.turn_id is None and not mark.operation_ids
+            assert mark.route_basis["closed_typing"]["prompt_id"] == prompt.id
             notices = [row for row in await reader.scalars(select(TelegramOutboxRow)) if any(part.get("source_ref", {}).get("key") == "prompt.closed" for part in row.parts)]
             assert len(notices) == 1
+            notice = notices[0]
+            assert mark.route_basis["work_closed"]["notice_id"] == notice.id
+            controls = list(await reader.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == notice.parts[-1]["callback_group_id"])))
+            assert {control.kind for control in controls} == {"prompt_reopen", "prompt_send_new", "prompt_discard"}
+            assert all(control.message_id is None for control in controls)
+        for index in range(len(notice.parts)):
+            await dispatch(e, 6232 + index)
+        assert not e.dispatch_errors, e.dispatch_errors
+        assert await e.channel.handle_update(update)
+        await e.channel._drain_ingress()
+        async with e.db.sessions() as reader:
+            mark = await reader.get(TelegramInboundMarkRow, (e.link.id, 6231, e.link.chat_id))
+            assert mark.route_basis["work_closed"]["notice_id"] == notice.id and not mark.route_complete
+            for control in controls:
+                assert (await reader.get(TelegramCallbackRow, control.id)).message_id == 6231 + len(notice.parts)
+        assert ordinary == [] and calls == []
     finally:
         await owner.stop()
