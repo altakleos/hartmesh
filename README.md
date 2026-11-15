@@ -138,6 +138,10 @@ Change and Withdraw explain lost permissions when pressed. A denied Stop keeps
 the original attempt and identifies its requester only with current Inspect.
 If permissions change after a preview, Start and Save explain missing access
 without showing assignment contents. Restored access requires another press.
+Saved Starts report current lifecycle and execution-readiness refusals. When
+access and execution are restored, a fresh preview requires a new Start press.
+Unattempted saved assignments explain current lifecycle and permission loss
+while preserving their original Save or Save and Start operation.
 Current Inspect grants control visibility; referenced files retain separate access
 checks. Uncertain execution requires qualified containment and explicit recovery.
 The Work command API can stop one exact running attempt without cancelling the

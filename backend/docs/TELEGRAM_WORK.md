@@ -2222,6 +2222,55 @@ its receipt/recovery path. The existing lifecycle notice rechecks live account,
 Use precedence, status, token and destination at the SDK boundary; this path
 contains no private Work content and creates no conversation or activation.
 
+Saved Start refusals retain their canonical execution notice and immutable
+journal. `WorkSavedRefusals` may add a fixed lifecycle or missing-Inspect reply
+only after read-only receipt reconciliation and conclusive no-effect proof.
+An AgentDenied receipt read permits this proof only for an actual unattempted
+journal; unreadable or attempted unknown receipts remain held. Creation and
+SDK entry join the actual root/effective child, original acknowledged source
+and complete group, saved primary signature, canonical notice, live account,
+binding, current grants/policy, identity, preferences and actual delivery claim.
+Global native activation promises and operation events under either operation
+id veto this exception. The source projection adds facts to the existing
+authority statement; it cannot grant access or replace its default checks.
+Typed read-ceiling refusals use the same unattempted proof and existing fixed
+status exception. The shared prepared route evaluator folds issuer-matching
+role limits into the principal and rejects configuration/principal drift in
+the final joined statement; stale read-capability advice is never adopted.
+Fixed replies contain no Work body and keep their original topic. Changed
+lifecycle, restored Inspect and late native ownership retire only that fixed
+reply; original execution ownership remains intact.
+The actual part rejects added ForceReply or reply-target fields even when its
+persisted fixed-status recipe is unchanged. A saved `ceiling` refusal uses the
+same no-effect proof and current permission explanation.
+
+An admitted Save or Save and Start refused before its first service call may
+use the same minimal fixed reply before private draft observation. Its proof
+uses the real draft, delegate, exact full original Save consent and canonical
+assignment notice. Initial `read_family` and final joined `DelegateFamily`
+checks veto surviving no-due children or siblings, even with damaged forward
+metadata. Global native events, launch promises and any deterministic activation
+child also veto this exception. Current Inspect loss uses `assign.no_access`;
+current write-capability loss uses the ordinary fixed permission wording.
+For an empty-target composite whose primary is conclusively refused, only the
+existing bookkeeping transition from `awaiting_primary` to `refused` is
+equivalent in this proof's signature. All other continuation, source, counter,
+result and cancellation facts stay bound. Observation performs no continuation
+write, delegation retry or activation. Attempted and unknown owners retain
+their original receipt/recovery path.
+
+For a conclusively refused Start without a native effect, the execution reader
+uses the real read-only execution probe to explain current disabled agents,
+operator hold, changed host or unverified files. An unknown cause keeps the
+generic repair wording. Current custody and administrator status determine
+repair advice. If access and execution are restored, the source offers a
+complete fresh preview, acknowledged controls and a new explicit Start press.
+It never refreshes an attempted body or retries the original action. Source
+signatures, original context/receipt ownership and final global native-absence
+checks fence the probe across creation, refresh and SDK admission. Prepared
+directory and transport test adapters prove protocol behavior, not native
+containment; deployed acceptance remains a separate CI responsibility.
+
 The installed runtime also owns `WorkCapacityOffers`, using its existing global
 database arbitration and owner-authenticated HTTP capacity reader. Maintenance
 checks at least once a minute and at the configured offer-hold boundary; newly

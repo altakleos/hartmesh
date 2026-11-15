@@ -122,7 +122,7 @@ async def prepare_start_carrier(reader, link, parent, original, *, trail=(), act
 
         owner = WorkExecutionReader(work=reader.work, authority=reader.authority, links=reader.links, clock=reader.clock)
         owner.acts, owner.product = reader.acts, source.work["product"]
-        projection = WorkExecutionProjection(owner, link, current, source, clock=clock, origin_only=True)
+        projection = WorkExecutionProjection(owner, link, current, source, clock=await owner.prepare_clock(link, current), origin_only=True)
         await projection.prepare_source()
         return projection
     projection = await news_origin_projection(reader, link, parent, original, activation_id=activation_id, historical=True, readonly_start_refresh=True)

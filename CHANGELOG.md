@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   another action or changing the original launch reservation.
 - Explain current callback permission loss without exposing Work contents;
   preserve reply ownership across replay, quiet hours and read-only refreshes.
+- Explain current lifecycle and execution readiness for saved Start refusals;
+  restored access offers a fresh preview without retrying the refused action.
+- Explain current lifecycle and permission loss for unattempted saved
+  delegations, preserving original consent, child and native receipt ownership.
 - Open the current complete review from a refused Start, retaining original
   admission evidence, file acknowledgements and explicit review confirmation.
 - Explain a refused save when Work is switched off, keeping the original retry

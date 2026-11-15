@@ -215,7 +215,7 @@ class TelegramAuthority:
             raise AuthorityUnavailable
         return await agents.get(actor=PrincipalRef("human", link.owner_user_id), instance_id=link.agent_ref, permission=AgentPermission.USE)
 
-    async def instance_send_policy(self, link: BotLink, *, require_use: bool, bound: bool = True, require_inspect: bool = False, require_manage: bool = False, expected_lifecycle: str | None = None) -> str:
+    async def instance_send_policy(self, link: BotLink, *, require_use: bool, bound: bool = True, require_inspect: bool = False, require_manage: bool = False, expected_lifecycle: str | None = None, projection=None) -> str:
         """Final point-in-time grant, target, policy and discard decision.
 
         Live host authority is checked first. The final joined SQL statement
@@ -249,18 +249,17 @@ class TelegramAuthority:
         async def read():
             async with self.links.session_factory() as session:
                 bot, instance, grant, policy = TelegramBotLinkRow, AgentInstanceRow, AgentInstanceGrantRow, TelegramInstancePolicyRow
-                result = (
-                    await session.execute(
-                        select(bot, instance.custody, instance.status, grant.permissions, policy.policy)
-                        .join(instance, instance.id == bot.agent_ref)
-                        .outerjoin(grant, and_(grant.instance_id == instance.id, grant.user_id == bot.owner_user_id))
-                        .outerjoin(policy, policy.instance_id == instance.id)
-                        .where(bot.id == link.id)
-                    )
-                ).one_or_none()
-                if result is None:
+                query = (
+                    select(bot, instance.custody, instance.status, grant.permissions, policy.policy)
+                    .join(instance, instance.id == bot.agent_ref)
+                    .outerjoin(grant, and_(grant.instance_id == instance.id, grant.user_id == bot.owner_user_id))
+                    .outerjoin(policy, policy.instance_id == instance.id)
+                    .where(bot.id == link.id)
+                )
+                facts = (await session.execute(projection.extend(query) if projection is not None else query)).all()
+                if not facts or any(tuple(row[:5]) != tuple(facts[0][:5]) for row in facts):
                     raise AuthorityUnavailable
-                current, custody, status, permissions, value = result
+                current, custody, status, permissions, value = facts[0][:5]
                 basis = ("owner_user_id", "agent_kind", "agent_ref", "bot_id", "token_revision", "binding_generation", "connection_id", "chat_id", "telegram_user_id")
                 if any(getattr(current, key) != getattr(link, key) for key in basis) or custody not in {"personal", "company"} or bound and current.state != "connected":
                     raise AuthorityUnavailable
@@ -285,6 +284,10 @@ class TelegramAuthority:
                     raise AgentDenied("The current Telegram presentation is unavailable")
                 if require_use and getattr(getattr(self.app, "state", None), "agent_instances", None) is not agents:
                     raise AuthorityUnavailable
+                if projection is not None:
+                    # The caller's source may add facts and veto this same
+                    # final snapshot; every default policy check still runs.
+                    projection.check(facts)
                 if pending_discard(current) is not None and value != "off":
                     return "restoring"
                 return value
@@ -366,7 +369,7 @@ class TelegramAuthority:
                 return "policy_off"
             try:
                 view = await self.instance_view(link)
-            except AgentDenied:
+            except (AgentDenied, CeilingRefused):
                 return "agent_unavailable"
             from app.telegram_bots.policy import pending_discard
 

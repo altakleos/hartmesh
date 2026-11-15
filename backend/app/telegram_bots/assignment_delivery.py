@@ -20,6 +20,7 @@ from deerflow.utils.file_io import await_drained
 class AssignmentPlans(WorkNewsPlans):
     def __init__(self, **kwargs):
         super().__init__(**kwargs, projection=AssignmentProjection)
+        self.fixed_refusals = None
 
     async def cancel(self, link, callback_id, **kwargs):
         from app.telegram_bots.assignment_recovery import AssignmentRecovery
@@ -45,10 +46,15 @@ class AssignmentPlans(WorkNewsPlans):
                 if row is None:
                     raise ProductSourceRetired()
                 item = _item(row)
-                if any(getattr(row, key) is not None for key in ("claim_owner", "claim_id", "claimed_at")):
-                    return row.id
+                claimed = any(getattr(row, key) is not None for key in ("claim_owner", "claim_id", "claimed_at"))
             if len(operations) > 1:
                 raise ProductSourceRetired()
+            if operations and self.fixed_refusals is not None:
+                fixed = await self.fixed_refusals.offer(link, item, guard=guard)
+                if fixed is not None:
+                    return fixed
+            if claimed:
+                return item.id
             before = await self.reader.read(link, item)
             if operations:
                 from app.telegram_bots.assignment_receipts import prepare_receipt_guard

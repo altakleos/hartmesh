@@ -62,8 +62,14 @@ class WorkChatRuntime:
 
         self.start_reviews = WorkStartReviewReplies(self)
         self.executions.review_handoffs = self.start_reviews
+        from app.telegram_bots.work_saved_refusals import WorkSavedRefusals
+
+        self.saved_refusals = WorkSavedRefusals(self)
+        self.executions.fixed_refusals = self.saved_refusals
+        host.work_saved_refusals = self.saved_refusals
         self.stops = WorkStopAdmissions(self.views, host.acts)
         self.assignments = AssignmentPlans(reader=AssignmentReader(host.acts), **delivery)
+        self.assignments.fixed_refusals = self.saved_refusals
         self.assignment_answers = AssignmentAnswers(self.assignments)
         source = getattr(host, "assignment_proposal_source", None)
         if source is not None:

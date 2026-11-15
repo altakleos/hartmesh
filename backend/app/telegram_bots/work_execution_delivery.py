@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.telegram_bots.acts import _snapshot
 from app.telegram_bots.attention_authority import prepare_attention
+from app.telegram_bots.authority import CeilingRefused
 from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
 from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.producer import ProductSourceRetired, _item, keyboard_cleanup_row
@@ -18,6 +19,7 @@ from app.telegram_bots.work_news_delivery import WorkNewsPlans, frozen_news
 from app.telegram_bots.work_news_recovery import WorkNewsRecovery
 from app.telegram_bots.work_result_navigation import NavigationOrigin
 from app.telegram_bots.work_view_origins import acknowledged_view, anchor_signature
+from deerflow.agent_instances.contract import AgentDenied
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
@@ -40,6 +42,7 @@ class WorkExecutionPlans(WorkNewsPlans):
         super().__init__(**kwargs, projection=WorkExecutionProjection)
         self.acts = acts
         self.review_handoffs = None
+        self.fixed_refusals = None
         self.reader.product = product
         self.reader.acts = acts
         if acts.session_factory.kw.get("bind") is not self.outbox.sessions.kw.get("bind"):
@@ -55,9 +58,16 @@ class WorkExecutionPlans(WorkNewsPlans):
             # commands, launching or physical cancellation.
             captured = await self.acts._work_record(act_id)
             require_execution_scope(link, captured)
+            receipt_read = True
             try:
                 act = await self.acts.reconcile_receipt(act_id)
+            except (AgentDenied, CeilingRefused):
+                act = await self.acts._work_record(act_id)
+                # No service attempt was made. The fixed owner must still
+                # prove native absence in its creation and SDK statements.
+                receipt_read = act.attempts == 0
             except Exception:
+                receipt_read = False
                 # Receipt failure proves neither completion nor absence. The
                 # final source still qualifies this exact saved journal.
                 act = await self.acts._work_record(act_id)
@@ -122,6 +132,10 @@ class WorkExecutionPlans(WorkNewsPlans):
                 row = await reader.get(TelegramOutboxRow, identity)
                 item = _item(row)
                 claimed = any(getattr(row, key) is not None for key in ("claim_owner", "claim_id", "claimed_at"))
+            if receipt_read and self.fixed_refusals is not None:
+                fixed = await self.fixed_refusals.offer(link, item, guard=guard)
+                if fixed is not None:
+                    return fixed
             if claimed:
                 return identity
             current = await self.reader.inspect(link, item)

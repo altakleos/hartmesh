@@ -218,7 +218,9 @@ class WorkExecutionReader(WorkViewReader):
                 from app.telegram_bots.work_capacity_sources import CapacityClock
 
                 return CapacityClock(clock.settings, clock.zone, clock.now, await self.capacity.read(link))
-        return clock
+        from app.telegram_bots.work_execution_readiness import prepare_refusal_clock
+
+        return await prepare_refusal_clock(self, link, item, clock)
 
     async def inspect(self, link, item):
         async def perform():
@@ -323,7 +325,17 @@ class WorkExecutionProjection:
             result = self.activation_parent.extend(result)
         if self.command is not None:
             result = self.command.extend(result)
-        return self.capacity_projection.extend(result) if self.capacity_projection is not None else result
+        result = self.capacity_projection.extend(result) if self.capacity_projection is not None else result
+        from app.telegram_bots.work_execution_readiness import RefusalClock
+
+        self.readiness_column = None
+        if isinstance(self.clock, RefusalClock):
+            self.readiness_column = len(result.column_descriptions)
+            result = result.add_columns(
+                select(AgentWorkAttemptRow.id).where(or_(AgentWorkAttemptRow.activation_id == act.id, AgentWorkAttemptRow.activation_id == context_operation)).exists(),
+                select(AgentWorkEventRow.id).where(or_(AgentWorkEventRow.operation_id == act.id, AgentWorkEventRow.operation_id == context_operation)).exists(),
+            )
+        return result
 
     def check(self, rows):
         raise ProductSourceRetired()
@@ -331,6 +343,7 @@ class WorkExecutionProjection:
     def check_with_permissions(self, rows, held):
         if self.projection is not None:
             self.projection.check_with_permissions(rows, held)
+        detail = self.detail if self.origin_only else self.projection.source
         if self.capacity_projection is not None:
             self.capacity_projection.check(rows)
         delivery, journal, callback, parent, _control, original, child, event, settings, person, supervisor = rows[0][self.delivery_column : self.delivery_column + 11]
@@ -422,6 +435,24 @@ class WorkExecutionProjection:
         else:
             notice_act = act
         notice = execution_notice(notice_act, original=original_facts, dispatch=effective.stop_dispatch)
+        readiness = None
+        from app.telegram_bots.work_execution_readiness import NO_EFFECT_REASONS
+
+        if notice is not None and notice.key in {"unavailable.fix", "denied.start", "tap.failed"} and effective.reason in NO_EFFECT_REASONS:
+            from dataclasses import replace
+
+            from app.telegram_bots.work_execution_readiness import RefusalClock, readiness_signature
+
+            if not isinstance(self.clock, RefusalClock) or self.clock.signature != readiness_signature(act, effective) or any(rows[0][self.readiness_column : self.readiness_column + 2]):
+                raise ProductSourceRetired()
+            from app.telegram_bots.work_views import work_start_permissions
+
+            if work_start_permissions(detail.record, can_reuse_conversation=detail.can_reuse_conversation).issubset(held):
+                failure = self.clock.failure
+                readiness = {"key": failure.text_key, "values": failure.values} if failure is not None else {"key": "ready", "values": {}}
+                notice = replace(notice, key=failure.text_key if failure is not None else "tap.failed", preview=failure is None)
+            else:
+                notice = replace(notice, key="denied.start", preview=False)
         if notice is not None and act.kind == "activate" and act.operation_ids and self.clock.now() >= context_deadline(act) and not promise:
             from dataclasses import replace
 
@@ -446,7 +477,6 @@ class WorkExecutionProjection:
             if not notice.preview or any(not same_body(expected.get(key), value) for key, value in proof.items()):
                 raise ProductSourceRetired()
             return
-        detail = self.detail if self.origin_only else self.projection.source
         record = detail.record
         values = dict(
             name=rows[0][1].name,
@@ -455,6 +485,12 @@ class WorkExecutionProjection:
             supervisor=supervisor,
             time=format_time(aware(original.settled_at), self.clock.settings, now=self.clock.now(), zone=self.clock.zone) if original is not None and original.settled_at is not None else "",
         )
+        if readiness is not None:
+            user = rows[0][5]
+            from deerflow.persistence.user.access import issuer_key
+
+            limited = any(row[7] is not None and row[7].role != "admin" and (not user.oauth_issuer or row[7].issuer == issuer_key(user.oauth_issuer)) for row in rows) if user.oauth_id and user.oauth_provider else False
+            values.update(custody=rows[0][1].custody, reader_is_administrator=user.system_role == "admin" and not limited, **readiness["values"])
         if notice.key == "busy.work_limit" and self.capacity is not None:
             from app.telegram_bots.render import render
             from app.telegram_bots.work_capacity_text import waiting_html
@@ -484,6 +520,7 @@ class WorkExecutionProjection:
                 event_proof=event_proof,
                 timezone=settings.timezone,
                 notice=asdict(notice),
+                **({"readiness": readiness} if readiness is not None else {}),
             )
         )
         source = WorkNewsRead(act.work_id, "execution." + act.kind, values, detail.protected, data, digest([self.link.id, self.link.binding_generation, act.id, act.kind, thaw(act.body), origin]), digest([data, values]))

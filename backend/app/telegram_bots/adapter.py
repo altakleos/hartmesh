@@ -1932,6 +1932,11 @@ class TelegramBotChannel(TelegramChannel):
             if work_sources is None:
                 raise PermanentDeliveryError("unsupported-callback-denial-source")
             work_part = await work_sources.read_part(saved)
+        elif "work_saved_refusal" in saved.item.payload:
+            work_sources = getattr(self._services, "work_saved_refusals", None)
+            if work_sources is None:
+                raise PermanentDeliveryError("unsupported-saved-refusal-source")
+            work_part = await work_sources.read_part(saved)
         elif "summary_stop_basis" in saved.item.payload:
             work_sources = getattr(self._services, "summary_preferences", None)
             if work_sources is None:
@@ -2337,7 +2342,7 @@ class TelegramBotChannel(TelegramChannel):
                 from app.telegram_bots.notification_authority import authorize_notification
 
                 if work_part is not None:
-                    if "work_callback_denial" in latest_notification.item.payload:
+                    if "work_callback_denial" in latest_notification.item.payload or "work_saved_refusal" in latest_notification.item.payload:
                         await work_sources.authorize(latest_notification, silent=silent, now=self._now(), rendered=work_part)
                     else:
                         await work_sources.authorize(latest_notification, silent=silent, now=self._now())
