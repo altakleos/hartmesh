@@ -15,6 +15,10 @@ from app.telegram_bots.work_result_identity import digest
 
 def acknowledged_view(link, parent, version):
     """Reconstruct an acknowledged original even after a source refresh."""
+    if "work_status_update" in parent.payload:
+        from app.telegram_bots.work_status_control_origins import acknowledged_update
+
+        return acknowledged_update(parent, version)
     item = _item(parent)
     current = item.payload["presentation_version"]
     if type(version) is not int or not 0 <= version <= current:
@@ -38,7 +42,8 @@ def acknowledged_view(link, parent, version):
 
 
 def anchor_signature(item):
-    return digest([item.id, item.payload["presentation_version"], item.payload["work_news_basis"], item.payload["product_keyboard_basis"], item.parts])
+    basis = item.payload["work_status_update"] if "work_status_update" in item.payload else item.payload["work_news_basis"]
+    return digest([item.id, item.payload["presentation_version"], basis, item.payload["product_keyboard_basis"], item.parts])
 
 
 def qualify_origin(link, item, origin, rows, column, clock):

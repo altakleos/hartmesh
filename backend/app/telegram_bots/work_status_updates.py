@@ -12,20 +12,24 @@ from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.notifications import aware
 from app.telegram_bots.producer import _PART_IDENTITY, _TRANSPORT_RECEIPTS, DeliveryClaimRetired, DeliveryRetry, ProductSourceRetired, _item
-from app.telegram_bots.split import split_html, visible_text
+from app.telegram_bots.split import visible_text
 from app.telegram_bots.work_actions import same_body
+from app.telegram_bots.work_details import WorkDetailProjection
 from app.telegram_bots.work_news_delivery import frozen_news
 from app.telegram_bots.work_news_sources import same_news_origin
 from app.telegram_bots.work_result_identity import digest
-from app.telegram_bots.work_status import STATUS_KEYS, StatusProjection, WorkStatusRead, render_status
+from app.telegram_bots.work_status import STATUS_KEYS, StatusProjection, WorkStatusRead
 from app.telegram_bots.work_status_delivery import notice
 from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
 from deerflow.utils.file_io import await_drained
 
 
 def recipes(source, target):
+    from app.telegram_bots.work_status_update_controls import presentation
+
     status = WorkStatusRead(**source["status"])
-    chunks = split_html(render_status(status, locale=source["locale"]))
+    shown = presentation(source)
+    chunks = [part["html"] for part in shown.parts]
     previous = target["messages"]
     if type(target.get("replace")) is not bool:
         raise ProductSourceRetired()
@@ -42,6 +46,8 @@ def recipes(source, target):
         }
         if edit:
             part.update(target_message_id=previous[index]["id"], target_protect_content=previous[index]["protected"])
+        if "detail" in source and index == len(chunks) - 1:
+            part["stored_keyboard"] = True
         result.append(part)
     return result
 
@@ -59,7 +65,7 @@ def validate_update(row, *, acknowledged=False):
 
 def _validate_update(row, *, acknowledged=False):
     basis = row.payload["work_status_update"]
-    if type(basis) is not dict or set(basis) != {"version", "source", "anchor", "parts", "history"} or type(basis["version"]) is not int or basis["version"] != 1:
+    if type(basis) is not dict or set(basis) != {"version", "source", "anchor", "parts", "history"} or type(basis["version"]) is not int or basis["version"] not in {1, 2}:
         raise ProductSourceRetired()
     version, history = row.payload["presentation_version"], basis["history"]
     if type(version) is not int or version < 0 or type(history) is not list or len(history) != version:
@@ -67,11 +73,26 @@ def _validate_update(row, *, acknowledged=False):
     ids, messages = set(), set()
     for prior in range(version + 1):
         saved = basis if prior == version else history[prior]["basis"]
-        if set(saved) != {"version", "source", "anchor", "parts", "history"} or type(saved["version"]) is not int or saved["version"] != 1:
+        if set(saved) != {"version", "source", "anchor", "parts", "history"} or type(saved["version"]) is not int or saved["version"] != basis["version"]:
             raise ProductSourceRetired()
         source, target = saved["source"], saved["anchor"]
-        if type(source) is not dict or set(source) != {"status", "revision", "work_id", "locale"} or type(source["revision"]) is not int or source["revision"] < 1 or source["work_id"] != row.work_id:
+        if (
+            type(source) is not dict
+            or set(source) != {"status", "revision", "work_id", "locale"} | ({"detail", "detail_dates", "owner_user_id"} if saved["version"] == 2 else set())
+            or type(source["revision"]) is not int
+            or source["revision"] < 1
+            or source["work_id"] != row.work_id
+        ):
             raise ProductSourceRetired()
+        if saved["version"] == 2:
+            from app.telegram_bots.callbacks import canonical_keyboard
+            from app.telegram_bots.work_status_update_controls import presentation
+
+            keyboard = canonical_keyboard(presentation(source).keyboard)
+            if source["owner_user_id"] != row.owner_user_id or prior == version and not same_body(keyboard, row.payload.get("product_keyboard_basis")):
+                raise ProductSourceRetired()
+        else:
+            keyboard = []
         status = WorkStatusRead(**source["status"])
         if status.key not in STATUS_KEYS or type(status.protected) is not bool or type(status.terminal) is not bool or type(status.values) is not dict or type(status.event_proofs) is not dict or not status.event_proofs:
             raise ProductSourceRetired()
@@ -106,7 +127,7 @@ def _validate_update(row, *, acknowledged=False):
                 or type(part.get("ordinal")) is not int
                 or part["ordinal"] != index
                 or any(not same_body(part.get(key), value) for key, value in recipe.items())
-                or part.get("callback_group_id")
+                or bool(part.get("callback_group_id")) != bool(keyboard and index == len(expected) - 1)
                 or part["state"] not in ({"sent", "retired"} if prior < version else {"pending", "sending", "sent"})
                 or acknowledged
                 and prior == version
@@ -186,6 +207,27 @@ async def acknowledge_status_update(session, row):
     target = {"outbox_id": row.id, "part_id": row.parts[-1]["part_id"]}
     if type(previous) is not int or previous > revision or previous == revision and parent.payload.get("status_anchor") != target:
         raise ProductSourceRetired()
+    if basis["version"] == 2:
+        from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
+        from app.telegram_bots.work_status_update_controls import retire
+        from deerflow.persistence.telegram_bots.model import TelegramCallbackRow
+
+        group = row.parts[-1].get("callback_group_id")
+        controls = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group))) if group else []
+        try:
+            _validate_rows(row, controls, allow_pending=True)
+        except CallbackRefused:
+            raise ProductSourceRetired() from None
+        pointer = parent.payload.get("status_anchor")
+        prior = await session.get(TelegramOutboxRow, pointer["outbox_id"]) if pointer else parent
+        if prior is None:
+            raise ProductSourceRetired()
+        if prior.id != row.id:
+            from app.telegram_bots.work_status_control_cleanup import plan
+
+            now = max(aware(datetime.fromisoformat(part["sent_at"])) for part in row.parts if part["state"] == "sent")
+            await plan(session, row, parent, prior, basis, now)
+            await retire(session, prior, now)
     parent.payload = {**parent.payload, "status_anchor": target, "status_acked_revision": revision}
 
 
@@ -199,6 +241,12 @@ class WorkStatusUpdates:
     async def _materialize(self, link, identity):
         clock = await self.reader.prepare(link)
         admission = await prepare_attention(self.reader, link)
+        async with self.outbox.sessions() as reader:
+            saved = await reader.get(TelegramOutboxRow, identity)
+            if saved is None or saved.payload.get("work_event_intent", {}).get("key") not in STATUS_KEYS or not saved.dedupe_key.startswith("edit:"):
+                return False
+            work_id = saved.work_id
+        detail = await self.reader.details.detail(link, work_id)
         async with self.outbox._writer(link.id) as (writer, binding):
             row = await writer.get(TelegramOutboxRow, identity, with_for_update=True, populate_existing=True)
             if row is None or row.payload.get("work_event_intent", {}).get("key") not in STATUS_KEYS or not row.dedupe_key.startswith("edit:"):
@@ -208,7 +256,7 @@ class WorkStatusUpdates:
             if row.parts:
                 validate_update(row)
                 return True
-            projection = _SourceProjection(link, _item(row), clock)
+            projection = _SourceProjection(link, _item(row), clock, reader=self.reader, detail=detail)
             await admission(session=writer, projection=projection)
             source = projection.context
             parent = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == "progress:" + projection.source.attempt_id).with_for_update())
@@ -232,9 +280,12 @@ class WorkStatusUpdates:
             if self.outbox.clock() < due:
                 return False
             parts = recipes(source, target)
-            row.payload = {**row.payload, "work_status_update": {"version": 1, "source": source, "anchor": target, "parts": parts, "history": []}}
+            row.payload = {**row.payload, "work_status_update": {"version": 2, "source": source, "anchor": target, "parts": parts, "history": []}}
             row.parts = self.outbox._parts(parts, 0)
             row.message_thread_id = target["message_thread_id"]
+            from app.telegram_bots.work_status_update_controls import stage
+
+            await stage(writer, link, row, self.plans.callbacks)
             parent.payload = {**parent.payload, "status_update": {"revision": source["revision"], "outbox_id": row.id}}
             await writer.flush()
             await admission(session=writer, projection=_SendProjection(self, link, _item(row), clock))
@@ -245,7 +296,8 @@ class WorkStatusUpdates:
             basis = validate_update(captured.item)
             clock = await self.reader.prepare(captured.link)
             admission = await prepare_attention(self.reader, captured.link)
-            source = _SourceProjection(captured.link, captured.item, clock)
+            detail = await self.reader.details.detail(captured.link, captured.item.work_id) if basis["version"] == 2 else None
+            source = _SourceProjection(captured.link, captured.item, clock, reader=self.reader, detail=detail)
             await admission(projection=source)
             if not compatible(basis["source"], source.context, captured.item):
                 raise ProductSourceRetired()
@@ -267,19 +319,24 @@ class WorkStatusUpdates:
             parent = await writer.get(TelegramOutboxRow, old["anchor"]["outbox_id"], with_for_update=True, populate_existing=True)
             if parent is None or parent.payload.get("status_update") != {"revision": old["source"]["revision"], "outbox_id": row.id} or not compatible(old["source"], source, row):
                 raise ProductSourceRetired()
-            projection = _SourceProjection(captured.link, _item(row), clock, WorkStatusRead(**source["status"]))
+            from app.telegram_bots.work_view_sources import detail_read
+
+            projection = _SourceProjection(captured.link, _item(row), clock, WorkStatusRead(**source["status"]), reader=self.reader, detail=detail_read(source["detail"]) if "detail" in source else None)
             await admission(session=writer, projection=projection)
             pointer = parent.payload.get("status_anchor")
             moved = await writer.get(TelegramOutboxRow, pointer["outbox_id"], populate_existing=True) if pointer else None
             target = anchor(captured.link, parent, source, moved, replacement=old["anchor"]["replace"])
             if not same_body(target, old["anchor"]):
                 raise ProductSourceRetired()
-            self._replace(row, parent, source, target)
+            await self._replace(writer, captured.link, row, parent, source, target)
             await writer.flush()
             await admission(session=writer, projection=_SendProjection(self, captured.link, _item(row), clock))
 
-    def _replace(self, row, parent, source, target):
+    async def _replace(self, writer, link, row, parent, source, target):
+        from app.telegram_bots.work_status_update_controls import retire, stage
+
         old = validate_update(row)
+        await retire(writer, row, self.outbox.clock())
         version = row.payload["presentation_version"]
         historical = deepcopy(row.parts)
         for part in historical:
@@ -289,7 +346,9 @@ class WorkStatusUpdates:
         history = [*deepcopy(old["history"]), {"basis": archived, "parts": [part for part in historical if part["presentation_version"] == version]}]
         parts = recipes(source, target)
         row.parts = [*historical, *self.outbox._parts(parts, version + 1)]
-        row.payload = {**row.payload, "presentation_version": version + 1, "work_status_update": {"version": 1, "source": source, "anchor": target, "parts": parts, "history": history}}
+        row.payload = {**row.payload, "presentation_version": version + 1, "work_status_update": {"version": old["version"], "source": source, "anchor": target, "parts": parts, "history": history}}
+        if old["version"] == 2:
+            await stage(writer, link, row, self.plans.callbacks)
         row.state, row.not_before = "pending", self.outbox.clock()
         row.failed_reason = row.closed_at = row.skip_reason = row.sent_at = None
         row.claim_id = row.claim_owner = row.claimed_at = None
@@ -301,6 +360,13 @@ class WorkStatusUpdates:
                 await prepare_publication_guard(guard)
             clock = await self.reader.prepare(link)
             admission = await prepare_attention(self.reader, link)
+            async with self.outbox.sessions() as reader:
+                original = await reader.get(TelegramOutboxRow, identity)
+                if original is None:
+                    return False
+                use_detail = original.payload.get("work_status_update", {}).get("version") == 2
+                work_id = original.work_id
+            detail = await self.reader.details.detail(link, work_id) if use_detail else None
             async with self.outbox._writer(link.id) as (writer, binding):
                 if guard is not None:
                     await guard.check(writer)
@@ -314,7 +380,7 @@ class WorkStatusUpdates:
                 ):
                     return False
                 old = validate_update(row)
-                projection = _SourceProjection(link, _item(row), clock)
+                projection = _SourceProjection(link, _item(row), clock, reader=self.reader, detail=detail)
                 await admission(session=writer, projection=projection)
                 source = projection.context
                 if not compatible(old["source"], source, row):
@@ -327,7 +393,7 @@ class WorkStatusUpdates:
                 target = anchor(link, parent, source, moved, replacement=old["anchor"]["replace"])
                 if not same_body(target, old["anchor"]):
                     raise ProductSourceRetired()
-                self._replace(row, parent, source, {**target, "replace": True})
+                await self._replace(writer, link, row, parent, source, {**target, "replace": True})
                 await writer.flush()
                 await admission(session=writer, projection=_SendProjection(self, link, _item(row), clock))
                 if guard is not None:
@@ -348,7 +414,8 @@ class WorkStatusUpdates:
                 basis = validate_update(captured.item)
                 clock = await self.reader.prepare(captured.link)
                 admission = await prepare_attention(self.reader, captured.link)
-                source = _SourceProjection(captured.link, captured.item, clock)
+                detail = await self.reader.details.detail(captured.link, captured.item.work_id) if basis["version"] == 2 else None
+                source = _SourceProjection(captured.link, captured.item, clock, reader=self.reader, detail=detail)
                 await admission(projection=source)
                 if compatible(basis["source"], source.context, captured.item) and not same_body(basis["source"], source.context):
                     raise DeliveryRetry(timedelta(seconds=1)) from None
@@ -358,22 +425,53 @@ class WorkStatusUpdates:
 
 
 class _SourceProjection(StatusProjection):
+    def __init__(self, link, item, clock, source=None, *, reader=None, detail=None):
+        super().__init__(link, item, clock, source)
+        self.detail = WorkDetailProjection(reader, link, detail.record, detail.request, reusable=detail.can_reuse_conversation, expected=detail) if detail is not None else None
+
+    def extend(self, query):
+        result = super().extend(query)
+        return self.detail.extend(result) if self.detail is not None else result
+
+    def check_with_permissions(self, rows, held):
+        if self.detail is not None:
+            self.detail.check_with_permissions(rows, held)
+        self.check(rows)
+
     def check(self, rows):
         super().check(rows)
         self.context = {"status": asdict(self.source), "revision": rows[0][self.column].revision, "work_id": self.item.work_id, "locale": self.clock.settings.locale}
+        if self.detail is not None:
+            from app.telegram_bots.work_actions import thaw
+            from app.telegram_bots.work_news_carriers import detail_dates
+
+            self.context.update(detail=thaw(asdict(self.detail.source)), detail_dates=detail_dates(self.detail.source, self.clock), owner_user_id=self.link.owner_user_id)
 
 
 class _SendProjection(_SourceProjection):
     def __init__(self, host, link, item, clock, *, captured=None):
+        from app.telegram_bots.work_view_sources import detail_read
+
         self.basis = validate_update(item)
-        super().__init__(link, item, clock, WorkStatusRead(**self.basis["source"]["status"]))
+        detail = detail_read(self.basis["source"]["detail"]) if self.basis["version"] == 2 else None
+        super().__init__(link, item, clock, WorkStatusRead(**self.basis["source"]["status"]), reader=host.reader, detail=detail)
         self.host, self.captured = host, captured
 
     def extend(self, query):
+        from sqlalchemy import and_
+
+        from deerflow.persistence.telegram_bots.model import TelegramCallbackRow
+
         result = super().extend(query)
         self.anchor_column = len(result.column_descriptions)
-        parent, moved = aliased(TelegramOutboxRow), aliased(TelegramOutboxRow)
-        return result.add_columns(parent, moved).outerjoin(parent, parent.id == self.basis["anchor"]["outbox_id"]).outerjoin(moved, moved.id == parent.payload["status_anchor"]["outbox_id"].as_string())
+        parent, moved, control = aliased(TelegramOutboxRow), aliased(TelegramOutboxRow), aliased(TelegramCallbackRow)
+        group = self.item.parts[-1].get("callback_group_id")
+        return (
+            result.add_columns(parent, moved, control)
+            .outerjoin(parent, parent.id == self.basis["anchor"]["outbox_id"])
+            .outerjoin(moved, moved.id == parent.payload["status_anchor"]["outbox_id"].as_string())
+            .outerjoin(control, and_(control.group_id == group, control.payload["anchor_outbox_id"].as_string() == self.item.id))
+        )
 
     def check(self, rows):
         super().check(rows)
@@ -387,6 +485,16 @@ class _SendProjection(_SourceProjection):
         now = self.host.outbox.clock()
         if now < due:
             raise DeliveryRetry(due - now)
+        if self.basis["version"] == 2:
+            from app.telegram_bots.callbacks import CallbackRefused, _validate_rows
+
+            controls = list({control.id: control for row in rows if (control := row[self.anchor_column + 2]) is not None}.values())
+            try:
+                _validate_rows(row, controls, allow_pending=True)
+                for control in controls:
+                    self.host.plans.callbacks._usable(control)
+            except CallbackRefused:
+                raise ProductSourceRetired() from None
         if self.captured is not None:
             saved = self.captured
             current = self.host.outbox._sending(rows[0][0], row, link_id=self.link.id, part_id=saved.part["part_id"], claim_owner=saved.claim_owner, claim_id=saved.claim_id, token_revision=saved.token_revision)

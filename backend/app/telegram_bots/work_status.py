@@ -77,6 +77,7 @@ class StatusProjection:
         activation, progress, terminal, cause = (aliased(event) for _ in range(4))
         request, recipient, settings = HumanInputRequestRow, aliased(UserRow), aliased(TelegramPersonSettingsRow)
         trigger_request, receipt, previous = aliased(HumanInputRequestRow), aliased(HumanInputEventRow), aliased(event)
+        source_act = aliased(TelegramActRow)
         prior_activation = (
             select(previous.operation_id)
             .where(previous.work_id == event.work_id, previous.instance_id == event.instance_id, previous.action == "activate", previous.revision < event.revision)
@@ -96,7 +97,7 @@ class StatusProjection:
             return select(candidate.id).where(*conditions).order_by(candidate.revision.desc()).limit(1).correlate(work, attempt, activation, terminal).scalar_subquery()
 
         return (
-            query.add_columns(work, attempt, activation, event, delivery, progress, terminal, cause, request, recipient.email, settings, RunRow, trigger_request, receipt, prior_activation, TelegramActRow)
+            query.add_columns(work, attempt, activation, event, delivery, progress, terminal, cause, request, recipient.email, settings, RunRow, trigger_request, receipt, prior_activation, source_act)
             .join(work, work.id == self.item.work_id)
             .join(attempt, and_(attempt.id == self.item.payload.get("work_event_intent", {}).get("attempt_id"), attempt.work_id == work.id))
             .join(activation, and_(activation.work_id == work.id, activation.operation_id == attempt.activation_id))
@@ -121,10 +122,10 @@ class StatusProjection:
             .outerjoin(RunRow, RunRow.run_id == attempt.run_id)
             .outerjoin(trigger_request, trigger_request.id == delivery.request_id)
             .outerjoin(receipt, and_(receipt.instance_id == event.instance_id, receipt.operation_id == event.operation_id))
-            .outerjoin(TelegramActRow, TelegramActRow.id == attempt.activation_id)
+            .outerjoin(source_act, source_act.id == attempt.activation_id)
         )
 
-    def check(self, rows):
+    def check(self, rows, *, compare_source=True):
         instance, policy = rows[0][1], rows[0][3]
         work, attempt, activation, event, delivery, progress, terminal, cause, request, person, preferences = rows[0][self.column : self.column + 11]
         run = rows[0][self.column + 11]
@@ -292,6 +293,6 @@ class StatusProjection:
                 ]
             ),
         )
-        if self.source is not None and not same_body(asdict(self.source), asdict(fresh)):
+        if compare_source and self.source is not None and not same_body(asdict(self.source), asdict(fresh)):
             raise ProductSourceRetired()
         self.source = fresh

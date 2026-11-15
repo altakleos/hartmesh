@@ -2022,6 +2022,8 @@ of the request is separate from confirmed settlement.
 Late text and voice replies to closed assignment or Edit prompts stay held until
 you choose Reopen, Send as new message or Discard. Reopen shows the current full
 preview and asks for a fresh answer; it does not submit the held words.
+Status messages offer Stop for their own active attempt. An assignment you stopped
+offers Resume beneath its complete current preview; ended attempts lose Stop.
 Eligible assignment news also offers Start or Resume beneath the complete current
 objective and success criteria. The button becomes usable after every preview
 part is delivered, and retains its original event through restart.

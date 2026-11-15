@@ -13,19 +13,24 @@ from deerflow.utils.file_io import await_drained
 
 
 def displayed_start(link, parent, callback):
+    from app.telegram_bots.work_status_control_origins import carrier_source, status_record
+
     original = acknowledged_view(link, parent, callback.payload.get("presentation_version"))
-    source = original.payload["work_news_basis"]["source"]
+    source = carrier_source(original)
     from app.telegram_bots.work_news_carriers import ACTION_NEWS_KEYS
 
     news = source["key"] in ACTION_NEWS_KEYS and "work_event_intent" in original.payload and "detail" in source.get("work", {})
     preview = source["key"] in {"execution.activate", "execution.stop"} and source.get("work", {}).get("notice", {}).get("preview") is True
     saved_assignment = source["key"] == "assignment.card" and source.get("work", {}).get("phase") == "saved"
     management = source["key"] in {"management.edit", "management.withdraw"} and source.get("work", {}).get("phase") in {"saved", "changed", "back"}
+    stopped = source["key"] == "status.stopped"
+    if stopped:
+        status_record(source)
     if (
-        (source["key"] not in {"view.detail", "capacity.offer"} and not preview and not saved_assignment and not management and not news)
+        (source["key"] not in {"view.detail", "capacity.offer"} and not preview and not saved_assignment and not management and not news and not stopped)
         or callback.kind != "work_start"
         or callback.target_kind != "work"
-        or original.payload["work_news_basis"]["concealed"]
+        or original.payload.get("work_news_basis", {}).get("concealed")
     ):
         raise CallbackRefused()
     detail = source["work"]["detail"]["record"]
@@ -73,7 +78,9 @@ class WorkStartAdmissions:
                     if anchor_signature(original) != signature or any(row.payload.get("work_action_id") != callback_id for row in rows):
                         raise CallbackRefused()
                 return await self.acts.stage_activation(link, operation_id=callback_id, work_id=displayed["id"], assignment_revision=displayed["assignment_revision"])
-            offered = original.payload["work_news_basis"]["source"]
+            from app.telegram_bots.work_status_control_origins import carrier_source
+
+            offered = carrier_source(original)
             waiting_id = offered["work"]["waiting_act"]["id"] if offered["key"] == "capacity.offer" else None
             fresh = await self.plans.reader.detail(link, displayed["id"], **({"ignore_activation": waiting_id} if waiting_id else {}))
             if any(not same_body(fresh.record.get(key), displayed.get(key)) for key in ("id", "objective", "success_criteria", "assignment_revision", "due_at")):

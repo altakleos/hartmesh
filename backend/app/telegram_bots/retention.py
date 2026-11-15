@@ -114,6 +114,9 @@ async def status_cleanup_anchors(session):
     from app.telegram_bots.work_status_pins import pin_cleanup_anchors
 
     pinned.update(await pin_cleanup_anchors(session))
+    from app.telegram_bots.work_status_control_cleanup import dependencies
+
+    pinned.update(await dependencies(session))
     return pinned | {identity for identity, attempt, _pending in roots if attempt in active}
 
 
