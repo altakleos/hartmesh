@@ -164,7 +164,10 @@ async def test_real_worker_atomic_replacement_retains_finalization_authority(sto
         else:
             await asyncio.wait_for(record.task, 2)
         if renewal:
-            await asyncio.wait_for(renewal, 1)
+            # The cycle joins decisions bounded by the confirmed lease, not a
+            # one-second observation deadline. Keep its owner alive until that
+            # configured budget expires; teardown still drains it on failure.
+            await asyncio.wait_for(asyncio.shield(renewal), manager._run_ownership_config.lease_seconds)
         row = await store.get(record.run_id, user_id="review")
         expected = "error" if action == "rollback" else "interrupted"
         assert row["status"] == expected
