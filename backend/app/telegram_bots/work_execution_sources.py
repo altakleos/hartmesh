@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import datetime
 
-from sqlalchemy import and_, case, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import aliased
 
 from app.telegram_bots.acts import _snapshot
@@ -64,8 +64,16 @@ def require_execution_scope(link, act):
         raise ProductSourceRetired()
 
 
-def qualify_execution_origin(link, act, callback, parent, controls, *, activation_parent=None, command=None):
+def qualify_execution_origin(link, act, callback, parent, controls, *, activation_parent=None, command=None, context_root=None):
     try:
+        if act.kind == "activate_context":
+            from app.telegram_bots.work_start_conversations import require_context_child, source_signature
+
+            if context_root is None:
+                raise ValueError("missing-activation-context-root")
+            require_context_child(context_root, act)
+            original = qualify_execution_origin(link, context_root, callback, parent, controls, activation_parent=activation_parent)
+            return {**original, "activation_context_root_id": context_root.id, "activation_context_signature": source_signature(context_root)}
         if command is not None:
             require_execution_scope(link, act)
             if activation_parent is not None or act.kind != "stop" or command.act.id != act.id or not same_body(source_marker(act), command.marker):
@@ -147,6 +155,19 @@ def qualify_execution_origin(link, act, callback, parent, controls, *, activatio
 
 async def execution_origin_rows(reader, journal):
     """Locate the actual human gesture; a composite child has no own button."""
+    context_root = None
+    if journal.kind == "activate_context":
+        from app.telegram_bots.work_start_conversations import require_context_child
+
+        marker = (journal.continuation or {}).get("activation_context_parent")
+        if not isinstance(marker, Mapping) or type(marker.get("root_id")) is not str:
+            raise ProductSourceRetired()
+        row = await reader.get(TelegramActRow, marker["root_id"], populate_existing=True)
+        if row is None:
+            raise ProductSourceRetired()
+        context_root = _snapshot(row)
+        require_context_child(context_root, _snapshot(journal))
+        journal = row
     marker = journal.continuation.get("activation_parent") if isinstance(journal.continuation, Mapping) else None
     primary = await reader.get(TelegramActRow, marker.get("act_id"), populate_existing=True) if isinstance(marker, Mapping) and type(marker.get("act_id")) is str else None
     if marker is not None and primary is None:
@@ -154,7 +175,7 @@ async def execution_origin_rows(reader, journal):
     callback = await reader.get(TelegramCallbackRow, primary.id if primary is not None else journal.id, populate_existing=True)
     parent = await reader.get(TelegramOutboxRow, callback.payload.get("anchor_outbox_id"), populate_existing=True) if callback else None
     controls = list(await reader.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == callback.group_id).execution_options(populate_existing=True))) if callback else []
-    return callback, parent, controls, _snapshot(primary) if primary is not None else None
+    return callback, parent, controls, _snapshot(primary) if primary is not None else None, context_root
 
 
 def qualify_stop_receipt(event, act):
@@ -279,6 +300,7 @@ class WorkExecutionProjection:
             aliased(UserRow),
         )
         operation = case((act.kind == "stop", act.body["attempt_id"].as_string()), else_=None)
+        context_operation = act.continuation["activation_context"]["child_id"].as_string()
         supervisor = aliased(UserRow)
         result = (
             result.add_columns(delivery, act, callback, parent, control, original, child, event, settings, requester.email, supervisor.email)
@@ -287,9 +309,12 @@ class WorkExecutionProjection:
             .outerjoin(callback, callback.id == self.item.payload["work_execution_intent"]["origin"].get("callback_id"))
             .outerjoin(parent, parent.id == callback.payload["anchor_outbox_id"].as_string())
             .outerjoin(control, control.group_id == callback.group_id)
-            .outerjoin(original, and_(original.work_id == act.work_id, case((act.kind == "activate", original.activation_id == act.id), else_=original.id == operation)))
-            .outerjoin(child, child.id == act.result["stop_child_id"].as_string())
-            .outerjoin(event, and_(event.instance_id == act.instance_id, event.work_id == act.work_id, event.operation_id == case((child.id.is_not(None), child.id), else_=act.id)))
+            .outerjoin(
+                original,
+                and_(or_(context_operation.is_not(None), original.work_id == act.work_id), case((act.kind == "activate", original.activation_id == func.coalesce(context_operation, act.id)), else_=original.id == operation)),
+            )
+            .outerjoin(child, child.id == func.coalesce(act.result["stop_child_id"].as_string(), act.continuation["activation_context"]["child_id"].as_string()))
+            .outerjoin(event, and_(or_(context_operation.is_not(None), and_(event.instance_id == act.instance_id, event.work_id == act.work_id)), event.operation_id == case((child.id.is_not(None), child.id), else_=act.id)))
             .join(settings, settings.owner_user_id == self.link.owner_user_id)
             .outerjoin(requester, requester.id == original.requester_id)
             .outerjoin(supervisor, supervisor.id == AgentInstanceRow.supervisor_id)
@@ -346,9 +371,18 @@ class WorkExecutionProjection:
         if child is not None:
             effective = _snapshot(child)
             try:
-                validate_child(act, effective, parent_of(effective)["ordinal"])
-                if effective.id not in act.operation_ids or act.result.get("stop_child_id") != effective.id:
-                    raise ValueError()
+                if act.kind == "activate":
+                    from app.telegram_bots.work_start_conversations import qualify_context_receipt, require_context_child
+
+                    require_context_child(act, effective)
+                    if act.state == "done":
+                        qualify_context_receipt(act, effective, event, original, act.result["receipt"])
+                        if act.result.get("activation_context_child_id") != effective.id:
+                            raise ValueError()
+                else:
+                    validate_child(act, effective, parent_of(effective)["ordinal"])
+                    if effective.id not in act.operation_ids or act.result.get("stop_child_id") != effective.id:
+                        raise ValueError()
                 if act.state == "done" and (effective.state != "done" or not same_body(act.result.get("receipt"), effective.result)):
                     raise ValueError()
             except (TypeError, ValueError, KeyError):
@@ -356,7 +390,7 @@ class WorkExecutionProjection:
         elif act.kind == "stop" and act.operation_ids and act.state == "done":
             raise ProductSourceRetired()
         if original is not None:
-            if act.kind == "activate" and ((original.requester_id, original.thread_id) != (act.owner_user_id, act.body["thread_id"]) or not same_body(original.request, act.body)):
+            if act.kind == "activate" and ((original.requester_id, original.thread_id) != (effective.owner_user_id, effective.body["thread_id"]) or not same_body(original.request, effective.body)):
                 raise ProductSourceRetired()
             if act.kind == "stop" and (original.id != act.body["attempt_id"] or act.stop_dispatch is not None and original.thread_id != act.stop_dispatch["thread_id"]):
                 raise ProductSourceRetired()
@@ -365,13 +399,42 @@ class WorkExecutionProjection:
         if act.kind == "stop" and act.state == "done":
             event_proof = qualify_stop_receipt(event, effective)
         original_facts = _fields(original, _ATTEMPT)
-        notice = execution_notice(act, original=original_facts, dispatch=effective.stop_dispatch)
+        if act.kind == "activate" and act.operation_ids:
+            from dataclasses import replace
+
+            from app.telegram_bots.work_start_conversations import context_deadline, exact_runless_promise, qualify_child_operation
+
+            if child is None:
+                if self.allow_empty:
+                    self.source = None
+                    return
+                raise ProductSourceRetired()
+            attempts = {value.id: value for row in rows if (value := row[self.delivery_column + 5]) is not None}
+            events = {value.id: value for row in rows if (value := row[self.delivery_column + 7]) is not None}
+            if len(attempts) > 1 or len(events) > 1:
+                raise ProductSourceRetired()
+            try:
+                qualify_child_operation(effective, event, original, allow_absent=True)
+                promise = exact_runless_promise(effective, event, original, deadline=context_deadline(act))
+            except ValueError:
+                raise ProductSourceRetired() from None
+            notice_act = replace(effective, kind="activate")
+        else:
+            notice_act = act
+        notice = execution_notice(notice_act, original=original_facts, dispatch=effective.stop_dispatch)
+        if notice is not None and act.kind == "activate" and act.operation_ids and self.clock.now() >= context_deadline(act) and not promise:
+            from dataclasses import replace
+
+            notice = replace(notice, retry=False)
         if notice is None:
             if self.allow_empty:
                 if act.kind == "activate" and act.state == "done":
                     from app.telegram_bots.work_start_retention import closed_activation, closed_start
 
-                    closed = closed_activation(journal, self.link, original, work_id=act.work_id) if primary is not None else closed_start(callback, journal, self.link, original)
+                    if act.operation_ids:
+                        closed = child is not None and closed_activation(child, self.link, original, work_id=act.work_id)
+                    else:
+                        closed = closed_activation(journal, self.link, original, work_id=act.work_id) if primary is not None else closed_start(callback, journal, self.link, original)
                     if not closed:
                         raise ProductSourceRetired()
                 self.source = None

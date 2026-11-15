@@ -118,8 +118,8 @@ class WorkDetailProjection:
                 action.work_id == work.id,
                 action.instance_id == work.instance_id,
                 action.owner_user_id == self.link.owner_user_id,
-                action.kind == "activate",
-                action.state.in_(("pending", "waiting", "uncertain")),
+                action.kind.in_(("activate", "activate_context")),
+                or_(action.state.in_(("pending", "waiting", "uncertain")), and_(action.kind == "activate_context", action.continuation["activation_context_parent"]["root_id"].as_string().is_(None))),
                 action.id != self.ignore_activation if self.ignore_activation is not None else True,
                 binding.binding_generation == action.binding_generation,
                 binding.owner_user_id == action.owner_user_id,
@@ -130,10 +130,38 @@ class WorkDetailProjection:
             .scalar_subquery()
         )
         marker, journal, marker_binding, receipt_attempt = aliased(TelegramCallbackRow), aliased(TelegramActRow), aliased(TelegramBotLinkRow), aliased(AgentWorkAttemptRow)
+        from deerflow.persistence.agent_instances.work import AgentWorkEventRow
+
+        context_child, context_attempt, context_event = aliased(TelegramActRow), aliased(AgentWorkAttemptRow), aliased(AgentWorkEventRow)
+        original_exists = or_(
+            select(AgentWorkAttemptRow.id).where(AgentWorkAttemptRow.activation_id == journal.id).correlate(journal).exists(),
+            select(AgentWorkEventRow.id).where(AgentWorkEventRow.operation_id == journal.id).correlate(journal).exists(),
+        )
         pending = select(AgentLifecycleRow.operation_id).where(AgentLifecycleRow.instance_id == AgentInstanceRow.id, AgentLifecycleRow.phase == "pending").correlate(AgentInstanceRow).exists()
         return (
             query.add_columns(
-                work, attempt, request, definition, creator.email, person, grant.permissions, disabled, conversation, thread.thread_id, pending, custodian, custodian_disabled, waiting, marker, journal, marker_binding, receipt_attempt
+                work,
+                attempt,
+                request,
+                definition,
+                creator.email,
+                person,
+                grant.permissions,
+                disabled,
+                conversation,
+                thread.thread_id,
+                pending,
+                custodian,
+                custodian_disabled,
+                waiting,
+                marker,
+                journal,
+                marker_binding,
+                receipt_attempt,
+                context_child,
+                context_attempt,
+                context_event,
+                original_exists,
             )
             .join(work, and_(work.id.in_(work_ids) if work_ids is not None else work.id == self.record["id"], work.instance_id == TelegramBotLinkRow.agent_ref))
             .outerjoin(attempt, attempt.id == current_attempt)
@@ -162,6 +190,9 @@ class WorkDetailProjection:
             )
             .outerjoin(journal, journal.id == marker.payload["work_action_id"].as_string())
             .outerjoin(receipt_attempt, and_(receipt_attempt.work_id == work.id, receipt_attempt.activation_id == journal.id))
+            .outerjoin(context_child, or_(context_child.id == journal.continuation["activation_context"]["child_id"].as_string(), context_child.continuation["activation_context_parent"]["root_id"].as_string() == journal.id))
+            .outerjoin(context_attempt, context_attempt.activation_id == context_child.id)
+            .outerjoin(context_event, context_event.operation_id == context_child.id)
         )
 
     def check_with_permissions(self, rows, held):
@@ -187,9 +218,21 @@ class WorkDetailProjection:
         pending_activation = rows[0][self.column + 13]
         for row in rows:
             marker, journal, binding, original_attempt = row[self.column + 14 : self.column + 18]
+            context = row[self.column + 18 : self.column + 22]
             if marker is not None and journal is not None and marker.id == journal.id == self.ignore_activation:
                 continue
-            if marker is not None and not closed_start(marker, journal, binding, original_attempt):
+            if marker is not None and journal is not None and context[0] is not None and context[0].id == self.ignore_activation:
+                from app.telegram_bots.acts import _snapshot
+                from app.telegram_bots.work_start_conversations import require_context_child
+
+                try:
+                    require_context_child(_snapshot(journal), _snapshot(context[0]))
+                    if context[3]:
+                        raise ValueError("conflicting-activation-root")
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    raise AuthorityUnavailable() from None
+                continue
+            if marker is not None and not closed_start(marker, journal, binding, original_attempt, context=context):
                 pending_activation = pending_activation or marker.id
         record = _fields(work, _WORK)
         record.update(

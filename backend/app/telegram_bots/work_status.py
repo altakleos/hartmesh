@@ -275,7 +275,7 @@ class StatusProjection:
             self.link.telegram_user_id,
             self.link.chat_id,
         ):
-            if (act.kind, act.instance_id, act.work_id, act.request_id, act.message_id) != ("activate", instance.id, work.id, None, None) or act.attempts < 1 or not same_body(act.body, activation.request):
+            if act.kind not in {"activate", "activate_context"} or (act.instance_id, act.work_id, act.request_id, act.message_id) != (instance.id, work.id, None, None) or act.attempts < 1 or not same_body(act.body, activation.request):
                 raise ProductSourceRetired()
             data["activation_act_id"] = act.id
         proofs = {fact.id: digest([event_signature(fact, None, {}), aware(fact.created_at).isoformat()]) for fact in (activation, event, progress, terminal, cause) if fact is not None}

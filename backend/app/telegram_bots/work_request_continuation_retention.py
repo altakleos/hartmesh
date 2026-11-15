@@ -102,7 +102,7 @@ def pin_orphan(result, chosen, deliveries, marks, by_anchor, related):
     result.groups.update(row.group_id for value in owned for row in by_anchor[value] if same_scope(row, link) and row.message_thread_id == deliveries[value].message_thread_id)
 
 
-async def closed_request(session, parent, child, link, attempt):
+async def closed_request(session, parent, child, link, attempt, *, context_roots=()):
     try:
         snapshot = _snapshot(parent)
         value = mapping(parent.continuation)
@@ -131,7 +131,14 @@ async def closed_request(session, parent, child, link, attempt):
             require_child(_snapshot(parent), _snapshot(child))
             if parent.operation_ids != [child.id]:
                 return False
-            if state["phase"] not in {"done", "refused", "cancelled"} or not closed_activation(child, link, attempt, work_id=parent.work_id) or attempt is not None and attempt.status in UNRESOLVED:
+            from app.telegram_bots.work_start_retention import context_facts
+
+            if (
+                state["phase"] not in {"done", "refused", "cancelled"}
+                or not closed_activation(child, link, attempt, work_id=parent.work_id, context=await context_facts(session, child, force=child.id in context_roots))
+                or attempt is not None
+                and attempt.status in UNRESOLVED
+            ):
                 return False
         elif state["child_body"] is not None or state["phase"] not in {"expired", "cancelled", "refused"}:
             return False
@@ -148,6 +155,9 @@ async def closed_request(session, parent, child, link, attempt):
 
 
 async def request_dependencies(session, now, *, max_age_days):
+    from app.telegram_bots.work_start_retention import context_owners
+
+    context_roots = await context_owners(session)
     result = RequestDependencies()
     journals = {row.id: row for row in await session.scalars(select(TelegramActRow).execution_options(populate_existing=True))}
     controls = list(await session.scalars(select(TelegramCallbackRow).execution_options(populate_existing=True)))
@@ -240,7 +250,7 @@ async def request_dependencies(session, now, *, max_age_days):
         live = any(row.consumed_at is None and aware(now) < aware(row.created_at) + timedelta(days=max_age_days) and (row.expires_at is None or aware(now) < aware(row.expires_at)) for row in related)
         pending = any(deliveries[value].state in {"pending", "sending", "failed"} for value in owned)
         canonical = {identity, *([activation_child_id(identity)] if child is not None else [])}
-        closed = parent is not None and member_ids == canonical and await closed_request(session, parent, child, link, attempts.get(activation_child_id(identity)))
+        closed = parent is not None and member_ids == canonical and await closed_request(session, parent, child, link, attempts.get(activation_child_id(identity)), context_roots=context_roots)
         if not closed or live or pending:
             result.acts.update(row.id for row in members)
             result.inputs.update(inputs)

@@ -126,23 +126,35 @@ class ActivationActionMethods:
             if state == "done":
                 from app.telegram_bots.work_start_status import seed_activation_status
 
-                await seed_activation_status(self, writer, link, saved, result)
+                if not (captured.kind == "activate" and captured.operation_ids):
+                    await seed_activation_status(self, writer, link, saved, result)
             await writer.flush()
             return _snapshot(saved)
 
     async def _complete_activation(self, act, result):
         try:
+            if act.kind == "activate" and act.operation_ids:
+                from app.telegram_bots.work_start_conversations import complete_context_child
+
+                result = await complete_context_child(self, act, result)
             return await self._activation_outcome(act, state="done", result=result)
         except Exception:
             # Host admission already succeeded. A source/journal failure must
             # preserve receipt recovery and let unrelated Acts make progress.
             return await self._work_record(act.id)
 
-    async def _attempt_activation(self, act, *, explicit=False, attempt_current=lambda: True):
+    async def _attempt_activation(self, act, *, explicit=False, attempt_current=lambda: True, retry_expected=None):
         from app.gateway.work_execution import activate_work
         from app.telegram_bots.acts import _snapshot
         from app.telegram_bots.work_actions import _ACT_SCOPE, _SCOPE, request_for, same_body
 
+        if act.kind == "activate" and (act.operation_ids or "activation_context" in (act.continuation or {})):
+            from app.telegram_bots.work_start_conversations import resume_context
+
+            try:
+                return await resume_context(self, act, attempt_current=attempt_current, explicit=explicit, retry_expected=retry_expected)
+            except Exception:
+                return await self._activation_outcome(act, state="uncertain", reason=act.reason)
         if act.attempts:
             try:
                 receipt = await self.receipt_for(act)
@@ -188,6 +200,11 @@ class ActivationActionMethods:
                     raise ValueError("unsupported-work-act")
                 if saved.state == "done" or saved.attempts != act.attempts or saved.cancel_requested_at is not None or any(getattr(saved, key) != getattr(act, key) for key in _ACT_SCOPE) or not same_body(saved.body, act.body):
                     return _snapshot(saved)
+                if retry_expected is not None:
+                    from app.telegram_bots.work_execution_sources import act_facts
+
+                    if not same_body(act_facts(_snapshot(saved)), retry_expected):
+                        return _snapshot(saved)
                 if current is None or any(getattr(current, key) != getattr(link, key) for key in _SCOPE) or current.state != "connected" or current.health != "ok":
                     raise AgentDenied("The bot binding is no longer current")
                 if not attempt_current():
@@ -197,7 +214,7 @@ class ActivationActionMethods:
                 await writer.flush()
                 act = _snapshot(saved)
                 await owner(link.owner_user_id, writer)
-            admission = await activation_admission(self, link, act, attempt_current=attempt_current)
+            admission = await activation_admission(self, link, act, attempt_current=attempt_current, explicit=explicit)
             result = await activate_work(internal_request(self.authority.app, link.owner_user_id), instance_id=act.instance_id, work_id=act.work_id, body=body, admission=admission)
         except AgentConflict as exc:
             return await self._activation_outcome(act, state="conflict", reason=exc.reason or "work-changed", answered=True)
@@ -206,6 +223,23 @@ class ActivationActionMethods:
                 return await self._activation_outcome(act, state="waiting", reason=exc.reason, answered=True)
             return await self._activation_outcome(act, state="refused", reason=exc.reason or "denied", answered=True)
         except (AgentDenied, AccessOff, CeilingRefused, ValueError) as exc:
+            from app.telegram_bots.work_start_conversations import CONVERSATION_REFUSALS, plan_context, resume_context
+
+            if getattr(exc, "reason", None) in CONVERSATION_REFUSALS and act.kind == "activate":
+                try:
+                    planned = await plan_context(self, act, reason=exc.reason, attempt_current=attempt_current)
+                    if planned is not None:
+                        if planned.state == "done":
+                            return planned
+                        return await resume_context(self, planned, attempt_current=attempt_current)
+                except Exception:
+                    return await self._work_record(act.id)
+            if getattr(exc, "reason", None) == "execution-stale":
+                from app.telegram_bots.work_start_context import execution_refresh
+
+                refreshed = await execution_refresh(self, act, attempt_current=attempt_current)
+                if refreshed is not None:
+                    return await self._attempt_activation(refreshed, explicit=False, attempt_current=attempt_current)
             return await self._activation_outcome(act, state="refused", reason=getattr(exc, "reason", None) or "denied", answered=True)
         except Exception:
             # Includes response loss after reservation/run creation. A fresh
@@ -240,6 +274,9 @@ class ActivationActionMethods:
                     raise ValueError("act-source-conflict")
                 if admission is not None:
                     await admission(writer, None)
+                from app.telegram_bots.work_start_conversations import fence_context_child
+
+                reserved = await fence_context_child(writer, saved, now=self.outbox.clock()) or reserved
                 if saved.state != "done" and saved.cancel_requested_at is None:
                     saved.cancel_requested_at = saved.updated_at = self.outbox.clock()
                     conclusive = not reserved and saved.attempts == act.attempts and (not saved.attempts or saved.state in {"waiting", "refused", "conflict"})
@@ -275,12 +312,34 @@ def answered_calls(act):
         return 0
     if (
         not isinstance(value, Mapping)
-        or set(value) - {"activation_retry", "activation_parent", "news_origin"} != {"version"}
-        or not {"activation_retry", "activation_parent", "news_origin"}.intersection(value)
+        or set(value) - {"activation_retry", "activation_parent", "news_origin", "start_context_recovery", "activation_context", "activation_context_parent"} != {"version"}
+        or not {"activation_retry", "activation_parent", "news_origin", "start_context_recovery", "activation_context", "activation_context_parent"}.intersection(value)
         or type(value["version"]) is not int
         or value["version"] != 1
     ):
         raise ValueError("invalid-activation-retry")
+    if "activation_context" in value:
+        from app.telegram_bots.work_start_conversations import context_plan
+
+        context_plan(act)
+    if "activation_context_parent" in value:
+        parent = value["activation_context_parent"]
+        if act.kind != "activate_context" or not isinstance(parent, Mapping) or set(parent) != {"version", "root_id", "source_signature"} or type(parent["version"]) is not int or parent["version"] != 1:
+            raise ValueError("invalid-activation-context-parent")
+        if "activation_retry" not in value:
+            return 0
+    if "start_context_recovery" in value:
+        context = value["start_context_recovery"]
+        if (
+            not isinstance(context, Mapping)
+            or set(context) != {"version", "execution_attempt"}
+            or type(context["version"]) is not int
+            or context["version"] != 1
+            or type(context["execution_attempt"]) is not int
+            or not 1 <= context["execution_attempt"] <= act.attempts
+            or "activation_retry" not in value
+        ):
+            raise ValueError("invalid-start-context-recovery")
     if "news_origin" in value:
         from app.telegram_bots.work_news_carriers import require_news_origin
 
@@ -315,11 +374,11 @@ def _startable(record):
         raise AgentConflict("The prior attempt is unresolved", reason="attempt-running" if attempt["status"] in {"starting", "running"} else "attempt-unsettled")
 
 
-async def activation_admission(acts, link, act, *, attempt_current):
+async def activation_admission(acts, link, act, *, attempt_current, explicit=False):
     from app.telegram_bots.attention_authority import prepare_attention
 
     prepared = await prepare_attention(acts, link)
-    projection = ActivationProjection(act, attempt_current)
+    projection = ActivationProjection(act, attempt_current, explicit=explicit)
     await projection.parent.prepare(acts, link)
 
     async def admission(writer):
@@ -338,11 +397,16 @@ async def activation_admission(acts, link, act, *, attempt_current):
 
 
 class ActivationProjection:
-    def __init__(self, act, attempt_current):
+    def __init__(self, act, attempt_current, *, explicit=False):
         from app.telegram_bots.work_continuation_sources import ActivationParentProjection
 
         self.act, self.attempt_current = act, attempt_current
-        self.parent = ActivationParentProjection(self.act)
+        if act.kind == "activate_context":
+            from app.telegram_bots.work_start_conversation_sources import ContextParentProjection
+
+            self.parent = ContextParentProjection(act, explicit=explicit)
+        else:
+            self.parent = ActivationParentProjection(self.act)
 
     def extend(self, query):
         self.column = len(query.column_descriptions)

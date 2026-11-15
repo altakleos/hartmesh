@@ -36,7 +36,7 @@ from deerflow.utils.file_io import await_drained
 
 _ACT_SCOPE = ("link_id", "owner_user_id", "bot_id", "binding_generation", "telegram_user_id", "chat_id", "instance_id", "work_id", "request_id", "kind", "message_id")
 
-WORK_ACT_KINDS = frozenset({"respond", "decide", "accept", "changes_requested", "route", "stop", "activate", "delegate", "edit", "cancel"})
+WORK_ACT_KINDS = frozenset({"respond", "decide", "accept", "changes_requested", "route", "stop", "activate", "activate_context", "delegate", "edit", "cancel"})
 _SCOPE = ("id", "owner_user_id", "bot_id", "agent_kind", "agent_ref", "binding_generation", "token_revision", "telegram_user_id", "chat_id", "connection_id")
 
 
@@ -56,8 +56,8 @@ def same_body(left, right):
 def request_for(kind, body, *, identity=None):
     if kind not in WORK_ACT_KINDS:
         raise ValueError("unsupported-work-act")
-    request = (Respond if kind == "respond" else RequestCommand if kind == "route" else ActivateWork if kind == "activate" else DelegateWork if kind == "delegate" else WorkCommand).model_validate(thaw(body))
-    if identity is not None and request.operation_id != identity or kind not in {"respond", "activate", "delegate"} and request.action != kind:
+    request = (Respond if kind == "respond" else RequestCommand if kind == "route" else ActivateWork if kind in {"activate", "activate_context"} else DelegateWork if kind == "delegate" else WorkCommand).model_validate(thaw(body))
+    if identity is not None and request.operation_id != identity or kind not in {"respond", "activate", "activate_context", "delegate"} and request.action != kind:
         raise ValueError("act-source-conflict")
     return request
 
@@ -122,7 +122,11 @@ class WorkActionMethods(ContinuationActionMethods, ManagementActionMethods, Stop
             return await self._stop_chain_receipt(act)
         actor = PrincipalRef("human", link.owner_user_id)
         body = request_for(act.kind, act.body, identity=act.id)
-        if act.kind == "activate":
+        if act.kind == "activate" and (act.operation_ids or "activation_context" in (act.continuation or {})):
+            from app.telegram_bots.work_start_conversations import context_receipt
+
+            return await context_receipt(self, act)
+        if act.kind in {"activate", "activate_context"}:
             from deerflow.agent_instances.work_execution import WorkExecution
 
             return await WorkExecution(self.work).activation_receipt(actor=actor, instance_id=act.instance_id, work_id=act.work_id, request=body)
@@ -185,7 +189,7 @@ class WorkActionMethods(ContinuationActionMethods, ManagementActionMethods, Stop
             return await self._management_outcome(captured, state=state, reason=reason, result=result)
         if captured.kind == "delegate" and state == "done":
             return await self._finish_delegate(captured, result)
-        if captured.kind == "activate":
+        if captured.kind in {"activate", "activate_context"}:
             if state == "done":
                 return await self._complete_activation(captured, result)
             return await self._activation_outcome(captured, state=state, reason=reason, result=result)
@@ -232,7 +236,7 @@ class WorkActionMethods(ContinuationActionMethods, ManagementActionMethods, Stop
             return await self._attempt_management(act, explicit=explicit, attempt_current=attempt_current)
         if act.kind == "stop":
             return await self._run_stop_chain(act, explicit=explicit, attempt_current=attempt_current)
-        if act.kind == "activate":
+        if act.kind in {"activate", "activate_context"}:
             return await self._attempt_activation(act, explicit=explicit, attempt_current=attempt_current)
         if act.kind == "delegate":
             return await self._attempt_delegate(act, explicit=explicit, attempt_current=attempt_current)
@@ -501,6 +505,19 @@ class WorkActionMethods(ContinuationActionMethods, ManagementActionMethods, Stop
                         ):
                             receipt = await self.receipt_for(current)
                             return await self._work_outcome(current, state="done", result=receipt) if receipt is not None and current.state != "done" else current
+                    if current.kind == "activate" and "effective" in expected:
+                        from app.telegram_bots.work_execution_sources import act_facts
+                        from app.telegram_bots.work_start_conversations import require_context_child
+
+                        shown = expected["effective"]
+                        effective = current
+                        changed = bool(current.operation_ids) and shown["id"] == current.id
+                        if shown["id"] != current.id:
+                            effective = await self._work_record(shown["id"])
+                            require_context_child(current, effective)
+                        if changed or not same_body(act_facts(effective), shown):
+                            receipt = await self.receipt_for(current)
+                            return await self._work_outcome(current, state="done", result=receipt) if receipt is not None and current.state != "done" else current
                     if current.kind == "stop" and "effective" in expected:
                         effective = current
                         if expected["effective"]["id"] != current.id:
@@ -520,6 +537,8 @@ class WorkActionMethods(ContinuationActionMethods, ManagementActionMethods, Stop
                         if receipt is not None and current.state != "done":
                             return await self._work_outcome(current, state="done", result=receipt)
                         return current
+                if current.kind in {"activate", "activate_context"} and expected is not None and "effective" in expected:
+                    return await self._attempt_activation(current, explicit=True, attempt_current=attempt_current, retry_expected=expected["effective"])
                 return await self._attempt_work(current, explicit=True, attempt_current=attempt_current)
 
         return await await_drained(perform())
@@ -569,7 +588,13 @@ class ActsWorker:
                         or_(
                             and_(TelegramActRow.state == "pending", TelegramActRow.reason.is_(None)),
                             and_(TelegramActRow.kind == "stop", TelegramActRow.state == "conflict", TelegramActRow.reason == "changed"),
-                            and_(TelegramActRow.kind == "activate", TelegramActRow.state == "waiting", TelegramActRow.reason == "busy"),
+                            and_(TelegramActRow.kind.in_(("activate", "activate_context")), TelegramActRow.state == "waiting", TelegramActRow.reason == "busy"),
+                            and_(
+                                TelegramActRow.kind == "activate",
+                                TelegramActRow.state == "refused",
+                                TelegramActRow.continuation["activation_context"]["phase"].as_string().in_(("planning", "staged")),
+                                TelegramActRow.cancel_requested_at.is_(None),
+                            ),
                         ),
                     )
                     .order_by(TelegramActRow.updated_at, TelegramActRow.id)
@@ -583,7 +608,7 @@ class ActsWorker:
                 continue
             async with self.acts._work_serial(identity):
                 act = await self.acts._work_record(identity)
-                retry_seconds = self.acts.outbox.config.queue.retry_seconds if act.kind == "activate" and act.state == "waiting" and act.reason == "busy" else self.acts.outbox.config.acts.retry_seconds
+                retry_seconds = self.acts.outbox.config.queue.retry_seconds if act.kind in {"activate", "activate_context"} and act.state == "waiting" and act.reason == "busy" else self.acts.outbox.config.acts.retry_seconds
                 if now - _utc(act.updated_at) >= timedelta(seconds=retry_seconds):
                     await await_drained(self.acts._attempt_work(act, attempt_current=lambda: not self._stopping and self.available()))
         await self.acts._recover_stop_dispatches(attempt_current=lambda: not self._stopping and self.available())

@@ -1646,6 +1646,58 @@ when the authorized tool set contains the proposal tool.
 
 ## Explicit Work view and Start owners
 
+Known execution-generation refusal permits one durable fresh-execution read for
+the same operation and body. The final owner wait rechecks lifetime and deadline.
+Known conversation/Space refusal permits one deterministic `activate_context`
+child, after receipt reconciliation and global absence of the original native
+operation. Its body changes only operation and thread IDs; original Work CAS and
+consent remain fixed. A typed refusal alone cannot prove absence of an earlier
+runless promise, which stays with its original operation.
+
+The original Start persists a closed conversation plan before off-writer resource
+creation. Planning, staged and ended phases distinguish preparation recovery from
+a missing admitted journal. First staging checks global child operation absence;
+a staged missing child never reconstructs intent. Reciprocal signatures bind the
+original scope, body, source and authorization timestamp. The child retains the
+earliest original Start/composite consent deadline for fresh admission and
+automatic recovery, with the original retry pacing. The final
+prepared SQL projection qualifies the actual root, absence facts and original
+callback/news/composite source, ignoring only its own qualified child reservation.
+There is no synthetic child button or new consent grant.
+
+An acknowledged Retry freezes the actual effective child's complete journal
+snapshot. Its claim writer rechecks that snapshot after receipt/provider waits,
+so a stale counter or continuation can observe receipts but cannot authorize
+another attempt. Explicit Retry reaches uncertain children and refused children
+with their exact unresolved native promise. Beyond the original deadline, only
+an exact runless promise admitted before that deadline can finish; the final
+transaction requalifies its original actor, body, thread, source and authority.
+There is no new child or fresh admission after expiry. Unknown unadmitted intents
+lose Retry and remain available for read-only observation through their Work link.
+
+Cancel fences root and child in one borrowed binding writer. Conclusive
+no-admission cancellation ends the family; unknown/runless promises remain held.
+Only the actual child's activation event seeds canonical status. The root records
+an effective receipt wrapper. Recovery checks current authority and immutable
+event/body/attempt identity, preserving the child's saved receipt through later
+progress, settlement and successor attempts. Terminal or damaged families leave
+automatic root selection without abandoning their read-only receipt ownership.
+
+Retention discovers the closed child kind and deterministic native operation
+evidence independently of optional relation JSON. It pins only original scoped
+ancestry and never grants effect authority. Closed cancellation can expire its
+old controls; missing/corrupt journals stay held. The kind uses the existing
+journal column and introduces no schema change.
+
+`test_telegram_start_context_{recovery,ownership,delivery,lifecycle}.py` covers
+actual SQL/native admission and recorded SDK ancestry on both databases. Its
+offline launcher and explicit scripted capacity adapter are disclosed test
+boundaries; these cases do not establish worker or container provenance.
+The native-entry regression creates another instance through the actual
+instance/Space services and admits its conflicting operation after child staging.
+Final SQL qualifies global child events and attempts as one exact original
+promise, refusing foreign or ambiguous evidence before admission.
+
 `work_details.py` reads canonical Work, question and conversation facts, then
 joins current assignment, adopted definition, recipient/account, grants,
 lifecycle, conversation metadata and personal custodian facts after provider

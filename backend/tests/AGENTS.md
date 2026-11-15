@@ -1,5 +1,8 @@
 # Backend Tests
 
+Start context tests join actual SQL/native admission to recorded SDK ancestry.
+Keep original CAS/deadlines; cover missing journals, receipt drift and aged sweeps.
+
 `test_null_tool_result_pairing.py` pins null/empty/sentinel ID equivalence, provider-wire
 pairing, and ambiguity rejection for incomplete parallel results.
 

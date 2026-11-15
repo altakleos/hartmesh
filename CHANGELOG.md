@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Recover once from stale execution or changed conversation context during Start,
+  preserving approved assignment versions, original consent deadlines, exact
+  operation ownership and cancellation across the recovery family.
 - Refresh a changed assignment or legacy Start button into a complete current
   preview, requiring a new acknowledged Start without replacing owned launches.
 - Keep live account-policy configuration reads off the Gateway loop, including

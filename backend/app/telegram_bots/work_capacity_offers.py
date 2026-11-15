@@ -55,10 +55,10 @@ async def retire_offer_controls(writer, old, *, outbox):
 async def waiting_origin(writer, link, journal, *, expected=None, origin=None, transfer=None):
     if link is None or journal is None:
         raise ProductSourceRetired()
-    callback, parent, controls, primary = await execution_origin_rows(writer, journal)
+    callback, parent, controls, primary, context_root = await execution_origin_rows(writer, journal)
     attempt = await writer.scalar(select(AgentWorkAttemptRow).where(AgentWorkAttemptRow.work_id == journal.work_id, AgentWorkAttemptRow.activation_id == journal.id).execution_options(populate_existing=True))
-    origin = origin or qualify_execution_origin(link, _snapshot(journal), callback, parent, controls, activation_parent=primary)
-    act = qualify_waiting(link, journal, attempt, callback, parent, controls, origin, expected=expected, transfer=transfer, activation_parent=primary)
+    origin = origin or qualify_execution_origin(link, _snapshot(journal), callback, parent, controls, activation_parent=primary, context_root=context_root)
+    act = qualify_waiting(link, journal, attempt, callback, parent, controls, origin, expected=expected, transfer=transfer, activation_parent=primary, context_root=context_root)
     return act, origin, parent.message_thread_id
 
 
@@ -159,7 +159,7 @@ class WorkCapacityOffers(WorkNewsPlans):
                             TelegramBotLinkRow.chat_id == TelegramActRow.chat_id,
                         ),
                     )
-                    .where(TelegramActRow.kind == "activate", TelegramActRow.state == "waiting", TelegramActRow.reason == "work-limit", TelegramActRow.cancel_requested_at.is_(None))
+                    .where(TelegramActRow.kind.in_(("activate", "activate_context")), TelegramActRow.state == "waiting", TelegramActRow.reason == "work-limit", TelegramActRow.cancel_requested_at.is_(None))
                     .order_by(TelegramActRow.created_at, TelegramActRow.id)
                 )
             )
