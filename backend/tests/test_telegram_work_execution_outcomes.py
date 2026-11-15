@@ -472,14 +472,17 @@ async def test_stop_child_receipt_and_dispatch_own_the_parent_reply(work_deliver
 async def test_denied_start_names_the_current_supervisor(work_delivery, monkeypatch):
     from sqlalchemy import select
 
-    from deerflow.agent_instances.contract import AgentDenied
+    from deerflow.config.app_config import peek_loaded_app_config
+    from deerflow.config.authorization_config import AuthorizationConfig
     from deerflow.persistence.agent_instances.model import AgentInstanceRow
     from deerflow.persistence.user.model import UserRow
 
     e = work_delivery
     _views, controller, button = await start_control(e, monkeypatch)
     act = await stage(e, controller, button)
-    monkeypatch.setattr("app.gateway.work_execution.activate_work", AsyncMock(side_effect=AgentDenied("permission withdrawn", reason="denied")))
+    configuration = peek_loaded_app_config()
+    policy = {"routes": {"allow": "*", "deny": ["runs:create"]}}
+    monkeypatch.setattr(configuration, "authorization", AuthorizationConfig.model_validate({"enabled": True, "provider": {"use": "deerflow.authz.rbac:RbacAuthorizationProvider", "config": {"roles": {"admin": policy, "user": policy}}}}))
     assert (await e.acts.check(act.id)).state == "refused"
     plans = execution_plans(e)
     e.identity = await plans.observe(e.link, act.id)
@@ -489,7 +492,11 @@ async def test_denied_start_names_the_current_supervisor(work_delivery, monkeypa
         assert name
     await dispatch(e, 3960)
     messages = [call.parameters["text"] for call in e.channel.bot.request.calls if call.endpoint == "sendMessage"]
-    assert name in messages[-1]
+    from app.telegram_bots.attention_authority import prepare_attention
+
+    held, _basis = await (await prepare_attention(plans.reader, e.link))()
+    refused = await e.acts._work_record(act.id)
+    assert name in messages[-1], (refused.state, refused.reason, refused.attempts, refused.continuation, sorted(held))
 
 
 @pytest.mark.asyncio

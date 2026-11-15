@@ -2090,7 +2090,16 @@ class Outbox:
         return await await_drained(perform())
 
     async def plan_status_notice(
-        self, link: BotLink, *, source_id: str, parts: list[dict], inbox_rows: Sequence = (), finish_route: bool = False, session: AsyncSession | None = None, check_attempt_current: Callable[[], bool] | None = None
+        self,
+        link: BotLink,
+        *,
+        source_id: str,
+        parts: list[dict],
+        inbox_rows: Sequence = (),
+        finish_route: bool = False,
+        session: AsyncSession | None = None,
+        check_attempt_current: Callable[[], bool] | None = None,
+        message_thread_id: int | None = None,
     ) -> str:
         """Server handler path only; untrusted outbound metadata cannot set this tag."""
         if not isinstance(source_id, str) or not source_id:
@@ -2101,7 +2110,7 @@ class Outbox:
         origins = sorted((row.link_id, row.message_id, row.chat_id) for row in inbox_rows)
         if len(set(origins)) != len(origins) or any(row.link_id != link.id or row.binding_generation != link.binding_generation or row.chat_id != link.chat_id for row in inbox_rows):
             raise ValueError("status-source-conflict")
-        topic = inbox_rows[0].message_thread_id if inbox_rows else None
+        topic = message_thread_id if message_thread_id is not None else inbox_rows[0].message_thread_id if inbox_rows else None
         if topic is not None and (type(topic) is not int or topic <= 0):
             raise ValueError("invalid-delivery-target")
         if topic == 1:
