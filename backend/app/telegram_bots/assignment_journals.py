@@ -76,7 +76,8 @@ def journal_state(link, root, parent, child, original_event, child_event, *, now
         return "unconfirmed", {"key": "assign.save_cancelled", "cancel": False, "retry": False}, None
     event = child_event if child is not None else original_event
     if parent.state in {"refused", "conflict"} and effective.state in {"refused", "conflict"} and event is None:
-        return "refused", {"key": "assign.not_saved", "cancel": False, "retry": effective.reason in RETRY_REASONS}, None
+        key = "assign.no_work" if effective.reason == "work-off" else "assign.not_saved"
+        return "refused", {"key": key, "cancel": False, "retry": effective.reason in RETRY_REASONS}, None
     if effective.state == "pending" and effective.first_attempt_at is not None and now - effective.first_attempt_at < timedelta(hours=1) and effective.attempts < config.acts.max_attempts:
         return "saving", {"key": "assign.saving", "cancel": True, "retry": False}, None
     return "unconfirmed", {"key": "act.unconfirmed" if parent.state != "done" else "assign.save_unconfirmed", "cancel": False, "retry": parent.state != "done"}, None

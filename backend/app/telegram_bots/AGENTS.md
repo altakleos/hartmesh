@@ -121,7 +121,7 @@ Stale lists retire without blocking later messages. Ordinary bots dispatch
 `/assistants` and `/employees` to `handle_list`; their Work words only point to
 those chats. Instance/custom bots do not acquire these ordinary-chat commands.
 
-Work navigation, result drafts, reviews and preferences:
+Work navigation, result drafts, reviews and refusals:
 [Work delivery guide](../../docs/TELEGRAM_WORK.md). Read before changing
 `attention*`, `notification*`, `digest*`, `summary*`, `rejected*`, `*settings*`, `work_*` or sender/callback integration.
 

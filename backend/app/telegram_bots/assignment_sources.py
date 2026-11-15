@@ -1,6 +1,6 @@
 """Private assignment cards join their exact draft and input at the SDK fence."""
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -16,10 +16,16 @@ from app.telegram_bots.work_actions import _ACT_SCOPE, same_body, thaw
 from app.telegram_bots.work_details import WorkDetailProjection
 from app.telegram_bots.work_news_sources import WorkNewsRead
 from app.telegram_bots.work_result_identity import digest
+from app.telegram_bots.work_stop_news import NewsClock
 from app.telegram_bots.work_view_sources import WorkViewReader
 from deerflow.persistence.agent_instances.work import AgentWorkEventRow
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramOutboxRow, TelegramPersonSettingsRow
-from deerflow.utils.file_io import await_drained
+from deerflow.utils.file_io import await_drained, run_file_io
+
+
+@dataclass(frozen=True)
+class AssignmentClock(NewsClock):
+    product: str
 
 
 def private_facts(row):
@@ -39,7 +45,7 @@ def assignment_intent(item):
     return intent
 
 
-def private_source(link, root, *, instance, permissions, policy, held, clock, config, journal=None, detail=None, transcripts=()):
+def private_source(link, root, *, instance, permissions, policy, held, clock, config, journal=None, detail=None, transcripts=(), work_enabled=True):
     draft = snapshot_draft(link, root)
     if root.cancel_requested_at is not None:
         raise ProductSourceRetired()
@@ -76,7 +82,14 @@ def private_source(link, root, *, instance, permissions, policy, held, clock, co
             raise ProductSourceRetired()
         parent, child, original_event, child_event = journal
         phase, notice, receipt = journal_state(link, root, parent, child, original_event, child_event, now=clock.now(), config=config)
+        if phase == "refused" and notice["key"] == "assign.no_work" and work_enabled:
+            notice = {**notice, "key": "assign.not_saved"}
         data.update(phase=phase, notice=notice, act=action_facts(parent), child=action_facts(child), original_event=event_facts(original_event), child_event=event_facts(child_event))
+        if phase == "refused" and notice["key"] == "assign.no_work":
+            from app.telegram_bots.pages import page_address
+
+            values["product"] = clock.product
+            data["settings_url"] = page_address("web.agentSettings", link, permissions=permissions, ceilings=held, public_base_url=config.public_base_url) if "agents:write" in held else None
         if child is not None:
             data["due_note"] = True
             data["draft"] = {"objective": child.body["objective"], "success_criteria": child.body["success_criteria"], "due_at": None, "due_text": parent.continuation["delegate_source"]["due_text"]}
@@ -97,6 +110,14 @@ class AssignmentReader(WorkViewReader):
     def __init__(self, acts):
         super().__init__(work=acts.work, authority=acts.authority, links=acts.links, clock=acts.outbox.clock)
         self.acts, self.config = acts, acts.outbox.config
+
+    async def prepare_clock(self, link, item):
+        from deerflow.config.app_config import get_app_config
+        from deerflow.config.ui_config import product_name
+
+        clock = await super().prepare_clock(link, item)
+        product = await run_file_io(lambda: product_name(get_app_config()))
+        return AssignmentClock(clock.settings, clock.zone, clock.now, product)
 
     async def read(self, link, item):
         async def perform():
@@ -180,7 +201,10 @@ class AssignmentProjection:
 
             self.fresh = FreshDraft(root.id, item.id)
         self.detail_projection = WorkDetailProjection(reader, link, detail.record, detail.request, reusable=detail.can_reuse_conversation, expected=detail) if detail is not None and not origin_only else None
-        self.projection = DraftProjection(link, root.body["origin"], saved=root)
+        # Only a known, answered Work-off refusal may bypass the effect policy
+        # for read-only delivery. The final joined frame proves it again below.
+        self.work_off_refusal = journal is not None and journal[0].state in {"refused", "conflict"} and (journal[1] or journal[0]).state in {"refused", "conflict"} and (journal[1] or journal[0]).reason == "work-off"
+        self.projection = DraftProjection(link, root.body["origin"], saved=root, require_work_policy=not self.work_off_refusal)
         from app.telegram_bots.assignment_proposal_records import ProposalInputs, proposal_primary
 
         self.proposal = ProposalInputs(link, item) if proposal_primary(item.payload) else None
@@ -272,6 +296,21 @@ class AssignmentProjection:
             if mark is not None and voice_basis(mark) is not None:
                 draft_input_basis(mark)
                 transcripts.append(mark.sanitized_input["text"])
-        self.source = private_source(self.link, root, instance=rows[0][1], permissions=rows[0][2], policy=rows[0][3], held=held, clock=self.clock, config=self.reader.config, journal=journal, detail=detail, transcripts=transcripts)
+        self.source = private_source(
+            self.link,
+            root,
+            instance=rows[0][1],
+            permissions=rows[0][2],
+            policy=rows[0][3],
+            held=held,
+            clock=self.clock,
+            config=self.reader.config,
+            journal=journal,
+            detail=detail,
+            transcripts=transcripts,
+            work_enabled=self.projection.work_enabled,
+        )
+        if not self.projection.work_enabled and (not self.work_off_refusal or self.source.work["phase"] != "refused" or self.source.work["notice"]["key"] != "assign.no_work"):
+            raise ProductSourceRetired()
         if self.expected is not None and not same_body(self.source.__dict__, self.expected.__dict__):
             raise ProductSourceRetired()

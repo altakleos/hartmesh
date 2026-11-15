@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Explain a refused save when Work is switched off, keeping the original retry
+  and showing settings only to current managers. Recheck policy before delivery.
 - Recover once from stale execution or changed conversation context during Start,
   preserving approved assignment versions, original consent deadlines, exact
   operation ownership and cancellation across the recovery family.
