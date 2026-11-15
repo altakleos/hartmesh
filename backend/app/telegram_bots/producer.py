@@ -2385,13 +2385,20 @@ class OutboxSender:
             return DeliveryEligibility.wait()
         work_basis = row.payload.get("work_news_basis", row.payload.get("result_notice_basis", row.payload.get("work_request_basis", {})))
         dependency = work_basis.get("cleanup_id") if type(work_basis) is dict else None
+        if "management_prompt_intent" in row.payload:
+            direct = row.payload.get("management_prompt_cleanup_id")
+            if dependency is not None and dependency != direct:
+                return DeliveryEligibility.skip("source-gone")
+            dependency = direct
         if dependency is not None:
             from app.telegram_bots.work_request_source import cleanup_ready
 
+            if type(dependency) is not str or len(dependency) != 32 or any(value not in "0123456789abcdef" for value in dependency):
+                return DeliveryEligibility.skip("source-gone")
             async with self.outbox.sessions() as reader:
                 cleanup = await reader.get(TelegramOutboxRow, dependency)
                 try:
-                    if not cleanup_ready(row, cleanup):
+                    if not cleanup_ready(row, cleanup, identity=dependency):
                         return DeliveryEligibility.wait()
                 except ProductSourceRetired:
                     return DeliveryEligibility.skip("source-gone")

@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-from sqlalchemy import and_, literal, or_, select, text, tuple_
+from sqlalchemy import String, and_, cast, literal, or_, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.telegram_bots.token_pattern import TOKEN_IN_TEXT
@@ -3135,6 +3135,77 @@ class InboxRepository:
     @staticmethod
     def _publication(turn_id: str, event_id: str) -> str:
         return hashlib.sha256((turn_id + ":" + event_id).encode()).hexdigest()[:32]
+
+    @staticmethod
+    def unanswered_delivery(row: TelegramOutboxRow) -> bool:
+        """A materialized reply can be replaced only before any transport entry."""
+        return (
+            row.class_ == "reply"
+            and row.state == "pending"
+            and type(row.attempts) is int
+            and row.attempts == 0
+            and all(getattr(row, key) is None for key in ("claim_owner", "claim_id", "claimed_at", "sent_at", "message_id", "closed_at"))
+            and not any(key.endswith("_dispatch_conflict") or key == "presentation_history" for key in row.payload)
+            and isinstance(row.parts, list)
+            and all(isinstance(part, dict) and part.get("state") == "pending" and type(part.get("message_ids")) is list and not part["message_ids"] and not {"sent_at", "dispatched_at"}.intersection(part) for part in row.parts)
+        )
+
+    async def replace_unanswered_delivery(self, rows: Sequence[InboxRow], *, previous_id: str, outbox_id: str, session: AsyncSession) -> None:
+        """Replace an undispatched non-turn reply, preserving its sealed history.
+
+        The caller must qualify the old source and the replacement in this same
+        writer. Claims, transport entry and any acknowledgement retain the old
+        delivery owner. Ordinary registration keeps sealed routes immutable.
+        """
+        self._borrow(session)
+        link_id = self._requested(rows)
+        await session.flush()
+        link = await self._link(session, link_id)
+        marks = await self._rows(session, rows)
+        previous = await session.get(TelegramOutboxRow, previous_id, with_for_update=True, populate_existing=True)
+        delivery = await session.get(TelegramOutboxRow, outbox_id, with_for_update=True, populate_existing=True)
+        if previous is None or delivery is None or previous_id == outbox_id or not all(self.unanswered_delivery(row) for row in (previous, delivery)):
+            raise ValueError("inbox-delivery-conflict")
+        scope = (link_id, link.owner_user_id, link.binding_generation, link.chat_id)
+        if any((row.link_id, row.owner_user_id, row.binding_generation, row.chat_id) != scope or row.class_ != "reply" for row in (previous, delivery)) or _topic(previous.message_thread_id) != _topic(delivery.message_thread_id):
+            raise ValueError("inbox-delivery-conflict")
+        owners = list(await session.scalars(select(TelegramInboundMarkRow).where(or_(TelegramInboundMarkRow.outbox_id == previous_id, cast(TelegramInboundMarkRow.delivery_ids, String).contains(previous_id))).with_for_update()))
+        callback_owner = await session.scalar(select(TelegramCallbackRow.id).where(cast(TelegramCallbackRow.payload[CALLBACK_PUBLICATION_KEY], String).contains(previous_id)).limit(1))
+        if {_identity(mark) for mark in owners} != {_identity(mark) for mark in marks} or callback_owner is not None:
+            raise ValueError("inbox-delivery-conflict")
+        groups = {part["callback_group_id"] for part in previous.parts if part.get("callback_group_id") is not None}
+        controls = list(
+            await session.scalars(
+                select(TelegramCallbackRow).where(or_(TelegramCallbackRow.group_id.in_(groups), TelegramCallbackRow.payload["anchor_outbox_id"].as_string() == previous_id)).with_for_update().execution_options(populate_existing=True)
+            )
+        )
+        if {control.group_id for control in controls} != groups or any(
+            (control.link_id, control.binding_generation, control.chat_id, _topic(control.message_thread_id)) != (link_id, link.binding_generation, link.chat_id, _topic(previous.message_thread_id))
+            or control.payload.get("anchor_outbox_id") != previous_id
+            or control.payload.get("presentation_version") != previous.payload.get("presentation_version")
+            or control.payload.get("presentation_pending") is not True
+            or any(getattr(control, key) is not None for key in ("message_id", "consumed_at", "closed_reason"))
+            or any(key in control.payload for key in (CALLBACK_PUBLICATION_KEY, "presentation_history", "work_action_id"))
+            for control in controls
+        ):
+            raise ValueError("inbox-delivery-conflict")
+        for mark in marks:
+            self._current(link, mark)
+            if (
+                mark.state != "reply_pending"
+                or any(getattr(mark, key) is not None for key in ("turn_id", "thread_id", "run_id", "assistant_message_id", "outbox_id"))
+                or "publications" in mark.route_basis
+                or previous_id not in mark.delivery_ids
+                or mark.message_thread_id != _topic(delivery.message_thread_id)
+            ):
+                raise ValueError("inbox-delivery-conflict")
+        for mark in marks:
+            if outbox_id not in mark.delivery_ids:
+                mark.delivery_ids = [*mark.delivery_ids, outbox_id]
+        for control in controls:
+            control.consumed_at, control.closed_reason = _now(), "replaced"
+        previous.state, previous.skip_reason, previous.closed_at = "skipped", "unanswered-replacement", _now()
+        await self.settle_deliveries(link_id=link_id, session=session)
 
     async def register_delivery(self, rows: Sequence[InboxRow], *, outbox_id: str, primary: bool = False, finish: bool = False, session: AsyncSession) -> None:
         """Attach a plan in its caller's transaction, then recompute completion."""

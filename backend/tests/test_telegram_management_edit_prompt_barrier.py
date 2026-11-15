@@ -65,10 +65,12 @@ async def test_prompt_waits_for_real_keyboard_ack_then_arms_from_actual_sdk_ack(
         cleanup.not_before = e.clock.now() + timedelta(minutes=10)
     before = len([call for call in e.channel.bot.request.calls if call.endpoint == "sendMessage"])
     e.clock.advance(10)
-    assert await e.sender.tick() == 1
+    assert await e.sender.tick() == 0
     await e.sender.drain()
     assert len([call for call in e.channel.bot.request.calls if call.endpoint == "sendMessage"]) == before
     async with e.db.sessions() as reader:
+        row = await reader.get(TelegramOutboxRow, identity)
+        assert row.state == "pending" and row.claim_owner is None and row.claim_id is None and row.claimed_at is None
         prompt = await reader.get(TelegramCallbackRow, prompt_id)
         assert prompt.payload["prompt_visibility"]["state"] == "pending" and prompt.message_id is None and prompt.expires_at is None
     e.dispatch_errors.clear()
