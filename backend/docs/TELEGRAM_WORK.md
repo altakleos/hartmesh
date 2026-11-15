@@ -2174,6 +2174,17 @@ recovery custody. Discard/Back observers receive their caller's original guard,
 and execution-notice creation checks it again after flushing and before commit.
 Receipt settlement remains separate from fresh presentation admission.
 
+Unadmitted Start, Save and Save + Start callbacks may reuse the supervisor's
+current lifecycle notice. The exact original callback, binding, payload and age
+must still match, with no consumed/reserved control, actual journal, global
+native activation promise or operation event across the complete original group.
+Assignment drafts must retain a fresh scoped Root and independent unadmitted
+family proof, including when a sibling marker or saved journal is missing.
+A saved or uncertain owner keeps
+its receipt/recovery path. The existing lifecycle notice rechecks live account,
+Use precedence, status, token and destination at the SDK boundary; this path
+contains no private Work content and creates no conversation or activation.
+
 The installed runtime also owns `WorkCapacityOffers`, using its existing global
 database arbitration and owner-authenticated HTTP capacity reader. Maintenance
 checks at least once a minute and at the configured offer-hold boundary; newly

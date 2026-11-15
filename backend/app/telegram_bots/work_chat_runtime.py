@@ -187,6 +187,67 @@ class WorkChatRuntime:
             return True
         return False
 
+    async def _unadmitted_lifecycle(self, link, row):
+        """Fixed current status may answer a press with no saved effect owner."""
+        from sqlalchemy import select
+
+        from app.telegram_bots.callbacks import _row
+        from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow
+        from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow
+
+        notice = getattr(self.host, "notice_instance_unavailable", None)
+        if row.kind not in {"work_start", "assign_start", "assign_save"} or notice is None:
+            return False
+        key, _identity = await self.host.authority.instance_lifecycle(link)
+        if key not in {"agent.paused", "agent.retired", "access.agent_off"}:
+            return False
+        async with self.host.outbox.sessions() as reader:
+            selected = await reader.get(TelegramCallbackRow, row.id)
+            if (
+                selected is None
+                or (selected.link_id, selected.binding_generation, selected.chat_id, selected.message_id, selected.message_thread_id, selected.kind, selected.group_id, selected.target_kind, selected.target_id)
+                != (link.id, link.binding_generation, link.chat_id, row.message_id, row.message_thread_id, row.kind, row.group_id, row.target_kind, row.target_id)
+                or _row(selected).payload != row.payload
+                or selected.consumed_at is not None
+                or "work_action_id" in selected.payload
+            ):
+                return False
+            members = list(await reader.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == selected.group_id)))
+            if not members or any(member.consumed_at is not None or "work_action_id" in member.payload for member in members):
+                return False
+            if row.kind in {"assign_start", "assign_save"}:
+                from app.telegram_bots.assignment_drafts import draft_scope
+                from app.telegram_bots.assignment_lineage import require_fresh_draft
+
+                root = await reader.get(TelegramActRow, row.target_id)
+                if (
+                    root is None
+                    or any(getattr(root, key) != value for key, value in draft_scope(link).items())
+                    or root.state != "draft"
+                    or root.operation_ids
+                    or root.continuation is not None
+                    or root.stop_dispatch is not None
+                    or root.cancel_requested_at is not None
+                ):
+                    return False
+                try:
+                    await require_fresh_draft(reader, link, root.id)
+                except ProductSourceRetired:
+                    return False
+            identities = [member.id for member in members]
+            owned = await reader.execute(
+                select(
+                    select(TelegramActRow.id).where(TelegramActRow.id.in_(identities)).exists(),
+                    select(AgentWorkAttemptRow.id).where(AgentWorkAttemptRow.activation_id.in_(identities)).exists(),
+                    select(AgentWorkEventRow.id).where(AgentWorkEventRow.operation_id.in_(identities)).exists(),
+                )
+            )
+            if any(owned.one()):
+                return False
+            self.host.callbacks._unexpired(selected)
+        await notice(link)
+        return True
+
     async def execute_callback(self, channel, row, *, query_id=None, update_id=None):
         if row.kind not in {
             "work_details",
@@ -217,6 +278,8 @@ class WorkChatRuntime:
         async def perform():
             guard = self.guard(channel, link)
             await guard.prepare()
+            if await self._unadmitted_lifecycle(link, row):
+                return True
             scope = dict(chat_id=row.chat_id, message_id=row.message_id, message_thread_id=row.message_thread_id, guard=guard)
             if row.kind == "work_start" and "assignment_revision" not in row.payload:
                 await self.views.open(link, row.id, query_id=query_id, refusal=True, **scope)
