@@ -1,5 +1,12 @@
 ### Schema Migrations (`packages/harness/deerflow/persistence/migrations/`)
 
+`0053_work_operation_indexes` appends nonunique activation/operation leading-key
+indexes to Work attempts/events after 0052. Global conflicting-evidence reads
+must not hide other targets behind scoped predicates. Upgrade verifies existing
+index shape; downgrade removes only these indexes. No rows, historical ancestry
+or bootstrap compatibility floor change. Qualify old-to-new, fresh bootstrap and
+downgrade/reupgrade on SQLite/PostgreSQL in the matching migration test.
+
 HartMesh's own chain (`0027_account_access` … `0044_telegram_assistant_ids`) forks
 from `0026_mcp_task_lease_tokens`; upstream's `0027_notification_deliveries` …
 `0048_extension_execution_leases` are append-imported after it (`0027_notification_deliveries.down_revision
@@ -83,7 +90,7 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0039_user_disabled` → `0040_scheduled_group_notice` →
 `0041_im_notice_preferences` → `0042_channel_leases` →
 `0043_runtime_im_notices` → `0044_channel_runtime_configs` →
-`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` → `0048_extension_execution_leases`, then `0049_run_inputs` and `0049_run_producer_fencing` → `0050_history_seed_authority`, joined by `0051_merge_run_inputs_fencing` → `0052_batch_continuation` (head).
+`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` → `0048_extension_execution_leases`, then `0049_run_inputs` and `0049_run_producer_fencing` → `0050_history_seed_authority`, joined by `0051_merge_run_inputs_fencing` → `0052_batch_continuation` → `0053_work_operation_indexes` (head).
 The preference revision uses an owner/key table with a cascading users FK;
 project documents use an owner-scoped shelf. MCP lease tokens, batch evidence,
 and run-idempotency identity add nullable columns without historical backfill or

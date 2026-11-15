@@ -12,10 +12,10 @@ from test_work_attention_pages import work_pages as work_pages
 
 from app.telegram_bots.acts import Acts
 from deerflow.persistence.agent_instances.work import AgentWorkEventRow
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow
 
 
-async def prepare_management(e, kind):
+async def prepare_management(e, kind, *, work_id=None):
     from app.telegram_bots.work_management_delivery import WorkManagementPlans
     from app.telegram_bots.work_management_sources import WorkManagementReader
     from app.telegram_bots.work_news_delivery import WorkNewsSources
@@ -25,6 +25,10 @@ async def prepare_management(e, kind):
     views, _ = await prepare_view(e)
     await dispatch(e, 6101)
     detail = await selected(e, "work_details")
+    if work_id is not None:
+        async with e.db.sessions() as reader:
+            detail = await reader.scalar(select(TelegramCallbackRow).where(TelegramCallbackRow.kind == "work_details", TelegramCallbackRow.target_id == work_id, TelegramCallbackRow.payload["anchor_outbox_id"].as_string() == e.identity))
+        assert detail is not None
     e.identity = await views.open(e.link, detail.id, query_id="management-detail", chat_id=e.link.chat_id, message_id=detail.message_id, message_thread_id=None, guard=await guard_for(e))
     await dispatch(e, 6102)
     control = await selected(e, kind)

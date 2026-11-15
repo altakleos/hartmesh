@@ -15,11 +15,11 @@ from deerflow.persistence.agent_instances.work import AgentWorkEventRow
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow
 
 
-async def editing(e, *, unchanged=False):
+async def editing(e, *, unchanged=False, work_id=None):
     from app.telegram_bots.work_management_editing import WorkManagementEdits
     from app.telegram_bots.work_news_delivery import WorkNewsSources
 
-    cards, button = await prepare_management(e, "work_change")
+    cards, button = await prepare_management(e, "work_change", work_id=work_id)
     await open_card(e, cards, button)
     if unchanged:
         from test_telegram_work_management_navigation import publish_edit

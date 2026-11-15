@@ -146,8 +146,11 @@ async def settings_prompt_dependencies(session):
 
 async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int, draft_ttl_hours: int = 24) -> set[str]:
     """The ids and ``reply:`` keys of outbox rows a live control or unfinished delivery needs."""
+    from app.telegram_bots.work_start_refresh_retention import refresh_dependencies
+
+    refresh = await refresh_dependencies(session, now, max_age_days=callback_max_age_days)
     generations = dict((await session.execute(select(TelegramBotLinkRow.id, TelegramBotLinkRow.binding_generation))).all())
-    pinned: set[str] = {anchor for _prompt, anchor in await settings_prompt_dependencies(session) if type(anchor) is str}
+    pinned: set[str] = {anchor for _prompt, anchor in await settings_prompt_dependencies(session) if type(anchor) is str} | refresh.deliveries
     from app.telegram_bots.assignment_reopen_retention import reopen_dependencies
 
     pinned.update((await reopen_dependencies(session, now)).deliveries)
@@ -157,7 +160,7 @@ async def _pinned_deliveries(session, now: datetime, callback_max_age_days: int,
     pinned.update(start_anchors)
     from app.telegram_bots.work_execution_retention import execution_dependencies
 
-    _execution_groups, execution_anchors, _execution_acts = await execution_dependencies(session)
+    _execution_groups, execution_anchors, _execution_acts = await execution_dependencies(session, now=now, max_age_days=callback_max_age_days)
     pinned.update(execution_anchors)
     from app.telegram_bots.work_command_stop_retention import command_stop_dependencies
 
@@ -368,7 +371,7 @@ async def _sweep_acts(sessions, now, *, draft_ttl_hours=24, callback_max_age_day
         )
         from app.telegram_bots.work_execution_retention import execution_dependencies
 
-        _execution_groups, _execution_anchors, execution_acts = await execution_dependencies(session)
+        _execution_groups, _execution_anchors, execution_acts = await execution_dependencies(session, now=now, max_age_days=callback_max_age_days)
         pending_outcome = or_(pending_outcome, TelegramActRow.id.in_(sorted(execution_acts)))
         from app.telegram_bots.work_command_stop_retention import command_stop_dependencies
 

@@ -267,12 +267,22 @@ async def test_observation_is_frozen_and_closed(coordinator_environment):
         PublicationObservation("held", record, outbox_id="f" * 32, reason="source_unavailable")
 
 
-async def test_read_timeout_retires_prompt_network_and_leaves_owner_owned(coordinator_environment, monkeypatch):
+@pytest.mark.parametrize("slow_admission", [False, True])
+async def test_read_timeout_retires_prompt_network_and_leaves_owner_owned(coordinator_environment, monkeypatch, slow_admission):
     e = coordinator_environment
     record = await marked(e)
     attempt = await e.host.capture(e.link, thread_id=e.thread_id, endpoint_id=e.http.endpoint_id)
     record = await e.inbox.bind_publication_run(record, run_id="coordinator-run", guard=attempt.read_guard)
     entered, cancelled = asyncio.Event(), asyncio.Event()
+    if slow_admission:
+        actual_attempt = e.coordinator._attempt
+
+        async def delayed_admission(*args, **kwargs):
+            result = await actual_attempt(*args, **kwargs)
+            await asyncio.sleep(0.08)
+            return result
+
+        monkeypatch.setattr(e.coordinator, "_attempt", delayed_admission)
 
     async def held(request):
         entered.set()
@@ -282,10 +292,24 @@ async def test_read_timeout_retires_prompt_network_and_leaves_owner_owned(coordi
             cancelled.set()
 
     e.responder = held
-    monkeypatch.setattr(publication, "OUTPUT_READ_TIMEOUT_SECONDS", 0.05)
-    with pytest.raises(PublicationRefused):
-        await e.coordinator.read_output(record, e.link)
-    assert entered.is_set() and cancelled.is_set() and e.http.closed is False
+    actual_wait = asyncio.wait
+
+    async def deadline_after_network_entry(tasks, *, timeout=None, **kwargs):
+        if timeout is not None and any(task.get_name() == "telegram-publication-operation" for task in tasks):
+            # Qualify actual SQL admission before testing network retirement.
+            # A 50 ms end-to-end budget can correctly expire before HTTP begins.
+            await asyncio.wait_for(entered.wait(), 5)
+            timeout = 0.01
+        return await actual_wait(tasks, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(publication, "OUTPUT_READ_TIMEOUT_SECONDS", 5)
+    monkeypatch.setattr(asyncio, "wait", deadline_after_network_entry)
+    try:
+        with pytest.raises(PublicationRefused):
+            await e.coordinator.read_output(record, e.link)
+        assert entered.is_set() and cancelled.is_set() and e.http.closed is False
+    finally:
+        await e.coordinator.stop()
 
 
 async def test_observation_deadline_drains_committed_bind_exit_before_return(coordinator_environment, monkeypatch):

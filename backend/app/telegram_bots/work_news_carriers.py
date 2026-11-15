@@ -42,13 +42,23 @@ def present_news_detail(source, basis, link, view):
     return WorkViewPresentation(parts, (*view.keyboard, *controls))
 
 
-async def news_origin_projection(reader, link, parent, original, *, activation_id=None, historical=False):
+async def news_origin_projection(reader, link, parent, original, *, activation_id=None, historical=False, readonly_start_refresh=False):
     """Prepare the actual native event behind this acknowledged news carrier."""
     from app.telegram_bots.producer import ProductSourceRetired, _item
     from app.telegram_bots.work_news_sources import WorkNewsProjection, WorkNewsRead, WorkNewsReader
     from app.telegram_bots.work_status_control_origins import carrier_source, resume_projection
 
-    value = carrier_source(original)
+    value = carrier_source(original, readonly_start_refresh=readonly_start_refresh)
+    if value["key"] == "view.detail" and value["work"].get("origin", {}).get("refusal") == "start.changed":
+        from app.telegram_bots.work_view_sources import WorkViewProjection, WorkViewReader
+
+        view_reader = reader
+        if not hasattr(reader, "prepare_clock"):
+            view_reader = WorkViewReader(work=reader.work, authority=reader.authority, links=reader.links, clock=reader.outbox.clock)
+            view_reader.acts = reader
+        projection = WorkViewProjection(view_reader, link, _item(parent), WorkNewsRead(**value), clock=await view_reader.prepare_clock(link, _item(parent)), origin_only=True)
+        await projection.prepare_source(activation_id=activation_id)
+        return projection
     if "work_outcome_basis" in original.payload:
         from app.telegram_bots.work_outcome_origins import OutcomeOriginProjection
 
@@ -56,7 +66,7 @@ async def news_origin_projection(reader, link, parent, original, *, activation_i
     if value["key"] == "status.stopped":
         if "work_event_intent" not in original.payload:
             raise ProductSourceRetired()
-        return await resume_projection(reader, link, parent, original)
+        return await resume_projection(reader, link, parent, original, readonly_start_refresh=readonly_start_refresh)
     if value["key"] not in ACTION_NEWS_KEYS or "work_event_intent" not in original.payload:
         return None
     source_reader = WorkNewsReader(work=reader.work, authority=reader.authority, links=reader.links)
@@ -64,10 +74,10 @@ async def news_origin_projection(reader, link, parent, original, *, activation_i
     return WorkNewsProjection(source_reader, link, item, origin=WorkNewsRead(**value), clock=await source_reader.prepare_clock(link, item), activation_id=activation_id, historical=historical)
 
 
-async def prepare_news_origin(reader, link, parent, original):
+async def prepare_news_origin(reader, link, parent, original, *, activation_id=None):
     from app.telegram_bots.attention_authority import prepare_attention
 
-    projection = await news_origin_projection(reader, link, parent, original)
+    projection = await news_origin_projection(reader, link, parent, original, activation_id=activation_id)
     if projection is None:
         return None
     admission = await prepare_attention(reader, link)
@@ -222,9 +232,10 @@ class ActivationNewsOrigin:
             from app.telegram_bots.work_outcome_origins import is_outcome_carrier
 
             outcome_parent = is_outcome_carrier(parent)
+            refresh_parent = parent is not None and (parent.dedupe_key.startswith("notice:work-start-refresh:") or parent.payload.get("work_view_intent", {}).get("origin", {}).get("refusal") == "start.changed")
             if outcome_parent and "work_outcome_basis" not in parent.payload:
                 raise ProductSourceRetired()
-            if not outcome_parent and (parent is None or "work_event_intent" not in parent.payload or not {"work_news_basis", "work_status_update"}.intersection(parent.payload)):
+            if not outcome_parent and not refresh_parent and (parent is None or "work_event_intent" not in parent.payload or not {"work_news_basis", "work_status_update"}.intersection(parent.payload)):
                 if marker is not None or witness is not None or status_parent:
                     raise ProductSourceRetired()
                 return

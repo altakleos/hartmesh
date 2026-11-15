@@ -29,9 +29,9 @@ def is_status_carrier(parent):
     )
 
 
-def acknowledged_update(parent, version):
+def acknowledged_update(parent, version, *, readonly_start_refresh=False):
     item = _item(parent)
-    basis = validate_update(item)
+    basis = validate_update(item, readonly_start_refresh=readonly_start_refresh)
     current = item.payload["presentation_version"]
     if type(version) is not int or not 0 <= version <= current or basis["version"] != 2:
         raise ProductSourceRetired()
@@ -45,18 +45,18 @@ def acknowledged_update(parent, version):
             parts=[part for part in item.parts if part["presentation_version"] < version] + deepcopy(basis["history"][version]["parts"]),
             payload={**item.payload, "presentation_version": version, "work_status_update": saved, "product_keyboard_basis": canonical_keyboard(presentation(saved["source"]).keyboard)},
         )
-    validate_update(item, acknowledged=True)
+    validate_update(item, acknowledged=True, readonly_start_refresh=readonly_start_refresh)
     return item
 
 
-def carrier_source(item):
+def carrier_source(item, *, readonly_start_refresh=False):
     if "work_outcome_basis" in item.payload:
         from app.telegram_bots.work_outcome_origins import outcome_source
 
         return outcome_source(item)
     if "work_status_update" not in item.payload:
         return item.payload["work_news_basis"]["source"]
-    source = validate_update(item, acknowledged=True)["source"]
+    source = validate_update(item, acknowledged=True, readonly_start_refresh=readonly_start_refresh)["source"]
     return asdict(notice(WorkStatusRead(**source["status"]), SimpleNamespace(work_id=item.work_id), detail=detail_read(source["detail"]), dates=source["detail_dates"]))
 
 
@@ -104,10 +104,10 @@ class StatusResumeOrigin:
             raise ProductSourceRetired()
 
 
-async def resume_projection(reader, link, parent, original):
+async def resume_projection(reader, link, parent, original, *, readonly_start_refresh=False):
     from app.telegram_bots.settings import SettingsRepository
     from app.telegram_bots.work_status_delivery import StatusNoticeReader
 
     clock = reader.outbox.clock if hasattr(reader, "outbox") else reader.clock
     status = StatusNoticeReader(reader, settings=SettingsRepository(reader.links.session_factory, reader.links.config), clock=clock)
-    return StatusResumeOrigin(link, _item(parent), carrier_source(original), await status.prepare(link))
+    return StatusResumeOrigin(link, _item(parent), carrier_source(original, readonly_start_refresh=readonly_start_refresh), await status.prepare(link))

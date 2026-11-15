@@ -33,7 +33,9 @@ test-live:
 	DEER_FLOW_RUN_LIVE_TESTS=1 PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m live tests/ -v -s
 
 test-blocking-io:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest tests/blocking_io -q --tb=short
+	@test -f "$(DURATIONS_FILE)" || \
+		(echo "error: $(DURATIONS_FILE) is missing" >&2; exit 1)
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest tests/blocking_io --splits $(SPLITS) --group $(GROUP) --splitting-algorithm least_duration --durations-path=$(DURATIONS_FILE) -v --tb=short -o faulthandler_timeout=120
 
 # Run the backend unit-test suite as one shard of a parallel CI split.
 #   SPLITS = total number of shards; GROUP = 1-based shard index.

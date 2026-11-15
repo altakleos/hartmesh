@@ -63,6 +63,9 @@ async def management_dependencies(session, now, *, max_age_days=180, draft_ttl_h
     Historical locators are used solely for garbage collection, never dispatch.
     """
     result = ManagementDependencies()
+    from app.telegram_bots.work_start_refresh_retention import refresh_dependencies
+
+    refresh = await refresh_dependencies(session, now, max_age_days=max_age_days)
     journals = {row.id: row for row in await session.scalars(select(TelegramActRow).where(TelegramActRow.kind.in_(("edit", "cancel"))))}
     controls = list(await session.scalars(select(TelegramCallbackRow)))
     by_id = {row.id: row for row in controls}
@@ -246,7 +249,7 @@ async def management_dependencies(session, now, *, max_age_days=180, draft_ttl_h
                         held = True
             except (ValueError, TypeError, KeyError, AttributeError, ProductSourceRetired):
                 held = True
-            held |= parent.state in {"pending", "sending", "failed"}
+            held |= parent.state in {"pending", "sending", "failed"} or parent.id in refresh.deliveries
             for prompt_id in family_prompts[parent.id]:
                 prompt_parent = prompts.get(prompt_id)
                 if prompt_parent is None:

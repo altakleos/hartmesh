@@ -1,5 +1,6 @@
 """Retain actual primary journals needed by native outcome controls."""
 
+from collections.abc import Mapping
 from datetime import timedelta
 
 from sqlalchemy import select
@@ -13,6 +14,9 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBot
 
 
 async def outcome_primary_acts(session, now, *, max_age_days, required_activations=()):
+    from app.telegram_bots.work_start_refresh_retention import refresh_dependencies
+
+    refresh = await refresh_dependencies(session, now, max_age_days=max_age_days)
     _groups, anchors = await reserved_starts(session)
     controls = await session.execute(
         select(TelegramCallbackRow, TelegramOutboxRow, TelegramBotLinkRow)
@@ -21,6 +25,34 @@ async def outcome_primary_acts(session, now, *, max_age_days, required_activatio
         .where(TelegramCallbackRow.kind.in_(("work_start", "work_change", "work_activation_origin")), TelegramOutboxRow.dedupe_key.like("notice:work-outcome:%"))
     )
     retained = set()
+    # An independently owned refresh still needs its actual primary journal
+    # after the public source control is lost. This only pins existing rows.
+    ordered = sorted(refresh.deliveries)
+    for start in range(0, len(ordered), 500):
+        for parent in await session.scalars(select(TelegramOutboxRow).where(TelegramOutboxRow.id.in_(ordered[start : start + 500]), TelegramOutboxRow.dedupe_key.like("notice:work-outcome:%"))):
+            tail = outcome_key(parent.dedupe_key)
+            binding = await session.get(TelegramBotLinkRow, parent.link_id)
+            primary = await session.get(TelegramActRow, tail[0]) if tail is not None else None
+            if binding is None or primary is None or primary.kind not in {"respond", "decide", "changes_requested"}:
+                continue
+            if (primary.link_id, primary.owner_user_id, primary.binding_generation, primary.chat_id, primary.instance_id, primary.work_id, primary.request_id) != (
+                parent.link_id,
+                parent.owner_user_id,
+                parent.binding_generation,
+                parent.chat_id,
+                parent.instance_id,
+                parent.work_id,
+                parent.request_id,
+            ):
+                continue
+            captured = parent.payload
+            for key in ("work_outcome_basis", "context", "origin_proof", "act"):
+                captured = captured.get(key, {}) if isinstance(captured, Mapping) else {}
+            if isinstance(captured, Mapping) and any(
+                getattr(primary, key) != captured[key] for key in ("id", "link_id", "owner_user_id", "bot_id", "binding_generation", "telegram_user_id", "chat_id", "instance_id", "work_id", "request_id") if key in captured
+            ):
+                continue
+            retained.add(primary.id)
     for control, parent, binding in controls:
         # The host-owned row name survives damaged optional source metadata.
         # These facts only retain an already scoped journal; they admit no Act.
@@ -59,6 +91,6 @@ async def outcome_primary_acts(session, now, *, max_age_days, required_activatio
             # Unknown journals remain held by their own admitted control. A
             # foreign or damaged child is never adopted as new permission.
             live = live or not closed_start(control, child, binding, attempt) or own_child and child.id in required_activations
-        if live:
+        if live or parent.id in refresh.deliveries:
             retained.add(primary.id)
     return retained

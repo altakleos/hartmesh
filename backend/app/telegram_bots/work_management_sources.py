@@ -200,13 +200,15 @@ class WorkManagementReader(WorkViewReader):
 
 
 class WorkManagementProjection:
-    def __init__(self, reader, link, item, source=None, *, detail=None, act=None, clock):
+    def __init__(self, reader, link, item, source=None, *, detail=None, act=None, clock, origin_only=False):
         self.reader, self.link, self.item, self.expected, self.clock = reader, link, item, source, clock
+        self.origin_only = origin_only
         self.intent = management_intent(item)
         detail = detail_read(source.work["detail"]) if source is not None else detail
         if detail is None:
             raise ProductSourceRetired()
-        self.detail = WorkDetailProjection(reader, link, detail.record, detail.request, reusable=detail.can_reuse_conversation, expected=detail)
+        self.displayed_detail = detail
+        self.detail = None if origin_only else WorkDetailProjection(reader, link, detail.record, detail.request, reusable=detail.can_reuse_conversation, expected=detail)
         self.opening, self.source = ManagementOpening(link, item, self.intent), None
         self.navigation = ManagementNavigationProof(link, item)
         self.recovery = ManagementRecoveryProof(link, item)
@@ -221,7 +223,7 @@ class WorkManagementProjection:
             self.consent = ManagementConsent(self.act)
 
     def extend(self, query):
-        result = self.detail.extend(query)
+        result = self.detail.extend(query) if self.detail is not None else query
         self.column = len(result.column_descriptions)
         self.delivery_column = self.column + 3
         root, act, event, delivery, settings, editor_prompt = aliased(TelegramActRow), aliased(TelegramActRow), aliased(AgentWorkEventRow), aliased(TelegramOutboxRow), aliased(TelegramPersonSettingsRow), aliased(TelegramCallbackRow)
@@ -251,7 +253,8 @@ class WorkManagementProjection:
         raise ProductSourceRetired()
 
     def check_with_permissions(self, rows, held):
-        self.detail.check_with_permissions(rows, held)
+        if self.detail is not None:
+            self.detail.check_with_permissions(rows, held)
         self.opening.check(rows)
         if self.consent is not None:
             self.consent.check(rows, allow_closed=True)
@@ -266,8 +269,8 @@ class WorkManagementProjection:
         if reserved != expected or markers != expected:
             raise ProductSourceRetired()
         if (
-            rows[0][2] & 6 != 6
-            or "agents:write" not in held
+            not self.origin_only
+            and (rows[0][2] & 6 != 6 or "agents:write" not in held)
             or _item(delivery) != self.item
             or (delivery.link_id, delivery.owner_user_id, delivery.binding_generation, delivery.chat_id, delivery.instance_id, delivery.work_id, delivery.class_, delivery.request_id, delivery.event_id)
             != (self.link.id, self.link.owner_user_id, self.link.binding_generation, self.link.chat_id, self.link.agent_ref, self.intent["work_id"], "reply", None, None)
@@ -282,7 +285,7 @@ class WorkManagementProjection:
             self.link,
             self.item,
             self.intent,
-            self.detail.source,
+            self.displayed_detail if self.origin_only else self.detail.source,
             _snapshot(root) if root is not None else None,
             _snapshot(act) if act is not None else None,
             event,
@@ -292,6 +295,13 @@ class WorkManagementProjection:
             editor_prompt=rows[0][self.column + 5],
             heard=self.lineage.heard,
         )
-        if self.expected is not None and not same_body(asdict(self.expected), asdict(source)):
-            raise ProductSourceRetired()
+        if self.expected is not None:
+            if self.origin_only:
+                keys = ("intent", "phase", "draft_id", "draft", "root", "act", "navigation", "recovery")
+                if any(not same_body(self.expected.work.get(key), source.work.get(key)) for key in keys):
+                    raise ProductSourceRetired()
+                self.source = self.expected
+                return
+            if not same_body(asdict(self.expected), asdict(source)):
+                raise ProductSourceRetired()
         self.source = source

@@ -13,12 +13,12 @@ from app.telegram_bots.work_news_delivery import frozen_news
 from app.telegram_bots.work_result_identity import digest
 
 
-def acknowledged_view(link, parent, version):
+def acknowledged_view(link, parent, version, *, readonly_start_refresh=False):
     """Reconstruct an acknowledged original even after a source refresh."""
     if "work_outcome_basis" in parent.payload:
         from app.telegram_bots.work_outcome_origins import acknowledged_outcome
 
-        return acknowledged_outcome(link, parent, version)
+        return acknowledged_outcome(link, parent, version, readonly_start_refresh=readonly_start_refresh)
     if {"summary_basis", "summary_view_basis"}.intersection(parent.payload):
         from app.telegram_bots.work_summary_origins import acknowledged_summary
 
@@ -26,7 +26,7 @@ def acknowledged_view(link, parent, version):
     if "work_status_update" in parent.payload:
         from app.telegram_bots.work_status_control_origins import acknowledged_update
 
-        return acknowledged_update(parent, version)
+        return acknowledged_update(parent, version, readonly_start_refresh=readonly_start_refresh)
     item = _item(parent)
     current = item.payload["presentation_version"]
     if type(version) is not int or not 0 <= version <= current:
@@ -45,7 +45,7 @@ def acknowledged_view(link, parent, version):
             )
         except (KeyError, IndexError, TypeError):
             raise ProductSourceRetired() from None
-    frozen_news(SimpleNamespace(link=link, item=item, part=None), acknowledged=True)
+    frozen_news(SimpleNamespace(link=link, item=item, part=None), acknowledged=True, readonly_start_refresh=readonly_start_refresh)
     return item
 
 
@@ -60,7 +60,7 @@ def anchor_signature(item):
     return digest([item.id, item.payload["presentation_version"], basis, item.payload["product_keyboard_basis"], item.parts])
 
 
-def qualify_origin(link, item, origin, rows, column, clock):
+def qualify_origin(link, item, origin, rows, column, clock, *, historical=False):
     mark, gesture, parent, _ = rows[0][column : column + 4]
     if type(origin) is not dict:
         raise ProductSourceRetired()
@@ -81,7 +81,12 @@ def qualify_origin(link, item, origin, rows, column, clock):
         ):
             raise ProductSourceRetired()
         return
-    if origin.get("kind") != "callback" or set(origin) != {"kind", "gesture_id", "callback_id", "anchor_outbox_id", "presentation_version", "anchor_signature"} | ({"list_cursor"} if "list_cursor" in origin else set()):
+    refusal = origin.get("refusal")
+    if refusal is not None and refusal != "start.changed":
+        raise ProductSourceRetired()
+    if origin.get("kind") != "callback" or set(origin) != {"kind", "gesture_id", "callback_id", "anchor_outbox_id", "presentation_version", "anchor_signature"} | ({"list_cursor"} if "list_cursor" in origin else set()) | (
+        {"refusal", "cleanup_id"} | ({"waiting_act_id"} if "waiting_act_id" in origin else set()) if "refusal" in origin else set()
+    ):
         raise ProductSourceRetired()
     if (
         gesture is None
@@ -90,17 +95,20 @@ def qualify_origin(link, item, origin, rows, column, clock):
         != (link.id, link.chat_id, link.binding_generation, "work_view_gesture", "outbox", item.id, item.message_thread_id)
         or not same_body(gesture.payload, origin)
         or gesture.consumed_at is not None
-        or gesture.expires_at is not None
+        or not historical
+        and gesture.expires_at is not None
         and aware(gesture.expires_at) <= clock()
         or (parent.link_id, parent.owner_user_id, parent.chat_id, parent.binding_generation) != (link.id, link.owner_user_id, link.chat_id, link.binding_generation)
     ):
         raise ProductSourceRetired()
-    original = acknowledged_view(link, parent, origin["presentation_version"])
+    original = acknowledged_view(link, parent, origin["presentation_version"], readonly_start_refresh=bool(refusal))
     if anchor_signature(original) != origin["anchor_signature"]:
         raise ProductSourceRetired()
-    controls = {control.id: control for row in rows if (control := row[column + 3]) is not None}
+    from app.telegram_bots.work_request_source import _RequestProjection
+
+    controls = {control.id: control for row in rows for control in _RequestProjection.objects(row[column + 3])}
     try:
-        _validate_rows(original, list(controls.values()))
+        _validate_rows(original, list(controls.values()), readonly_start_refresh=bool(refusal))
     except CallbackRefused:
         raise ProductSourceRetired() from None
     selected = controls.get(origin["callback_id"])
@@ -110,14 +118,23 @@ def qualify_origin(link, item, origin, rows, column, clock):
         or gesture.message_id != selected.message_id
         or selected.message_id != final["message_ids"][0]
         or selected.group_id != final.get("callback_group_id")
-        or selected.kind not in {"work_details", "work_list_page", "work_list_open"}
+        or selected.kind not in ({"work_start"} if refusal else {"work_details", "work_list_page", "work_list_open"})
     ):
         raise ProductSourceRetired()
+    if refusal:
+        from app.telegram_bots.work_start_refresh import require_unreserved, waiting_act
+        from app.telegram_bots.work_status_control_origins import carrier_source
+
+        require_unreserved(controls.values())
+        if origin.get("waiting_act_id") != waiting_act(carrier_source(original, readonly_start_refresh=True)):
+            raise ProductSourceRetired()
+        if any(control.consumed_at is None or control.closed_reason != "work-refresh" for control in controls.values()):
+            raise ProductSourceRetired()
     if (selected.kind == "work_list_open") != ("list_cursor" in origin):
         raise ProductSourceRetired()
     expected = (
         {"key": "view.detail", "work_id": selected.payload.get("work_id")}
-        if selected.kind == "work_details"
+        if selected.kind in {"work_details", "work_start"}
         else {"key": "view.list", "cursor": origin["list_cursor"] if selected.kind == "work_list_open" else selected.payload.get("cursor")}
     )
     if not same_body({key: value for key, value in item.payload["work_view_intent"].items() if key not in {"version", "origin"}}, expected):

@@ -249,7 +249,12 @@ async def assignment_dependencies(session, now, *, max_age_days, draft_ttl_hours
     from app.telegram_bots.work_start_retention import reserved_starts
 
     held_groups, held_anchors = await reserved_starts(session)
-    execution_groups, execution_anchors, held_execution_acts = await execution_dependencies(session)
+    from app.telegram_bots.work_start_refresh_retention import refresh_dependencies
+
+    refresh = await refresh_dependencies(session, now, max_age_days=max_age_days)
+    held_groups.update(refresh.groups)
+    held_anchors.update(refresh.deliveries)
+    execution_groups, execution_anchors, held_execution_acts = await execution_dependencies(session, now=now, max_age_days=max_age_days)
     held_groups.update(execution_groups)
     held_anchors.update(execution_anchors)
     # A separately pending child outcome owns its whole original family. A raw

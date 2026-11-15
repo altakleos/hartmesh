@@ -56,14 +56,14 @@ def compatible(previous, current, item):
     return same_news_origin(notice(WorkStatusRead(**previous["status"]), item), notice(WorkStatusRead(**current["status"]), item))
 
 
-def validate_update(row, *, acknowledged=False):
+def validate_update(row, *, acknowledged=False, readonly_start_refresh=False):
     try:
-        return _validate_update(row, acknowledged=acknowledged)
+        return _validate_update(row, acknowledged=acknowledged, readonly_start_refresh=readonly_start_refresh)
     except (TypeError, ValueError, KeyError, IndexError, AttributeError):
         raise ProductSourceRetired() from None
 
 
-def _validate_update(row, *, acknowledged=False):
+def _validate_update(row, *, acknowledged=False, readonly_start_refresh=False):
     basis = row.payload["work_status_update"]
     if type(basis) is not dict or set(basis) != {"version", "source", "anchor", "parts", "history"} or type(basis["version"]) is not int or basis["version"] not in {1, 2}:
         raise ProductSourceRetired()
@@ -85,11 +85,13 @@ def _validate_update(row, *, acknowledged=False):
         ):
             raise ProductSourceRetired()
         if saved["version"] == 2:
-            from app.telegram_bots.callbacks import canonical_keyboard
+            from app.telegram_bots.callbacks import canonical_keyboard, start_refresh_keyboard
             from app.telegram_bots.work_status_update_controls import presentation
 
             keyboard = canonical_keyboard(presentation(source).keyboard)
-            if source["owner_user_id"] != row.owner_user_id or prior == version and not same_body(keyboard, row.payload.get("product_keyboard_basis")):
+            actual = row.payload.get("product_keyboard_basis")
+            matches = start_refresh_keyboard(actual, keyboard) if readonly_start_refresh else same_body(keyboard, actual)
+            if source["owner_user_id"] != row.owner_user_id or prior == version and not matches:
                 raise ProductSourceRetired()
         else:
             keyboard = []

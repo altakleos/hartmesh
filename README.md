@@ -2030,6 +2030,9 @@ offers Resume beneath its complete current preview; ended attempts lose Stop.
 Eligible assignment news also offers Start or Resume beneath the complete current
 objective and success criteria. The button becomes usable after every preview
 part is delivered, and retains its original event through restart.
+If an assignment changes before you press Start, the bot shows its complete
+current preview and asks for a new Start press. An older button without a saved
+assignment version also refreshes the preview before it can start work.
 Eligible saved answers, decisions and requests for changes also offer Resume
 beneath the current preview. Managers can open Change after a cannot-help reply
 or an attempt that ended without a result; saving the edit remains a separate press.

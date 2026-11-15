@@ -222,12 +222,13 @@ class WorkExecutionReader(WorkViewReader):
 
 
 class WorkExecutionProjection:
-    def __init__(self, reader, link, item, source=None, *, detail=None, clock, allow_empty=False):
+    def __init__(self, reader, link, item, source=None, *, detail=None, clock, allow_empty=False, origin_only=False):
         self.reader, self.link, self.item, self.source, self.clock = reader, link, item, source, clock
+        self.origin_only = origin_only
         self.allow_empty = allow_empty
         self.expected_act = None
         self.detail = detail or detail_read(source.work["detail"])
-        self.projection = WorkDetailProjection(reader, link, self.detail.record, self.detail.request, reusable=self.detail.can_reuse_conversation, expected=self.detail)
+        self.projection = None if origin_only else WorkDetailProjection(reader, link, self.detail.record, self.detail.request, reusable=self.detail.can_reuse_conversation, expected=self.detail)
         self.capacity = getattr(clock, "capacity", None)
         self.capacity_projection = None
         self.activation_parent = None
@@ -263,7 +264,7 @@ class WorkExecutionProjection:
         return current
 
     def extend(self, query):
-        result = self.projection.extend(query)
+        result = self.projection.extend(query) if self.projection is not None else query
         self.delivery_column = len(result.column_descriptions)
         delivery, act, callback, parent, control, original, child, event, settings, requester = (
             TelegramOutboxRow,
@@ -303,7 +304,8 @@ class WorkExecutionProjection:
         raise ProductSourceRetired()
 
     def check_with_permissions(self, rows, held):
-        self.projection.check_with_permissions(rows, held)
+        if self.projection is not None:
+            self.projection.check_with_permissions(rows, held)
         if self.capacity_projection is not None:
             self.capacity_projection.check(rows)
         delivery, journal, callback, parent, _control, original, child, event, settings, person, supervisor = rows[0][self.delivery_column : self.delivery_column + 11]
@@ -375,7 +377,14 @@ class WorkExecutionProjection:
                 self.source = None
                 return
             raise ProductSourceRetired()
-        record = self.projection.source.record
+        if self.origin_only:
+            expected = self.source.work
+            proof = {"act": facts, "original": original_facts, "dispatch": effective.stop_dispatch, "effective": act_facts(effective), "origin": origin, "event_proof": event_proof, "notice": asdict(notice)}
+            if not notice.preview or any(not same_body(expected.get(key), value) for key, value in proof.items()):
+                raise ProductSourceRetired()
+            return
+        detail = self.detail if self.origin_only else self.projection.source
+        record = detail.record
         values = dict(
             name=rows[0][1].name,
             objective=record["objective"],
@@ -403,7 +412,7 @@ class WorkExecutionProjection:
                 product=self.reader.product,
                 wait_seconds=self.reader.acts.outbox.config.queue.max_wait_seconds,
                 detail_dates={"date": date(record["created_at"]), "due": date(record["due_at"])},
-                detail=asdict(self.projection.source),
+                detail=asdict(detail),
                 act=act_facts(act),
                 original=original_facts,
                 dispatch=effective.stop_dispatch,
@@ -414,7 +423,7 @@ class WorkExecutionProjection:
                 notice=asdict(notice),
             )
         )
-        source = WorkNewsRead(act.work_id, "execution." + act.kind, values, self.projection.source.protected, data, digest([self.link.id, self.link.binding_generation, act.id, act.kind, thaw(act.body), origin]), digest([data, values]))
+        source = WorkNewsRead(act.work_id, "execution." + act.kind, values, detail.protected, data, digest([self.link.id, self.link.binding_generation, act.id, act.kind, thaw(act.body), origin]), digest([data, values]))
         if self.source is not None and not same_body(asdict(self.source), asdict(source)):
             raise ProductSourceRetired()
         self.source = source

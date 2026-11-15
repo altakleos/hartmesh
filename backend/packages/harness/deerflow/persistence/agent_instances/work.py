@@ -56,6 +56,7 @@ class AgentWorkAttemptRow(Base):
     __tablename__ = "agent_work_attempts"
     __table_args__ = (
         UniqueConstraint("work_id", "activation_id", name="uq_agent_work_attempt_activation"),
+        Index("ix_agent_work_attempt_activation_id", "activation_id"),
         CheckConstraint("assignment_revision >= 1 AND assignment_revision <= 2147483647 AND instance_generation >= 1 AND instance_generation <= 2147483647", name="ck_agent_work_attempt_revision"),
         CheckConstraint("status IN ('starting', 'running', 'stopping', 'uncertain', 'succeeded', 'failed', 'cancelled')", name="ck_agent_work_attempt_status"),
         Index("uq_agent_work_attempt_unresolved", "work_id", unique=True, sqlite_where=text("status IN ('starting', 'running', 'stopping', 'uncertain')"), postgresql_where=text("status IN ('starting', 'running', 'stopping', 'uncertain')")),
@@ -84,6 +85,7 @@ class AgentWorkEventRow(Base):
     __tablename__ = "agent_work_events"
     __table_args__ = (
         UniqueConstraint("instance_id", "operation_id", name="uq_agent_work_event_operation"),
+        Index("ix_agent_work_event_operation_id", "operation_id"),
         CheckConstraint("actor_kind IN ('human', 'nonhuman', 'host')", name="ck_agent_work_event_actor"),
         UniqueConstraint("work_id", "revision", name="uq_agent_work_event_revision"),
         CheckConstraint("revision >= assignment_revision AND assignment_revision >= 1 AND revision <= 2147483647", name="ck_agent_work_event_revision"),

@@ -21,7 +21,7 @@ def is_outcome_carrier(parent):
     return parent is not None and ("work_outcome_basis" in parent.payload or parent.dedupe_key.startswith("notice:work-outcome:") or any(part.get("source_ref", {}).get("key") == "work.action.outcome" for part in parent.parts))
 
 
-def acknowledged_outcome(link, parent, version):
+def acknowledged_outcome(link, parent, version, *, readonly_start_refresh=False):
     try:
         item = _item(parent)
         basis = item.payload["work_outcome_basis"]
@@ -50,7 +50,10 @@ def acknowledged_outcome(link, parent, version):
         ):
             raise ProductSourceRetired()
         parts, keyboard, _ = materialize(link, data, locale=basis["locale"], timezone=basis["timezone"], product="")
-        if not same_body(parts, basis["parts"]) or not same_body(keyboard, basis["keyboard"]) or not same_body(keyboard, item.payload["product_keyboard_basis"]):
+        from app.telegram_bots.callbacks import start_refresh_keyboard
+
+        matches = start_refresh_keyboard(basis["keyboard"], keyboard) if readonly_start_refresh else same_body(keyboard, basis["keyboard"])
+        if not same_body(parts, basis["parts"]) or not matches or not same_body(basis["keyboard"], item.payload["product_keyboard_basis"]):
             raise ProductSourceRetired()
         acknowledged_parts(item, parts, edit=basis.get("edit") is not None)
         return item
