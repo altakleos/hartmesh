@@ -20,10 +20,15 @@ permissions:
   contents: read
 
 jobs:
-  backend-blocking-io:
+  blocking-io-shard:
+    name: backend-blocking-io (${{ matrix.shard }})
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
 
     steps:
       - name: Checkout
@@ -46,4 +51,12 @@ jobs:
 
       - name: Run blocking IO regression tests
         working-directory: backend
-        run: make test-blocking-io
+        run: make test-blocking-io SPLITS=2 GROUP=${{ matrix.shard }}
+
+  backend-blocking-io:
+    needs: [blocking-io-shard]
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every strict IO shard
+        run: test "${{ needs.blocking-io-shard.result }}" = success

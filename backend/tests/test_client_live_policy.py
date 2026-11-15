@@ -295,6 +295,28 @@ def test_blocking_io_ci_workflow_owns_dedicated_suite() -> None:
     assert "make test-blocking-io" in workflow
 
 
+def test_blocking_io_shards_cover_every_group_and_preserve_the_required_gate() -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "backend-blocking-io-tests.yml").read_text(encoding="utf-8"))
+    shard = workflow["jobs"]["blocking-io-shard"]
+    assert shard["timeout-minutes"] == 15
+    assert shard["strategy"]["fail-fast"] is False
+    assert shard["strategy"]["matrix"] == {"shard": [1, 2]}
+    calls = [step["run"] for step in shard["steps"] if step.get("run", "").startswith("make test-blocking-io")]
+    assert calls == ["make test-blocking-io SPLITS=2 GROUP=${{ matrix.shard }}"]
+    for group in (1, 2):
+        command = _dry_run_make_target("test-blocking-io", "SPLITS=2", f"GROUP={group}")
+        assert "pytest tests/blocking_io" in command
+        assert "--splits 2" in command and f"--group {group}" in command
+        assert "--splitting-algorithm least_duration" in command
+        assert "--durations-path=.test_durations" in command
+        assert "--store-durations" not in command
+        assert "faulthandler_timeout=120" in command
+    gate = workflow["jobs"]["backend-blocking-io"]
+    assert gate["needs"] == ["blocking-io-shard"]
+    assert "always()" in gate["if"]
+    assert [step["run"] for step in gate["steps"]] == ['test "${{ needs.blocking-io-shard.result }}" = success']
+
+
 def test_windows_workflow_collects_all_five_policy_checks() -> None:
     """Execute CI's selection so missing cases or accidental make tests fail."""
     import shlex
