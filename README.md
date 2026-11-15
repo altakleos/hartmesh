@@ -132,6 +132,8 @@ In an agent bot, Start on an assignment awaiting review opens the current full
 review, including permitted result files, even with proactive notifications off.
 Review controls become available after the complete reply arrives; accepting a
 result still requires confirmation.
+An unadmitted Start in an agent bot shows the agent's current paused or retired
+status, with the existing access-loss notice taking precedence.
 Current Inspect grants control visibility; referenced files retain separate access
 checks. Uncertain execution requires qualified containment and explicit recovery.
 The Work command API can stop one exact running attempt without cancelling the

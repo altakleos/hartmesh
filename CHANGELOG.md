@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admission evidence, file acknowledgements and explicit review confirmation.
 - Explain a refused save when Work is switched off, keeping the original retry
   and showing settings only to current managers. Recheck policy before delivery.
+- Answer an unadmitted Work press with current fixed agent lifecycle status,
+  preserving the ownership of existing journals and native launch promises.
 - Recover once from stale execution or changed conversation context during Start,
   preserving approved assignment versions, original consent deadlines, exact
   operation ownership and cancellation across the recovery family.
