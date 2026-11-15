@@ -44,10 +44,15 @@ def present_news_detail(source, basis, link, view):
 
 async def news_origin_projection(reader, link, parent, original, *, activation_id=None, historical=False):
     """Prepare the actual native event behind this acknowledged news carrier."""
-    from app.telegram_bots.producer import _item
+    from app.telegram_bots.producer import ProductSourceRetired, _item
     from app.telegram_bots.work_news_sources import WorkNewsProjection, WorkNewsRead, WorkNewsReader
+    from app.telegram_bots.work_status_control_origins import carrier_source, resume_projection
 
-    value = original.payload["work_news_basis"]["source"]
+    value = carrier_source(original)
+    if value["key"] == "status.stopped":
+        if "work_event_intent" not in original.payload:
+            raise ProductSourceRetired()
+        return await resume_projection(reader, link, parent, original)
     if value["key"] not in ACTION_NEWS_KEYS or "work_event_intent" not in original.payload:
         return None
     source_reader = WorkNewsReader(work=reader.work, authority=reader.authority, links=reader.links)
@@ -70,6 +75,7 @@ async def prepare_news_origin(reader, link, parent, original):
 
 
 def activation_news_origin(original):
+    from app.telegram_bots.work_status_control_origins import carrier_source
     from app.telegram_bots.work_view_origins import anchor_signature
 
     return {
@@ -77,7 +83,7 @@ def activation_news_origin(original):
         "anchor_outbox_id": original.id,
         "presentation_version": original.payload["presentation_version"],
         "signature": anchor_signature(original),
-        "event_signature": original.payload["work_news_basis"]["source"]["event_signature"],
+        "event_signature": carrier_source(original)["event_signature"],
     }
 
 
@@ -207,8 +213,11 @@ class ActivationNewsOrigin:
             callback = await reader.get(TelegramCallbackRow, self.act.id)
             witness = await reader.get(TelegramCallbackRow, news_witness_id(self.act.id))
             parent = await reader.get(TelegramOutboxRow, callback.payload.get("anchor_outbox_id")) if callback else None
-            if parent is None or "work_event_intent" not in parent.payload or "work_news_basis" not in parent.payload:
-                if marker is not None or witness is not None:
+            from app.telegram_bots.work_status_control_origins import is_status_carrier
+
+            status_parent = is_status_carrier(parent)
+            if parent is None or "work_event_intent" not in parent.payload or not {"work_news_basis", "work_status_update"}.intersection(parent.payload):
+                if marker is not None or witness is not None or status_parent:
                     raise ProductSourceRetired()
                 return
             original = acknowledged_view(link, parent, callback.payload.get("presentation_version"))

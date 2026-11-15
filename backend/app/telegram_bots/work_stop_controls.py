@@ -15,11 +15,13 @@ from deerflow.utils.file_io import await_drained
 
 
 def displayed_stop(link, parent, callback):
+    from app.telegram_bots.work_status_control_origins import carrier_source, status_record
+
     original = acknowledged_view(link, parent, callback.payload.get("presentation_version"))
-    source = original.payload["work_news_basis"]["source"]
+    source = carrier_source(original)
     if callback.kind != "stop_attempt" or callback.target_kind != "attempt":
         raise CallbackRefused()
-    record = full_detail(source)["record"]
+    record = status_record(source) if source["key"].startswith("status.") else full_detail(source)["record"]
     attempt = record.get("attempt") or {}
     if (callback.target_id, callback.payload.get("attempt_id"), callback.payload.get("work_id")) != (attempt.get("id"), attempt.get("id"), record["id"]):
         raise CallbackRefused()

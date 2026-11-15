@@ -802,7 +802,9 @@ class CallbackRepository:
                 rows = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group).order_by(TelegramCallbackRow.id)))
                 try:
                     work_preview = bool(
-                        {"summary_view_basis", "summary_basis", "work_digest_view_basis", "work_digest_basis", "work_request_basis", "work_outcome_basis", "result_notice_basis", "work_news_basis"}.intersection(parent.payload)
+                        {"summary_view_basis", "summary_basis", "work_digest_view_basis", "work_digest_basis", "work_request_basis", "work_outcome_basis", "result_notice_basis", "work_news_basis", "work_status_update"}.intersection(
+                            parent.payload
+                        )
                     )
                     if "summary_view_basis" in parent.payload:
                         from app.telegram_bots.summary_views import frozen_view
@@ -820,6 +822,10 @@ class CallbackRepository:
                         from app.telegram_bots.work_digest_delivery import frozen_digest
 
                         frozen_digest(captured)
+                    elif "work_status_update" in parent.payload:
+                        from app.telegram_bots.work_status_updates import validate_update
+
+                        validate_update(parent)
                     elif "work_news_basis" in parent.payload:
                         from app.telegram_bots.work_news_delivery import frozen_news
 

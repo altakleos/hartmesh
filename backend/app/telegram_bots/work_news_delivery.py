@@ -75,6 +75,10 @@ def recipes(source, basis, identity, link):
         from app.telegram_bots.work_news_carriers import present_news_detail
 
         view = present_news_detail(source, basis, link, view)
+        if source.key.startswith("status."):
+            from app.telegram_bots.work_status_controls import present_status_controls
+
+            view = present_status_controls(source, basis, link, view)
     keyboard = [list(line) for line in view.keyboard]
     if not basis["concealed"] and source.key in ATTEMPT_KEYS and source.values.get("open_files"):
         address = page_address("web.files", link, permissions=3, public_base_url=basis["public_base_url"])

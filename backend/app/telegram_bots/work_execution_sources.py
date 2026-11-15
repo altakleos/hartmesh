@@ -126,7 +126,9 @@ def qualify_execution_origin(link, act, callback, parent, controls, *, activatio
         if callback.id != act.id or isinstance(act.continuation, Mapping) and "activation_parent" in act.continuation:
             raise ValueError()
         original, *basis = (displayed_start if act.kind == "activate" else displayed_stop)(link, parent, callback)
-        source = original.payload["work_news_basis"]["source"]
+        from app.telegram_bots.work_status_control_origins import carrier_source
+
+        source = carrier_source(original)
         expected_parent_work = None if act.kind == "activate" and source["key"] == "assignment.card" and source["work"]["phase"] == "saved" else act.work_id
         if parent.work_id != expected_parent_work:
             raise ValueError()

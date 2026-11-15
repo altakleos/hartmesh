@@ -1132,7 +1132,10 @@ plans, complete ACK validation, protected Show and display refresh. Notice deliv
 accepts a source projection owner so status authority stays separate from colleague
 events. Refresh may adopt later progress, but cannot rewrite an already used event.
 Raw status templates require this source owner. Initial status sends are silent,
-including when discretionary notices are disabled, and expose no execution controls.
+including when discretionary notices are disabled. A visible active status offers
+Stop only for its original current attempt, with current write/cancel ceilings.
+An owner-stopped status offers Resume beneath the complete current assignment;
+all preview parts must be acknowledged before that control becomes usable.
 `work_status_updates.py` coalesces newer progress into that attempt's fully
 acknowledged presentation. Every edit is silent, with the 30-second interval
 checked again immediately before dispatch. A missing message, changed protection
@@ -1145,6 +1148,24 @@ Current authority and immutable source evidence are checked after provider waits
 A late locale change preserves delivery for refresh, while revoked access or
 changed source retires it. Retention keeps original and moved presentations while
 the attempt or an update remains unresolved. The runtime installs these owners.
+
+Status update protocol v2 retains the actual current Work detail, route ceilings,
+owner and date projection, and its real pending callback group. Protocol v1 remains
+readable. Final joined SQL rechecks both the original attempt and the current
+detail after provider waits. Ended statuses explicitly clear Stop. Each complete
+update ACK retires the genuinely previous group; receipt replay preserves the
+current group. A replacement message chain commits a separate keyboard cleanup
+for its actual prior acknowledged message. That cleanup and its own and prior
+receipts survive retention until the remote edit settles.
+
+`work_status_control_origins.py` reconstructs actual historical update receipts
+without changing their source family. Resume retains the original Stop event,
+full SDK receipt and independently stored activation witness through the Gateway
+admission. Its historical guard re-derives the original status across its own new
+reservation revision, while requiring every original immutable event proof to
+remain present and unchanged. Missing metadata never downgrades retained status
+parts or a Work status root to an internal activation. Current Work authority and
+assignment CAS remain with the existing activation service.
 
 `work_status_pins.py` owns a durable, serialized pin ledger for each status root.
 Every operation binds an exact complete acknowledged presentation and its first

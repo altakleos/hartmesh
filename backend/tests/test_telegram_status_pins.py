@@ -2,6 +2,7 @@
 
 import pytest
 from _telegram_repository_test_support import db as db
+from sqlalchemy import select
 from test_telegram_bot_adapter import message
 from test_telegram_status_updates import progress, shown
 from test_telegram_work_source_delivery import work_delivery as work_delivery
@@ -53,7 +54,7 @@ async def test_status_terminal_unpins_only_its_own_message(work_delivery):
     from deerflow.agent_instances.work_execution_contract import ReportWork
 
     e = work_delivery
-    root, _work, execution, scope, run, _worker, clock, updates = await shown(e)
+    root, work, execution, scope, run, worker, clock, updates = await shown(e)
     pins = WorkStatusPins(updates)
     e.channel._services.work_status_pins = pins
     await pins.plan(e.link, root.id)
@@ -64,6 +65,16 @@ async def test_status_terminal_unpins_only_its_own_message(work_delivery):
     current = (await scope.context(execution))["work"]
     await scope.report(execution, ReportWork(operation_id=uuid4().hex, expected_revision=current["revision"], action="outcome", statement="Verified the findings."))
     await scope.finish(execution, run, settled=True)
+    await worker.tick()
+    async with e.db.sessions() as reader:
+        final = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.work_id == work["id"], TelegramOutboxRow.payload["work_event_intent"]["key"].as_string() == "status.finished"))
+        assert final is not None
+        final_id = final.id
+    clock.advance(30)
+    assert await updates.materialize(e.link, final_id)
+    message(e.channel.bot.request, "editMessageText", identity=3101)
+    assert await e.sender.tick() == 1
+    await e.sender.drain()
     from datetime import timedelta
 
     from app.telegram_bots.retention import _pinned_deliveries
@@ -126,6 +137,11 @@ async def test_status_replacement_moves_pin_after_complete_ack(work_delivery, fa
     assert await pins.plan(e.link, root.id) is None
     message(e.channel.bot.request, identity=4101)
     await e.sender.tick()
+    await e.sender.drain()
+    # The replacement's ACK also owns clearing the old visible Stop keyboard.
+    e.channel.bot.request.enqueue("editMessageReplyMarkup", body={"ok": True, "result": True})
+    clock.advance(2)
+    assert await e.sender.tick() == 1
     await e.sender.drain()
     for endpoint in ("unpinChatMessage", "pinChatMessage"):
         assert await pins.plan(e.link, root.id)

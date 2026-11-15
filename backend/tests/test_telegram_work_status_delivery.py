@@ -29,7 +29,7 @@ async def prepare(e, item):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("protected", [False, True])
-async def test_status_first_delivery_is_silent_and_has_no_execution_controls(work_delivery, protected):
+async def test_status_first_delivery_is_silent_and_offers_stop_after_its_full_ack(work_delivery, protected):
     from deerflow.persistence.telegram_bots.model import TelegramInstancePolicyRow
 
     e = work_delivery
@@ -50,7 +50,7 @@ async def test_status_first_delivery_is_silent_and_has_no_execution_controls(wor
         assert [button["text"] for row in calls[0].parameters["reply_markup"]["inline_keyboard"] for button in row] == ["Show"]
     else:
         assert "Report findings" in calls[0].parameters["text"] and "Starting" in calls[0].parameters["text"]
-        assert not calls[0].parameters.get("reply_markup")
+        assert [button["text"] for row in calls[0].parameters["reply_markup"]["inline_keyboard"] for button in row] == ["Stop"]
     async with e.db.sessions() as reader:
         row = await reader.get(TelegramOutboxRow, item.id)
         assert row.state == "sent" and row.message_id == 2101
