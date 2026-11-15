@@ -139,6 +139,9 @@ def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
             | ({"navigation_origin"} if basis.get("version") in {1, 3} and "navigation_origin" in basis else set())
             | ({"direct_edit"} if basis.get("version") == 3 and "direct_edit" in basis else set())
             | ({"work_navigation"} if "work_navigation" in basis else set())
+            | ({"manager_navigation"} if "manager_navigation" in basis else set())
+            or "manager_navigation" in basis
+            and (type(basis["manager_navigation"]) is not int or basis["manager_navigation"] != 1 or basis["source"]["key"] != "attempt.no_result")
             or "work_navigation" in basis
             and (type(basis["work_navigation"]) is not int or basis["work_navigation"] != 1 or basis["source"]["key"] != "remind.ready_to_resume")
             or type(basis["version"]) is not int
@@ -372,6 +375,8 @@ class WorkNewsPlans:
             basis = {"version": 1, "source": asdict(source), "locale": settings.locale, "concealed": conceal_news(source), "public_base_url": origin.base}
             if source.key == "remind.ready_to_resume":
                 basis["work_navigation"] = 1
+            if source.key == "attempt.no_result":
+                basis["manager_navigation"] = 1
             parts, keyboard = recipes(source, basis, identity, link)
             row.parts = self.outbox._parts(parts, 0)
             row.payload = _safe_json({**row.payload, "work_news_basis": {**basis, "parts": parts, "keyboard": keyboard}, "product_keyboard_basis": keyboard})

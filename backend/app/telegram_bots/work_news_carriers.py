@@ -32,7 +32,7 @@ def present_news_detail(source, basis, link, view):
     if source.key == "request.answered" and source.values.get("open_assignment") is not True:
         return view
     detail = present_view(replace(source, key="view.detail", values=source.work["detail_dates"]), basis, link)
-    allowed = {"work_start"}
+    allowed = {"work_start", "work_change"} if source.key == "attempt.no_result" and basis.get("manager_navigation") == 1 else {"work_start"}
     controls = tuple(tuple(button for button in line if button.get("kind") in allowed) for line in detail.keyboard)
     controls = tuple(line for line in controls if line)
     if not controls:
@@ -49,6 +49,10 @@ async def news_origin_projection(reader, link, parent, original, *, activation_i
     from app.telegram_bots.work_status_control_origins import carrier_source, resume_projection
 
     value = carrier_source(original)
+    if "work_outcome_basis" in original.payload:
+        from app.telegram_bots.work_outcome_origins import OutcomeOriginProjection
+
+        return OutcomeOriginProjection(link, original)
     if value["key"] == "status.stopped":
         if "work_event_intent" not in original.payload:
             raise ProductSourceRetired()
@@ -150,40 +154,39 @@ async def news_witness_dependencies(session, control, journal, binding):
     from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow
 
     try:
-        from collections.abc import Mapping
-
-        continuation = journal.continuation if journal is not None and isinstance(journal.continuation, Mapping) else {}
-        marker = require_news_origin(continuation.get("news_origin")) if journal is not None else None
-        if marker is None or control.id != news_witness_id(journal.id) or control.group_id != control.id:
+        # Retain the witness's own original receipt even when its admitted
+        # journal is lost. This never supplies permission to execute an Act.
+        action_id = control.payload.get("work_action_id")
+        marker = require_news_origin(control.payload.get("news_origin"))
+        if type(action_id) is not str or len(action_id) != 32 or control.id != news_witness_id(action_id) or control.group_id != control.id:
             return set(), set()
         parent = await session.get(TelegramOutboxRow, marker["anchor_outbox_id"])
         if (
             parent is None
             or control.payload.get("anchor_outbox_id") != parent.id
-            or (journal.link_id, journal.owner_user_id, journal.binding_generation, journal.chat_id, journal.instance_id, journal.work_id, journal.kind)
-            != (binding.id, binding.owner_user_id, binding.binding_generation, binding.chat_id, binding.agent_ref, control.target_id, "activate")
+            or (control.link_id, control.binding_generation, control.chat_id, control.kind, control.target_kind) != (binding.id, binding.binding_generation, binding.chat_id, "work_activation_origin", "work")
             or (parent.link_id, parent.owner_user_id, parent.binding_generation, parent.chat_id, parent.instance_id, parent.work_id, parent.message_thread_id)
             != (binding.id, binding.owner_user_id, binding.binding_generation, binding.chat_id, binding.agent_ref, control.target_id, control.message_thread_id)
-            or not same_body(control.payload.get("news_origin"), marker)
-            or control.payload.get("work_action_id") != journal.id
         ):
             return set(), set()
         original = acknowledged_view(binding, parent, marker["presentation_version"])
         group_id = original.parts[-1]["callback_group_id"]
         if not same_body(marker, activation_news_origin(original)) or control.payload.get("source_group_id") != group_id:
             return set(), set()
-        selected = await session.get(TelegramCallbackRow, journal.id)
+        selected = await session.get(TelegramCallbackRow, action_id)
         if selected is not None and (
             selected.group_id != group_id
             or selected.payload.get("anchor_outbox_id") != parent.id
             or selected.payload.get("presentation_version") != marker["presentation_version"]
-            or (selected.kind, selected.target_kind, selected.target_id) != ("work_start", "work", journal.work_id)
+            or (selected.kind, selected.target_kind, selected.target_id) != ("work_start", "work", control.target_id)
         ):
             return set(), set()
         members = list(await session.scalars(select(TelegramCallbackRow).where(TelegramCallbackRow.group_id == group_id)))
-        if not members or any(
+        # Missing public controls cannot renew consent. The actual complete
+        # SDK receipt and independent scoped witness still retain its history.
+        if any(
             (row.link_id, row.binding_generation, row.chat_id, row.message_thread_id, row.payload.get("anchor_outbox_id"), row.payload.get("work_action_id"))
-            != (binding.id, binding.binding_generation, binding.chat_id, control.message_thread_id, parent.id, journal.id)
+            != (binding.id, binding.binding_generation, binding.chat_id, control.message_thread_id, parent.id, action_id)
             for row in members
         ):
             return set(), set()
@@ -216,7 +219,12 @@ class ActivationNewsOrigin:
             from app.telegram_bots.work_status_control_origins import is_status_carrier
 
             status_parent = is_status_carrier(parent)
-            if parent is None or "work_event_intent" not in parent.payload or not {"work_news_basis", "work_status_update"}.intersection(parent.payload):
+            from app.telegram_bots.work_outcome_origins import is_outcome_carrier
+
+            outcome_parent = is_outcome_carrier(parent)
+            if outcome_parent and "work_outcome_basis" not in parent.payload:
+                raise ProductSourceRetired()
+            if not outcome_parent and (parent is None or "work_event_intent" not in parent.payload or not {"work_news_basis", "work_status_update"}.intersection(parent.payload)):
                 if marker is not None or witness is not None or status_parent:
                     raise ProductSourceRetired()
                 return

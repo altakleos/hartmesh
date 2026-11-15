@@ -15,6 +15,10 @@ from app.telegram_bots.work_result_identity import digest
 
 def acknowledged_view(link, parent, version):
     """Reconstruct an acknowledged original even after a source refresh."""
+    if "work_outcome_basis" in parent.payload:
+        from app.telegram_bots.work_outcome_origins import acknowledged_outcome
+
+        return acknowledged_outcome(link, parent, version)
     if {"summary_basis", "summary_view_basis"}.intersection(parent.payload):
         from app.telegram_bots.work_summary_origins import acknowledged_summary
 
@@ -46,6 +50,8 @@ def acknowledged_view(link, parent, version):
 
 
 def anchor_signature(item):
+    if "work_outcome_basis" in item.payload:
+        return digest([item.id, item.payload["presentation_version"], item.payload["work_outcome_basis"], item.payload["product_keyboard_basis"], item.parts])
     if {"summary_basis", "summary_view_basis"}.intersection(item.payload):
         from app.telegram_bots.work_summary_origins import family
 

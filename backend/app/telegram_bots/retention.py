@@ -378,6 +378,10 @@ async def _sweep_acts(sessions, now, *, draft_ttl_hours=24, callback_max_age_day
 
         requests = await request_dependencies(session, now, max_age_days=callback_max_age_days)
         pending_outcome = or_(pending_outcome, TelegramActRow.id.in_(sorted(requests.acts)))
+        from app.telegram_bots.work_outcome_retention import outcome_primary_acts
+
+        outcome_acts = await outcome_primary_acts(session, now, max_age_days=callback_max_age_days, required_activations=execution_acts)
+        pending_outcome = or_(pending_outcome, TelegramActRow.id.in_(sorted(outcome_acts)))
         from app.telegram_bots.work_management_retention import expire_management
 
         management = await expire_management(session, now, draft_ttl_hours=draft_ttl_hours, pending_outcome=pending_outcome)

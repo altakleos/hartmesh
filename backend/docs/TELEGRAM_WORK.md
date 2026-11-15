@@ -587,8 +587,9 @@ issuing commands or installing controls. Unknown actions never become a failed
 save. A known attempt-closing refusal keeps the original confirmation; a retained
 uncertain operation offers only its original retry. Plain replies to decisions or
 reviews are comments. The text renderer uses the plain wrong-recipient acknowledgement;
-the outcome planner can replace it with current manager routing choices. Start/resume navigation is
-web-only at this stage. The central `errors.text_key_for` reads typed refusal codes
+the outcome planner can replace it with current manager routing choices. New
+outcomes offer eligible native controls beneath their current complete preview;
+older saved contexts preserve their original web navigation. The central `errors.text_key_for` reads typed refusal codes
 and classes, never exception sentences; `key_for_reader` owns manager wording.
 
 `work_outcome_reads.py` qualifies these views through the exact public service
@@ -616,6 +617,25 @@ and a versioned Work-only delivery receipt in `Act.continuation` commit with the
 complete Telegram ACK. Collected outbox history cannot republish an acknowledged
 phase; pending deliveries retain their action through cleanup. Obsolete unsent
 plans can be replaced while their captured input remains unfinished.
+
+Native contexts carry `work_controls:1`, current detail/date strings and an
+immutable proof of the actual primary Act, canonical event/effect and response.
+Detail and timezone preparation stays outside writers; final SDK checks join both
+the receipt and current detail in one borrowed SQL read. Only the final complete
+part activates controls. `work_outcome_origins.py` reconstructs this actual protocol
+and SDK receipt for Resume; it never creates a synthetic news row. Native entry
+rejoins the original canonical proof without comparing the activation's own Work
+revision changes. Independent row/part identity refuses missing source metadata
+even if the activation marker and witness are also lost. Retention keeps the
+scoped primary journal while its control or unclosed native child needs it.
+Manager Change after cannot-help or no-result opens the existing fresh full edit
+card; the original receipt remains saved, and only a later Save changes Work.
+No-result bases use `manager_navigation:1`, preserved through refresh/Show;
+absence reconstructs the original keyboard. Outcome keys accept only the
+producer's canonical positive retry suffix while verifying the original digest.
+An independently scoped witness retains its actual original ACK and primary
+through combined public-control/journal loss. Such holds never renew consent or
+authorize a retry; native entry still needs its actual source and control.
 
 Completed routing uses a closed V2
 edit proof tied to the original command's acknowledged selection, message and

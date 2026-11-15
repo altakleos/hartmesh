@@ -50,6 +50,10 @@ def acknowledged_update(parent, version):
 
 
 def carrier_source(item):
+    if "work_outcome_basis" in item.payload:
+        from app.telegram_bots.work_outcome_origins import outcome_source
+
+        return outcome_source(item)
     if "work_status_update" not in item.payload:
         return item.payload["work_news_basis"]["source"]
     source = validate_update(item, acknowledged=True)["source"]

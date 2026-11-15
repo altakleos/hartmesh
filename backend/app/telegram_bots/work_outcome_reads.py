@@ -1,16 +1,19 @@
 """Read exact action receipts and current Work context without issuing commands."""
 
+import asyncio
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, literal, select
+from sqlalchemy import and_, false, literal, select
 from sqlalchemy.orm import aliased
 
 from app.telegram_bots.attention_authority import current_attention
 from app.telegram_bots.producer import DeliveryRetry, ProductSourceRetired
 from app.telegram_bots.work_actions import same_body
+from app.telegram_bots.work_details import WorkDetailsReader
 from deerflow.agent_instances.work import UNRESOLVED
-from deerflow.persistence.agent_instances.human_input import HumanInputEventRow, HumanInputRequestRow
+from deerflow.persistence.agent_instances.human_input import HumanInputEventRow, HumanInputRequestRow, HumanInputResponseRow
 from deerflow.persistence.agent_instances.model import AgentInstanceRow
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow, AgentWorkRow
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow
@@ -31,6 +34,11 @@ class WorkOutcomeRead:
     recipient: str | None
     file_answer: object = None
     primary_work_revision: int | None = None
+    detail: object = None
+    detail_reader: object = None
+    detail_link: object = None
+    detail_dates: dict | None = None
+    origin_proof: dict | None = None
 
     @property
     def attempt_unresolved(self):
@@ -40,10 +48,11 @@ class WorkOutcomeRead:
 class WorkOutcomeReader:
     def __init__(self, requests, acts):
         self.requests, self.acts = requests, acts
+        self.details = WorkDetailsReader(work=requests.work, authority=requests.authority, links=requests.links, clock=requests.clock)
         if requests.links.session_factory.kw.get("bind") is not acts.session_factory.kw.get("bind"):
             raise ValueError("work-outcome-requires-shared-storage")
 
-    async def read(self, link, act_id):
+    async def read(self, link, act_id, *, native=False):
         async def perform():
             act = await self.acts._work_record(act_id)
             if (act.link_id, act.owner_user_id, act.instance_id, act.binding_generation, act.bot_id, act.telegram_user_id, act.chat_id) != (
@@ -71,8 +80,16 @@ class WorkOutcomeReader:
             from app.telegram_bots.work_file_outcomes import file_answer_proof
 
             file_answer = await file_answer_proof(self, link, act)
-            projection = _OutcomeProjection(act, source, receipt, file_answer=file_answer)
+            projection = _OutcomeProjection(act, source, receipt, file_answer=file_answer, native=native)
             _held, target = await current_attention(self.requests, link, projection=projection)
+            detail = await self.details.detail(link, act.work_id) if native and act.state == "done" and act.kind in {"respond", "decide", "changes_requested"} and not projection.continued else None
+            dates = None
+            if detail is not None:
+                settings = await self.acts.settings.get(link.owner_user_id)
+                if settings is None:
+                    raise ProductSourceRetired()
+                zone = await asyncio.to_thread(ZoneInfo, settings.timezone)
+                dates = {key: datetime.fromisoformat(detail.record[field]).astimezone(zone).strftime("%Y-%m-%d %H:%M") if detail.record[field] else None for key, field in (("date", "created_at"), ("due", "due_at"))}
             return WorkOutcomeRead(
                 act,
                 receipt,
@@ -85,6 +102,11 @@ class WorkOutcomeReader:
                 projection.recipient,
                 file_answer,
                 primary_work_revision=projection.primary_work_revision,
+                detail=detail,
+                detail_reader=self.details,
+                detail_link=link,
+                detail_dates=dates,
+                origin_proof=projection.proof if detail is not None else None,
             )
 
         return await await_drained(perform())
@@ -93,12 +115,13 @@ class WorkOutcomeReader:
 class _OutcomeProjection:
     """One final joined account/role/claim-free action and source read."""
 
-    def __init__(self, act, source, receipt, *, file_answer=None):
+    def __init__(self, act, source, receipt, *, file_answer=None, native=False):
         self.act, self.source, self.receipt = act, source, receipt
         self.file_answer = file_answer
         self.continued = False
         self.supervisor = self.recipient = None
         self.primary_work_revision = None
+        self.native, self.proof = native, None
 
     def extend(self, query):
         act, work, request = TelegramActRow, AgentWorkRow, HumanInputRequestRow
@@ -126,7 +149,7 @@ class _OutcomeProjection:
             .exists()
         )
         self.file_evidence_column = len(query.column_descriptions) + 8
-        return (
+        result = (
             query.add_columns(act, work, request, event, attempt, effect, supervisor.email, recipient.email, self.file_answer.expression() if self.file_answer else literal(None).label("work_file_evidence"))
             .join(act, act.id == self.act.id)
             .where(~and_(act.state.in_(("conflict", "refused")), transferred))
@@ -138,6 +161,11 @@ class _OutcomeProjection:
             .outerjoin(supervisor, supervisor.id == AgentInstanceRow.supervisor_id)
             .outerjoin(recipient, recipient.id == self.act.body.get("recipient_id"))
         )
+        if self.native:
+            answer = aliased(HumanInputResponseRow)
+            self.answer_column = len(result.column_descriptions)
+            result = result.add_columns(answer).outerjoin(answer, answer.id == event.receipt["response_id"].as_string() if self.act.kind == "respond" else false())
+        return result
 
     def check(self, rows):
         from app.telegram_bots.acts import _snapshot
@@ -181,6 +209,26 @@ class _OutcomeProjection:
         action = {"respond": "human_response", "route": "request_route"}.get(self.act.kind, self.act.kind)
         if effect is None or (effect.work_id, effect.actor_kind, effect.actor_id, effect.action) != (work.id, "human", bot.owner_user_id, action) or not same_body(effect.request, self.act.body):
             raise ProductSourceRetired()
+        if self.native:
+            answer = rows[0][self.answer_column]
+            if self.act.kind == "respond" and (
+                answer is None
+                or (answer.request_id, answer.actor_id, answer.disposition, answer.text, answer.choice, answer.request_revision, answer.assignment_revision)
+                != (
+                    self.act.request_id,
+                    bot.owner_user_id,
+                    self.act.body.get("disposition", "supplied"),
+                    self.act.body.get("text"),
+                    self.act.body.get("choice"),
+                    self.act.body["expected_request_revision"],
+                    self.act.body["expected_assignment_revision"],
+                )
+                or not same_body(answer.sources, self.act.body.get("sources", []))
+            ):
+                raise ProductSourceRetired()
+            from app.telegram_bots.work_outcome_proof import native_proof
+
+            self.proof = native_proof(saved, event, effect, answer)
         self.primary_work_revision = effect.revision
         # The activation's expected Work revision provides logical ordering,
         # independent of wall-clock skew or current execution availability.
