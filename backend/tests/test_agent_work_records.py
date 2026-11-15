@@ -313,8 +313,15 @@ async def test_work_migration_rebuild_and_used_downgrade_guard(work):
             inspector = inspect(connection)
             return {table.name: sorted((c["name"], str(c["type"]), c["nullable"]) for c in inspector.get_columns(table.name)) for table in module._tables}
 
+        def indexes():
+            inspector = inspect(connection)
+            return {table.name: sorted((i["name"], tuple(i["column_names"]), bool(i["unique"])) for i in inspector.get_indexes(table.name)) for table in module._tables}
+
         before = columns()
+        before_indexes = indexes()
+        operation_indexes = importlib.import_module("deerflow.persistence.migrations.versions.0053_work_operation_indexes")
         with Operations.context(MigrationContext.configure(connection)):
+            operation_indexes.downgrade()
             importlib.import_module("deerflow.persistence.migrations.versions.0041_storage_host_replacements").downgrade()
             importlib.import_module("deerflow.persistence.migrations.versions.0040_work_execution").downgrade()
         for row in (HumanInputReadRow, HumanInputEventRow, HumanInputResponseRow, HumanInputRequestRow):
@@ -327,7 +334,9 @@ async def test_work_migration_rebuild_and_used_downgrade_guard(work):
             importlib.import_module("deerflow.persistence.migrations.versions.0039_human_input").upgrade()
             importlib.import_module("deerflow.persistence.migrations.versions.0040_work_execution").upgrade()
             importlib.import_module("deerflow.persistence.migrations.versions.0041_storage_host_replacements").upgrade()
+            operation_indexes.upgrade()
         assert columns() == before
+        assert indexes() == before_indexes
 
     async with sf.kw["bind"].begin() as connection:
         await connection.run_sync(rebuild)
