@@ -109,6 +109,26 @@ def test_summary_caps_only_display_and_keeps_request_buttons_and_web_handover(lo
     assert not any(button.get("kind") in {"work_details", "work_start", "stop_attempt"} for button in buttons)
 
 
+@pytest.mark.parametrize("locale", ["en-US", "zh-CN"])
+def test_native_summary_shares_five_waiting_buttons_and_keeps_legacy_rendering(locale):
+    from app.telegram_bots.summary_text import present_summary
+
+    waiting = [
+        {"kind": kind, "work_id": f"{index:032x}", "request_id": f"{index + 100:032x}" if kind == "question" else None, "objective": "A complete objective " * 8}
+        for index, kind in enumerate(["question", "resume", "start", "resume", "start", "start"], 1)
+    ]
+    data = {"finished": [], "working": [], "interrupted": [], "waiting": waiting}
+    args = dict(locale=locale, protected=False, concealed=False, outbox_id="a" * 32, link_id="b" * 32, time="08:00", work_url=None)
+    native = present_summary(data, **args, work_controls=True)
+    buttons = [button for row in native.keyboard for button in row]
+    assert [button["kind"] for button in buttons] == ["digest_item", "work_details", "work_details", "work_details", "work_details", "work_list_open", "summary_off"]
+    assert all(len(button["label_values"]["label"]) <= 32 for button in buttons[:5])
+    assert [button["target_id"] for button in buttons[1:5]] == [item["work_id"] for item in waiting[1:5]]
+    assert all(len(row) == 1 for row in native.keyboard)
+    legacy = present_summary(data, **args)
+    assert [button["kind"] for row in legacy.keyboard for button in row] == ["digest_item", "summary_off"]
+
+
 def test_concealed_summary_has_no_private_titles_or_item_targets():
     from app.telegram_bots.summary_text import present_summary
 

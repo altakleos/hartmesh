@@ -183,6 +183,7 @@ class WorkChatRuntime:
         if row.kind not in {
             "work_details",
             "work_list_page",
+            "work_list_open",
             "work_start",
             "stop_attempt",
             "stop_which",
@@ -250,7 +251,7 @@ class WorkChatRuntime:
             elif row.kind in {"act_check", "cancel_wait"}:
                 operation = recovery.retry if row.kind == "act_check" else recovery.cancel
                 await operation(link, row.id, **scope)
-            elif row.kind in {"work_details", "work_list_page"}:
+            elif row.kind in {"work_details", "work_list_page", "work_list_open"}:
                 await self.views.open(link, row.id, query_id=query_id, **scope)
             elif row.kind in {"work_change", "work_withdraw"}:
                 await self.management.open(link, row.id, query_id=query_id, **scope)

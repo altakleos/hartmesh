@@ -2074,7 +2074,10 @@ Notifications follow current access and the employee's Telegram policy. Protecte
 notifications reveal their details only after Show, and their files remain
 protected. Digests combine related notices, progress messages follow the current
 attempt, and optional morning summaries show completed work and items waiting
-for you. A summary with nothing to report sends no message.
+for you. Summary Start and Resume buttons and saved-answer reminders open the
+current assignment preview; starting still takes a separate press there. A summary
+with omitted waiting items opens the first native Work-list page. A summary with
+nothing to report sends no message.
 
 In Channels settings or a bot's `/settings`, choose which unsolicited messages
 arrive, quiet hours and morning summaries. These preferences apply to all your

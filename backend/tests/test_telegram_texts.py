@@ -91,6 +91,7 @@ WORK_NEWS_KEYS |= frozenset(
     ).split()
 )
 WORK_NEWS_KEYS |= frozenset("summary.header summary.finished summary.working summary.interrupted summary.waiting summary.item.resume summary.item.start summary.more summary.button.off summary.off concealed.summary".split())
+WORK_NEWS_KEYS |= frozenset("summary.button.resume summary.button.start summary.button.work_list".split())
 
 
 WORK_VIEW_KEYS = frozenset(

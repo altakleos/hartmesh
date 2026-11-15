@@ -16,6 +16,7 @@ from app.telegram_bots.callbacks import CallbackRefused, _validate_rows, canonic
 from app.telegram_bots.notifications import aware, preference_skip
 from app.telegram_bots.pages import page_address
 from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryRetry, PermanentDeliveryError, ProductSourceRetired, _item, _safe_json
+from app.telegram_bots.render import _clip, render_plain
 from app.telegram_bots.settings import SettingsRepository, _snapshot
 from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_news import news_class, present_news
@@ -80,6 +81,10 @@ def recipes(source, basis, identity, link):
 
             view = present_status_controls(source, basis, link, view)
     keyboard = [list(line) for line in view.keyboard]
+    native_reminder = source.key == "remind.ready_to_resume" and basis.get("work_navigation") == 1
+    if not basis["concealed"] and native_reminder:
+        label = _clip(render_plain("summary.button.resume", basis["locale"], objective=" ".join(source.values["objective"].split())), 32)
+        keyboard.append([{"label": "label.choice", "label_values": {"label": label}, "kind": "work_details", "target_kind": "work", "target_id": source.work_id, "payload": {"work_id": source.work_id}}])
     if not basis["concealed"] and source.key in ATTEMPT_KEYS and source.values.get("open_files"):
         address = page_address("web.files", link, permissions=3, public_base_url=basis["public_base_url"])
         if address:
@@ -89,6 +94,7 @@ def recipes(source, basis, identity, link):
 
     if (
         not basis["concealed"]
+        and not native_reminder
         and (not native_start or source.key == "attempt.failed" and source.values.get("reason") not in FAILED_REASONS)
         and (
             source.key in {"decision.recorded", "result.changes", "attempt.stopped", "attempt.stopped_changed", "work.proposed", "remind.ready_to_resume"} | ATTEMPT_KEYS
@@ -132,6 +138,9 @@ def frozen_news(captured, *, acknowledged=False, pending=False, _history=None):
             | ({"reveal", "cleanup_id", "origin"} if basis.get("version") == 2 else {"reveal", "cleanup_id", "history", "teaser_version", "edit_target"} if basis.get("version") == 3 else set())
             | ({"navigation_origin"} if basis.get("version") in {1, 3} and "navigation_origin" in basis else set())
             | ({"direct_edit"} if basis.get("version") == 3 and "direct_edit" in basis else set())
+            | ({"work_navigation"} if "work_navigation" in basis else set())
+            or "work_navigation" in basis
+            and (type(basis["work_navigation"]) is not int or basis["work_navigation"] != 1 or basis["source"]["key"] != "remind.ready_to_resume")
             or type(basis["version"]) is not int
             or basis["version"] not in {1, 2, 3}
         ):
@@ -361,6 +370,8 @@ class WorkNewsPlans:
                 raise DeliveryClaimRetired()
             await admission(session=writer, projection=projected)
             basis = {"version": 1, "source": asdict(source), "locale": settings.locale, "concealed": conceal_news(source), "public_base_url": origin.base}
+            if source.key == "remind.ready_to_resume":
+                basis["work_navigation"] = 1
             parts, keyboard = recipes(source, basis, identity, link)
             row.parts = self.outbox._parts(parts, 0)
             row.payload = _safe_json({**row.payload, "work_news_basis": {**basis, "parts": parts, "keyboard": keyboard}, "product_keyboard_basis": keyboard})

@@ -11,6 +11,7 @@ from sqlalchemy.orm import aliased
 
 from app.telegram_bots.attention_authority import prepare_attention
 from app.telegram_bots.attention_scope import attention_proof
+from app.telegram_bots.links import prepare_publication_guard
 from app.telegram_bots.notifications import aware
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow
 from deerflow.utils.file_io import await_drained
@@ -61,19 +62,29 @@ def _snapshot(row, link, cursor, now):
 
 
 class WorkListMethods:
-    async def open_list(self, link):
+    async def open_list(self, link, *, guard=None, admit=None, snapshot_id=None):
         async def perform():
             now = self.clock()
             collected = await self.collect(link, as_of=now)
-            identity = uuid4().hex
+            identity = snapshot_id if snapshot_id is not None else uuid4().hex
             identities = [record["id"] for record in collected["work"]]
             count = max(1, math.ceil(len(identities) / WORK_LIST_LINES))
             cursors = {identity: 0, **{uuid4().hex: position for position in range(1, count)}}
             expires = now + timedelta(hours=self.links.config.callbacks.draft_ttl_hours)
             admission = await prepare_attention(self, link)
+            if guard is not None:
+                await prepare_publication_guard(guard)
             async with self.links._transaction() as writer:
                 await writer.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link.id).with_for_update().execution_options(populate_existing=True))
+                if guard is not None:
+                    await guard.check(writer)
+                if admit is not None:
+                    await admit(writer)
                 await admission(session=writer)
+                existing = await writer.get(TelegramCallbackRow, identity)
+                if existing is not None:
+                    _snapshot(existing, link, identity, self.clock())
+                    return identity
                 writer.add(
                     TelegramCallbackRow(
                         id=identity,
@@ -93,6 +104,10 @@ class WorkListMethods:
                 )
                 await writer.flush()
                 await admission(session=writer)
+                if guard is not None:
+                    await guard.check(writer)
+                if admit is not None:
+                    await admit(writer)
                 if self.clock() >= expires:
                     raise ValueError("work-list-unavailable")
             return identity

@@ -1210,8 +1210,18 @@ reusable digest controls intact.
 
 `summary.sections` ranks a complete `AttentionReader.collect` result before
 `summary_text.present_summary` applies five-item display limits. Old requests
-precede start/resume lines; those lines have no execution buttons. The renderer
-uses request-target navigation and a web Work handover for omitted items.
+precede start/resume lines. New presentations share five waiting-item controls:
+requests use their own request-target navigation, Start/Resume open current Work
+details, and omitted items open the first native Work-list page. These controls
+never execute work. Persisted `work_controls:1` selects this keyboard; absence
+keeps the legacy request-only keyboard and web handover unchanged on replay.
+`work_summary_origins.py` qualifies actual complete summary/Show acknowledgements,
+including the original protected root and consumed Show in the final borrowed SQL.
+Committed gestures remain repairable after their original controls are retired.
+Work-list collection stays off-writer; snapshot admission rechecks the original
+press and publication guard before/after flush and uses an idempotent owned ID.
+Saved-answer reminders use `work_navigation:1` to open current details; old
+presentations retain their web link. Neither path creates an Act or resumes work.
 `due_date` uses the owner's local calendar date, defers to quiet end, and retains
 the scheduled day across an overnight delay; duplicate local times retain one
 date key. These pure helpers do not install a scheduler or authorize a delivery.
