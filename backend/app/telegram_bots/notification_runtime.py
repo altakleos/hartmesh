@@ -144,6 +144,7 @@ class NotificationRuntime:
         self.chat_observer = WorkChatObservation(self.chat)
         host.work_digest_items = DigestItems(digests=self.digests, requests=self.requests, reviews=self.reviews, routing=self.routing, news=self.news, results=self.results, summaries=self.summary_plans, views=self.chat.detail_plans)
         navigation = host.work_digest_items.navigation
+        navigation.starts = self.chat.start_reviews
         from app.telegram_bots.work_navigation_recovery import WorkNavigationRecovery, WorkReviewNavigationRecovery, WorkRoutingNavigationRecovery
 
         host.work_callbacks.recovery = WorkNavigationRecovery(self.requests, navigation=navigation)

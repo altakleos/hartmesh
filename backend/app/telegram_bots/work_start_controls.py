@@ -97,6 +97,8 @@ class WorkStartAdmissions:
                 fresh.record, owner_id=link.owner_user_id, permissions=fresh.permissions, held=fresh.held, request=fresh.request, lifecycle_pending=fresh.lifecycle_pending, can_reuse_conversation=fresh.can_reuse_conversation
             )
             if not any(item.get("kind") == "work_start" for line in controls for item in line):
+                if fresh.record["status"] == "submitted" and fresh.request is not None and fresh.request["state"] == "pending" and fresh.request["purpose"] == "review":
+                    raise AgentConflict("Review the current result", reason="awaiting-review")
                 raise CallbackRefused()
             detail_current = await self.plans.reader.prepare_detail(link, fresh, ignore_activation=callback_id)
             from app.telegram_bots.work_news_carriers import prepare_news_origin

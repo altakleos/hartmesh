@@ -39,6 +39,7 @@ class WorkExecutionPlans(WorkNewsPlans):
     def __init__(self, *, acts, product="HartMesh", **kwargs):
         super().__init__(**kwargs, projection=WorkExecutionProjection)
         self.acts = acts
+        self.review_handoffs = None
         self.reader.product = product
         self.reader.acts = acts
         if acts.session_factory.kw.get("bind") is not self.outbox.sessions.kw.get("bind"):
@@ -61,6 +62,12 @@ class WorkExecutionPlans(WorkNewsPlans):
                 # final source still qualifies this exact saved journal.
                 act = await self.acts._work_record(act_id)
             require_execution_scope(link, act)
+            review_refused = act.state in {"refused", "conflict"} and act.reason == "awaiting-review"
+            review_context = act.state in {"refused", "conflict", "uncertain"} and (act.continuation or {}).get("activation_context") is not None
+            if self.review_handoffs is not None and act.kind == "activate" and (review_refused or review_context):
+                handoff = await self.review_handoffs.from_act(link, act.id, guard=guard)
+                if handoff is not None:
+                    return handoff
             key = "notice:work-execution:" + act_id
             async with self.outbox._writer(link.id) as (writer, _binding):
                 if guard is not None:

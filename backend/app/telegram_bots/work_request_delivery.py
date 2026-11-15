@@ -74,7 +74,10 @@ class WorkRequestPlans:
     async def _freeze(self, writer, link, row, source, settings, *, pending=False, navigation_origin=None):
         """Borrow an already-qualified writer and preserve its delivery identity."""
         identity, request_id = row.id, source.request["id"]
-        presentation = self._presentation(source, settings, identity, concealed=False) if navigation_origin is not None else self._presentation(source, settings, identity)
+        options = {"concealed": False} if navigation_origin is not None else {}
+        if navigation_origin is not None and navigation_origin["kind"] == "start":
+            options["start_refusal"] = True
+        presentation = self._presentation(source, settings, identity, **options)
         controls = [list(line) for line in presentation.keyboard]
         parts = []
         for index, supplied in enumerate(presentation.parts):

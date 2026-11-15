@@ -73,16 +73,11 @@ class UnadmittedStartProjection:
             raise DeliveryRetry(timedelta(seconds=1))
 
 
-async def refresh_origin_projection(reader, link, item, *, trail=(), activation_id=None):
+async def refresh_origin_projection(reader, link, item, *, trail=(), activation_id=None, origin=None):
     """Use the real original carrier, never a Work-view-shaped substitute."""
-    from app.telegram_bots.producer import _item
-    from app.telegram_bots.work_news_carriers import news_origin_projection
-    from app.telegram_bots.work_news_sources import WorkNewsRead
-    from app.telegram_bots.work_status_control_origins import carrier_source
     from app.telegram_bots.work_view_origins import acknowledged_view, anchor_signature
-    from app.telegram_bots.work_view_sources import WorkViewProjection
 
-    origin = item.payload["work_view_intent"]["origin"]
+    origin = item.payload["work_view_intent"]["origin"] if origin is None else origin
     async with reader.links.session_factory() as session:
         parent = await session.get(TelegramOutboxRow, origin.get("anchor_outbox_id"))
         if parent is None or parent.id in trail or len(trail) >= 32:
@@ -90,11 +85,22 @@ async def refresh_origin_projection(reader, link, item, *, trail=(), activation_
         original = acknowledged_view(link, parent, origin.get("presentation_version"), readonly_start_refresh=True)
         if anchor_signature(original) != origin.get("anchor_signature"):
             raise ProductSourceRetired()
-        current = _item(parent)
+    return await prepare_start_carrier(reader, link, parent, original, trail=(*trail, item.id), activation_id=activation_id)
+
+
+async def prepare_start_carrier(reader, link, parent, original, *, trail=(), activation_id=None):
+    """Prepare the actual acknowledged carrier before a new read-only write."""
+    from app.telegram_bots.producer import _item
+    from app.telegram_bots.work_news_carriers import news_origin_projection
+    from app.telegram_bots.work_news_sources import WorkNewsRead
+    from app.telegram_bots.work_status_control_origins import carrier_source
+    from app.telegram_bots.work_view_sources import WorkViewProjection
+
+    current = _item(parent)
     source = WorkNewsRead(**carrier_source(original, readonly_start_refresh=True))
     if source.key == "view.detail":
         projection = WorkViewProjection(reader, link, current, source, clock=await reader.prepare_clock(link, current), origin_only=True)
-        await projection.prepare_source(trail=(*trail, item.id), activation_id=activation_id)
+        await projection.prepare_source(trail=trail, activation_id=activation_id)
         return projection
     clock = await reader.prepare_clock(link, current)
     if source.key == "capacity.offer":

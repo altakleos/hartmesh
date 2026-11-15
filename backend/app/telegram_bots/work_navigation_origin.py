@@ -20,7 +20,7 @@ from deerflow.utils.file_io import await_drained
 
 
 def validate_origin(value):
-    if type(value) is not dict or value.get("kind") not in {"digest", "summary", "view"}:
+    if type(value) is not dict or value.get("kind") not in {"digest", "summary", "view", "start"}:
         raise ProductSourceRetired()
     root = value["kind"]
     if set(value) != {"version", "kind", root + "_id", root + "_proof", "anchor_outbox_id", "anchor_proof", "presentation_version", "message_id", "callback_id", "member_id", "query_key"}:
@@ -99,6 +99,7 @@ class NavigationRead:
 class WorkNavigation:
     def __init__(self, plans, *, summaries=None, requests=None, reviews=None, views=None):
         self.plans, self.digests = plans, DigestNavigation(plans)
+        self.starts = None
         self.views = {}
         if views is not None:
             from app.telegram_bots.work_detail_cards import DETAIL_INTENTS
@@ -123,6 +124,10 @@ class WorkNavigation:
 
     async def restore(self, link, value):
         expected = deepcopy(validate_origin(value))
+        if expected["kind"] == "start":
+            if self.starts is None:
+                raise ProductSourceRetired()
+            return await self.starts.restore(link, expected)
         return await await_drained(self._read(link, expected["callback_id"], expected["query_key"], expected=expected))
 
     async def _read(self, link, callback_id, query_key, *, expected=None):
@@ -218,7 +223,9 @@ class NavigationOriginProjection:
 
     def __init__(self, navigation):
         self.navigation = navigation
-        if navigation.value["kind"] == "view":
+        if navigation.value["kind"] == "start":
+            self.delegate = navigation.snapshot.projection
+        elif navigation.value["kind"] == "view":
             from app.telegram_bots.work_view_navigation import WorkViewNavigationProjection
 
             self.delegate = WorkViewNavigationProjection(navigation)
@@ -234,7 +241,7 @@ class NavigationOriginProjection:
 
     @property
     def callback_column(self):
-        if self.navigation.value["kind"] in {"summary", "view"}:
+        if self.navigation.value["kind"] in {"summary", "view", "start"}:
             return self.delegate.callback_column
         delegate = self.delegate
         return delegate.column + 2 if delegate.origin_column is None else delegate.origin_column + 1

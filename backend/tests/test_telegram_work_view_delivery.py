@@ -12,7 +12,7 @@ from test_work_attention_pages import work_pages as work_pages
 from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
 
 
-async def prepare_view(e):
+async def prepare_view(e, *, topic=None):
     from app.telegram_bots.work_news_delivery import WorkNewsSources
     from app.telegram_bots.work_view_delivery import WorkViewPlans
     from app.telegram_bots.work_view_sources import WorkViewReader
@@ -25,7 +25,7 @@ async def prepare_view(e):
     e.channel._services.work_view_sources = WorkNewsSources(plans)
     async with e.db.sessions.begin() as writer:
         (await writer.get(TelegramOutboxRow, e.identity)).state = "skipped"
-    update = make_update(3401, account=e.link.chat_id, text="/work")
+    update = make_update(3401, account=e.link.chat_id, topic=topic, text="/work")
     inbox, _ = await e.sender.outbox.inbox.accept(e.link, update, sanitized_input={"command": "work"})
     e.identity = await plans.command(e.link, inbox, guard=await guard_for(e))
     return plans, inbox

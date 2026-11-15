@@ -205,7 +205,15 @@ def frozen(captured, *, acknowledged=False, pending=False, replay=False):
         elif "result_files" in basis:
             from app.telegram_bots.work_result_files import present_review_files, result_options
 
-            presentation = present_review_files(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id, suggestion_controls=basis.get("suggestion_controls") == 1, **result_options(basis["result_files"]))
+            presentation = present_review_files(
+                source,
+                locale=basis["locale"],
+                concealed=basis["concealed"],
+                outbox_id=captured.item.id,
+                suggestion_controls=basis.get("suggestion_controls") == 1,
+                start_refusal=(navigation_origin or {}).get("kind") == "start",
+                **result_options(basis["result_files"]),
+            )
         else:
             presentation = present_request(source, locale=basis["locale"], concealed=basis["concealed"], outbox_id=captured.item.id)
         if reveal is not None and (len(presentation.parts) > 1 or "result_files" in basis) and cleanup_id is None:

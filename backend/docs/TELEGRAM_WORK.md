@@ -2,6 +2,33 @@
 
 Read alongside [the managed bot guide](../app/telegram_bots/AGENTS.md).
 
+`work_start_review_replies.py` opens the current recipient's complete result card
+when a genuine Start is conclusively refused because Work awaits review. This
+manual reply ignores proactive notification preferences. It uses the canonical
+review source, confined file exports, current protection and complete SDK ACK
+pipeline before enabling review controls; Accept still needs its own confirmation.
+Non-null topics and acknowledged file prefixes survive held delivery repair.
+
+The closed `start` navigation origin binds an actual original callback, frozen
+presentation and private `work_start_review_origin` witness to the reply. Before
+admission, creation composes the historical carrier with the current review,
+consumes only the unreserved original group and records keyboard cleanup. A
+saved refused activation instead retains its actual journal, body, counter and
+original group ownership. `work_start_review_acts.py` composes the original
+direct carrier or composite confirmation with current permission and global
+Native admission absence; no child callback or synthetic Work view is created.
+Every creation and SDK read rechecks its source. Missing evidence stays held.
+Partless committed replies materialize after restart, retaining the same owner.
+Retention walks actual acknowledged ancestry without renewing callback age.
+Context recovery composes both actual journals and the effective child's refusal.
+Receipt-only deadline reconciliation may end the outer family and mark it
+uncertain; it keeps the same reply while the exact child remains conclusively
+refused and both native operations remain absent. Its retained digest binds the
+approval, body, counter, cancellation and child facts; current projection checks
+also qualify the outer lifecycle state and context phase. Decision and spoken
+response confirmations use their actual request signature and original input.
+Request-family retention honors those source holds, including after primary ACK.
+
 `notification_runtime.py` composes the source owners around the supervisor's
 single sender. Check installs the binding baseline hook before routes. A negative
 copy decision precedes initial baselines, prior-claim and saved-input recovery,

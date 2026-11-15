@@ -128,6 +128,10 @@ keeps the original retry; only current managers receive a settings link.
 The Work page separates progress, blockers, execution attempts and human review.
 A reviewer’s request-for-changes note stays in later attempts’ context until the
 result is accepted or the assignment is cancelled or reopened.
+In an agent bot, Start on an assignment awaiting review opens the current full
+review, including permitted result files, even with proactive notifications off.
+Review controls become available after the complete reply arrives; accepting a
+result still requires confirmation.
 Current Inspect grants control visibility; referenced files retain separate access
 checks. Uncertain execution requires qualified containment and explicit recovery.
 The Work command API can stop one exact running attempt without cancelling the

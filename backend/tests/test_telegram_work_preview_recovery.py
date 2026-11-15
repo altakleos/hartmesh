@@ -25,9 +25,9 @@ def install(e):
     e.sender.outbox.clock = e.clock
 
 
-async def dispatch(e, identity):
+async def dispatch(e, identity, *, topic=None):
     e.clock.advance(10)
-    message(e.channel.bot.request, identity=identity)
+    message(e.channel.bot.request, identity=identity, topic=topic)
     assert await e.sender.tick() == 1
     await e.sender.drain()
 

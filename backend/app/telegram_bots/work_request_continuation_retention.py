@@ -170,6 +170,9 @@ async def request_dependencies(session, now, *, max_age_days):
     )
     if not candidates:
         return result
+    from app.telegram_bots.work_start_refresh_retention import refresh_dependencies
+
+    refresh = await refresh_dependencies(session, now, max_age_days=max_age_days)
     deliveries = {row.id: row for row in await session.scalars(select(TelegramOutboxRow).execution_options(populate_existing=True))}
     marks = {(row.link_id, row.message_id, row.chat_id): row for row in await session.scalars(select(TelegramInboundMarkRow).execution_options(populate_existing=True))}
     by_parent, by_anchor, by_act = (defaultdict(list) for _ in range(3))
@@ -249,9 +252,10 @@ async def request_dependencies(session, now, *, max_age_days):
         related = [row for value in owned for row in by_anchor[value] if same_scope(row, link) and row.message_thread_id == deliveries[value].message_thread_id]
         live = any(row.consumed_at is None and aware(now) < aware(row.created_at) + timedelta(days=max_age_days) and (row.expires_at is None or aware(now) < aware(row.expires_at)) for row in related)
         pending = any(deliveries[value].state in {"pending", "sending", "failed"} for value in owned)
+        source_held = bool(owned & refresh.deliveries) or any(row.group_id in refresh.groups for row in related)
         canonical = {identity, *([activation_child_id(identity)] if child is not None else [])}
         closed = parent is not None and member_ids == canonical and await closed_request(session, parent, child, link, attempts.get(activation_child_id(identity)), context_roots=context_roots)
-        if not closed or live or pending:
+        if not closed or live or pending or source_held:
             result.acts.update(row.id for row in members)
             result.inputs.update(inputs)
             result.deliveries.update(owned)
