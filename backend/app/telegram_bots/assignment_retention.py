@@ -89,7 +89,7 @@ def valid_root(root, scope):
         return False
 
 
-def closed_family(scope, root, parents, journals, reverse, forward, events, attempts):
+def closed_family(scope, root, parents, journals, reverse, forward, events, attempts, contexts):
     try:
         if len(parents) != 1 or list(root.operation_ids) != [parents[0].id]:
             return False
@@ -120,7 +120,7 @@ def closed_family(scope, root, parents, journals, reverse, forward, events, atte
                 from app.telegram_bots.work_continuation_state import require_child
 
                 require_child(parent, activation)
-                if not closed_activation(activation, scope, attempt, work_id=activation.work_id):
+                if not closed_activation(activation, scope, attempt, work_id=activation.work_id, context=contexts.get(activation.id)):
                     return False
             elif continuation.get("child_body") is not None:
                 return False
@@ -279,6 +279,9 @@ async def assignment_dependencies(session, now, *, max_age_days, draft_ttl_hours
     held_anchors.update(answer_anchors)
     result.groups.update(answer_groups)
     result.deliveries.update(answer_anchors)
+    from app.telegram_bots.work_start_retention import context_facts, context_owners
+
+    context_roots = await context_owners(session)
     families = []
     for identity in sorted(root_ids):
         raw = journals.get(identity)
@@ -361,7 +364,8 @@ async def assignment_dependencies(session, now, *, max_age_days, draft_ttl_hours
             and root.cancel_requested_at is None
             and not any(not isinstance(control.payload, Mapping) or control.payload.get("work_action_id") is not None for control in owned.values())
         )
-        closed = valid and (closed_family(scope, root, parents, normalized, reverse, forward, events, attempts) if parents else unadmitted)
+        contexts = {key: await context_facts(session, row, force=key in context_roots) for key, row in normalized.items() if row.kind == "activate"}
+        closed = valid and (closed_family(scope, root, parents, normalized, reverse, forward, events, attempts, contexts) if parents else unadmitted)
         old_draft = root.created_at is not None and now >= aware(root.created_at) + timedelta(hours=draft_ttl_hours)
         if unadmitted and root.state == "draft" and old_draft:
             result.expired_drafts.add(identity)

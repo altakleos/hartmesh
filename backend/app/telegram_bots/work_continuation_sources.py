@@ -7,15 +7,16 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow
 
 
 class ActivationParentProjection:
-    def __init__(self, child, *, for_effect=True):
+    def __init__(self, child, *, for_effect=True, effective_child=None):
         self.child = child
+        self.effective_child = effective_child or child
         self.for_effect = for_effect
         self.draft = self.family = self.consent = self.proposal = None
         self.link = self.parent_id = self.root_id = None
         self.request = None
         from app.telegram_bots.work_news_carriers import ActivationNewsOrigin
 
-        self.news = ActivationNewsOrigin(child, for_effect=for_effect)
+        self.news = ActivationNewsOrigin(child, for_effect=for_effect, activation_id=self.effective_child.id)
 
     async def prepare(self, acts, link):
         from app.telegram_bots.acts import _snapshot
@@ -37,7 +38,7 @@ class ActivationParentProjection:
             if parent.kind in {"decide", "respond"}:
                 from app.telegram_bots.work_request_continuation_sources import RequestParentProof
 
-                self.request = RequestParentProof(acts, link, _snapshot(parent), self.child, for_effect=self.for_effect)
+                self.request = RequestParentProof(acts, link, _snapshot(parent), self.child, for_effect=self.for_effect, effective_child=self.effective_child)
                 return self
             source = delegate_source(_snapshot(parent))
             root = await reader.get(TelegramActRow, source["draft_id"])
@@ -94,7 +95,7 @@ class ActivationParentProjection:
 
         attempt = aliased(AgentWorkAttemptRow)
         self.attempt_column = len(result.column_descriptions)
-        result = result.add_columns(attempt).outerjoin(attempt, and_(attempt.work_id == self.child.work_id, attempt.activation_id == self.child.id))
+        result = result.add_columns(attempt).outerjoin(attempt, and_(attempt.work_id == self.effective_child.work_id, attempt.activation_id == self.effective_child.id))
         if self.request is not None:
             return self.request.extend(result, parent)
         if self.draft is not None:
@@ -165,8 +166,8 @@ class ActivationParentProjection:
             promise is not None
             and promise.run_id is None
             and promise.status in UNRESOLVED
-            and (promise.work_id, promise.activation_id, promise.requester_id, promise.thread_id) == (actual_child.work_id, actual_child.id, actual_child.owner_user_id, actual_child.body["thread_id"])
-            and same_body(promise.request, actual_child.body)
+            and (promise.work_id, promise.activation_id, promise.requester_id, promise.thread_id) == (self.effective_child.work_id, self.effective_child.id, self.effective_child.owner_user_id, self.effective_child.body["thread_id"])
+            and same_body(promise.request, self.effective_child.body)
         )
         if (
             parent.state != "done"

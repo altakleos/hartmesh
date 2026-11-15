@@ -208,9 +208,10 @@ async def news_witness_dependencies(session, control, journal, binding):
 class ActivationNewsOrigin:
     """The original news event and SDK acknowledgements survive to native entry."""
 
-    def __init__(self, act, *, for_effect=True):
+    def __init__(self, act, *, for_effect=True, activation_id=None):
         self.act, self.projection = act, None
         self.for_effect = for_effect
+        self.activation_id = activation_id or act.id
 
     async def prepare(self, acts, link):
         from collections.abc import Mapping
@@ -240,7 +241,7 @@ class ActivationNewsOrigin:
                     raise ProductSourceRetired()
                 return
             original = acknowledged_view(link, parent, callback.payload.get("presentation_version"))
-        self.projection = await news_origin_projection(acts, link, parent, original, activation_id=self.act.id, historical=not self.for_effect)
+        self.projection = await news_origin_projection(acts, link, parent, original, activation_id=self.activation_id, historical=not self.for_effect)
         if self.projection is not None and (witness is None or not same_body(marker, activation_news_origin(original))):
             raise ProductSourceRetired()
         self.link = link

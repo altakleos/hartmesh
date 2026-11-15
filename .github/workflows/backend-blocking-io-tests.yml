@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3]
 
     steps:
       - name: Checkout
@@ -51,7 +51,7 @@ jobs:
 
       - name: Run blocking IO regression tests
         working-directory: backend
-        run: make test-blocking-io SPLITS=2 GROUP=${{ matrix.shard }}
+        run: make test-blocking-io SPLITS=3 GROUP=${{ matrix.shard }}
 
   backend-blocking-io:
     needs: [blocking-io-shard]

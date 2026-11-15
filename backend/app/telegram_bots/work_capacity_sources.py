@@ -58,7 +58,7 @@ def startable_detail(detail, link):
     )
 
 
-def qualify_waiting(link, journal, attempt, callback, parent, controls, origin, *, expected=None, transfer=None, activation_parent=None):
+def qualify_waiting(link, journal, attempt, callback, parent, controls, origin, *, expected=None, transfer=None, activation_parent=None, context_root=None):
     if journal is None or attempt is not None or journal.cancel_requested_at is not None:
         raise ProductSourceRetired()
     act = _snapshot(journal)
@@ -66,7 +66,9 @@ def qualify_waiting(link, journal, attempt, callback, parent, controls, origin, 
 
     if act.attempts < 1 or answered_calls(act) != act.attempts:
         raise ProductSourceRetired()
-    actual = qualify_execution_origin(link, act, callback, parent, controls, activation_parent=activation_parent)
+    if context_root is not None and context_root.cancel_requested_at is not None:
+        raise ProductSourceRetired()
+    actual = qualify_execution_origin(link, act, callback, parent, controls, activation_parent=activation_parent, context_root=context_root)
     if not same_body(actual, origin):
         raise ProductSourceRetired()
     if expected is not None:
@@ -127,10 +129,15 @@ class WorkCapacityOfferProjection:
 
         async with self.reader.links.session_factory() as reader:
             act = await reader.get(TelegramActRow, self.intent["act_id"])
-            if act is None or act.kind != "activate":
+            if act is None or act.kind not in {"activate", "activate_context"}:
                 raise ProductSourceRetired()
             captured = _snapshot(act)
-        self.activation_parent = ActivationParentProjection(captured, for_effect=False)
+        if captured.kind == "activate_context":
+            from app.telegram_bots.work_start_conversation_sources import ContextParentProjection
+
+            self.activation_parent = ContextParentProjection(captured, for_effect=False)
+        else:
+            self.activation_parent = ActivationParentProjection(captured, for_effect=False)
         try:
             await self.activation_parent.prepare(self.reader.acts, self.link)
         except (ValueError, KeyError, TypeError):
@@ -184,7 +191,8 @@ class WorkCapacityOfferProjection:
             self.activation_parent.check(rows, journal, held)
         except (ValueError, KeyError, TypeError):
             raise ProductSourceRetired() from None
-        primary = rows[0][self.activation_parent.column]
+        primary = rows[0][getattr(self.activation_parent, "origin_parent_column", self.activation_parent.column)]
+        context_root = rows[0][self.activation_parent.column] if hasattr(self.activation_parent, "origin_parent_column") else None
         transfer = {"capacity_transfer": {"outbox_id": self.item.id, "operation_id": self.activation_id}} if self.origin_only and self.activation_id is not None else None
         act = qualify_waiting(
             self.link,
@@ -197,6 +205,7 @@ class WorkCapacityOfferProjection:
             expected=self.source.work["waiting_act"] if self.origin_only else None,
             transfer=transfer,
             activation_parent=_snapshot(primary) if primary is not None else None,
+            context_root=_snapshot(context_root) if context_root is not None else None,
         )
         from app.telegram_bots.work_capacity_reads import capacity_scope
 

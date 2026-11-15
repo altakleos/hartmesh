@@ -15,7 +15,9 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBot
 
 async def outcome_primary_acts(session, now, *, max_age_days, required_activations=()):
     from app.telegram_bots.work_start_refresh_retention import refresh_dependencies
+    from app.telegram_bots.work_start_retention import context_facts, context_owners
 
+    context_roots = await context_owners(session)
     refresh = await refresh_dependencies(session, now, max_age_days=max_age_days)
     _groups, anchors = await reserved_starts(session)
     controls = await session.execute(
@@ -90,7 +92,7 @@ async def outcome_primary_acts(session, now, *, max_age_days, required_activatio
         if admitted:
             # Unknown journals remain held by their own admitted control. A
             # foreign or damaged child is never adopted as new permission.
-            live = live or not closed_start(control, child, binding, attempt) or own_child and child.id in required_activations
+            live = live or not closed_start(control, child, binding, attempt, context=await context_facts(session, child, force=child is not None and child.id in context_roots)) or own_child and child.id in required_activations
         if live or parent.id in refresh.deliveries:
             retained.add(primary.id)
     return retained

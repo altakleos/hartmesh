@@ -59,6 +59,9 @@ def closed_stop(root, journals, attempts, events):
 
 async def execution_dependencies(session, *, now=None, max_age_days=180):
     """Conservative same-binding evidence pins; never renew callback age."""
+    from app.telegram_bots.work_start_retention import context_facts, context_owners
+
+    context_roots = await context_owners(session)
     deliveries = list(
         await session.scalars(
             select(TelegramOutboxRow).where(or_(TelegramOutboxRow.payload["work_execution_intent"]["act_id"].as_string().is_not(None), TelegramOutboxRow.payload["capacity_offer_intent"]["act_id"].as_string().is_not(None)))
@@ -82,7 +85,7 @@ async def execution_dependencies(session, *, now=None, max_age_days=180):
         for journal in await session.scalars(select(TelegramActRow).where(TelegramActRow.id.in_(children[start : start + 500]))):
             journals[journal.id] = journal
     attempts, activation_attempts, events = {}, {}, {}
-    if any(journal.kind in {"activate", "stop"} for journal in journals.values()):
+    if any(journal.kind in {"activate", "activate_context", "stop"} for journal in journals.values()):
         targets = sorted({journal.body.get("attempt_id") for journal in journals.values() if journal.kind == "stop" and isinstance(journal.body, Mapping) and type(journal.body.get("attempt_id")) is str})
         for start in range(0, len(targets), 500):
             for attempt in await session.scalars(select(AgentWorkAttemptRow).where(AgentWorkAttemptRow.id.in_(targets[start : start + 500]))):
@@ -105,9 +108,18 @@ async def execution_dependencies(session, *, now=None, max_age_days=180):
         closed = False
         if journal is not None:
             try:
-                require_execution_scope(link, _snapshot(journal))
-                if journal.work_id == delivery.work_id:
-                    closed = closed_activation(journal, link, activation_attempts.get((journal.work_id, journal.id)), work_id=delivery.work_id) if journal.kind == "activate" else closed_stop(journal, journals, attempts, events)
+                if journal.kind == "activate_context":
+                    from app.telegram_bots.work_start_retention import closed_context_member
+
+                    if "capacity_offer_intent" in delivery.payload and journal.work_id == delivery.work_id:
+                        closed = await closed_context_member(session, journal, link)
+                else:
+                    require_execution_scope(link, _snapshot(journal))
+                if journal.kind != "activate_context" and journal.work_id == delivery.work_id:
+                    if journal.kind == "activate":
+                        closed = closed_activation(journal, link, activation_attempts.get((journal.work_id, journal.id)), work_id=delivery.work_id, context=await context_facts(session, journal, force=journal.id in context_roots))
+                    else:
+                        closed = closed_stop(journal, journals, attempts, events)
             except (ProductSourceRetired, KeyError, TypeError, ValueError, AttributeError):
                 pass
         if not closed or delivery.state in {"pending", "sending", "failed"} or delivery.id in refresh.deliveries:

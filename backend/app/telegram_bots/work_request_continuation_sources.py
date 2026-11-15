@@ -18,8 +18,9 @@ from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, Telegr
 
 
 class RequestParentProof:
-    def __init__(self, acts, link, parent, child, *, for_effect):
+    def __init__(self, acts, link, parent, child, *, for_effect, effective_child=None):
         self.acts, self.link, self.parent, self.child, self.for_effect = acts, link, parent, child, for_effect
+        self.effective_child = effective_child or child
         self.source = request_activation(parent)
 
     def extend(self, query, parent):
@@ -42,7 +43,7 @@ class RequestParentProof:
             .outerjoin(outcome, outcome.id == self.source["outcome_id"])
             .outerjoin(event, and_(event.instance_id == parent.instance_id, event.operation_id == parent.id))
             .outerjoin(response, and_(response.instance_id == parent.instance_id, response.operation_id == parent.id))
-            .outerjoin(promise, and_(promise.work_id == self.child.work_id, promise.activation_id == self.child.id))
+            .outerjoin(promise, and_(promise.work_id == self.effective_child.work_id, promise.activation_id == self.effective_child.id))
         )
         self.input_column = len(result.column_descriptions)
         mark, question, control, answer = aliased(TelegramInboundMarkRow), aliased(TelegramOutboxRow), aliased(TelegramCallbackRow), aliased(HumanInputResponseRow)
@@ -74,8 +75,8 @@ class RequestParentProof:
             promise is not None
             and promise.run_id is None
             and promise.status in UNRESOLVED
-            and (promise.work_id, promise.activation_id, promise.requester_id, promise.thread_id) == (child.work_id, child.id, child.owner_user_id, child.body["thread_id"])
-            and same_body(promise.request, child.body)
+            and (promise.work_id, promise.activation_id, promise.requester_id, promise.thread_id) == (self.effective_child.work_id, self.effective_child.id, self.effective_child.owner_user_id, self.effective_child.body["thread_id"])
+            and same_body(promise.request, self.effective_child.body)
         )
         if self.for_effect:
             if (

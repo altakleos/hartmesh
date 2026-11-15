@@ -73,6 +73,9 @@ class ContinuationActionMethods:
                         continue
                     if member.kind == "activate":
                         reserved = await writer.scalar(select(AgentWorkAttemptRow.id).where(AgentWorkAttemptRow.work_id == member.work_id, AgentWorkAttemptRow.activation_id == member.id))
+                        from app.telegram_bots.work_start_conversations import fence_context_child
+
+                        reserved = await fence_context_child(writer, member, now=now) or reserved
                     else:
                         reserved = await writer.scalar(select(AgentWorkEventRow.id).where(AgentWorkEventRow.instance_id == member.instance_id, AgentWorkEventRow.operation_id == member.id))
                     conclusive = reserved is None and (member.attempts == 0 or member.state in {"refused", "conflict", "waiting"})
@@ -254,6 +257,8 @@ class ContinuationActionMethods:
             return await self._continuation_phase(parent, "done")
         if child.state == "refused" and child.reason == "cancelled":
             return await self._continuation_phase(parent, "cancelled")
+        if child.kind == "activate" and child.operation_ids:
+            return await self._work_record(parent.id)
         if child.state in {"refused", "conflict"} or child.state == "waiting" and child.reason == "work-limit":
             return await self._continuation_phase(parent, "refused")
         return await self._work_record(parent.id)

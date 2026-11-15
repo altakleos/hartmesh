@@ -79,11 +79,11 @@ class WorkExecutionPlans(WorkNewsPlans):
                         callback, parent, controls, primary = None, None, [], None
                         topic = command.topic
                     else:
-                        callback, parent, controls, primary = await execution_origin_rows(writer, journal)
+                        callback, parent, controls, primary, context_root = await execution_origin_rows(writer, journal)
                         if parent is None or callback.message_thread_id != parent.message_thread_id:
                             raise ProductSourceRetired()
                         topic = parent.message_thread_id
-                    origin = qualify_execution_origin(link, _snapshot(journal), callback, parent, controls, activation_parent=primary, command=command)
+                    origin = qualify_execution_origin(link, _snapshot(journal), callback, parent, controls, activation_parent=primary, command=command, context_root=context_root if command is None else None)
                     row = TelegramOutboxRow(
                         id=uuid4().hex,
                         link_id=link.id,
