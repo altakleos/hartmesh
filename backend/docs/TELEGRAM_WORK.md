@@ -594,6 +594,8 @@ and classes, never exception sentences; `key_for_reader` owns manager wording.
 
 `work_outcome_reads.py` qualifies these views through the exact public service
 receipt, current Work/request and a final joined account/grant/policy/event read.
+Combined answer/decision-and-resume gestures keep their stable primary
+acknowledgement; their child owns execution updates, without a separate native detail snapshot.
 It never calls an action or upgrades an uncertain journal to success. A receipt
 found before journal reconciliation defers presentation until receipt-only journal
 reconciliation; this does not authorize an automatic replay of uncertain actions.

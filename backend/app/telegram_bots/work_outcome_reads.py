@@ -1,6 +1,7 @@
 """Read exact action receipts and current Work context without issuing commands."""
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -82,7 +83,8 @@ class WorkOutcomeReader:
             file_answer = await file_answer_proof(self, link, act)
             projection = _OutcomeProjection(act, source, receipt, file_answer=file_answer, native=native)
             _held, target = await current_attention(self.requests, link, projection=projection)
-            detail = await self.details.detail(link, act.work_id) if native and act.state == "done" and act.kind in {"respond", "decide", "changes_requested"} and not projection.continued else None
+            combined = act.state == "done" and isinstance(act.continuation, Mapping) and "request_activation" in act.continuation
+            detail = await self.details.detail(link, act.work_id) if native and not combined and act.state == "done" and act.kind in {"respond", "decide", "changes_requested"} and not projection.continued else None
             dates = None
             if detail is not None:
                 settings = await self.acts.settings.get(link.owner_user_id)
