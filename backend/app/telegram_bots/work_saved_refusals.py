@@ -11,6 +11,7 @@ from sqlalchemy.orm import aliased
 from app.telegram_bots.acts import _snapshot
 from app.telegram_bots.authority import get_local_provider
 from app.telegram_bots.notifications import aware, preference_skip
+from app.telegram_bots.pages import page_address
 from app.telegram_bots.producer import DeliveryClaimRetired, DeliveryRetry, Outbox, ProductSourceRetired, _item
 from app.telegram_bots.render import render, render_plain
 from app.telegram_bots.route_permissions import prepare_routes
@@ -20,6 +21,7 @@ from app.telegram_bots.work_command_stop_origins import source_marker
 from app.telegram_bots.work_execution_readiness import conclusive_refusal, readiness_signature
 from app.telegram_bots.work_execution_sources import act_facts, execution_origin_rows, qualify_execution_origin, require_execution_scope
 from app.telegram_bots.work_result_identity import digest
+from app.telegram_bots.work_result_navigation import NavigationOrigin
 from app.telegram_bots.work_start_conversations import context_plan
 from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow
@@ -30,6 +32,7 @@ from deerflow.persistence.user.model import UserRow
 from deerflow.utils.file_io import await_drained
 
 _LIFECYCLE = {"agent.paused", "agent.retired", "access.agent_off"}
+_UNAVAILABLE = {"unavailable.off", "unavailable.paused", "unavailable.moved", "unavailable.files_unchecked", "unavailable.fix"}
 
 
 def primary_signature(primary):
@@ -45,12 +48,15 @@ class Metadata:
     live_owner: object
     can_read: bool
     decision: object
+    settings_url: str | None = None
+    navigation: object | None = None
 
 
 class SavedStartProof:
     assignment = False
     management_kind = None
     required_routes = frozenset()
+    composite = False
     optional_journal = False
     stop_requester = None
 
@@ -59,7 +65,7 @@ class SavedStartProof:
         return conclusive_refusal(root, effective)
 
     def metadata_options(self):
-        return {"assignment": self.assignment, "management_kind": self.management_kind, "required_routes": self.required_routes, "stop_requester": self.stop_requester}
+        return {"assignment": self.assignment, "management_kind": self.management_kind, "required_routes": self.required_routes, "stop_requester": self.stop_requester, "composite": self.composite}
 
     def __init__(self, owner, link, item, root, effective, origin, callback, parent, primary):
         self.owner, self.link, self.item = owner, link, item
@@ -79,7 +85,12 @@ class SavedStartProof:
             return await SavedManagementProof.read(owner, link, item, gesture=gesture)
         if gesture is not None:
             raise ProductSourceRetired()
-        if cls is SavedStartProof and "assignment_intent" in item.payload:
+        if cls is SavedStartProof and ("assignment_intent" in item.payload or "work_outcome_basis" in item.payload):
+            from app.telegram_bots.work_saved_composite_refusals import SavedCompositeProof
+
+            composite = await SavedCompositeProof.read(owner, link, item)
+            if composite is not None or "work_outcome_basis" in item.payload:
+                return composite
             from app.telegram_bots.work_saved_assignment_refusals import SavedAssignmentProof
 
             return await SavedAssignmentProof.read(owner, link, item)
@@ -138,6 +149,7 @@ class SavedStartProof:
             aliased(RoleLimitRow),
         )
         ids = {self.root_id, self.effective_id}
+        self.instance_entity = instance
         return (
             query.add_columns(
                 root,
@@ -213,7 +225,7 @@ class SavedStartProof:
             if instance.name != meta.values["name"] or supervisor != meta.values.get("supervisor", supervisor) or (settings.locale, settings.timezone) != (meta.settings.locale, meta.settings.timezone):
                 raise DeliveryRetry(timedelta(seconds=1))
             if meta.key in {"denied.start", "assign.no_access"}:
-                if instance.status != "active" or type(permissions) is not int or not permissions & 1 or permissions & 2:
+                if instance.status != "active" or type(permissions) is not int or not permissions & 1 or permissions & 2 and (not self.composite or self.required_routes.issubset(meta.decision.held)):
                     raise ProductSourceRetired()
             elif meta.key == "denied.other":
                 if instance.status != "active" or type(permissions) is not int or permissions & 3 != 3 or (self.required_routes or {"agents:write"}).issubset(meta.decision.held):
@@ -227,6 +239,16 @@ class SavedStartProof:
             elif meta.key in {"denied.change", "denied.withdraw"}:
                 if instance.status != "active" or type(permissions) is not int or not permissions & 1 or permissions & 6 == 6 and self.required_routes.issubset(meta.decision.held):
                     raise ProductSourceRetired()
+            elif meta.key == "assign.no_work" or meta.key in _UNAVAILABLE:
+                if not self.composite or instance.status != "active" or type(permissions) is not int or permissions & 3 != 3 or not self.required_routes.issubset(meta.decision.held):
+                    raise ProductSourceRetired()
+                if meta.key in _UNAVAILABLE and instance.custody != meta.values["custody"]:
+                    raise ProductSourceRetired()
+                if meta.navigation is not None:
+                    meta.navigation.check({"public_base_url": meta.navigation.base})
+                    current_url = page_address("web.agentSettings", self.link, permissions=permissions, ceilings=meta.decision.held, public_base_url=meta.navigation.base)
+                    if current_url != meta.settings_url:
+                        raise ProductSourceRetired()
             elif meta.key in {"agent.paused", "agent.retired"}:
                 if instance.status != {"agent.paused": "suspended", "agent.retired": "archived"}[meta.key] or type(permissions) is not int or not permissions & 1:
                     raise ProductSourceRetired()
@@ -252,7 +274,7 @@ class WorkSavedRefusals:
     def __init__(self, chat):
         self.chat, self.host = chat, chat.host
 
-    async def metadata(self, link, *, assignment=False, management_kind=None, required_routes=frozenset(), stop_requester=None):
+    async def metadata(self, link, *, assignment=False, management_kind=None, required_routes=frozenset(), stop_requester=None, composite=False, work_enabled=None, execution_failure=None):
         routes = await prepare_routes(self.host.links.session_factory)
         decision = await routes.evaluate(await routes.users.get_user_by_id(link.owner_user_id))
         key, identity = await self.host.authority.instance_lifecycle(link)
@@ -275,6 +297,14 @@ class WorkSavedRefusals:
                 key = "denied.change" if management_kind == "edit" else "denied.withdraw"
             elif not view.permissions & 2:
                 key = "assign.no_access" if assignment else "denied.start"
+            elif composite and not required_routes.issubset(decision.held):
+                key = "denied.start"
+            elif composite and work_enabled is False:
+                key = "assign.no_work"
+            elif composite and execution_failure is not None:
+                if execution_failure.text_key not in _UNAVAILABLE:
+                    raise ProductSourceRetired()
+                key = execution_failure.text_key
             elif assignment and "agents:write" not in decision.held:
                 key = "denied.other"
             else:
@@ -285,6 +315,12 @@ class WorkSavedRefusals:
             raise ProductSourceRetired()
         zone = await asyncio.to_thread(ZoneInfo, settings.timezone)
         values = {"name": identity.name, "product": self.host.product_name}
+        navigation, settings_url = None, None
+        if key == "assign.no_work":
+            navigation = NavigationOrigin()
+            settings_url = page_address("web.agentSettings", link, permissions=identity.permissions, ceilings=decision.held, public_base_url=navigation.base)
+        elif key in _UNAVAILABLE:
+            values.update(custody=identity.custody, reader_is_administrator=decision.principal.role == "admin", **execution_failure.values)
         if key == "stop.not_yours":
             person = await get_local_provider().get_user(stop_requester)
             if person is None:
@@ -297,27 +333,34 @@ class WorkSavedRefusals:
         can_read = "agents:read" in decision.held
         if key in {"agent.paused", "agent.retired"} and not can_read:
             raise DeliveryRetry(timedelta(seconds=1))
-        return Metadata(key, values, settings, zone, live, can_read, decision)
+        return Metadata(key, values, settings, zone, live, can_read, decision, settings_url, navigation)
 
     @staticmethod
-    def recipe(key):
-        return {"kind": "text", "source_ref": {"key": key, "values": {}}}
+    def recipe(key, *, settings_url=None):
+        result = {"kind": "text", "source_ref": {"key": key, "values": {}}}
+        if settings_url is not None:
+            if key != "assign.no_work":
+                raise ProductSourceRetired()
+            result["url_button"] = {"page": "web.agentSettings", "url": settings_url}
+        return result
 
     @staticmethod
-    def source_id(link, act_id, key, gesture):
-        return "work-saved-refusal:" + digest([link.id, link.binding_generation, act_id, key, *([gesture] if gesture is not None else [])])
+    def source_id(link, act_id, key, gesture, *, settings_url=None):
+        return "work-saved-refusal:" + digest([link.id, link.binding_generation, act_id, key, *([gesture] if gesture is not None else []), *([settings_url] if settings_url is not None else [])])
 
     @staticmethod
     def intent(item):
         intent = item.payload.get("work_saved_refusal")
         if (
             type(intent) is not dict
-            or set(intent) not in ({"version", "act_id", "canonical_id", "signature", "key"}, {"version", "act_id", "canonical_id", "signature", "key", "gesture"})
+            or set(intent) - {"gesture", "settings_url"} != {"version", "act_id", "canonical_id", "signature", "key"}
             or type(intent["version"]) is not int
             or intent["version"] != 1
             or type(intent["key"]) is not str
-            or intent["key"] not in _LIFECYCLE | {"denied.start", "assign.no_access", "denied.other", "denied.change", "denied.withdraw", "work.need_inspect", "stop.not_yours"}
+            or intent["key"] not in _LIFECYCLE | _UNAVAILABLE | {"assign.no_work", "denied.start", "assign.no_access", "denied.other", "denied.change", "denied.withdraw", "work.need_inspect", "stop.not_yours"}
         ):
+            raise ProductSourceRetired()
+        if "settings_url" in intent and (intent["key"] != "assign.no_work" or type(intent["settings_url"]) is not str or not intent["settings_url"]):
             raise ProductSourceRetired()
         if "gesture" in intent and (type(intent["gesture"]) is not dict or set(intent["gesture"]) != {"callback_id", "query_id"}):
             raise ProductSourceRetired()
@@ -331,18 +374,19 @@ class WorkSavedRefusals:
         return intent
 
     @classmethod
-    def validate_item(cls, link, item, canonical, *, act_id, signature, key, part=None):
+    def validate_item(cls, link, item, canonical, *, act_id, signature, key, part=None, settings_url=None, after_delivery_id=None):
         intent = cls.intent(item)
-        if (intent["act_id"], intent["canonical_id"], intent["signature"], intent["key"]) != (act_id, canonical.id, signature, key) or len(item.parts) != 1:
+        if (intent["act_id"], intent["canonical_id"], intent["signature"], intent["key"], intent.get("settings_url")) != (act_id, canonical.id, signature, key, settings_url) or len(item.parts) != 1:
             raise ProductSourceRetired()
         part = item.parts[0] if part is None else part
-        recipe = cls.recipe(intent["key"])
-        source = "notice:" + cls.source_id(link, act_id, key, intent.get("gesture"))
+        recipe = cls.recipe(intent["key"], settings_url=settings_url)
+        source = "notice:" + cls.source_id(link, act_id, key, intent.get("gesture"), settings_url=settings_url)
         scope = {name: getattr(link, name) for name in ("owner_user_id", "agent_kind", "agent_ref", "bot_id", "connection_id", "telegram_user_id", "binding_generation", "chat_id")}
         status = key in _LIFECYCLE
-        allowed = {"presentation_version", "work_saved_refusal", "notification_reserved_at"} | ({"delivery_kind", "status_basis"} if status else {"product_basis"})
+        allowed = {"presentation_version", "work_saved_refusal", "notification_reserved_at"} | ({"delivery_kind", "status_basis"} if status else {"product_basis"}) | ({"after_delivery_id"} if after_delivery_id is not None else set())
         if (
             set(item.payload) - allowed
+            or item.payload.get("after_delivery_id") != after_delivery_id
             or type(item.payload.get("presentation_version")) is not int
             or item.payload["presentation_version"] != 0
             or any(getattr(item, key) is not None for key in ("instance_id", "work_id", "request_id", "event_id"))
@@ -364,7 +408,8 @@ class WorkSavedRefusals:
         if (
             len(item.parts) != 1
             or any(part.get(key) != value for key, value in recipe.items())
-            or any(part.get(key) is not None for key in ("url_button", "callback_group_id", "stored_keyboard", "reply_to_message_id"))
+            or part.get("url_button") != recipe.get("url_button")
+            or any(part.get(key) is not None for key in ("callback_group_id", "stored_keyboard", "reply_to_message_id"))
             or part.get("force_reply") is not None
             and part.get("force_reply") is not False
         ):
@@ -378,6 +423,8 @@ class WorkSavedRefusals:
             metadata = await self.metadata(link, **proof.metadata_options())
             if metadata is None:
                 return None
+            if proof.composite:
+                await proof.recheck_readiness(metadata)
             if proof.stop_requester is not None and metadata.key in {"denied.other", "stop.not_yours"}:
                 # Current Inspect allows the canonical Stop source to render
                 # its own proven denial, without a second competing reply.
@@ -386,7 +433,9 @@ class WorkSavedRefusals:
             intent = {"version": 1, "act_id": proof.root_id, "canonical_id": item.id, "signature": proof.signature, "key": metadata.key}
             if gesture is not None:
                 intent["gesture"] = gesture
-            source = self.source_id(link, proof.root_id, metadata.key, gesture)
+            if metadata.settings_url is not None:
+                intent["settings_url"] = metadata.settings_url
+            source = self.source_id(link, proof.root_id, metadata.key, gesture, settings_url=metadata.settings_url)
             async with self.host.callbacks.writer(link, guard) as writer:
                 await guard.check_projection(writer, proof)
                 existing = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == link.id, TelegramOutboxRow.dedupe_key == "notice:" + source).with_for_update())
@@ -399,10 +448,14 @@ class WorkSavedRefusals:
                         if not self.host.outbox.inbox.unanswered_delivery(canonical):
                             return None
                 planner = self.host.outbox.plan_status_notice if metadata.key in _LIFECYCLE else self.host.outbox.plan_product
-                identity = await planner(link, source_id=source, parts=[self.recipe(metadata.key)], message_thread_id=item.message_thread_id, session=writer)
+                identity = await planner(link, source_id=source, parts=[self.recipe(metadata.key, settings_url=metadata.settings_url)], message_thread_id=item.message_thread_id, session=writer)
                 if existing is None:
                     row = await writer.get(TelegramOutboxRow, identity)
                     row.payload = {**row.payload, "work_saved_refusal": intent}
+                    if proof.composite:
+                        row.payload = {**row.payload, "after_delivery_id": item.id}
+                elif existing.payload.get("after_delivery_id") != (item.id if proof.composite else None):
+                    raise ProductSourceRetired()
                 await guard.check_projection(writer, proof)
                 if hasattr(proof, "command_mode"):
                     from app.telegram_bots.work_command_stop_completion import complete_selected
@@ -434,10 +487,21 @@ class WorkSavedRefusals:
             metadata = await self.metadata(link, **proof.metadata_options())
             if metadata is None or metadata.key != intent["key"]:
                 raise ProductSourceRetired()
-            self.validate_item(link, item, proof.item, act_id=proof.root_id, signature=proof.signature, key=metadata.key, part=captured.part)
+            self.validate_item(
+                link,
+                item,
+                proof.item,
+                act_id=proof.root_id,
+                signature=proof.signature,
+                key=metadata.key,
+                part=captured.part,
+                settings_url=metadata.settings_url,
+                after_delivery_id=proof.item.id if proof.composite else None,
+            )
             status = metadata.key in _LIFECYCLE
             proof.metadata, proof.captured, proof.silent, proof.now = metadata, captured, silent, now
-            policy = await self.host.authority.instance_send_policy(link, require_use=not status, expected_lifecycle=metadata.key if status else None, projection=proof)
+            preparation = {"before_snapshot": lambda: proof.recheck_readiness(metadata)} if proof.composite and metadata.key in _UNAVAILABLE else {}
+            policy = await self.host.authority.instance_send_policy(link, require_use=not status, expected_lifecycle=metadata.key if status else None, projection=proof, **preparation)
             if policy in {"off", "restoring", "protected"} and not captured.part.get("protect_content"):
                 raise DeliveryClaimRetired()
             return render(metadata.key, metadata.settings.locale, **metadata.values), render_plain(metadata.key, metadata.settings.locale, **metadata.values)

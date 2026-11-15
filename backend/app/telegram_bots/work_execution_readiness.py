@@ -72,6 +72,12 @@ async def prepare_refusal_clock(reader, link, item, clock):
         owned = await session.execute(select(select(AgentWorkAttemptRow.id).where(AgentWorkAttemptRow.activation_id.in_(ids)).exists(), select(AgentWorkEventRow.id).where(AgentWorkEventRow.operation_id.in_(ids)).exists()))
         if any(owned.one()):
             return clock
+    failure = await current_execution_failure(reader, link)
+    return RefusalClock(clock.settings, clock.zone, clock.now, readiness_signature(root, effective), failure)
+
+
+async def current_execution_failure(reader, link):
+    """Read actual current readiness without preparing or admitting a run."""
     await reader.authority.instance_view(link)
     try:
         await storage_spaces.require_execution(reader.authority.app, link.agent_ref)
@@ -79,4 +85,4 @@ async def prepare_refusal_clock(reader, link, item, clock):
         failure = await describe_send_refusal(reader.authority, link, error)
     else:
         failure = None
-    return RefusalClock(clock.settings, clock.zone, clock.now, readiness_signature(root, effective), failure)
+    return failure

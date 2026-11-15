@@ -96,7 +96,7 @@ class WorkDetailProjection:
         self.recipient_owner = _PreparedLiveOwner(request["recipient_id"] if request else None, "", self.config.auth.local.enabled is False, users, reader.links.session_factory.kw["bind"].sync_engine)
         self.source, self.expected = None, deepcopy(expected)
 
-    def extend(self, query, *, work_ids=None):
+    def extend(self, query, *, work_ids=None, instance_entity=AgentInstanceRow):
         self.column = len(query.column_descriptions)
         work, attempt, latest, request = aliased(AgentWorkRow), aliased(AgentWorkAttemptRow), aliased(AgentWorkAttemptRow), aliased(HumanInputRequestRow)
         definition, creator, person, grant, disabled, conversation, thread = (
@@ -137,7 +137,7 @@ class WorkDetailProjection:
             select(AgentWorkAttemptRow.id).where(AgentWorkAttemptRow.activation_id == journal.id).correlate(journal).exists(),
             select(AgentWorkEventRow.id).where(AgentWorkEventRow.operation_id == journal.id).correlate(journal).exists(),
         )
-        pending = select(AgentLifecycleRow.operation_id).where(AgentLifecycleRow.instance_id == AgentInstanceRow.id, AgentLifecycleRow.phase == "pending").correlate(AgentInstanceRow).exists()
+        pending = select(AgentLifecycleRow.operation_id).where(AgentLifecycleRow.instance_id == instance_entity.id, AgentLifecycleRow.phase == "pending").correlate(instance_entity).exists()
         return (
             query.add_columns(
                 work,
@@ -166,14 +166,14 @@ class WorkDetailProjection:
             .join(work, and_(work.id.in_(work_ids) if work_ids is not None else work.id == self.record["id"], work.instance_id == TelegramBotLinkRow.agent_ref))
             .outerjoin(attempt, attempt.id == current_attempt)
             .outerjoin(request, and_(request.work_id == work.id, request.instance_id == work.instance_id, request.state != "closed"))
-            .join(definition, definition.revision == AgentInstanceRow.definition_revision)
+            .join(definition, definition.revision == instance_entity.definition_revision)
             .outerjoin(creator, creator.id == work.creator_id)
             .outerjoin(person, person.id == request.recipient_id)
             .outerjoin(grant, and_(grant.instance_id == work.instance_id, grant.user_id == person.id))
             .outerjoin(disabled, or_(disabled.subject == person.id, disabled.subject == person.oauth_id))
             .outerjoin(conversation, and_(conversation.thread_id == attempt.thread_id, conversation.instance_id == work.instance_id))
             .outerjoin(thread, thread.thread_id == conversation.thread_id)
-            .outerjoin(custodian, custodian.id == AgentInstanceRow.owner_id)
+            .outerjoin(custodian, custodian.id == instance_entity.owner_id)
             .outerjoin(custodian_disabled, or_(custodian_disabled.subject == custodian.id, custodian_disabled.subject == custodian.oauth_id))
             .outerjoin(marker_binding, and_(marker_binding.owner_user_id == self.link.owner_user_id, marker_binding.agent_ref == work.instance_id))
             .outerjoin(
@@ -196,11 +196,14 @@ class WorkDetailProjection:
         )
 
     def check_with_permissions(self, rows, held):
+        self.check_with_context(rows, held, instance=rows[0][1], permissions=rows[0][2], policy=rows[0][3])
+
+    def check_with_context(self, rows, held, *, instance, permissions, policy):
+        """Reuse joined detail facts with an explicitly supplied SQL authority frame."""
         from deerflow.config.app_config import peek_loaded_app_config
 
         if peek_loaded_app_config() is not self.config:
             raise AuthorityUnavailable()
-        instance, permissions, policy = rows[0][1:4]
         work, attempt, request, definition, creator, person, recipient_grant, _disabled, conversation, thread_id, pending = rows[0][self.column : self.column + 11]
         if _fields(work, _WORK) != _fields(self.record, _WORK) or _fields(attempt, _ATTEMPT) != _fields(self.record.get("attempt"), _ATTEMPT) or _fields(request, _REQUEST) != _fields(self.request, _REQUEST):
             raise AuthorityUnavailable()

@@ -2341,3 +2341,40 @@ claim. The SDK projection rechecks that same row, so a prompt cannot occupy the
 only sender while waiting for cleanup queued behind it. Qualification uses both
 SQL dialects and the default in-process supervisor with recorded SDK/directory
 adapters; it does not claim native containment or deployment acceptance.
+
+### Successful primaries with no admitted continuation
+
+The default chat runtime enables combined request controls after installing all
+Decision, Voice and continuation owners. A complete acknowledged primary remains
+successful when preparing its Start is denied. `work_saved_composite_refusals.py`
+qualifies the real primary receipt, original whole control group, immutable body,
+target/version, deadline, counter and canonical delivery. Request primaries use
+the shared `RequestPrimaryProof`; they never synthesize an activation child.
+
+`child_namespace_owned` checks global direct/context IDs, reverse parent markers,
+Native reservations and operation events. The no-child terminal writer repeats
+that proof before changing the parent's phase. Unknown reads and actual children
+retain recovery. A typed current denial ends only an absent continuation; restored
+rights do not launch it automatically or renew its original consent.
+
+Current Start route requirements include conditional conversation creation.
+Minimal lifecycle/permission replies avoid current private Work projections.
+Work-off advice offers Settings only for current Manage and route access; exact
+URL/intent/part identity and loaded navigation configuration are checked again.
+Readiness advice reuses actual read-only execution checks. The generic
+`instance_send_policy(before_snapshot=...)` preparation runs after authority
+preflight and outside SQL; its joined ownership/claim/role projection stays last.
+Readiness changes retire the old advice, and unreadable readiness waits. None of
+these reads invokes launch, command retry or physical cancellation.
+
+Native primary success and Telegram display remain separate facts. Fixed advice
+declares its actual canonical `after_delivery_id`; the generic sender checks that
+same-scope dependency before claim so a waiting reply cannot starve its primary.
+Dispatch independently qualifies the complete actual saved generation/outcome
+ACK, while pending primary delivery defers. Request ACK bookkeeping does not
+change effect identity; any recorded marker must match the actual canonical
+outcome and phase. Primary body, receipt, counter and consent remain unchanged.
+
+Qualification uses actual SQL/default-supervisor primaries, recorded SDK and
+typed directory/readiness adapters. Late Work, Manage, URL and readiness changes
+must veto stale SDK delivery while preserving the primary and child custody.

@@ -11,6 +11,26 @@ def activation_child_id(identity):
     return sha256((identity + ":activate").encode()).hexdigest()[:32]
 
 
+def child_namespace_owned(parent_id, child_id):
+    """Reprove global child custody without trusting a parent's phase marker."""
+    from sqlalchemy import or_, select
+    from sqlalchemy.orm import aliased
+
+    from app.telegram_bots.work_start_conversations import context_child_id
+    from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow
+    from deerflow.persistence.telegram_bots.model import TelegramActRow
+
+    activation = aliased(TelegramActRow)
+    namespace = [child_id, context_child_id(child_id)]
+    return or_(
+        select(activation.id)
+        .where(or_(activation.id.in_(namespace), activation.continuation["activation_parent"]["act_id"].as_string() == parent_id, activation.continuation["activation_context_parent"]["root_id"].as_string() == child_id))
+        .exists(),
+        select(AgentWorkAttemptRow.id).where(AgentWorkAttemptRow.activation_id.in_(namespace)).exists(),
+        select(AgentWorkEventRow.id).where(AgentWorkEventRow.operation_id.in_(namespace)).exists(),
+    )
+
+
 def continuation_state(act):
     from app.telegram_bots.work_actions import request_for, thaw
 

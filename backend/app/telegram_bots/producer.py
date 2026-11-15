@@ -2376,6 +2376,17 @@ class OutboxSender:
             raise ValueError("invalid-delivery-eligibility")
         if decision.decision != "allow":
             return decision
+        dependency = row.payload.get("after_delivery_id")
+        if dependency is not None:
+            if type(dependency) is not str or len(dependency) != 32 or any(value not in "0123456789abcdef" for value in dependency) or dependency == row.id:
+                return DeliveryEligibility.skip("source-gone")
+            async with reader_session(self.outbox.sessions) as reader:
+                parent = await reader.get(TelegramOutboxRow, dependency)
+                scope = ("link_id", "owner_user_id", "binding_generation", "chat_id", "message_thread_id")
+                if parent is None or any(getattr(parent, key) != getattr(row, key) for key in scope):
+                    return DeliveryEligibility.skip("source-gone")
+                if parent.state != "sent":
+                    return DeliveryEligibility.wait()
         structural = self._structural(binding, row)
         if structural is not None:
             return structural

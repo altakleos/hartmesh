@@ -6,7 +6,7 @@ SDK checks cover files, topics, held repair, full ACK, confirmation, restart,
 retention and late source/permission/admission loss; the strict wrapper repeats
 these paths. Its directory-Space and run-record adapters prove protocol behavior,
 not native containment or default worker composition.
-Work refusals preserve real owners and current SDK authority.
+Work/composite refusals: real owners and current SDK authority.
 
 Start context tests join actual SQL/native admission to recorded SDK ancestry.
 Keep original CAS/deadlines; cover missing journals, receipt drift and aged sweeps.

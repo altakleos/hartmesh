@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 
 from app.telegram_bots.notifications import aware
-from app.telegram_bots.work_continuation_state import child_marker, continuation_state, require_child
+from app.telegram_bots.work_continuation_state import child_marker, child_namespace_owned, continuation_state, require_child
 from deerflow.persistence.telegram_bots.model import TelegramActRow
 from deerflow.utils.file_io import await_drained
 
@@ -127,7 +127,10 @@ class ContinuationActionMethods:
                 if current["phase"] in {"done", "refused", "cancelled", "expired"} and all(same_body(current[key], previous[key]) for key in current if key != "phase"):
                     return _snapshot(row)
                 raise ValueError("continuation-source-conflict")
-            data = {**continuation_state(_snapshot(row)), "phase": phase}
+            current = continuation_state(_snapshot(row))
+            if current["child_body"] is None and phase in {"refused", "cancelled", "expired"} and await writer.scalar(select(child_namespace_owned(row.id, current["child_id"]))):
+                return _snapshot(row)
+            data = {**current, "phase": phase}
             if phase != "refused":
                 data.pop("refusal", None)
             elif refusal is not None:
@@ -138,10 +141,20 @@ class ContinuationActionMethods:
             await writer.flush()
             return _snapshot(row)
 
+    async def _refuse_unplanned_child(self, parent, error):
+        # Only preparing the absent child ends. The primary receipt/body and
+        # original deadline remain intact; attempted children retain recovery.
+        reason = getattr(error, "reason", None)
+        if type(reason) is not str or not 1 <= len(reason) <= 128:
+            reason = "denied"
+        return await self._continuation_phase(parent, "refused", refusal={"kind": "denied", "reason": reason})
+
     async def _resume_continuation(self, act_id, *, attempt_current, background):
+        from app.telegram_bots.authority import AccessOff, CeilingRefused
         from app.telegram_bots.work_actions import _ACT_SCOPE, same_body, thaw
         from app.telegram_bots.work_delegate_actions import DELEGATION_RECEIPT_FIELDS, delegate_source
         from app.telegram_bots.work_start_actions import link_matches
+        from deerflow.agent_instances.contract import AgentDenied
 
         parent = await self._work_record(act_id)
         state = continuation_state(parent)
@@ -162,7 +175,12 @@ class ContinuationActionMethods:
             # The outcome owner makes this ready with its durable primary
             # delivery. A saved receipt alone cannot invent that commitment.
             return parent
-        receipt = await self.receipt_for(parent)
+        try:
+            receipt = await self.receipt_for(parent)
+        except (AgentDenied, CeilingRefused, AccessOff) as error:
+            if state["phase"] != "ready":
+                raise
+            return await self._refuse_unplanned_child(parent, error)
         if receipt is None:
             return parent
         saved_receipt, current_receipt = parent.result, receipt
@@ -184,7 +202,12 @@ class ContinuationActionMethods:
         link = await self.links.get(parent.link_id)
         if not link_matches(link, parent):
             return await self._continuation_phase(parent, "cancelled")
-        await self._work_link(link)
+        try:
+            await self._work_link(link)
+        except (AgentDenied, CeilingRefused, AccessOff) as error:
+            if state["phase"] != "ready":
+                raise
+            return await self._refuse_unplanned_child(parent, error)
         if state["phase"] == "ready":
             if parent.cancel_requested_at is not None:
                 return await self._continuation_phase(parent, "cancelled")
@@ -196,7 +219,10 @@ class ContinuationActionMethods:
                     raise ValueError("orphan-activation-child")
             from app.telegram_bots.attention_authority import prepare_attention
 
-            prepared = await prepare_attention(self, link)
+            try:
+                prepared = await prepare_attention(self, link)
+            except (AgentDenied, CeilingRefused, AccessOff) as error:
+                return await self._refuse_unplanned_child(parent, error)
 
             async def admit(writer, child):
                 row = await writer.get(TelegramActRow, parent.id, with_for_update=True, populate_existing=True)
