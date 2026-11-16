@@ -2457,3 +2457,33 @@ unknown owners, actual context children, foreign requesters, final authority and
 receipt races, negative Retry custody and aged retention. Native owners come from
 real public reservation APIs; provider/SDK and directory/readiness adapters do
 not qualify native containment or Compose acceptance.
+
+
+## Retry when the agent is unavailable
+
+An acknowledged Retry with an unknown original first qualifies its actual full
+SDK group, original/effective journal body and scope, age and unused new gesture
+namespace. If current attention admission fails, only the confirmed current
+`agent.paused`, `agent.retired` or `access.agent_off` classification may reuse
+`notice_instance_unavailable`. This is existing global current status, with its
+normal health, throttling, policy/protection and expected-lifecycle SDK fence;
+it creates no gesture-specific replay promise or Work result Source. Invalid
+custody never reaches receipt lookup or the status owner. Saved* conclusive
+no-effect rules and ordinary private delivery authority remain unchanged.
+
+`receipt_for(..., allow_inactive=True)` and the corresponding read-only
+`reconcile_receipt` option admit only a current connected real service/binding,
+current `agents:read`, Use plus Inspect, a live account and a still-paused/retired
+policy snapshot. Ordinary calls keep their original active/send-health checks.
+The option reuses canonical command, activation/context, Stop-child and no-due
+receipt checks and can only persist genuinely returned receipts and ready
+follow-up metadata. It never calls `check`, launches or dispatches cancellation.
+A new Retry is qualified again before settlement. Lost read access leaves the
+original unknown; a failed lookup does not prove no committed effect.
+
+Lifecycle send policy prepares a `RouteDecision` outside its final reader, then
+joins the actual account and `RoleLimitRow` with target/grant/policy in that same
+SQL snapshot. Principal/configuration drift retires the old decision before
+lifecycle classification; caller projections retain the first five columns and
+append their own facts after the role prefix. Existing Saved status Sources must
+be qualified through this changed query as well as global no-projection notices.

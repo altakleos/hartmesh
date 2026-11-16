@@ -31,7 +31,6 @@ from deerflow.agent_instances.work_execution_contract import ActivateWork
 from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow, TelegramPersonSettingsRow
-from deerflow.persistence.user.access import RoleLimitRow
 from deerflow.persistence.user.model import UserRow
 from deerflow.spaces.contract import PrincipalRef
 
@@ -124,31 +123,29 @@ async def test_saved_start_reports_current_lifecycle(capture_environment, monkey
         monkeypatch.setattr(e.host.notifications.chat.executions, "observe", observe)
         fixed, modified, source_errors = e.host.work_saved_refusals, [], []
         actual_read, actual_authorize = fixed.read_part, fixed.authorize
-        at_sdk, policy_reads, checking_fixed = [], [], []
+        checking_fixed = []
         if change == "role":
-            from app.telegram_bots import authority
+            from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
 
-            actual_require, actual_policy = authority.require, e.host.authority.instance_send_policy
-
-            async def require(owner, *needed, **kwargs):
-                result = await actual_require(owner, *needed, **kwargs)
-                if at_sdk and "agents:read" in needed and not modified:
-                    policy_reads.append(True)
-                    if len(policy_reads) == 2:
-                        async with e.e.sf.begin() as writer:
-                            writer.add(RoleLimitRow(issuer="https://identity.example.invalid", subject="saved-refusal-owner", role="user", limited_at=e.clock.now()))
-                        modified.append(change)
-                return result
+            users = SQLiteUserRepository(e.e.sf)
+            actual_policy = e.host.authority.instance_send_policy
 
             async def policy(*args, **kwargs):
-                if checking_fixed:
-                    at_sdk.append(True)
-                try:
-                    return await actual_policy(*args, **kwargs)
-                finally:
-                    at_sdk.clear()
+                proof = kwargs.get("projection")
+                if checking_fixed and kwargs.get("expected_lifecycle") == "agent.paused" and getattr(proof, "owner", None) is fixed and proof.root_id == control.id and not modified:
+                    before_snapshot = kwargs.get("before_snapshot")
 
-            monkeypatch.setattr(authority, "require", require)
+                    async def limit_before_snapshot():
+                        if before_snapshot is not None:
+                            await before_snapshot()
+                        if not modified:
+                            await users.limit_role("https://identity.example.invalid", "saved-refusal-owner", "user")
+                            assert (await users.get_user_by_id(e.link.owner_user_id)).system_role == "user"
+                            modified.append(change)
+
+                    kwargs["before_snapshot"] = limit_before_snapshot
+                return await actual_policy(*args, **kwargs)
+
             monkeypatch.setattr(e.host.authority, "instance_send_policy", policy)
 
         async def read(captured, **kwargs):

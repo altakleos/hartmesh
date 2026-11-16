@@ -380,8 +380,27 @@ class WorkRetryDenials(WorkCallbackDenials):
                 source = shown.payload["work_news_basis"]["source"]
                 original = _snapshot(original)
                 required, manage = action_requirements(source, original, link.owner_user_id, await requester_for(reader, original))
-            current = await prepare_attention(self.chat.views.reader, link, require_inspect=False)
-            held, basis = await current()
+            try:
+                current = await prepare_attention(self.chat.views.reader, link, require_inspect=False)
+                held, basis = await current()
+            except (AgentDenied, CeilingRefused, AccessOff):
+                key, _identity = await host.authority.instance_lifecycle(link)
+                notice = getattr(host, "notice_instance_unavailable", None)
+                if key not in {"agent.paused", "agent.retired", "access.agent_off"} or notice is None:
+                    raise
+                # This is a new qualified Retry gesture. The existing minimal
+                # status owner repeats current lifecycle/access at the SDK fence;
+                # the uncertain original keeps its operation and Native owner.
+                await qualify_retry(self, link, row, original, guard=guard)
+                try:
+                    receipt = await host.acts.receipt_for(original, allow_inactive=True)
+                except (AgentDenied, CeilingRefused, AccessOff):
+                    receipt = None
+                if receipt is not None and original.state != "done":
+                    await qualify_retry(self, link, row, original, guard=guard)
+                    await host.acts.reconcile_receipt(original.id, allow_inactive=True)
+                await notice(link)
+                return True
             reason = denial_reason(basis[0], held, required, manage)
             if reason is None:
                 return False

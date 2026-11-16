@@ -10,12 +10,16 @@ from test_telegram_work_source_delivery import work_delivery as work_delivery
 from test_telegram_work_stop_news import stopped
 from test_work_attention_pages import work_pages as work_pages
 
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow, TelegramPersonSettingsRow
 
 
 async def stopped_carrier(e, cause, *, multipart=False):
     clock = ManualClock(e.sender.outbox.clock())
     e.sender.outbox.clock = clock.now
+    # Carrier custody needs one stable calendar, without changing gesture ages.
+    # The same instant is at least six hours from midnight in one of these zones.
+    async with e.db.sessions.begin() as writer:
+        (await writer.get(TelegramPersonSettingsRow, e.link.owner_user_id)).timezone = "UTC" if 6 <= clock.now().hour < 18 else "Etc/GMT-12"
     item = await stopped(e, cause)
     if multipart:
         from test_agent_work_records import command
@@ -56,6 +60,24 @@ async def stopped_carrier(e, cause, *, multipart=False):
 @pytest.mark.parametrize("multipart", [False, True])
 async def test_stopped_news_offers_resume_only_under_its_complete_assignment(work_delivery, cause, multipart):
     await stopped_carrier(work_delivery, cause, multipart=multipart)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timezone", ["America/New_York", "UTC", "Etc/GMT-12"])
+async def test_stopped_carrier_keeps_its_instant_near_fixture_midnight(work_delivery, timezone):
+    from datetime import UTC, datetime, time, timedelta
+    from zoneinfo import ZoneInfo
+
+    e = work_delivery
+    zone = ZoneInfo(timezone)
+    next_date = e.sender.outbox.clock().astimezone(zone).date() + timedelta(days=1)
+    midnight = datetime.combine(next_date, time(), tzinfo=zone).astimezone(UTC)
+    before_midnight = midnight - timedelta(seconds=1)
+    e.sender.outbox.clock = lambda: before_midnight
+    await stopped_carrier(e, "stop")
+    assert e.sender.outbox.clock() == before_midnight + timedelta(seconds=2)
+    actual_zone = ZoneInfo((await e.db.settings.get(e.link.owner_user_id)).timezone)
+    assert before_midnight.astimezone(actual_zone).date() == e.sender.outbox.clock().astimezone(actual_zone).date()
 
 
 @pytest.mark.asyncio

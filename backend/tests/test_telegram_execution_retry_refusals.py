@@ -48,7 +48,7 @@ async def deliver_owned(e, identity):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["activate", "stop"])
 @pytest.mark.parametrize("change", ["inspect", "capability"])
-async def test_current_execution_retry_preserves_actual_native(capture_environment, monkeypatch, tmp_path, kind, change, *, context=False, foreign=False, carrier=False):
+async def test_current_execution_retry_preserves_actual_native(capture_environment, monkeypatch, tmp_path, kind, change, *, context=False, foreign=False, carrier=False, known_stop=False):
     await asyncio.to_thread(render_compose_config, tmp_path, monkeypatch, keys={"OPENAI_API_KEY": "sk-synthetic"})
     async with installed_worker(capture_environment, monkeypatch, tmp_path) as e:
         monkeypatch.setattr("app.telegram_bots.inbox._now", e.clock.now)
@@ -101,6 +101,7 @@ async def test_current_execution_retry_preserves_actual_native(capture_environme
 
             monkeypatch.setattr(services, "start_run", unknown)
         else:
+            actual_command = e.host.acts.work.command
             monkeypatch.setattr(e.host.acts.work, "command", unknown)
         damaged = []
         if context:
@@ -162,7 +163,24 @@ async def test_current_execution_retry_preserves_actual_native(capture_environme
         if foreign:
             async with e.e.sf.begin() as writer:
                 (await writer.get(AgentInstanceGrantRow, (e.instance.id, e.link.owner_user_id))).permissions = 3
-        if change == "inspect":
+        if known_stop:
+            from app.telegram_bots.work_actions import thaw
+            from deerflow.agent_instances.work_contract import WorkCommand
+            from deerflow.persistence.agent_instances.model import AgentInstanceRow
+
+            assert kind == "stop" and change == "paused"
+            async with e.host.notifications._maintenance_lock, e.host.notifications._send_lock:
+                await e.host.sender.drain()
+                await actual_command(actor=actor, instance_id=e.instance.id, work_id=original.work_id, request=WorkCommand.model_validate(thaw(original.body)), can_stop=True)
+                async with e.e.sf.begin() as writer:
+                    (await writer.get(AgentInstanceRow, e.instance.id)).status = "suspended"
+                assert await e.host.acts._work_record(original.id) == original
+        elif change == "paused":
+            from deerflow.persistence.agent_instances.model import AgentInstanceRow
+
+            async with e.e.sf.begin() as writer:
+                (await writer.get(AgentInstanceRow, e.instance.id)).status = "suspended"
+        elif change == "inspect":
             async with e.e.sf.begin() as writer:
                 (await writer.get(AgentInstanceGrantRow, (e.instance.id, e.link.owner_user_id))).permissions = 1
         elif change != "manage":
@@ -191,12 +209,18 @@ async def test_current_execution_retry_preserves_actual_native(capture_environme
             await e.host.sender.tick()
             await e.host.sender.drain()
         supervisor = await get_local_provider().get_user(e.instance.supervisor.subject_id)
-        key = "denied.start" if kind == "activate" else "work.need_inspect" if change == "inspect" else "stop.not_yours" if change == "manage" else "denied.other"
+        key = "agent.paused" if change == "paused" else "denied.start" if kind == "activate" else "work.need_inspect" if change == "inspect" else "stop.not_yours" if change == "manage" else "denied.other"
         expected = render(key, "en-US", name=e.instance.name, supervisor=str(supervisor.email), person="colleague@example.com" if foreign else "")
         sent = [call.parameters.get("text") for call in e.normal.calls[before:] if call.endpoint == "sendMessage"]
         assert (expected in sent) is not carrier
 
-        assert await e.host.acts._work_record(original.id) == original and len(calls) == 1
+        current = await e.host.acts._work_record(original.id)
+        if known_stop:
+            assert current.state == "done" and current.body == original.body and current.attempts == original.attempts
+            assert current.stop_dispatch["state"] == "ready" and current.stop_dispatch["attempts"] == 0
+        else:
+            assert current == original
+        assert len(calls) == 1
         if context:
             assert await e.host.acts._work_record(effective.id) == effective
         async with e.e.sf() as reader:

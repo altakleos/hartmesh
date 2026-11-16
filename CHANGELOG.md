@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Explain lifecycle and chat/read access loss on an acknowledged Retry. Recover
+  readable committed receipts while inactive; keep current role checks at the
+  final lifecycle-notice SQL read without issuing another command or launch.
+
 - Explain current permissions on a new Retry without changing its unknown
   operation. Require original acknowledged custody before receipt reconciliation;
   preserve the requester's unfinished physical Stop authority and exact target.

@@ -72,6 +72,8 @@ async def test_live_owner_uses_cold_disk_config_and_original_provider_loop(db, m
     real_config = app_config.get_app_config
     owner = await install_live_owner(db, monkeypatch)
     monkeypatch.setattr(app_config, "get_app_config", real_config)
+    app_config.reset_app_config()
+    assert app_config.peek_loaded_app_config() is None
     monkeypatch.setattr(authority, "get_local_provider", lambda: LocalAuthProvider(owner.users))
     loop, thread = asyncio.get_running_loop(), threading.get_ident()
     checker = await owner.authority.prepare_live_owner(owner.id)
