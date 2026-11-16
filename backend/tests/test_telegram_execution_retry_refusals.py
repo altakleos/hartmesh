@@ -1,6 +1,7 @@
 """A real unknown Start/Stop retains its Native promise when new Retry is denied."""
 
 import asyncio
+from datetime import datetime
 from uuid import uuid4
 
 import pytest
@@ -48,7 +49,7 @@ async def deliver_owned(e, identity):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["activate", "stop"])
 @pytest.mark.parametrize("change", ["inspect", "capability"])
-async def test_current_execution_retry_preserves_actual_native(capture_environment, monkeypatch, tmp_path, kind, change, *, context=False, foreign=False, carrier=False, known_stop=False):
+async def test_current_execution_retry_preserves_actual_native(capture_environment, monkeypatch, tmp_path, kind, change, *, context=False, foreign=False, carrier=False, known_stop=False, contend=False):
     await asyncio.to_thread(render_compose_config, tmp_path, monkeypatch, keys={"OPENAI_API_KEY": "sk-synthetic"})
     async with installed_worker(capture_environment, monkeypatch, tmp_path) as e:
         monkeypatch.setattr("app.telegram_bots.inbox._now", e.clock.now)
@@ -83,6 +84,10 @@ async def test_current_execution_retry_preserves_actual_native(capture_environme
             native_scope = await WorkExecution(service).reserve(
                 execution=execution, work_id=work["id"], request=ActivateWork(operation_id=uuid4().hex, expected_revision=work["revision"], expected_assignment_revision=work["assignment_revision"], thread_id=execution.thread_id)
             )
+        # The list captures a fixed horizon; include the newly persisted Work.
+        created = datetime.fromisoformat(work["created_at"])
+        if created >= e.clock.now():
+            e.clock.advance((created - e.clock.now()).total_seconds() + 0.000001)
         incoming = Update.de_json(update_payload(7110, message_id=7110, account=PERSON, text="/work"), e.channel.bot)
         assert await e.channel.handle_update(incoming)
         await e.channel._drain_ingress()
@@ -122,16 +127,41 @@ async def test_current_execution_retry_preserves_actual_native(capture_environme
         await tap(e, control, 7112)
         original = await e.host.acts._work_record(control.id)
         assert original.state in ({"refused"} if context else {"pending", "uncertain"}) and original.attempts == 1 and len(calls) == 1, (original.state, original.reason, original.operation_ids, original.continuation, len(calls), damaged)
-        if context:
-            await e.host.notifications.worker.stop()
-        e.clock.advance(3601)
-        worker = ActsWorker(e.host.acts)
-        try:
-            await worker.tick()
-        finally:
-            await worker.stop()
-        original = await e.host.acts._work_record(control.id)
-        assert original.state in ({"uncertain", "refused"} if context else {"uncertain"}) and original.attempts == 1
+        # Drain automatic action retries and observers before driving expiry.
+        # An owner in a receipt read can legitimately make a worker tick skip.
+        await e.host.notifications.worker.stop()
+        async with e.host.notifications._maintenance_lock, e.host.notifications._send_lock:
+            await e.host.sender.drain()
+            e.clock.advance(3601)
+            worker = ActsWorker(e.host.acts)
+            try:
+                if contend:
+                    entered, release = asyncio.Event(), asyncio.Event()
+                    receipt_for = e.host.acts.receipt_for
+
+                    async def held_receipt(act, **kwargs):
+                        if act.id == original.id:
+                            entered.set()
+                            await release.wait()
+                        return await receipt_for(act, **kwargs)
+
+                    with monkeypatch.context() as patch:
+                        patch.setattr(e.host.acts, "receipt_for", held_receipt)
+                        owner = asyncio.create_task(e.host.acts.reconcile_receipt(original.id))
+                        try:
+                            await asyncio.wait_for(entered.wait(), 30)
+                            assert original.id in e.host.acts._work_active
+                            await worker.tick()
+                            held = await e.host.acts._work_record(original.id)
+                            assert held.state == "pending" and held.body == original.body and held.attempts == 1 and len(calls) == 1
+                        finally:
+                            release.set()
+                            await owner
+                await worker.tick()
+            finally:
+                await worker.stop()
+            original = await e.host.acts._work_record(control.id)
+            assert original.state in ({"uncertain", "refused"} if context else {"uncertain"}) and original.attempts == 1
         if context and original.state == "refused":
             assert original.reason == "conversation-changed"
         effective = original
