@@ -110,6 +110,10 @@ class WorkChatRuntime:
 
         self.denials = WorkCallbackDenials(self)
         host.work_callback_denials = self.denials
+        from app.telegram_bots.work_retry_denials import WorkRetryDenials
+
+        self.retry_denials = WorkRetryDenials(self)
+        host.work_retry_denials = self.retry_denials
         host.work_management_sources = WorkNewsSources(self.management)
         host.work_management_prompt_sources = WorkNewsSources(self.management_edits.prompts)
         runtime.requests.reader.composites = True
@@ -341,6 +345,8 @@ class WorkChatRuntime:
             elif row.kind in {"accept_open", "changes_open"}:
                 await self.review_views.open(link, row.id, **scope)
             elif row.kind in {"act_check", "cancel_wait"}:
+                if row.kind == "act_check" and await self.retry_denials.offer(link, row, guard=guard, query_id=query_id):
+                    return True
                 operation = recovery.retry if row.kind == "act_check" else recovery.cancel
                 await operation(link, row.id, **scope)
             elif row.kind in {"work_details", "work_list_page", "work_list_open"}:

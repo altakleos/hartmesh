@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Explain current permissions on a new Retry without changing its unknown
+  operation. Require original acknowledged custody before receipt reconciliation;
+  preserve the requester's unfinished physical Stop authority and exact target.
+
 - Give saved decisions and spoken answers a separate current Resume preview when
   their original Start is refused or expires. Preserve the saved primary result,
   explain expiry, and require a new complete preview and explicit Start.

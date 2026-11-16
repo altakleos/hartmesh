@@ -311,6 +311,11 @@ class DenialProjection:
 
 
 class WorkCallbackDenials:
+    intent_field = "work_callback_denial"
+    parse_intent = staticmethod(validate_intent)
+    source_id = staticmethod(source_key)
+    projection = DenialProjection
+
     def __init__(self, chat):
         self.chat = chat
 
@@ -357,12 +362,12 @@ class WorkCallbackDenials:
 
     def intent(self, captured):
         item = captured.item
-        intent = validate_intent(item.payload.get("work_callback_denial"))
+        intent = self.parse_intent(item.payload.get(self.intent_field))
         expected = recipe(intent)
         basis = {"origins": [], "chat_id": captured.link.chat_id, "message_thread_id": intent["callback"]["message_thread_id"], "finish_route": False, "parts": [expected]}
         if (
             item.class_ != "reply"
-            or set(item.payload) - {"product_basis", "presentation_version", "work_callback_denial", "notification_reserved_at"}
+            or set(item.payload) - {"product_basis", "presentation_version", self.intent_field, "notification_reserved_at"}
             or item.payload.get("presentation_version") != 0
             or type(item.payload.get("presentation_version")) is not int
             or len(item.parts) != 1
@@ -370,7 +375,7 @@ class WorkCallbackDenials:
             or item.instance_id is not None
             or item.request_id is not None
             or item.event_id is not None
-            or item.dedupe_key != "notice:" + source_key(captured.link, intent)
+            or item.dedupe_key != "notice:" + self.source_id(captured.link, intent)
             or item.message_thread_id != basis["message_thread_id"]
             or not same_body(item.payload.get("product_basis"), basis)
         ):
@@ -383,6 +388,9 @@ class WorkCallbackDenials:
         ):
             raise ProductSourceRetired()
         return intent
+
+    async def prepare_person(self, captured, intent, values):
+        return None
 
     async def read_part(self, captured, *, silent=None, now=None):
         async def read():
@@ -408,9 +416,15 @@ class WorkCallbackDenials:
                 if requester is None:
                     raise ProductSourceRetired()
                 person = values["person"] = str(requester.email)
+            if person is None:
+                person = await self.prepare_person(captured, intent, values)
             current = await prepare_attention(self.chat.views.reader, captured.link, require_inspect=False)
             preferences = (settings.timezone, zone, silent, now) if now is not None else None
-            await current(projection=DenialProjection(self, captured.link, intent, captured=captured, metadata=metadata, preferences=preferences, detail=detail, person=person))
+            projection = self.projection(self, captured.link, intent, captured=captured, metadata=metadata, preferences=preferences, detail=detail, person=person)
+            prepare = getattr(projection, "prepare_source", None)
+            if prepare is not None:
+                await prepare()
+            await current(projection=projection)
             return render(intent["key"], settings.locale, **values), render_plain(intent["key"], settings.locale, **values)
 
         return await await_drained(read())

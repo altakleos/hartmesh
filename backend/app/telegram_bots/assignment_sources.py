@@ -168,9 +168,11 @@ class AssignmentProjection:
 
         return assignment_key(root, self.item.payload)
 
-    def __init__(self, reader, link, item, source=None, *, root=None, journal=None, detail=None, clock, origin_only=False):
+    def __init__(self, reader, link, item, source=None, *, root=None, journal=None, detail=None, clock, origin_only=False, recovery_only=False):
         self.reader, self.link, self.item, self.expected, self.clock = reader, link, item, source, clock
-        self.origin_only = origin_only
+        self.origin_only, self.recovery_only = origin_only, recovery_only
+        if recovery_only and not origin_only:
+            raise ProductSourceRetired()
         if source is not None:
             root = private_snapshot(source.work["root"])
             if source.work.get("act") is not None:
@@ -204,7 +206,7 @@ class AssignmentProjection:
         # Only a known, answered Work-off refusal may bypass the effect policy
         # for read-only delivery. The final joined frame proves it again below.
         self.work_off_refusal = journal is not None and journal[0].state in {"refused", "conflict"} and (journal[1] or journal[0]).state in {"refused", "conflict"} and (journal[1] or journal[0]).reason == "work-off"
-        self.projection = DraftProjection(link, root.body["origin"], saved=root, require_work_policy=not self.work_off_refusal)
+        self.projection = DraftProjection(link, root.body["origin"], saved=root, require_work_policy=not self.work_off_refusal and not recovery_only)
         from app.telegram_bots.assignment_proposal_records import ProposalInputs, proposal_primary
 
         self.proposal = ProposalInputs(link, item) if proposal_primary(item.payload) else None
@@ -278,9 +280,14 @@ class AssignmentProjection:
         if self.origin_only:
             from app.telegram_bots.assignment_journals import journal_state
 
-            if journal is None or self.expected.work.get("phase") != "saved":
+            if journal is None or not self.recovery_only and self.expected.work.get("phase") != "saved":
                 raise ProductSourceRetired()
-            phase, _notice, receipt = journal_state(self.link, root, *journal, now=self.clock.now(), config=self.reader.config)
+            phase, notice, receipt = journal_state(self.link, root, *journal, now=self.clock.now(), config=self.reader.config)
+            if self.recovery_only:
+                if phase != self.expected.work.get("phase") or not notice or notice.get("retry") is not True or not same_body(notice, self.expected.work["notice"]):
+                    raise ProductSourceRetired()
+                self.source = self.expected
+                return
             if phase != "saved" or receipt["id"] != self.detail.record["id"]:
                 raise ProductSourceRetired()
             self.source = self.expected
