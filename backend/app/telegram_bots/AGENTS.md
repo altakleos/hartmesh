@@ -1,6 +1,6 @@
 # Managed Telegram bots
 
-Work action/refusal custody: [guide](../../docs/TELEGRAM_WORK.md).
+Work/composite custody: [guide](../../docs/TELEGRAM_WORK.md).
 Owned SQL readers drain close: `sql_readers.py`.
 
 `config.py` validates optional `AppConfig.model_extra["telegram_bots"]` without

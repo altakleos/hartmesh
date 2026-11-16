@@ -73,3 +73,23 @@ class WorkChatObservation:
                 await self.chat.executions.observe(link, item.id, guard=guard)
             except Exception as error:
                 logger.warning("Telegram execution receipt observation deferred (%s)", type(error).__name__)
+        primaries = await self.page(
+            link,
+            "continuations",
+            row,
+            select(row).where(
+                row.link_id == link.id,
+                row.owner_user_id == link.owner_user_id,
+                row.binding_generation == link.binding_generation,
+                row.chat_id == link.chat_id,
+                row.kind.in_(("respond", "decide")),
+                row.state == "done",
+                row.continuation["activation_continuation"]["phase"].as_string().in_(("ready", "refused", "expired")),
+            ),
+        )
+        for item in primaries:
+            guard.current()
+            try:
+                await self.chat.host.work_callbacks.outcomes.observe_start_refusal(link, item.id, guard=guard)
+            except Exception as error:
+                logger.warning("Telegram request continuation observation deferred (%s)", type(error).__name__)

@@ -65,6 +65,7 @@ class WorkChatRuntime:
         from app.telegram_bots.work_saved_refusals import WorkSavedRefusals
 
         self.saved_refusals = WorkSavedRefusals(self)
+        host.work_callbacks.outcomes.fixed_refusals = self.saved_refusals
         self.executions.fixed_refusals = self.saved_refusals
         host.work_saved_refusals = self.saved_refusals
         self.stops = WorkStopAdmissions(self.views, host.acts)
@@ -110,6 +111,7 @@ class WorkChatRuntime:
         host.work_callback_denials = self.denials
         host.work_management_sources = WorkNewsSources(self.management)
         host.work_management_prompt_sources = WorkNewsSources(self.management_edits.prompts)
+        runtime.requests.reader.composites = True
 
     async def stop(self):
         await asyncio.gather(self.assignment_inputs.requests.stop(), self.management_edits.stop())

@@ -17,33 +17,30 @@ from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, Agent
 from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
 
 
-class RequestParentProof:
-    def __init__(self, acts, link, parent, child, *, for_effect, effective_child=None):
-        self.acts, self.link, self.parent, self.child, self.for_effect = acts, link, parent, child, for_effect
-        self.effective_child = effective_child or child
+class RequestPrimaryProof:
+    def __init__(self, acts, link, parent):
+        self.acts, self.link, self.parent = acts, link, parent
         self.source = request_activation(parent)
 
     def extend(self, query, parent):
         self.column = len(query.column_descriptions)
-        callback, anchor, member, outcome, event, response, promise = (
+        callback, anchor, member, outcome, event, response = (
             aliased(TelegramCallbackRow),
             aliased(TelegramOutboxRow),
             aliased(TelegramCallbackRow),
             aliased(TelegramOutboxRow),
             aliased(AgentWorkEventRow),
             aliased(HumanInputEventRow),
-            aliased(AgentWorkAttemptRow),
         )
         origin = self.source["origin"]
         result = (
-            query.add_columns(callback, anchor, member, outcome, event, response, promise)
+            query.add_columns(callback, anchor, member, outcome, event, response)
             .outerjoin(callback, callback.id == origin["callback_id"])
             .outerjoin(anchor, anchor.id == origin["anchor_outbox_id"])
             .outerjoin(member, member.group_id == callback.group_id)
             .outerjoin(outcome, outcome.id == self.source["outcome_id"])
             .outerjoin(event, and_(event.instance_id == parent.instance_id, event.operation_id == parent.id))
             .outerjoin(response, and_(response.instance_id == parent.instance_id, response.operation_id == parent.id))
-            .outerjoin(promise, and_(promise.work_id == self.effective_child.work_id, promise.activation_id == self.effective_child.id))
         )
         self.input_column = len(result.column_descriptions)
         mark, question, control, answer = aliased(TelegramInboundMarkRow), aliased(TelegramOutboxRow), aliased(TelegramCallbackRow), aliased(HumanInputResponseRow)
@@ -63,32 +60,22 @@ class RequestParentProof:
             .outerjoin(typed_parent, typed_parent.id == mark.route_basis["work_input"]["source_outbox_id"].as_string())
         )
 
-    def check(self, rows, parent, child, held):
-        parent, child = _snapshot(parent), _snapshot(child)
-        require_child(parent, child)
+    def check_primary(self, rows, parent):
+        """Qualify only real primary consent, delivery and Native receipts."""
         actual = request_activation(parent)
         state = continuation_state(parent)
-        if not same_body(actual, self.source) or parent.state != "done" or list(parent.operation_ids) != [child.id] or (state["work_id"], state["assignment_revision"]) != (parent.work_id, actual["assignment_revision"]):
+        scope = {
+            "link_id": self.link.id,
+            "owner_user_id": self.link.owner_user_id,
+            "bot_id": self.link.bot_id,
+            "binding_generation": self.link.binding_generation,
+            "telegram_user_id": self.link.telegram_user_id,
+            "chat_id": self.link.chat_id,
+            "instance_id": self.link.agent_ref,
+        }
+        if any(getattr(parent, key) != value for key, value in scope.items()) or (state["work_id"], state["assignment_revision"]) != (parent.work_id, actual["assignment_revision"]):
             raise ValueError("invalid-request-parent")
-        callback, anchor, _member, outcome, event, response, promise = rows[0][self.column : self.column + 7]
-        exact_promise = (
-            promise is not None
-            and promise.run_id is None
-            and promise.status in UNRESOLVED
-            and (promise.work_id, promise.activation_id, promise.requester_id, promise.thread_id) == (self.effective_child.work_id, self.effective_child.id, self.effective_child.owner_user_id, self.effective_child.body["thread_id"])
-            and same_body(promise.request, self.effective_child.body)
-        )
-        if self.for_effect:
-            if (
-                parent.cancel_requested_at is not None
-                or parent.kind == "decide"
-                and rows[0][0].acts_paused_since is not None
-                or not (state["phase"] == "child_planned" or state["phase"] == "refused" and exact_promise)
-                or not {"agents:write", "runs:create"} <= held
-            ):
-                raise ValueError("invalid-request-parent")
-        elif state["phase"] not in {"child_planned", "done", "refused", "cancelled"}:
-            raise ValueError("invalid-request-parent")
+        callback, anchor, _member, outcome, event, response = rows[0][self.column : self.column + 6]
         target = (None, None, None) if parent.kind == "respond" else (self.link.agent_ref, parent.work_id, parent.request_id)
         if (
             callback is None
@@ -264,3 +251,44 @@ def qualify_request_primary(parent, actual, event, response, answer):
         }
         if not same_body(response.receipt, expected):
             raise ValueError("invalid-request-primary")
+
+
+class RequestParentProof(RequestPrimaryProof):
+    def __init__(self, acts, link, parent, child, *, for_effect, effective_child=None):
+        super().__init__(acts, link, parent)
+        self.child, self.for_effect = child, for_effect
+        self.effective_child = effective_child or child
+
+    def extend(self, query, parent):
+        result = super().extend(query, parent)
+        self.promise_column = len(result.column_descriptions)
+        promise = aliased(AgentWorkAttemptRow)
+        return result.add_columns(promise).outerjoin(promise, and_(promise.work_id == self.effective_child.work_id, promise.activation_id == self.effective_child.id))
+
+    def check(self, rows, parent, child, held):
+        parent, child = _snapshot(parent), _snapshot(child)
+        require_child(parent, child)
+        actual = request_activation(parent)
+        state = continuation_state(parent)
+        if not same_body(actual, self.source) or parent.state != "done" or list(parent.operation_ids) != [child.id] or (state["work_id"], state["assignment_revision"]) != (parent.work_id, actual["assignment_revision"]):
+            raise ValueError("invalid-request-parent")
+        promise = rows[0][self.promise_column]
+        exact_promise = (
+            promise is not None
+            and promise.run_id is None
+            and promise.status in UNRESOLVED
+            and (promise.work_id, promise.activation_id, promise.requester_id, promise.thread_id) == (self.effective_child.work_id, self.effective_child.id, self.effective_child.owner_user_id, self.effective_child.body["thread_id"])
+            and same_body(promise.request, self.effective_child.body)
+        )
+        if self.for_effect:
+            if (
+                parent.cancel_requested_at is not None
+                or parent.kind == "decide"
+                and rows[0][0].acts_paused_since is not None
+                or not (state["phase"] == "child_planned" or state["phase"] == "refused" and exact_promise)
+                or not {"agents:write", "runs:create"} <= held
+            ):
+                raise ValueError("invalid-request-parent")
+        elif state["phase"] not in {"child_planned", "done", "refused", "cancelled"}:
+            raise ValueError("invalid-request-parent")
+        self.check_primary(rows, parent)

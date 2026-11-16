@@ -220,3 +220,7 @@ class WorkCallbacks:
                 await self.acts.resume_continuation(act_id, attempt_current=current)
         except Exception as error:
             logger.warning("Work outcome observation deferred (%s)", type(error).__name__)
+        try:
+            await self.outcomes.observe_start_refusal(link, act_id, guard=guard)
+        except Exception as error:
+            logger.warning("Work continuation refusal observation deferred (%s)", type(error).__name__)

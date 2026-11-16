@@ -215,12 +215,15 @@ class TelegramAuthority:
             raise AuthorityUnavailable
         return await agents.get(actor=PrincipalRef("human", link.owner_user_id), instance_id=link.agent_ref, permission=AgentPermission.USE)
 
-    async def instance_send_policy(self, link: BotLink, *, require_use: bool, bound: bool = True, require_inspect: bool = False, require_manage: bool = False, expected_lifecycle: str | None = None, projection=None) -> str:
+    async def instance_send_policy(
+        self, link: BotLink, *, require_use: bool, bound: bool = True, require_inspect: bool = False, require_manage: bool = False, expected_lifecycle: str | None = None, projection=None, before_snapshot=None
+    ) -> str:
         """Final point-in-time grant, target, policy and discard decision.
 
         Live host authority is checked first. The final joined SQL statement
         observes all mutable send facts together; no link refresh or separate
         policy/grant read can carry an earlier decision past a newer one.
+        Source preparation after preflight runs outside that final reader.
         """
         from sqlalchemy import and_, select
 
@@ -245,6 +248,9 @@ class TelegramAuthority:
                     await await_drained(require(link.owner_user_id, "agents:read"))
                 except CeilingRefused:
                     lifecycle_ceiling = False
+
+        if before_snapshot is not None:
+            await before_snapshot()
 
         async def read():
             async with self.links.session_factory() as session:

@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Offer explicit combined Decision/Resume and spoken-answer/Resume controls in
+  managed agent bots. Preserve a successful primary receipt when its Start cannot
+  be admitted, explain current access/settings/readiness, and retain actual child
+  custody through recovery and late delivery changes.
 - Keep retained Change, Withdraw and Stop replies current as access changes,
   reconcile committed receipts first, and wait for every typed Stop target's
   actual delivery. Unanswered replacements preserve sealed input history.

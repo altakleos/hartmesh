@@ -336,6 +336,26 @@ class WorkOutcomePlans:
         self.outbox, self.callbacks, self.settings = plans.outbox, plans.callbacks, plans.settings
         self.reader = WorkOutcomeReader(plans.reader, acts)
         self.inbox = InboxRepository(self.outbox.sessions)
+        self.fixed_refusals = None
+
+    async def observe_start_refusal(self, link, act_id, *, guard):
+        """Observe a saved primary's absent child without retrying either effect."""
+        if self.fixed_refusals is None:
+            return None
+        from app.telegram_bots.acts import _snapshot as act_snapshot
+        from app.telegram_bots.producer import _item
+        from app.telegram_bots.work_request_continuations import request_activation
+
+        async with self.outbox.sessions() as reader:
+            act = await reader.get(TelegramActRow, act_id)
+            if act is None or act.state != "done" or act.kind not in {"respond", "decide"} or "request_activation" not in (act.continuation or {}):
+                return None
+            source = request_activation(act_snapshot(act))
+            row = await reader.get(TelegramOutboxRow, source["outcome_id"]) if source["outcome_id"] is not None else None
+            if row is None:
+                return None
+            item = _item(row)
+        return await self.fixed_refusals.offer(link, item, guard=guard)
 
     async def plan(self, link, act_id, *, guard):
         async def perform():
