@@ -33,6 +33,7 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           test "$(docker info --format '{{.CgroupVersion}}')" = 2
+          python3 -c 'import os; assert hasattr(os, "pidfd_open"), "kernel process handles are required for cgroup exit reconciliation"'
           command -v mkfs.ext4 e2fsck resize2fs losetup mount umount findmnt fallocate nsenter flock
           test -c /dev/loop-control
           sudo mkdir -p /srv

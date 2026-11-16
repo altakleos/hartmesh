@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import json
 import os
 import re
+import select
 import subprocess
 import sys
 import threading
@@ -157,6 +158,14 @@ def cgroup_retired_after_exit(identity, error):
     )
 
 
+def cgroup_disappeared_after_process_exit(pidfd, error):
+    # A pidfd follows the actual kernel process across PID reuse and Docker's
+    # delayed status publication. Permission/other IO errors are never teardown.
+    return error.errno in {errno.ENOENT, errno.ENODEV} and bool(
+        select.select([pidfd], [], [], 0)[0]
+    )
+
+
 def measure(compose_file, directory, name, *, recreate):
     compose = ("docker", "compose", "-f", str(compose_file))
     if recreate:
@@ -170,16 +179,19 @@ def measure(compose_file, directory, name, *, recreate):
         "error": None,
         "max_current": 0,
         "stat_at_max_current": {},
+        "retirement_error": None,
     }
     stop = threading.Event()
 
     def watch():
+        pidfd = None
         try:
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline and not stop.is_set():
                 facts = json.loads(command("docker", "inspect", identity))[0]
                 if facts["State"]["Running"] and facts["State"]["Pid"]:
                     pid = facts["State"]["Pid"]
+                    pidfd = os.pidfd_open(pid)
                     group = next(
                         line.split(":", 2)[2]
                         for line in Path(f"/proc/{pid}/cgroup").read_text().splitlines()
@@ -188,6 +200,8 @@ def measure(compose_file, directory, name, *, recreate):
                     if not group.startswith("/") or ".." in Path(group).parts:
                         raise ValueError("invalid host cgroup path")
                     cg = Path("/sys/fs/cgroup") / group.lstrip("/")
+                    observed["pid"] = pid
+                    observed["cgroup"] = str(cg)
                     break
                 time.sleep(0.005)
             else:
@@ -218,12 +232,16 @@ def measure(compose_file, directory, name, *, recreate):
                         )
                     }
                 except OSError as exc:
-                    if cgroup_retired_after_exit(identity, exc):
+                    if cgroup_disappeared_after_process_exit(pidfd, exc):
+                        observed["retirement_error"] = exc
                         break
                     raise
                 time.sleep(0.005)
         except Exception as exc:
             observed["error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            if pidfd is not None:
+                os.close(pidfd)
 
     watcher = threading.Thread(target=watch)
     started_wall = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -240,6 +258,12 @@ def measure(compose_file, directory, name, *, recreate):
         stop.set()
         watcher.join()
     facts = json.loads(command("docker", "inspect", identity))[0]
+    if observed["retirement_error"] and not cgroup_retired_after_exit(
+        identity, observed["retirement_error"]
+    ):
+        observed["error"] = (
+            "kernel process ended but exact completed-container state could not be confirmed"
+        )
     if facts["Image"] != expected_image_id:
         raise ValueError("running container image differs from the selected digest")
     kernel_log = command(
@@ -287,6 +311,13 @@ def measure(compose_file, directory, name, *, recreate):
         max_sampled_current_bytes=observed["max_current"],
         memory_stat_at_max_sampled_current=observed["stat_at_max_current"],
         observer_error=observed["error"],
+        observer_exit_proof="unconfirmed"
+        if observed["error"]
+        else "pidfd+completed-container"
+        if observed["retirement_error"]
+        else "completed-wait",
+        observed_pid=observed.get("pid"),
+        observed_cgroup=observed.get("cgroup"),
         document=docs[-1] if len(docs) == 1 else None,
     )
     (directory / f"{name}.json").write_text(

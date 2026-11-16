@@ -3,8 +3,10 @@
 import copy
 import errno
 import importlib.util
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -223,3 +225,24 @@ def test_cgroup_retirement_requires_exact_completed_container(monkeypatch, code,
 def test_unrelated_cgroup_read_error_cannot_be_dismissed(monkeypatch):
     monkeypatch.setattr(qualification, "command", lambda *args: pytest.fail("permission failure is not teardown evidence"))
     assert qualification.cgroup_retired_after_exit("owned-container", PermissionError(errno.EACCES, "denied")) is False
+
+
+@pytest.mark.skipif(not hasattr(os, "pidfd_open"), reason="Linux process identity handles")
+def test_cgroup_retirement_uses_kernel_lifetime_before_docker_status():
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    pidfd = None
+    try:
+        pidfd = os.pidfd_open(child.pid)
+        for code in (errno.ENOENT, errno.ENODEV):
+            assert not qualification.cgroup_disappeared_after_process_exit(pidfd, OSError(code, "cgroup disappeared"))
+        child.terminate()
+        child.wait(timeout=10)
+        for code in (errno.ENOENT, errno.ENODEV):
+            assert qualification.cgroup_disappeared_after_process_exit(pidfd, OSError(code, "cgroup disappeared"))
+        assert not qualification.cgroup_disappeared_after_process_exit(pidfd, PermissionError(errno.EACCES, "not retirement"))
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=10)
+        if pidfd is not None:
+            os.close(pidfd)
