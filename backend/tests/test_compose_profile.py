@@ -1642,7 +1642,13 @@ def test_gateway_waits_for_storage_init_without_requiring_it(compose: dict) -> N
 
 
 def test_storage_init_receives_the_data_directory_and_the_seven_keys_by_name(compose: dict) -> None:
-    assert compose["services"]["storage-init"]["environment"] == {"PYTHONPATH": ".", "UV_CACHE_DIR": "/tmp/uv-cache", "HARTMESH_DATA_DIR": "${HARTMESH_DATA_DIR}", **{key: "${" + key + ":-}" for key in STORAGE_ENV_KEYS}}
+    assert compose["services"]["storage-init"]["environment"] == {
+        "PYTHONPATH": ".",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "UV_CACHE_DIR": "/tmp/uv-cache",
+        "HARTMESH_DATA_DIR": "${HARTMESH_DATA_DIR}",
+        **{key: "${" + key + ":-}" for key in STORAGE_ENV_KEYS},
+    }
     source = COMPOSE.read_text(encoding="utf-8")
     for key in STORAGE_ENV_KEYS:
         assert len(re.findall(r"\$\{" + key + r"\b", source)) == source.count("${" + key + ":-}") == 1
