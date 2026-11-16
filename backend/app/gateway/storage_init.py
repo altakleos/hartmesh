@@ -586,6 +586,11 @@ sync -f "$(dirname -- "$p")"
             self.host.run("mkfs.ext4", "-D", "-q", "-F", "-U", spec.filesystem_uuid, "-N", str(spec.max_inodes), "-m", "0", "-E", "nodiscard,lazy_itable_init=0,lazy_journal_init=0", str(spec.image_path), timeout=120)
             os.posix_fallocate(fd, 0, spec.max_bytes)
             os.fsync(fd)
+            # Drop only clean pages of this exclusively created, unmounted
+            # image. Never evict an existing pool or replace durability with
+            # cache advice; unsupported advice leaves preparation unchanged.
+            with contextlib.suppress(OSError):
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
         finally:
             os.close(fd)
         self.mount(spec)

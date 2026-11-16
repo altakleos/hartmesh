@@ -134,6 +134,35 @@ def test_new_image_formatting_uses_direct_io_and_retains_eager_initialization(op
         assert spec.image_path.stat().st_size == spec.max_bytes
 
 
+@pytest.mark.parametrize("unsupported", [False, True])
+def test_new_image_cache_release_follows_its_fsync_and_is_advisory(operator, monkeypatch, unsupported):
+    tool = operator[0]
+    synced, advised = set(), []
+    fsync = os.fsync
+
+    def durable(fd):
+        fsync(fd)
+        facts = os.fstat(fd)
+        synced.add((facts.st_dev, facts.st_ino))
+
+    def discard_clean_cache(fd, offset, length, advice):
+        facts = os.fstat(fd)
+        token = facts.st_dev, facts.st_ino
+        assert token in synced
+        assert (offset, length, advice) == (0, 0, os.POSIX_FADV_DONTNEED)
+        advised.append(token)
+        if unsupported:
+            raise OSError(errno.EOPNOTSUPP, "advisory cache release unsupported")
+
+    monkeypatch.setattr(os, "fsync", durable)
+    monkeypatch.setattr(os, "posix_fadvise", discard_clean_cache)
+    doc = tool.prepare()
+    inventory = tool.load()
+    expected = {(spec.image_path.stat().st_dev, spec.image_path.stat().st_ino) for spec in inventory.volumes.values()}
+    assert doc["returncode"] == 0
+    assert set(advised) == expected and len(advised) == len(expected)
+
+
 @pytest.mark.parametrize("text", ["# hartmesh-storage begin\n", "# hartmesh-storage end\n", "# hartmesh-storage begin\n# hartmesh-storage end\n# hartmesh-storage begin\n# hartmesh-storage end\n"])
 def test_fstab_sync_refuses_malformed_markers(text):
     with pytest.raises(si.Refused, match="fstab"):

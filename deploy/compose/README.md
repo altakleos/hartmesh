@@ -2512,8 +2512,9 @@ parent supervises the existing `app.gateway.storage_init prepare` child, without
 loading Gateway or application configuration in both processes. Bytecode writes
 are disabled for this service. New images are formatted with direct I/O to avoid
 filling the startup memory budget with buffer cache; eager inode/journal
-initialization, full allocation and fsync remain required. Formatting can take
-longer. Other operator verbs retain their implementation and return codes.
+initialization, full allocation and fsync remain required. After fsync, preparation
+requests clean-cache release for that exact new image before mounting it; this
+is advisory and never targets existing mounted spaces. Formatting can take longer. Other operator verbs retain their implementation and return codes.
 
 After child cleanup, stderr records `storage-init: memory peak … MiB of … MiB`
 with the raw byte values. Unlimited limits are explicit; unreadable counters say
