@@ -1,12 +1,13 @@
 """An ambiguous create must not permit deleting an owned fixture's backing."""
 
 import ast
+import errno
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from _storage_spaces_native_test_support import prepare_consumer_container
+from _storage_spaces_native_test_support import prepare_consumer_container, remove_owned_loop
 
 
 def test_create_effect_before_lost_acknowledgement_preserves_fixture_uncertainty(tmp_path):
@@ -60,3 +61,45 @@ def test_resident_native_fixture_uses_real_provider_registry_and_dedicated_inode
     containment = ast.unparse(functions["test_host_containment_removes_the_real_container_and_the_next_run_attaches_afresh"])
     for fact in ("contain_host", "fenced_by_kind", "fenced_by_id", "fence_reason", "fenced_at", "subprocess.run"):
         assert fact in containment
+
+
+@pytest.mark.parametrize("change", [None, "rebound", "replaced", "timeout", "denied"])
+def test_owned_loop_removal_reconciles_only_same_unbound_device(tmp_path, change):
+    sysfs = tmp_path / "loop"
+    sysfs.mkdir()
+    meta = sysfs.stat()
+    expected = meta.st_dev, meta.st_ino
+    now, calls = [0.0], []
+
+    def ioctl(fd, operation, number):
+        calls.append((fd, operation, number))
+        assert (fd, operation, number) == (41, 0x4C81, 73)
+        if len(calls) == 1 or change == "timeout":
+            if change == "rebound":
+                (sysfs / "loop").mkdir()
+            elif change == "replaced":
+                sysfs.rename(tmp_path / "original")
+                sysfs.mkdir()
+            raise OSError(errno.EACCES if change == "denied" else errno.EBUSY, "fixture opener")
+        return 0
+
+    def sleep(seconds):
+        assert seconds == 0.05
+        now[0] += 1
+
+    def remove():
+        remove_owned_loop(41, 73, sysfs, expected=expected, ioctl=ioctl, clock=lambda: now[0], sleep=sleep)
+
+    if change in {"rebound", "replaced"}:
+        with pytest.raises(RuntimeError, match="changed|bound"):
+            remove()
+        assert len(calls) == 1
+    elif change in {"timeout", "denied"}:
+        with pytest.raises(OSError) as caught:
+            remove()
+        assert caught.value.errno == (errno.EBUSY if change == "timeout" else errno.EACCES)
+        assert len(calls) == (6 if change == "timeout" else 1)
+    else:
+        remove()
+        assert len(calls) == 2
+    assert sysfs.is_dir()

@@ -1,10 +1,39 @@
-"""Task-owned native fixture creation, never a production attachment adapter."""
+"""Task-owned native fixture lifecycle, never a production attachment adapter."""
 
+import errno
 import os
 import re
 import subprocess
+import time
 
 from deerflow.spaces.docker import ATTACHMENT_LABEL, HOST_LABEL
+
+
+def remove_owned_loop(control, number, sysfs, *, expected, ioctl=None, clock=time.monotonic, sleep=time.sleep):
+    """Drain transient openers only after our exact loop is already unbound."""
+    if ioctl is None:
+        import fcntl
+
+        ioctl = fcntl.ioctl
+    deadline = clock() + 5
+    while True:
+        current = sysfs.stat()
+        if (current.st_dev, current.st_ino) != expected:
+            raise RuntimeError("Owned loop device changed before removal")
+        if (sysfs / "loop").exists():
+            raise RuntimeError("Owned loop device is still bound; no removal attempted")
+        try:
+            result = ioctl(control, 0x4C81, number)
+        except OSError as exc:
+            if exc.errno != errno.EBUSY or clock() >= deadline:
+                raise
+            # udev may still have an unbound device open after umount. Reprove
+            # identity and absence of a binding before every removal attempt.
+            sleep(0.05)
+        else:
+            if result != 0:
+                raise RuntimeError("Owned loop removal returned an unknown result")
+            return
 
 
 def prepare_consumer_container(plan, image, program, containers, containment, *, runner=subprocess.run):

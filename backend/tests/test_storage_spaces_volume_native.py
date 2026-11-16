@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from _storage_spaces_native_test_support import prepare_consumer_container
+from _storage_spaces_native_test_support import prepare_consumer_container, remove_owned_loop
 
 from deerflow.spaces.backings import BackingUnavailable, PreparedVolumeCatalog
 
@@ -44,6 +44,7 @@ def _allow_disposable_loop_deallocation(catalog, spec):
     control = root = None
     owned = None
     node = None
+    sysfs_identity = None
     node_identity = None
     qualified = False
     try:
@@ -63,6 +64,8 @@ def _allow_disposable_loop_deallocation(catalog, spec):
             break
         assert owned is not None, "Could not create an exclusive disposable loop"
         sysfs = Path(f"/sys/class/block/loop{owned}")
+        metadata = sysfs.stat()
+        sysfs_identity = metadata.st_dev, metadata.st_ino
         major, minor = map(int, (sysfs / "dev").read_text(encoding="ascii").strip().split(":"))
         device = os.makedev(major, minor)
         # libmount expects the canonical loop-device name. udev may have
@@ -101,7 +104,9 @@ def _allow_disposable_loop_deallocation(catalog, spec):
             if owned is not None:
                 # The kernel refuses removal while bound/open. Ambiguity retains
                 # the fixture rather than detaching an unproved attachment.
-                assert fcntl.ioctl(control, 0x4C81, owned) == 0
+                if sysfs_identity is None:
+                    raise RuntimeError("Fresh loop identity is unavailable; the device was retained")
+                remove_owned_loop(control, owned, sysfs, expected=sysfs_identity)
             if node_identity is not None:
                 try:
                     named = node.lstat()
