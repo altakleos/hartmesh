@@ -424,14 +424,12 @@ succeed on the current published head before merge. The regression workflows inc
 - **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered by `frontend-hm/`, the pnpm runner or that workflow)
 - **Production Docker acceptance** — [.github/workflows/docker-acceptance.yml](.github/workflows/docker-acceptance.yml), using real application services and synthetic inference
 
-The browser E2E and full-stack replay jobs use the official Playwright image,
-which includes Chromium and its system libraries. When upgrading the locked
-Playwright version, update the image tags in both browser workflows to match.
-Each job launches Chromium before running tests; auth recovery tests run only
-after that browser readiness check succeeds.
-These containers use uv-managed Python instead of the host's Python tool cache,
-so the interpreter's OpenSSL libraries match its runtime. Backend dependency
-setup also verifies SSL and SQLite imports before launching fixture gateways.
+The browser E2E and full-stack replay jobs install Chromium and its system
+libraries using the Playwright version in the product's frozen lockfile.
+Each job launches and closes Chromium before running tests; auth recovery tests
+run only after that browser readiness check succeeds, including when an earlier
+browser test fails. Jobs use the host runner with `actions/setup-python` and
+verify SSL and SQLite imports before launching fixture gateways.
 
 ### Test and diagnostics notes
 

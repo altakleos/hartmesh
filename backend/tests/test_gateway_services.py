@@ -4259,7 +4259,7 @@ def test_start_run_pins_the_resolved_project_context(_stub_app_config):
         "project_id": "p-1",
         "name": "Roadmap",
         "instructions": "Prefer boring solutions.",
-        "memory": {"enabled": True, "revision": 0, "facts": []},
+        "memory": {"enabled": False, "revision": 0, "facts": []},
     }
 
 

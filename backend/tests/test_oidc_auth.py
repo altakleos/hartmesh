@@ -1172,16 +1172,19 @@ async def test_oidc_userinfo_without_sub_cannot_make_a_first_login_an_admin():
         await service.close()
 
     local_provider = AsyncMock()
+    local_provider.is_identity_disabled.return_value = False
     local_provider.get_user_by_oauth.return_value = None
     local_provider.get_user_by_email.return_value = None
-    await get_or_provision_oidc_user(
+    local_provider.create_oauth_user.return_value = User(email="user@example.com", system_role="user", oauth_provider="keycloak", oauth_id="s1")
+    result = await get_or_provision_oidc_user(
         provider_id="keycloak",
         provider_config=_provider_config(admin_emails=["admin@example.com"]),
         identity=identity,
         local_provider=local_provider,
     )
 
-    local_provider.create_oauth_user.assert_awaited_once_with(email="user@example.com", oauth_provider="keycloak", oauth_id="s1", system_role="user")
+    local_provider.create_oauth_user.assert_awaited_once_with(email="user@example.com", oauth_provider="keycloak", oauth_id="s1", system_role="user", oauth_issuer="https://issuer.example.com", last_sign_in_at=ANY)
+    assert result["created"] and result["user"].system_role == "user"
 
 
 def _oidc_router_client(monkeypatch, service: OIDCService):

@@ -1,5 +1,6 @@
 """Queued and recovered batches must honor current account state and role."""
 
+import asyncio
 import json
 import os
 import signal
@@ -9,14 +10,18 @@ import sys
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateSchema, DropSchema
 
+from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+from deerflow.config.auth_config import LOCAL_ACCOUNT_ISSUER
 from deerflow.persistence.postgres_schema import dsn_with_search_path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -53,11 +58,33 @@ def database(request, tmp_path):
         with engine.connect() as connection:
             return connection.execute(text(statement), params).all()
 
+    def change_account(user_id, *, role=None, disabled=False, limit=None):
+        async def mutate():
+            # Exercise the current account repository instead of the upstream
+            # admin-users route, which HartMesh does not expose.
+            driver = "postgresql+psycopg" if schema else "sqlite+aiosqlite"
+            mutation_engine = create_async_engine(engine.url.set(drivername=driver))
+            try:
+                repo = SQLiteUserRepository(async_sessionmaker(mutation_engine, expire_on_commit=False))
+                user = await repo.get_user_by_id(user_id)
+                assert user is not None
+                if disabled:
+                    await repo.disable_identity(LOCAL_ACCOUNT_ISSUER, user_id)
+                elif limit is not None:
+                    await repo.limit_role(LOCAL_ACCOUNT_ISSUER, user_id, limit)
+                else:
+                    await repo.record_sign_in(user_id, system_role=role, oauth_issuer=user.oauth_issuer, last_sign_in_at=datetime.now(UTC))
+                return await repo.get_user_by_id(user_id)
+            finally:
+                await mutation_engine.dispose()
+
+        return asyncio.run(mutate())
+
     try:
         if schema:
             with engine.begin() as connection:
                 connection.execute(CreateSchema(schema))
-        yield config, read
+        yield config, read, change_account
     finally:
         try:
             if schema:
@@ -108,7 +135,7 @@ def _gateway(root, client, port, generation):
 @pytest.mark.parametrize("dispatch", ["batch_queue", "restart"])
 @pytest.mark.parametrize("change", ["disabled", "demoted", "promoted", "unchanged_admin", "unchanged_user"])
 def test_batch_revalidates_owner_at_execution(tmp_path, database, dispatch, change):
-    database_config, read = database
+    database_config, read, change_account = database
     config = {
         "models": [{"name": "owner-probe", "use": "support.batch_owner:OwnerModel", "model": "offline", "supports_tool_calling": True}],
         "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
@@ -119,7 +146,6 @@ def test_batch_revalidates_owner_at_execution(tmp_path, database, dispatch, chan
         "memory": {"enabled": False},
         "summarization": {"enabled": False},
         "tool_search": {"enabled": False},
-        "hitl_approval": {"enabled": False},
         "subagent_batches": {"enabled": True, "poll_interval_seconds": 0.1, "lease_seconds": 10, "default_max_running_items": 1, "max_attempts": 3 if dispatch == "restart" else 1},
         "subagent_runtime": {"max_running": 1},
         "authorization": {"enabled": True, "provider": {"use": "deerflow.authz.rbac:RbacAuthorizationProvider", "config": {"roles": {"admin": {}, "user": {"tools": {"deny": ["owner_admin"]}}}}}},
@@ -145,7 +171,7 @@ def test_batch_revalidates_owner_at_execution(tmp_path, database, dispatch, chan
             owner = account["id"]
             original_role = "user" if change in ("unchanged_user", "promoted") else "admin"
             if original_role == "admin":
-                request(admin, "PATCH", f"/api/v1/admin/users/{owner}", json={"system_role": "admin"})
+                assert change_account(owner, role="admin").system_role == "admin"
             thread = request(actor, "POST", "/api/threads", json={})["thread_id"]
             request(
                 actor,
@@ -164,13 +190,26 @@ def test_batch_revalidates_owner_at_execution(tmp_path, database, dispatch, chan
                 return read("SELECT item_key, status, attempt, error FROM subagent_batch_items WHERE batch_id = :batch_id ORDER BY position", batch_id=batch_id)
 
             _until(lambda: len(rows := items()) == 2 and rows[1][2] == 0)
+            if dispatch == "restart":
+                # Change the durable identity only after the old supervisor
+                # is gone, so refusal is proved by the replacement Gateway.
+                first.kill()
+                first.wait(timeout=10)
+                assert first.returncode == -signal.SIGKILL
             if change == "disabled":
-                request(admin, "PATCH", f"/api/v1/admin/users/{owner}", json={"disabled": True})
-                request(actor, "GET", "/api/v1/auth/me", expected=401)
+                assert change_account(owner, disabled=True).disabled_at is not None
+                if dispatch != "restart":
+                    request(actor, "GET", "/api/v1/auth/me", expected=401)
             elif change in ("demoted", "promoted"):
                 role = "user" if change == "demoted" else "admin"
-                request(admin, "PATCH", f"/api/v1/admin/users/{owner}", json={"system_role": role})
-                assert request(actor, "GET", "/api/v1/auth/me")["system_role"] == role
+                changed = change_account(owner, limit=role) if change == "demoted" else change_account(owner, role=role)
+                assert changed.system_role == role
+                if dispatch != "restart":
+                    if change == "demoted":
+                        # A canonical role limit ends existing sessions too.
+                        request(actor, "GET", "/api/v1/auth/me", expected=401)
+                    else:
+                        assert request(actor, "GET", "/api/v1/auth/me")["system_role"] == role
 
             def verify(pid):
                 def terminal():
@@ -190,14 +229,18 @@ def test_batch_revalidates_owner_at_execution(tmp_path, database, dispatch, chan
                     encoding="utf-8",
                 )
                 assert all(call["pid"] == pid and call["user_id"] == owner for call in calls)
-                if dispatch == "restart":
+                refused = change in ("disabled", "demoted")
+                if dispatch == "restart" and not refused:
                     assert rows[0][2] >= 2
-                else:
+                elif dispatch != "restart" and not refused:
                     assert rows[1][2] == 1
-                    assert rows[0][1] == "succeeded"  # Already admitted, outside the revocation gate.
+                    assert rows[0][1] == "succeeded"
                 observed = calls if dispatch == "restart" else [call for call in calls if call["item"] == "second"]
-                if change in ("disabled", "demoted", "promoted"):
-                    assert rows[1][1] == "failed", (rows, calls)
+                if refused:
+                    # The owner supervisor may cancel the queue before it is
+                    # claimed. No retry or second execution is required.
+                    assert rows[1][1] == "cancelled", (rows, calls)
+                    assert rows[1][3] == "Cancelled because batch owner access was refused or could not be verified"
                     assert not observed
                     assert not (tmp_path / "reached-second").exists()
                 else:
@@ -209,9 +252,6 @@ def test_batch_revalidates_owner_at_execution(tmp_path, database, dispatch, chan
                 (tmp_path / "hold").unlink()
                 verify(first.pid)
                 return
-            first.kill()
-            first.wait(timeout=10)
-            assert first.returncode == -signal.SIGKILL
 
         (tmp_path / "hold").unlink()
         with _gateway(tmp_path, admin, port, 2) as second:

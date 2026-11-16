@@ -65,7 +65,7 @@ def test_static_support_does_not_issue_a_no_view_claim():
 
 
 def test_caller_qualifier_claim_is_removed_from_both_serialized_config_sections(monkeypatch):
-    monkeypatch.setattr(services, "_resolve_gateway_recursion_limits", lambda: (25, 100))
+    monkeypatch.setattr(services, "_resolve_gateway_recursion_limits", lambda _app_config=None: (25, 100))
     config = services.build_run_config(thread_id="thread", request_config={"context": {"qualify_output_view": "forged", "legitimate": 7}, "configurable": {"qualify_output_view": "forged"}}, metadata=None)
     assert config["context"]["legitimate"] == 7
     assert "qualify_output_view" not in config["context"]

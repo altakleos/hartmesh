@@ -18,7 +18,8 @@ def wizard_checkout(tmp_path: Path) -> Path:
     checkout = tmp_path / "checkout"
     scripts_dir = checkout / "scripts"
     scripts_dir.mkdir(parents=True)
-    shutil.copyfile(REPO_ROOT / "scripts" / "setup_wizard.py", scripts_dir / "setup_wizard.py")
+    for name in ("setup_wizard.py", "frontend_env.py"):
+        shutil.copyfile(REPO_ROOT / "scripts" / name, scripts_dir / name)
     return checkout
 
 
@@ -61,3 +62,6 @@ def test_no_arguments_still_enters_the_wizard(wizard_checkout: Path):
     # The subprocess has no tty, so the wizard reports that instead of prompting.
     assert result.returncode == 1, result.stderr
     assert "Non-interactive environment detected" in result.stdout
+    assert not (wizard_checkout / "config.yaml").exists()
+    assert not (wizard_checkout / ".env").exists()
+    assert not (wizard_checkout / "frontend-hm" / ".env").exists()
