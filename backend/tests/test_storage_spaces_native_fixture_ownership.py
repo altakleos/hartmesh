@@ -103,3 +103,44 @@ def test_owned_loop_removal_reconciles_only_same_unbound_device(tmp_path, change
         remove()
         assert len(calls) == 2
     assert sysfs.is_dir()
+
+
+@pytest.mark.parametrize("change", [None, "foreign", "autoclear", "timeout"])
+def test_owned_loop_waits_only_for_its_original_autoclear_binding(tmp_path, change):
+    sysfs, binding = tmp_path, tmp_path / "loop"
+    binding.mkdir()
+    original = {"backing_file": "/own.img", "offset": "0", "sizelimit": "0", "autoclear": "1"}
+    for name, value in original.items():
+        (binding / name).write_text(value + "\n", encoding="utf-8")
+    meta = sysfs.stat()
+    now, calls = [0.0], []
+
+    def ioctl(*args):
+        assert not binding.exists(), "No removal request while the loop is bound"
+        calls.append(args)
+        return 0
+
+    def sleep(seconds):
+        assert seconds == 0.05
+        now[0] += 1
+        if change is None:
+            for child in binding.iterdir():
+                child.unlink()
+            binding.rmdir()
+        elif change in {"foreign", "autoclear"}:
+            (binding / ("backing_file" if change == "foreign" else "autoclear")).write_text("/foreign.img\n" if change == "foreign" else "0\n", encoding="utf-8")
+
+    def remove():
+        remove_owned_loop(41, 73, sysfs, expected=(meta.st_dev, meta.st_ino), retiring_binding=original, ioctl=ioctl, clock=lambda: now[0], sleep=sleep)
+
+    if change == "timeout":
+        with pytest.raises(TimeoutError, match="retire"):
+            remove()
+    elif change in {"foreign", "autoclear"}:
+        with pytest.raises(RuntimeError, match="binding"):
+            remove()
+    else:
+        remove()
+        assert calls == [(41, 0x4C81, 73)]
+    if change is not None:
+        assert not calls and binding.is_dir()

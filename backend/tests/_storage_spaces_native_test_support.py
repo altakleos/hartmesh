@@ -9,8 +9,8 @@ import time
 from deerflow.spaces.docker import ATTACHMENT_LABEL, HOST_LABEL
 
 
-def remove_owned_loop(control, number, sysfs, *, expected, ioctl=None, clock=time.monotonic, sleep=time.sleep):
-    """Drain transient openers only after our exact loop is already unbound."""
+def remove_owned_loop(control, number, sysfs, *, expected, retiring_binding=None, ioctl=None, clock=time.monotonic, sleep=time.sleep):
+    """Wait for the proved autoclear binding, then drain unbound openers."""
     if ioctl is None:
         import fcntl
 
@@ -20,8 +20,24 @@ def remove_owned_loop(control, number, sysfs, *, expected, ioctl=None, clock=tim
         current = sysfs.stat()
         if (current.st_dev, current.st_ino) != expected:
             raise RuntimeError("Owned loop device changed before removal")
-        if (sysfs / "loop").exists():
-            raise RuntimeError("Owned loop device is still bound; no removal attempted")
+        binding = sysfs / "loop"
+        if binding.exists():
+            if retiring_binding is None:
+                raise RuntimeError("Owned loop device is still bound; no removal attempted")
+            try:
+                facts = {name: (binding / name).read_text(encoding="utf-8").strip() for name in ("backing_file", "offset", "sizelimit", "autoclear")}
+            except FileNotFoundError:
+                if binding.exists():
+                    raise
+                continue  # Autoclear completed during this read; recheck identity.
+            if facts != retiring_binding or any(facts[name] != value for name, value in (("offset", "0"), ("sizelimit", "0"), ("autoclear", "1"))):
+                raise RuntimeError("Owned loop binding changed during retirement")
+            if clock() >= deadline:
+                raise TimeoutError("Owned autoclear loop binding did not retire")
+            # umount can return before a temporary opener releases the old
+            # autoclear binding. Only observe it; never detach a bound device.
+            sleep(0.05)
+            continue
         try:
             result = ioctl(control, 0x4C81, number)
         except OSError as exc:

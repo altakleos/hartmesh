@@ -45,6 +45,7 @@ def _allow_disposable_loop_deallocation(catalog, spec):
     owned = None
     node = None
     sysfs_identity = None
+    retiring_binding = None
     node_identity = None
     qualified = False
     try:
@@ -87,6 +88,7 @@ def _allow_disposable_loop_deallocation(catalog, spec):
         snapshot = _snapshot(spec, root, image)
         assert os.fstat(root).st_dev == device
         qualified = True
+        retiring_binding = {name: (sysfs / "loop" / name).read_text(encoding="utf-8").strip() for name in ("backing_file", "offset", "sizelimit", "autoclear")}
         limit = Path(f"/sys/dev/block/{snapshot[0]}/queue/discard_max_bytes")
         assert int(limit.read_text(encoding="ascii")) > 0
         yield node
@@ -100,13 +102,12 @@ def _allow_disposable_loop_deallocation(catalog, spec):
                     os.close(root)
             if qualified:
                 subprocess.run(["umount", str(spec.mount_path)], check=True, timeout=30)
-                assert not (sysfs / "loop").exists(), "Disposable loop did not automatically detach"
             if owned is not None:
                 # The kernel refuses removal while bound/open. Ambiguity retains
                 # the fixture rather than detaching an unproved attachment.
                 if sysfs_identity is None:
                     raise RuntimeError("Fresh loop identity is unavailable; the device was retained")
-                remove_owned_loop(control, owned, sysfs, expected=sysfs_identity)
+                remove_owned_loop(control, owned, sysfs, expected=sysfs_identity, retiring_binding=retiring_binding)
             if node_identity is not None:
                 try:
                     named = node.lstat()
