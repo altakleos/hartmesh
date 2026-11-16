@@ -75,7 +75,7 @@ Ancestry alone is not implementation evidence.
 | [`9699f04cd`](https://github.com/bytedance/deer-flow/commit/9699f04cdc6b65f21576ea5f1cf7d1236e31f50b) | Adapt | Add bounded owner-scoped project facts with explicit extraction opt-in; preserve summaries-off and managed-storage gates. |
 | [`6eb483359`](https://github.com/bytedance/deer-flow/commit/6eb48335981e4e4dc2f3ee8bb7ea741a7f7e3cd1) | Adapt | Manage the named ordinary agent's memory bucket while preserving instance-specific memory APIs and authority. |
 | [`13e6fc29e`](https://github.com/bytedance/deer-flow/commit/13e6fc29e54201ce650b5f48743f88444b4d46f5) | Adopt | Offer opt-in OpenSandbox endpoint access tokens without changing existing sandbox defaults. |
-| [`b883deaab`](https://github.com/bytedance/deer-flow/commit/b883deaab23bcb189ee3e9e1b037babf090983d2) | Adapt | Retain twelve HartMesh core shards and diagnostics; derive the shard total consistently rather than reducing capacity. |
+| [`b883deaab`](https://github.com/bytedance/deer-flow/commit/b883deaab23bcb189ee3e9e1b037babf090983d2) | Adapt | Size HartMesh core shards from measured qualification headroom; derive the total consistently and preserve all tests and diagnostics. |
 | [`b80191fad`](https://github.com/bytedance/deer-flow/commit/b80191fad3e0a507ddf06b352e0261b59c6e47d3) | Adopt | Reject duplicate fact IDs before replacing a memory document. |
 | [`98e8598ad`](https://github.com/bytedance/deer-flow/commit/98e8598adbcab0d66e8ae2de0faf059585dcddb6) | Adopt | Use Windows extended-length paths when deleting deep thread directories. |
 | [`2dc68b242`](https://github.com/bytedance/deer-flow/commit/2dc68b242fd253b32a1106a2b4c213f4b7041e3b) | Adopt | Publish file-backed agent creation exclusively so concurrent creates cannot overwrite a definition. |
@@ -194,7 +194,16 @@ checks encountered measured filesystem-journal stalls; no deadline or runtime
 policy was relaxed. Fresh required CI must qualify these and every applicable
 native/Compose workflow on the final published revision before merge.
 
-The staged reference frontend and marker equal upstream tree
+Core CI uses sixteen duration-balanced shards under the existing 45-minute job
+limit. The twelve-shard qualification on `32832bb951e392e144a5c9cfac2f3ffcb14dee57`
+passed eleven groups; one continuously progressing group reached 95% before its
+deadline, with no failed test assertions. Another group finished with six seconds
+left. Stored estimates underpredicted the cancelled group's observed execution
+by about 1.9 times. Additional capacity restores headroom while retaining every
+case, selection filter, diagnostic and the shared matrix-total command. No test
+or job deadline was extended, and no timing measurements were invented.
+
+The reference frontend and marker equal upstream tree
 `330ae40e7e41fbf440375cd7d06a50a92fcddf51`. The full isolation ancestry check passed
 on integration commit `7f2ad71d756791caa1f56dcbaf399734003c75e3`, whose parents are
 the HartMesh base and fixed upstream target. HartMesh's version
