@@ -17,7 +17,7 @@ from test_telegram_supervisor import _supervisor_logging as _supervisor_logging
 
 from app.telegram_bots.acts import ActsWorker
 from app.telegram_bots.authority import get_local_provider
-from app.telegram_bots.producer import ProductSourceRetired
+from app.telegram_bots.producer import DeliveryClaimRetired, ProductSourceRetired
 from app.telegram_bots.render import render
 from deerflow.agent_instances.work import AgentWork
 from deerflow.agent_instances.work_contract import DelegateWork
@@ -147,7 +147,9 @@ async def test_current_execution_retry_preserves_actual_native(capture_environme
                 await e.host.sender.drain()
                 try:
                     return await e.host.notifications.chat.executions.observe(e.link, original.id, guard=guard)
-                except ProductSourceRetired:
+                except (ProductSourceRetired, DeliveryClaimRetired):
+                    # Another real observer may materialize/claim the same row
+                    # during the read; reload the exact current owner.
                     await asyncio.sleep(0.05)
 
         identity = await asyncio.wait_for(observe(), 10)
