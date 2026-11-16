@@ -22,7 +22,7 @@ gateway:
 # Run all four duration-balanced shards locally; wait for every shard on failure.
 TEST_JOBS ?= 4
 TEST_SHARD_TARGETS := test-shard-1 test-shard-2 test-shard-3 test-shard-4
-.PHONY: test test-shard $(TEST_SHARD_TARGETS)
+.PHONY: test test-shard test-bundled-extensions $(TEST_SHARD_TARGETS)
 test:
 	$(MAKE) --no-print-directory -k -j$(TEST_JOBS) $(TEST_SHARD_TARGETS)
 
@@ -54,13 +54,20 @@ DURATIONS_FILE ?= .test_durations
 test-shard:
 	@test -f "$(DURATIONS_FILE)" || \
 		(echo "error: $(DURATIONS_FILE) is missing; run 'make test-shard-durations' to regenerate the duration baseline" >&2; exit 1)
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --splits $(SPLITS) --group $(GROUP) --splitting-algorithm least_duration --durations-path=$(DURATIONS_FILE) tests/ -v -o faulthandler_timeout=120
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live and not bundled_extension" --ignore=tests/blocking_io --splits $(SPLITS) --group $(GROUP) --splitting-algorithm least_duration --durations-path=$(DURATIONS_FILE) tests/ -v -o faulthandler_timeout=120
 
 # Regenerate .test_durations from the full offline (non-live, non-blocking-I/O)
 # suite so duration-aware sharding reflects real wall-clock cost. Use when
 # existing qualified results are insufficient for explicit baseline maintenance.
 test-shard-durations:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --store-durations --clean-durations --durations-path=$(DURATIONS_FILE) tests/ -q
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live and not bundled_extension" --ignore=tests/blocking_io --store-durations --clean-durations --durations-path=$(DURATIONS_FILE) tests/ -q
+
+# Bundled extension examples own their behavior suites; the core shards exclude
+# them so an optional example cannot fail an unrelated core PR. The extension CI
+# workflow runs this target when an example, the extension contract or the
+# bundled tests themselves change.
+test-bundled-extensions:
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "bundled_extension and not live" tests/ -q
 
 lint:
 	uv run ruff check .

@@ -130,19 +130,27 @@ PROBE_UNREACHABLE = "unreachable"
 
 
 async def check_database_health() -> str:
-    """Probe the persistence engine; return one of the PROBE_* values."""
+    """Probe the persistence engine; return one of the PROBE_* values.
+
+    The probe checks a connection out of the application's own engine pool,
+    the one every repository uses. Probes are serialized so unauthenticated
+    probe traffic holds at most one of those connections per process instead
+    of the whole pool, which would leave request handlers waiting for
+    database connections.
+    """
     engine = get_engine()
     if engine is None:
         # backend=memory, or the engine has not been initialized yet: there is
         # no database to probe.
         return PROBE_NOT_CONFIGURED
-    try:
-        async with asyncio.timeout(_PROBE_TIMEOUT_SECONDS):
-            async with engine.connect() as connection:
-                await connection.execute(text("SELECT 1"))
-    except Exception:
-        logger.warning("Readiness database probe failed", exc_info=True)
-        return PROBE_UNREACHABLE
+    async with _probe_gate("database"):
+        try:
+            async with asyncio.timeout(_PROBE_TIMEOUT_SECONDS):
+                async with engine.connect() as connection:
+                    await connection.execute(text("SELECT 1"))
+        except Exception:
+            logger.warning("Readiness database probe failed", exc_info=True)
+            return PROBE_UNREACHABLE
     return PROBE_OK
 
 

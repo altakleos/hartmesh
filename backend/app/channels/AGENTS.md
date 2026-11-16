@@ -136,3 +136,10 @@ Evict expired contexts first; caches are bounded/process-local. One worker per b
 
 Tests: `test_qq_{channel,lifecycle,binding}.py`, connection router and blocking-I/O.
 Setup: [IM_CHANNEL_CONNECTIONS.md](../../docs/IM_CHANNEL_CONNECTIONS.md#qq-websocket-setup-mvp).
+
+Presented file paths are deduplicated in first-presentation order. DingTalk file
+success needs a processQueryKey and no rejected/flow-controlled target. Telegram
+retries definite photo-format rejection once as the unchanged document; other
+errors retain normal delivery behavior. Feishu post top-level files add their
+placeholders after command detection; only their generated slots receive paths.
+WeCom strips leading mentions for known commands and accepts images up to10MiB.

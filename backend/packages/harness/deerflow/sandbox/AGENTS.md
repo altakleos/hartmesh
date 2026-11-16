@@ -185,3 +185,12 @@ Direct callers retain string compatibility. Shared reads detect this exact host
 carrier before empty/range/truncation handling; tool metadata uses the original
 exception type/status and preserved safe text. Plain file text cannot gain this
 identity. Failed reads never receive read marks; unknown causes stay unknown.
+
+## Short ranged reads
+
+Small successful ranges under uploads/workspace may render source line numbers
+for an actual tool call. Their `N | ` labels are display text, never source bytes.
+Keep full reads, provider errors, truncation markers and output evidence exact;
+read-before-write state tracks the canonical requested range independently.
+Host-path masking stops at commas as well as colons, so adjacent path lists do
+not expose unmasked siblings.

@@ -73,6 +73,7 @@ async def list_plugins(request: Request, response: Response):
     principal = _principal(request)
     response.headers["Cache-Control"] = "private, no-store"
     entries = []
+    documentation = dict(request.app.state.extensions.documentation)
     for source, plugin in request.app.state.extensions.plugins:
         settings = plugin_settings(source, plugin)
         provider = getattr(request.app.state, "extension_storage", None)
@@ -104,6 +105,8 @@ async def list_plugins(request: Request, response: Response):
                 "transport": transport,
                 "settings": {key: settings[key] for key in public},
                 "backend_actions": [action.name for action in plugin.backend if action.purpose != "management" or management_allowed],
+                "model_tools": [tool.name for tool in plugin.tools],
+                "documentation": documentation.get(source) if documentation.get(source, {}).get("id") == plugin.namespace else None,
                 "artifact_presentations": [
                     {"id": item.id, "suffixes": list(item.suffixes), "source_max_bytes": item.source_max_bytes, "preview_max_bytes": item.preview_max_bytes, "projection_marker": item.projection_marker} for item in plugin.artifacts
                 ],
@@ -113,6 +116,32 @@ async def list_plugins(request: Request, response: Response):
                 "storage_capabilities": asdict(provider.capabilities) if plugin.storage_api_version == 1 and provider is not None else None,
             }
         )
+    registered_sources = {source for source, _ in request.app.state.extensions.plugins}
+    known_ids = {entry["namespace"] for entry in entries}
+    for source, page in request.app.state.extensions.documentation:
+        if source in registered_sources or page["id"] in known_ids:
+            continue
+        locales = page["locales"]
+        copy = next((value for tag, value in locales.items() if tag.lower() == "en-us"), None)
+        if copy is None:
+            copy = next((value for tag, value in locales.items() if tag.partition("-")[0] == "en"), next(iter(locales.values())))
+        entries.append(
+            {
+                "namespace": page["id"],
+                "title": copy["title"],
+                "description": copy["description"],
+                "viewer_id": principal.user_id,
+                "module": None,
+                "entry": None,
+                "transport": None,
+                "settings": {"enabled": True},
+                "backend_actions": [],
+                "model_tools": [],
+                "documentation": page,
+                "runtime_only": True,
+            }
+        )
+        known_ids.add(page["id"])
     return entries
 
 

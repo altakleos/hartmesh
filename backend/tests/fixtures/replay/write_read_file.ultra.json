@@ -144,6 +144,52 @@
       "output": {
         "type": "ai",
         "data": {
+          "content": "",
+          "additional_kwargs": {},
+          "response_metadata": {
+            "finish_reason": "tool_calls",
+            "model_name": "sre/gpt-5",
+            "model_provider": "openai"
+          },
+          "type": "ai",
+          "name": null,
+          "id": "lc_run--present-note-file",
+          "tool_calls": [
+            {
+              "name": "present_files",
+              "args": {
+                "filepaths": [
+                  "/mnt/user-data/outputs/note.txt"
+                ]
+              },
+              "id": "call_PresentNoteFile",
+              "type": "tool_call"
+            }
+          ],
+          "invalid_tool_calls": [],
+          "usage_metadata": {
+            "input_tokens": 3719,
+            "output_tokens": 35,
+            "total_tokens": 3754,
+            "input_token_details": {
+              "audio": 0,
+              "cache_read": 3584
+            },
+            "output_token_details": {
+              "audio": 0,
+              "reasoning": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "caller": "lead_agent",
+      "conversation_hash": "445048d5235152d25a797e250545b6e3dfff046dc62617d133e44a2d9411aa93",
+      "input_hash": "5ae2b2037bd187455b59c1861a79b9bc7c06649fc7ded4658a888f9d58d3f7c4",
+      "output": {
+        "type": "ai",
+        "data": {
           "content": "hi from replay.",
           "additional_kwargs": {},
           "response_metadata": {

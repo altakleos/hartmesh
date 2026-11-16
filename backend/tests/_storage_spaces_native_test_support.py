@@ -3,10 +3,18 @@
 import errno
 import os
 import re
+import sqlite3
 import subprocess
 import time
+from contextlib import closing
 
 from deerflow.spaces.docker import ATTACHMENT_LABEL, HOST_LABEL
+
+
+def read_sqlite_page_snapshot(path):
+    """Close host readback before backing teardown, including on query failure."""
+    with closing(sqlite3.connect(path)) as connection:
+        return connection.execute("PRAGMA integrity_check").fetchone(), connection.execute("SELECT body FROM pages").fetchall()
 
 
 def remove_owned_loop(control, number, sysfs, *, expected, retiring_binding=None, ioctl=None, clock=time.monotonic, sleep=time.sleep):

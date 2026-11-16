@@ -45,6 +45,7 @@ def test_explicit_values_are_honored():
                 "shelf_index_max_entries": 10,
                 "shelf_index_max_bytes": 2048,
                 "trash_retention_days": 7,
+                "summaries_enabled": True,
             },
         }
     )
@@ -52,6 +53,7 @@ def test_explicit_values_are_honored():
     assert config.projects.shelf_index_max_entries == 10
     assert config.projects.shelf_index_max_bytes == 2048
     assert config.projects.trash_retention_days == 7
+    assert config.projects.summaries_enabled is True
 
 
 @pytest.mark.parametrize(

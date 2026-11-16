@@ -88,6 +88,9 @@ def compute_files_hash(files: list[str]) -> str:
         name = os.fsencode(os.path.basename(file_path))
         hasher.update(len(name).to_bytes(8, "big"))
         hasher.update(name)
+        if os.path.splitext(file_path)[1].lower() in EXCEL_EXTENSIONS:
+            # Rebuild caches written before literal and mixed-cell preservation.
+            hasher.update(b"excel-cells-v4\0")
         file_hasher = hashlib.sha256()
         try:
             with open(file_path, "rb") as f:
@@ -390,42 +393,70 @@ def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, st
 def _load_excel(
     con: duckdb.DuckDBPyConnection, file_path: str, table_map: dict[str, str]
 ) -> None:
-    """Load all sheets from an Excel file into DuckDB tables.
-
-    pandas picks the reader from the file's content (xlrd for the legacy BIFF
-    format, openpyxl for OOXML), so a mislabelled export still loads, and
-    DuckDB copies each sheet into a table; no DuckDB extension is needed.
-    """
-    import pandas as pd
+    """Read content-selected Excel formats without downloads or cell coercion."""
+    try:
+        import pandas
+    except ImportError:
+        raise SystemExit(
+            "pandas is not installed in this sandbox image. Rebuild the sandbox "
+            "image from docker/sandbox/Dockerfile; nothing is installed at runtime."
+        ) from None
 
     try:
-        sheets = pd.read_excel(file_path, sheet_name=None)
-    except Exception as e:
-        logger.warning(f"  Failed to read workbook '{file_path}': {e}")
+        # Detect the actual workbook content, including XLSX exports mislabeled
+        # .xls and BIFF workbooks mislabeled .xlsx. Neither path needs spatial.
+        workbook = pandas.ExcelFile(file_path)
+    except ImportError:
+        raise SystemExit(
+            "An Excel reader is not installed in this sandbox image. Rebuild the "
+            "sandbox image from docker/sandbox/Dockerfile with openpyxl and xlrd; "
+            "nothing is installed at runtime."
+        ) from None
+    except Exception as exc:
+        logger.warning(f"  Failed to load workbook '{file_path}': {exc}")
         return
 
-    for sheet_name, frame in sheets.items():
-        if frame.shape[1] == 0:
-            logger.warning(f"  Skipped empty sheet '{sheet_name}'")
-            continue
-
-        alias, table_name = _allocate_table_names(sheet_name, table_map)
-
-        try:
-            con.register("sheet_source", frame)
-            con.execute(
-                f"CREATE TABLE {_quote_identifier(table_name)} AS SELECT * FROM sheet_source"
-            )
-            con.unregister("sheet_source")
-            table_map[alias] = table_name
-            row_count = con.execute(
-                f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"
-            ).fetchone()[0]
-            logger.info(
-                f"  Loaded sheet '{sheet_name}' -> table '{table_name}' ({row_count} rows)"
-            )
-        except Exception as e:
-            logger.warning(f"  Failed to load sheet '{sheet_name}': {e}")
+    with workbook:
+        for sheet_name in workbook.sheet_names:
+            alias, table_name = _allocate_table_names(sheet_name, table_map)
+            try:
+                # Excel's literal NA/NULL strings and text identifiers are data,
+                # not pandas' default missing-value and numeric conversions.
+                frame = workbook.parse(
+                    sheet_name, dtype=object, keep_default_na=False, na_values=[""]
+                )
+                if frame.columns.empty:
+                    logger.warning(f"  Skipping empty sheet '{sheet_name}'")
+                    continue
+                for column_name, column in frame.items():
+                    kind = pandas.api.types.infer_dtype(column, skipna=True)
+                    if kind in ("mixed", "mixed-integer"):
+                        frame[column_name] = column.map(str, na_action="ignore")
+                    elif kind == "integer" and all(
+                        -(2**63) <= value < 2**63 for value in column.dropna()
+                    ):
+                        # Object inference narrows small integers to SQL INTEGER.
+                        # Retain the reader's historical BIGINT contract, including
+                        # nulls, without rounding floats or overflowing wider ints.
+                        frame[column_name] = pandas.array(column, dtype="Int64")
+                original_sample = con.execute(
+                    "SELECT current_setting('pandas_analyze_sample')"
+                ).fetchone()[0]
+                try:
+                    # Infer compatible types from every row, including rare cells.
+                    con.execute(
+                        "SET pandas_analyze_sample = ?",
+                        [max(original_sample, len(frame))],
+                    )
+                    con.from_df(frame).create(table_name)
+                finally:
+                    con.execute("SET pandas_analyze_sample = ?", [original_sample])
+                table_map[alias] = table_name
+                logger.info(
+                    f"  Loaded sheet '{sheet_name}' -> table '{table_name}' ({len(frame)} rows)"
+                )
+            except Exception as e:
+                logger.warning(f"  Failed to load sheet '{sheet_name}': {e}")
 
 
 def _load_csv(

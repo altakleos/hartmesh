@@ -64,6 +64,7 @@ from deerflow.runtime.checkpoint_state import (
     graph_writable_channels,
 )
 from deerflow.runtime.context_keys import (
+    AGENT_AUTH_CONTEXT_KEY,
     CHECKPOINT_AGENT_NAME_METADATA_KEY,
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
     DEFAULT_AGENT_NAME_METADATA_VALUE,
@@ -278,6 +279,7 @@ def _release_run_scoped_references(
         STORAGE_PROVIDER_CONTEXT_KEY,
         SCHEDULER_CAPABILITY_CONTEXT_KEY,
         AGENT_RUNS_CONTEXT_KEY,
+        AGENT_AUTH_CONTEXT_KEY,
     }
     try:
         from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
@@ -305,6 +307,7 @@ def _release_run_scoped_references(
             configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
             configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
             configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
+            configurable.pop(AGENT_AUTH_CONTEXT_KEY, None)
         context = runnable_config.get("context")
         if isinstance(context, dict):
             for key in internal_context_keys:
@@ -391,6 +394,9 @@ async def _persist_delivery_receipt(
 _DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
 _DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
 _RECURSION_CAPPED_STOP_REASON = "recursion_capped"
+# Stream error frames and the /wait error envelope share one name for a run that
+# ends in error without an exception; the Gateway spells it the same way.
+_RUN_ERROR_NAME = "RunError"
 _RECURSION_CAPPED_LISTED_OUTPUTS = 5
 
 
@@ -711,6 +717,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             STORAGE_PROVIDER_CONTEXT_KEY,
             SCHEDULER_CAPABILITY_CONTEXT_KEY,
             AGENT_RUNS_CONTEXT_KEY,
+            AGENT_AUTH_CONTEXT_KEY,
             "__run_input_control",
             THREAD_INCARNATION_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
@@ -749,6 +756,7 @@ def _build_runtime_context(
     storage_provider: Any | None = None,
     agent_execution: Any | None = None,
     scheduler_capability: SchedulerRunCapability | None = None,
+    agent_mcp_authority: Any | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -786,6 +794,8 @@ def _build_runtime_context(
         runtime_ctx[CONVERSATION_READER_CONTEXT_KEY] = conversation_reader
     if scheduler_capability is not None:
         runtime_ctx[SCHEDULER_CAPABILITY_CONTEXT_KEY] = scheduler_capability
+    if agent_mcp_authority is not None and agent_execution is None:
+        runtime_ctx[AGENT_AUTH_CONTEXT_KEY] = agent_mcp_authority
     if task_store is not None:
         from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
 
@@ -866,6 +876,7 @@ class RunContext:
     qualify_output_view: OutputViewQualifier | None = None
     agent_runs: Any | None = field(default=None)
     scheduler_capability: SchedulerRunCapability | None = field(default=None)
+    agent_mcp_authority: Any | None = field(default=None)
     # Server-selected occurrence identity. Metadata alone never activates a goal.
     scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
     # Host-only preflight under durable run ownership; failures reject execution.
@@ -884,6 +895,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         configurable.pop(CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY, None)
         configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
         configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
+        configurable.pop(AGENT_AUTH_CONTEXT_KEY, None)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
@@ -1948,6 +1960,7 @@ async def _run_agent(
             storage_provider=ctx.storage_provider,
             agent_execution=ctx.agent_execution,
             scheduler_capability=ctx.scheduler_capability,
+            agent_mcp_authority=ctx.agent_mcp_authority,
         )
         register_sandbox_prewarm_cleanup(runtime_ctx)
         # Bind every checkpoint produced by this run to the effective agent
@@ -2412,6 +2425,12 @@ async def _run_agent(
         if record.abort_event.is_set():
             await _finish_cancellation(record.abort_action)
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
+            # Deliberately no `error` frame here, unlike the delivery check below.
+            # The fallback was streamed and stored as a visible assistant message
+            # carrying the provider failure (tagged `deerflow_error_fallback`), so
+            # this turn never looked like a silent success; a frame would only
+            # duplicate that notice. The record still commits `error` for
+            # accounting and retry purposes.
             error_msg = llm_error_fallback_message
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
@@ -2707,6 +2726,10 @@ async def _run_agent(
                         receipt_persisted = await _persist_delivery_receipt(event_store, thread_id=thread_id, run_id=run_id, content=delivery_content)
                         if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
                             await run_manager.set_status(run_id, RunStatus.error, error=_DELIVERY_RECEIPT_FAILED_ERROR, persist=False)
+                            # A receipt failure has no specialized incomplete-output
+                            # verdict. Publish the terminal error after confirmation so
+                            # clients never observe a silent successful END.
+                            terminal_error_frame = {"message": _DELIVERY_RECEIPT_FAILED_ERROR, "name": _RUN_ERROR_NAME}
 
                     if not capture_requested and not record.ownership_lost and journal is not None and persist_completion:
                         try:

@@ -43,7 +43,10 @@ over canonical tables in the main schema, including on read-only cache hits.
 Keep these views connection-local and preserve normal CTE shadowing.
 
 The sandbox image provides DuckDB, pandas, openpyxl and xlrd. Workbook loading
-uses pandas with the content-appropriate reader, including XLS/XLSM. Never launch
+uses pandas with the content-appropriate reader, including XLS/XLSM. Preserve
+literal NA/NULL strings, text identifiers and nulls; normalize incompatible mixed
+columns to text and infer compatible columns from every row. Restore DuckDB
+sampling after failures and invalidate the Excel cache key when semantics change. Never launch
 installers or download DuckDB extensions. CSV analysis does not require the Excel
 reader to import successfully. Preserve unavailable-cache in-memory operation.
 
@@ -64,3 +67,9 @@ List each duplicate name once in result-column order, using `repr` so embedded
 line breaks remain escaped. At the CLI action-dispatch boundary, report
 `ValueError` as a short stderr error with a nonzero exit; close the connection
 in `finally` for both successful and failed actions. Other exceptions propagate.
+
+Integral Excel columns fitting signed 64-bit retain nullable BIGINT; do not
+coerce fractional, mixed or out-of-range columns to that width. Real workbook
+regressions cover signed large values, unsigned overflow, nulls, literal
+identifiers and cached readback. Changes to materialized types invalidate the
+Excel input cache namespace while retaining immutable existing generations.

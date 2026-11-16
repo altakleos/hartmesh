@@ -510,3 +510,7 @@ control must fail for memory margin, not an unrelated refusal. No developer-host
 mounts or THP changes. Record kernel/THP and individual logs/results; this is
 Docker memory evidence, not tenant-class qualification. Workflow dispatch accepts
 an exact published digest to repeat against delivered bytes.
+
+Host pnpm resolution checks the selected app's `packageManager` pin. A differing
+direct pnpm falls back to Corepack; executable paths stay absolute before changing
+working directories. The product and upstream reference keep independent pins.

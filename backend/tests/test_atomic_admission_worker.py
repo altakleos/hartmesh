@@ -40,6 +40,7 @@ async def test_real_worker_atomic_replacement_retains_finalization_authority(sto
     record = await manager.create_or_reject("thread", user_id="review")
     started, rollback_entered, release_rollback = (asyncio.Event() for _ in range(3))
     error_committed, release_error_ack = asyncio.Event(), asyncio.Event()
+    final_renewal_entered = asyncio.Event()
     hold_rollback = False
 
     class Saver(InMemorySaver):
@@ -83,14 +84,16 @@ async def test_real_worker_atomic_replacement_retains_finalization_authority(sto
     original_status = store.update_status
     original_renew = store.renew_lease
 
-    async def hold_first_active_renewal(run_id, **kwargs):
+    async def observe_renewal(run_id, **kwargs):
         stale_renewal_calls.append(kwargs.get("allow_interrupted", False))
         if stale_renewal_race and len(stale_renewal_calls) == 1:
             stale_renewal_entered.set()
             await release_stale_renewal.wait()
+        if run_id == record.run_id and error_committed.is_set():
+            final_renewal_entered.set()
         return await original_renew(run_id, **kwargs)
 
-    store.renew_lease = hold_first_active_renewal
+    store.renew_lease = observe_renewal
 
     async def hold_final_ack(run_id, status, **kwargs):
         result = await original_status(run_id, status, **kwargs)
@@ -147,7 +150,7 @@ async def test_real_worker_atomic_replacement_retains_finalization_authority(sto
             await asyncio.wait_for(error_committed.wait(), 2)
             assert not record.terminal_status_persisted
             renewal = asyncio.create_task(manager._renew_leases())
-            await asyncio.sleep(0)
+            await asyncio.wait_for(final_renewal_entered.wait(), 2)
             if host_finalization_cancel:
                 record.task.cancel("host cancellation during rollback terminal ACK")
                 await asyncio.sleep(0)

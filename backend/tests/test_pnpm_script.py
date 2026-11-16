@@ -104,6 +104,85 @@ def test_runner_prefers_direct_pnpm_and_forwards_arguments(tmp_path: Path):
     assert "via Corepack" not in result.stderr
 
 
+@pytest.mark.parametrize("direct_version", ["11.25.0", "10.26.2-rc.1"])
+def test_runner_uses_corepack_when_direct_pnpm_conflicts_with_package_manager(tmp_path: Path, direct_version: str):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    direct = _write_fake_command(bin_dir, "pnpm", "direct")
+    if os.name == "nt":
+        direct.write_text(
+            f'@echo off\r\nif "%1"=="--version" (echo {direct_version} & exit /b 0)\r\necho direct^|%CD%^|%*\r\n',
+            encoding="utf-8",
+        )
+    else:
+        direct.write_text(
+            f'#!/bin/sh\nif [ "$1" = "--version" ]; then echo {direct_version}; exit 0; fi\nprintf "direct|%s|%s\\n" "$PWD" "$*"\n',
+            encoding="utf-8",
+        )
+    _write_fake_command(bin_dir, "corepack", "corepack")
+
+    result = _run_pnpm(bin_dir, "install", "--frozen-lockfile")
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == f"corepack|{FRONTEND_DIR}|pnpm install --frozen-lockfile"
+    assert "via Corepack" in result.stderr
+
+
+def test_runner_rejects_mismatched_pnpm_without_corepack(tmp_path: Path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    direct = _write_fake_command(bin_dir, "pnpm", "direct")
+    if os.name == "nt":
+        direct.write_text("@echo off\r\necho 11.25.0\r\n", encoding="utf-8")
+    else:
+        direct.write_text("#!/bin/sh\necho 11.25.0\n", encoding="utf-8")
+
+    result = _run_pnpm(bin_dir, "install")
+
+    assert result.returncode == 127
+    assert "pnpm 11.25.0 is on PATH" in result.stderr
+    assert "pins 10.26.2" in result.stderr
+
+
+@pytest.mark.parametrize("package_content", [None, "{", "{}"])
+def test_runner_reports_unreadable_or_unpinned_package_manifest(tmp_path: Path, monkeypatch, capsys, package_content: str | None):
+    package_json = tmp_path / "package.json"
+    if package_content is not None:
+        package_json.write_text(package_content, encoding="utf-8")
+    run_pnpm = PNPM_MODULE["run_pnpm"]
+    monkeypatch.setitem(run_pnpm.__globals__, "PACKAGE_JSON_PATH", package_json)
+    monkeypatch.setitem(run_pnpm.__globals__, "find_pnpm_command", lambda: ["pnpm"])
+
+    assert run_pnpm(["install"]) != 0
+    assert str(package_json) in capsys.readouterr().err
+
+
+def test_runner_warns_when_direct_pnpm_version_is_unparseable(tmp_path: Path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_command(bin_dir, "pnpm", "direct")
+
+    result = _run_pnpm(bin_dir, "install")
+
+    assert result.returncode == 0
+    assert "could not determine pnpm version" in result.stderr.lower()
+
+
+def test_version_probe_does_not_read_stdin(monkeypatch):
+    run_pnpm = PNPM_MODULE["run_pnpm"]
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(returncode=0, stdout="10.26.2\n")
+
+    monkeypatch.setitem(run_pnpm.__globals__, "find_pnpm_command", lambda: ["pnpm"])
+    monkeypatch.setitem(run_pnpm.__globals__, "subprocess", SimpleNamespace(run=fake_run, DEVNULL=-3))
+
+    assert run_pnpm(["install"]) == 0
+    assert calls[0]["stdin"] == -3
+
+
 def test_runner_prefers_cmd_shim_on_windows(monkeypatch):
     paths = {
         "pnpm": r"C:\tools\pnpm.exe",
@@ -210,3 +289,30 @@ def test_make_install_dry_run_does_not_invoke_bare_pnpm():
     assert "cd frontend-hm && " in result.stdout
     assert "../scripts/pnpm.py --project frontend-hm -- install" in result.stdout
     assert "cd frontend-hm && pnpm install" not in result.stdout
+
+
+def test_pin_comes_from_selected_project(tmp_path: Path, monkeypatch):
+    runner = runpy.run_path(str(PNPM_SCRIPT))["run_pnpm"]
+    root = tmp_path / "checkout"
+    product = root / "frontend-hm"
+    reference = root / "frontend"
+    product.mkdir(parents=True)
+    reference.mkdir()
+    (product / "package.json").write_text('{"packageManager":"pnpm@10.26.2"}', encoding="utf-8")
+    (reference / "package.json").write_text('{"packageManager":"pnpm@99.0.0"}', encoding="utf-8")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout="10.26.2\n")
+
+    monkeypatch.setitem(runner.__globals__, "PROJECT_ROOT", root)
+    monkeypatch.setitem(runner.__globals__, "FRONTEND_DIR", reference)
+    monkeypatch.setitem(runner.__globals__, "PACKAGE_JSON_PATH", reference / "package.json")
+    monkeypatch.setitem(runner.__globals__, "find_pnpm_command", lambda: ["/tools/pnpm"])
+    monkeypatch.setitem(runner.__globals__, "find_corepack_command", lambda: None)
+    monkeypatch.setitem(runner.__globals__, "subprocess", SimpleNamespace(run=fake_run, DEVNULL=-3))
+    assert runner(["--project", "frontend-hm", "--", "check"]) == 0
+    assert calls[0][1]["cwd"] == product
+    assert calls[-1][0] == ["/tools/pnpm", "check"]
+    assert calls[-1][1]["cwd"] == product

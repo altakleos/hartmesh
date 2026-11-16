@@ -82,3 +82,19 @@ The optional background-task `status` filter flows through `McpTaskSubmitter.lis
 - Personal MCP configs live under the authenticated user root (`user_config.py`), use literal values, and never enter the deployment tool cache. `user_tools.py` guards owner and current revision before every call. Runtime server names bind owner/name/revision; durable task `driver_data.connection_scope` records personal or deployment ownership at submission, and background calls resolve a personal key only in the persisted task owner's file. Older rows without that field are deployment-owned. When a deployment name matches a personal runtime name, Agent assembly omits the personal tool rather than exposing two tools under one name; an already submitted personal task still uses its recorded personal scope. Keep catalog IDs stable across edits; never fall back by display name.
 - Personal definitions without `personal_public_network: true` require current administrator authority at discovery and every tool/durable call. `personal_access.py` uses a host-installed async lookup, never a captured role or cached decision; absent/failed lookup denies privileged connections. The Gateway binds the lookup to fresh account records on its database-owning loop for its lifespan. Deployment connections are unaffected. This is admission control, not termination of operations already admitted before a role change.
 - Public-network personal HTTP/SSE clients load TLS trust lazily in a worker thread, once per transport under an async lock. Keep `trust_env=False`, DNS screening, SNI and per-origin pool isolation intact; requests and pool cleanup remain asynchronous. Regression: `tests/blocking_io/test_personal_mcp_ssl.py`.
+
+## Agent credential grants
+
+`mcp_agent_auth` is an operator-owned OAuth client-credentials policy. A named
+custom agent must match an explicit owner and approved AgentConfig/SOUL digest
+at host admission. Runtime JSON cannot grant credentials. Pin its destination
+and nonsecret credential identity; recheck current operator configuration before
+each call and after token acquisition, outside run-scoped config snapshots.
+Revocation denies cached tokens and durable task recovery. Deployment-only
+`agent_auth` HTTP servers cannot combine user/context header credentials or be
+registered through personal MCP APIs. Subagent delegation carries the parent's
+server-admitted authority and keeps existing owner/account/instance fences.
+
+Bound names can collide across different server prefixes. Flatten discovery in
+enabled declaration order and warn when dropping a later duplicate; never
+publish two declarations whose bound names match.

@@ -13,6 +13,7 @@ on:
     branches: ["main", "*-dev"]
     paths:
       - "frontend-hm/**"
+      - ".github/upstream-frontend.json"
       - "contracts/**"
       - "scripts/pnpm.py"
       - "backend/app/gateway/**"
@@ -28,6 +29,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "frontend-hm/**"
+      - ".github/upstream-frontend.json"
       - "contracts/**"
       - "scripts/pnpm.py"
       - "backend/app/gateway/**"
@@ -90,6 +92,9 @@ jobs:
       - name: Install backend dependencies (replay gateway)
         working-directory: backend
         run: uv sync --group dev
+      - name: Verify backend Python libraries
+        working-directory: backend
+        run: uv run --no-sync python -c "import ssl, sqlite3"
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -103,11 +108,28 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Install Playwright Chromium
         working-directory: frontend-hm
-        run: npx playwright install chromium --with-deps
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Verify installed Chromium
+        id: chromium
+        working-directory: frontend-hm
+        run: |
+          node <<'NODE'
+          const { chromium } = require('@playwright/test');
+          (async () => {
+            const browser = await chromium.launch();
+            await browser.close();
+          })().catch((error) => {
+            console.error(error);
+            process.exitCode = 1;
+          });
+          NODE
       - name: Full-stack replay render (DOM assertions are the gate)
         working-directory: frontend-hm
         run: pnpm exec playwright test -c playwright.real-backend.config.ts
       - name: Real Gateway authentication through the Hartmesh proxy
+        # Keep authentication coverage after a render failure when Chromium works.
+        if: ${{ !cancelled() && steps.chromium.outcome == 'success' }}
         working-directory: frontend-hm
         run: pnpm exec playwright test -c playwright.gateway-auth.config.ts
       - name: Upload report + render artifact

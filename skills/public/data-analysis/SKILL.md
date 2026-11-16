@@ -9,6 +9,17 @@ description: Use this skill when the user uploads Excel (.xlsx/.xlsm/.xls) or CS
 
 This skill analyzes user-uploaded Excel/CSV files using DuckDB — an in-process analytical SQL engine. It supports schema inspection, SQL-based querying, statistical summaries, and result export, all through a single Python script.
 
+## Workbook fidelity
+
+The sandbox image supplies pandas, openpyxl and xlrd. All supported Excel formats
+load offline without DuckDB extensions. The reader uses the workbook content, so
+exports mislabeled with another Excel suffix still load. Text identifiers retain
+leading zeros and literal `NA`/`NULL` values remain text; empty cells become nulls.
+Columns containing incompatible types are stored as text while compatible numeric
+columns stay numeric. Integral columns within signed 64-bit range retain their
+BIGINT type, including nulls; wider integers and fractional values keep their
+existing numeric inference. Empty or unreadable sheets are reported and skipped.
+
 ## Core Capabilities
 
 - Inspect Excel/CSV file structure (sheets, columns, types, row counts)

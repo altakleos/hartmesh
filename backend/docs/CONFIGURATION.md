@@ -933,6 +933,16 @@ agent_storage:
 - `agent_storage` is restart-required (the backend is captured at Gateway lifespan startup).
 - In a multi-worker Postgres deployment (`GATEWAY_WORKERS > 1`), leaving `agent_storage.backend: file` logs a startup warning — agents written to one node's local disk are invisible to the others, which is exactly the divergence the `db` backend fixes.
 
+Managed subagents also follow this backend selection. With `file`, their directory
+must support hard links: creation atomically publishes a fully written temporary
+file without replacing an existing name. Workers sharing that directory therefore
+return one HTTP 201 and one HTTP 409 for concurrent same-name creates. Other
+filesystem errors propagate rather than falling back to an overwrite.
+Gateway startup probes hard-link creation once per worker in that directory,
+off the event loop, and logs a warning if the probe fails. Startup continues;
+use a volume with working hard links or migrate to `backend: db` before creating
+managed subagents on an incompatible volume. Probe files are removed afterward.
+
 Migrating an existing install from `file` to `db`:
 
 Run from the repository root using the backend's `uv` environment. The importer
@@ -1372,6 +1382,14 @@ shared (`100.64.0.0/10`, used by CGNAT and Tailscale), other non-global, or
 cloud-metadata addresses; set `allow_private_addresses: true` only when you
 intentionally point the tool at an internal target.
 
+Each Browserless tool entry reads its request timeout from `timeout_s`, with
+`timeout` as an alias when `timeout_s` is absent. The default is 30 seconds.
+Zero, negative, and non-finite values fall back to the default with a warning.
+Strings that cannot be parsed as numbers also trigger this fallback. HTTPX can
+time out immediately for non-positive values. It raises an error for NaN and
+applies no deadline for positive infinity. Browserless preserves positive finite
+values in seconds, including very large values.
+
 Both `web_fetch` (Browserless provider) and `web_capture` need a running
 Browserless instance. You can point `base_url` at [Browserless Cloud](https://www.browserless.io/)
 (set `BROWSERLESS_TOKEN`) or run one locally with Docker:
@@ -1638,6 +1656,7 @@ sandbox:
    request_timeout: 30                # management request timeout seconds
    ready_timeout: 30                  # create/readiness timeout seconds
    use_server_proxy: false            # proxy execd/file traffic through server
+   secure_access: false               # per-sandbox endpoint token; Kubernetes + gateway mode only
    sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
    bash_command_timeout: 600          # default remote command timeout seconds
    replicas: 3                        # active + warm cap per gateway process
@@ -1645,6 +1664,10 @@ sandbox:
    environment:
       PYTHONUNBUFFERED: "1"
 ```
+
+`use_server_proxy` and `secure_access` accept YAML booleans. Omitted or `null`
+values default to `false`. Quoted values such as `"false"` cause a provider
+startup error.
 
 Install the optional SDK before selecting this provider:
 
@@ -1973,7 +1996,7 @@ while WSL resolves it to `/mnt/d/data/report.csv`. WSL-native files can instead
 use `/home/alice/...`. Native Windows paths can use forward slashes as above,
 or single-quoted backslashes (`'D:\data'`). Plain, unquoted YAML scalars also keep
 backslashes literal; only double-quoted scalars interpret backslash escapes.
-These are path examples; the [local development prerequisites](../../README.md#option-2-local-development)
+These are path examples; the [local development prerequisites](../../docs/guide/deployment.md#option-2-local-development)
 still apply, including the documented WSL limitations of the startup scripts.
 
 **Gateway in Docker:** both bundled Compose files mount the repository's
@@ -2108,6 +2131,8 @@ models:
 - `DEER_FLOW_CREDENTIALS_KEY` - At-rest encryption key(s) for stored credentials; comma-separate to rotate. See [Credentials encryption key](#credentials-encryption-key-deer_flow_credentials_key)
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
+
+Search, fetch and capture providers treat an example value that `.env.example` ships (such as `your-jina-api-key`, matched exactly) as unset, in `config.yaml` and in the environment alike: a keyless provider such as the Jina Reader uses its free tier, and a provider that needs a key reports it missing. Any other value is sent as written, so a self-hosted token you chose keeps working. Browserless reads `BROWSERLESS_TOKEN` only when its `token` field is omitted, so a blank or placeholder `token` is not replaced by the variable. `make doctor` applies the same rules and names the variable or field that still holds a placeholder, including `JINA_API_KEY` and `YDC_API_KEY` for the keyless providers.
 
 ## Backend dotenv selection
 
@@ -2385,3 +2410,7 @@ sources, startup/bootstrap accounts and role assignment through deployment tools
 
 This configuration addition advances `config_version` to 52. There is no database
 schema change or customer data migration.
+
+Project memory extraction is disabled for existing/new legacy projects until
+explicitly enabled through their memory API. This does not enable project pages
+in the HartMesh frontend. Plugin-owned projects need their own storage adapter.

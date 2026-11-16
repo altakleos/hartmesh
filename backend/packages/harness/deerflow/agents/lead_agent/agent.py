@@ -67,6 +67,7 @@ from deerflow.config.subagents_config import (
     effective_subagent_concurrency,
     effective_total_subagents_per_run,
 )
+from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, AgentMcpAuthority
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
 from deerflow.runtime.checkpoint_mode import (
@@ -1232,12 +1233,18 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         scheduler_capability = None
     agent_name = instance_execution.definition.config["name"] if instance_execution else validate_agent_name(cfg.get("agent_name"))
 
+    agent_authority = runtime_context.get(AGENT_AUTH_CONTEXT_KEY) if isinstance(runtime_context, Mapping) else None
+    pinned_agent = isinstance(agent_authority, AgentMcpAuthority) and not is_bootstrap and not cfg.get("is_subagent") and not instance_execution
     if instance_execution:
         from deerflow.config.agents_config import AgentConfig
 
         if is_bootstrap:
             raise ValueError("Persistent instances cannot bootstrap or self-update their definition")
         agent_config = AgentConfig.model_validate(instance_execution.definition.validated().config)
+    elif pinned_agent:
+        agent_config = agent_authority.agent_config()
+        if agent_authority.user_id != resolved_user_id or agent_config is None or agent_config.name != agent_name:
+            raise ValueError("Admitted MCP agent definition does not match this run")
     else:
         agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
     memory_enabled = not instance_execution and getattr(agent_config, "memory_enabled", True) is not False
@@ -1681,6 +1688,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         max_concurrent_subagents=max_concurrent_subagents,
         max_total_subagents=max_total_subagents,
         agent_name=agent_name,
+        agent_soul=agent_authority.soul if pinned_agent else None,
         available_skills=available_skills,
         app_config=resolved_app_config,
         deferred_names=setup.deferred_names,

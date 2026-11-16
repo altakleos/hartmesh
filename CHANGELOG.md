@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Adopt DeerFlow reliability improvements for scheduling, memory, cancellation,
+  input validation and delegation while preserving HartMesh storage and ownership.
+- Add chat scrolling controls, bounded extension usage documentation and optional
+  owner-qualified search providers; retain explicit opt-in project memory.
+- Join the upstream schema branch through an additive migration. Publication and
+  exact release artifact qualification remain separate from source adoption.
+
 ## [2.2.0+hartmesh.59] - 2026-11-16
 
 ### Storage startup

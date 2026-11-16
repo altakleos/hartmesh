@@ -669,3 +669,12 @@ compaction share typed admission and generation/epoch fencing; unsupported
 backend scope is explicit. SQL search uses lexical/relevance ranking without
 disk indexes. Keep the backend portable and legacy contracts unchanged. See
 [instance memory](../../../../../../docs/AGENT_EXECUTION.md#instance-memory).
+
+Memory imports reject duplicate fact IDs before capacity selection, irrespective
+of input order or unchanged rows. Operational FTS startup errors preserve the
+existing index; only SQLite corruption/NOTADB justifies replacement. Invalid
+summary types preserve earlier summaries while consuming the extraction batch.
+Project memory is an explicit legacy-project opt-in and never selects a managed
+Space or employee memory audience through the human-memory hook. Binding a
+portable storage port copies configuration and removes that ambient project hook
+from its independent updater and queue. Human memory keeps its original hook.

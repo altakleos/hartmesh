@@ -967,6 +967,7 @@ export function createEnUS(product: string): Translations {
 
     // Common
     common: {
+      scrollToBottom: "Scroll to bottom",
       home: "Home",
       settings: "Settings",
       delete: "Delete",
