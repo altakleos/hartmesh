@@ -164,3 +164,36 @@ def test_mount_evidence_reads_protected_pool_and_checks_real_identity(monkeypatc
     else:
         qualification.verify_mounts(tmp_path)
         assert set(reads) == set(by_target) and len(reads) == 31
+
+
+def test_failed_margin_retains_all_readings_and_never_passes_run(monkeypatch, tmp_path):
+    import json
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("RUNNER_ENVIRONMENT", "github-hosted")
+    exists, read_text = Path.exists, Path.read_text
+    monkeypatch.setattr(Path, "exists", lambda path: False if path == Path("/srv/hartmesh-memory") else exists(path))
+    monkeypatch.setattr(Path, "read_text", lambda path, *args, **kwargs: "always" if str(path) == "/sys/kernel/mm/transparent_hugepage/enabled" else read_text(path, *args, **kwargs))
+    # No Docker, mounts or host writes: exercise admission/collection with
+    # independent structured inputs. Only actual CI supplies native evidence.
+    monkeypatch.setattr(qualification, "command", lambda *args: "fixture-source")
+    monkeypatch.setattr(qualification, "profile_service", lambda *args: {"fixture": True})
+    monkeypatch.setattr(qualification, "verify_mounts", lambda *args: None)
+
+    def measured(compose_file, directory, name, **kwargs):
+        sample = prepared_sample()
+        sample["name"] = name
+        if name == "candidate-empty-pool" or name.startswith("baseline-"):
+            sample["peak_bytes"] = 128 << 20
+        return sample
+
+    monkeypatch.setattr(qualification, "measure", measured)
+    image = "example.invalid/backend@sha256:" + "a" * 64
+    directory = tmp_path / "evidence"
+    with pytest.raises(qualification.MemoryMarginExceeded, match="candidate-empty-pool"):
+        qualification.main(["--image", image, "--baseline-image", image, "--artifacts", str(directory)])
+    result = json.loads((directory / "result.json").read_text())
+    assert result["passed"] is False
+    assert result["margin_failures"] == ["candidate-empty-pool"]
+    assert len(result["samples"]) == 16
+    assert {row["name"] for row in result["samples"]} >= {"candidate-fresh-5", "candidate-restart-5", "baseline-fresh-5"}

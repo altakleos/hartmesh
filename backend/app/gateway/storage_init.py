@@ -580,7 +580,10 @@ sync -f "$(dirname -- "$p")"
         try:
             os.fchown(fd, 0, 1000)
             os.posix_fallocate(fd, 0, spec.max_bytes)
-            self.host.run("mkfs.ext4", "-q", "-F", "-U", spec.filesystem_uuid, "-N", str(spec.max_inodes), "-m", "0", "-E", "nodiscard,lazy_itable_init=0,lazy_journal_init=0", str(spec.image_path), timeout=120)
+            # Direct IO prevents formatting each new image from filling the
+            # startup cgroup with buffer cache. Keep eager initialization and
+            # the existing allocation/fsync/verification boundaries intact.
+            self.host.run("mkfs.ext4", "-D", "-q", "-F", "-U", spec.filesystem_uuid, "-N", str(spec.max_inodes), "-m", "0", "-E", "nodiscard,lazy_itable_init=0,lazy_journal_init=0", str(spec.image_path), timeout=120)
             os.posix_fallocate(fd, 0, spec.max_bytes)
             os.fsync(fd)
         finally:

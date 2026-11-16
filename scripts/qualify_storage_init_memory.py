@@ -25,6 +25,10 @@ EXPECTED_LIMIT = 128 << 20
 COUNTS = {"user": 10, "assistant": 10, "employee": 10, "company": 1}
 
 
+class MemoryMarginExceeded(ValueError):
+    """Preparation completed but failed the independent memory admission gate."""
+
+
 def command(*args, env=None):
     try:
         return subprocess.check_output(
@@ -83,7 +87,7 @@ def validate_sample(sample, *, require_telemetry=True, require_margin=True):
                 "reported memory does not cover the external cgroup observation"
             )
     if require_margin and peak * 4 > limit * 3:
-        raise ValueError(
+        raise MemoryMarginExceeded(
             "storage preparation exceeds 75 percent of its declared memory limit"
         )
 
@@ -134,7 +138,14 @@ def measure(compose_file, directory, name, *, recreate):
         command(*compose, "create", "--force-recreate", "storage-init")
     identity = command(*compose, "ps", "-aq", "storage-init")
     before = json.loads(command("docker", "inspect", identity))[0]
-    observed = {"peak": 0, "limit": None, "events": {}, "error": None}
+    observed = {
+        "peak": 0,
+        "limit": None,
+        "events": {},
+        "error": None,
+        "max_current": 0,
+        "stat_at_max_current": {},
+    }
     stop = threading.Event()
 
     def watch():
@@ -162,6 +173,18 @@ def measure(compose_file, directory, name, *, recreate):
                         observed["peak"], int((cg / "memory.peak").read_text())
                     )
                     observed["limit"] = int((cg / "memory.max").read_text())
+                    current = int((cg / "memory.current").read_text())
+                    if current >= observed["max_current"]:
+                        observed["max_current"] = current
+                        observed["stat_at_max_current"] = {
+                            key: int(value)
+                            for key, value in (
+                                line.split()
+                                for line in (cg / "memory.stat")
+                                .read_text()
+                                .splitlines()
+                            )
+                        }
                     observed["events"] = {
                         key: int(value)
                         for key, value in (
@@ -234,6 +257,8 @@ def measure(compose_file, directory, name, *, recreate):
         peak_bytes=max(observed["peak"], reported["peak_bytes"] if reported else 0),
         reported_memory=reported,
         memory_events=observed["events"],
+        max_sampled_current_bytes=observed["max_current"],
+        memory_stat_at_max_sampled_current=observed["stat_at_max_current"],
         observer_error=observed["error"],
         document=docs[-1] if len(docs) == 1 else None,
     )
@@ -360,6 +385,7 @@ def main(argv=None):
         encoding="utf-8",
     )
     rows = []
+    margin_failures = []
     result = dict(
         schema=1,
         source=command("git", "rev-parse", "HEAD"),
@@ -390,7 +416,12 @@ def main(argv=None):
                 )
                 rows.append(sample)
                 if label == "candidate":
-                    validate_sample(sample)
+                    try:
+                        validate_sample(sample)
+                    except MemoryMarginExceeded:
+                        # Keep the failure, but measure the already-prepared pool
+                        # too. A failed margin must never erase the other readings.
+                        margin_failures.append(sample["name"])
                     verify_mounts(data)
                 else:
                     # A failed negative control must be the memory margin, not an unrelated preparation refusal.
@@ -409,9 +440,14 @@ def main(argv=None):
                 raise ValueError(
                     "baseline did not fail the memory-margin gate in every fresh container"
                 )
+        if margin_failures:
+            raise MemoryMarginExceeded(
+                f"memory margin failed: {', '.join(margin_failures)}"
+            )
         result["passed"] = True
     finally:
         result.setdefault("passed", False)
+        result["margin_failures"] = margin_failures
         (directory / "result.json").write_text(
             json.dumps(result, indent=2) + "\n", encoding="utf-8"
         )

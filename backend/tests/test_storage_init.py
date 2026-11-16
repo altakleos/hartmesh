@@ -120,6 +120,20 @@ def test_new_mount_explicitly_disables_online_discard(operator):
     assert "discard" not in options
 
 
+def test_new_image_formatting_uses_direct_io_and_retains_eager_initialization(operator):
+    tool, _, commands = operator
+    tool.prepare()
+    formats = [args for args in commands if args[0] == "mkfs.ext4"]
+    assert formats
+    for args in formats:
+        assert "-D" in args
+        assert args[args.index("-E") + 1] == "nodiscard,lazy_itable_init=0,lazy_journal_init=0"
+        spec = next(spec for spec in tool.load().volumes.values() if str(spec.image_path) == args[-1])
+        assert args[args.index("-U") + 1] == spec.filesystem_uuid
+        assert args[args.index("-N") + 1] == str(spec.max_inodes)
+        assert spec.image_path.stat().st_size == spec.max_bytes
+
+
 @pytest.mark.parametrize("text", ["# hartmesh-storage begin\n", "# hartmesh-storage end\n", "# hartmesh-storage begin\n# hartmesh-storage end\n# hartmesh-storage begin\n# hartmesh-storage end\n"])
 def test_fstab_sync_refuses_malformed_markers(text):
     with pytest.raises(si.Refused, match="fstab"):

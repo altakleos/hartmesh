@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Storage startup
 
 - Reduce privileged storage preparation's startup memory with a lightweight
-  supervisor and disabled bytecode writes. Report cgroup peak and limit without
+  supervisor, disabled bytecode writes and direct-I/O formatting. Report cgroup
+  peak and limit without
   changing preparation documents, exit codes or child containment. Qualify the
   production Docker service with 31 real spaces and a 25% memory reserve.
 
