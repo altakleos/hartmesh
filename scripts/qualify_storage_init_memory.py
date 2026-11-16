@@ -13,6 +13,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -25,9 +26,21 @@ COUNTS = {"user": 10, "assistant": 10, "employee": 10, "company": 1}
 
 
 def command(*args, env=None):
-    return subprocess.check_output(
-        args, text=True, stderr=subprocess.PIPE, env=env
-    ).strip()
+    try:
+        return subprocess.check_output(
+            args, text=True, stderr=subprocess.PIPE, env=env
+        ).strip()
+    except subprocess.CalledProcessError as exc:
+        # The fixture contains only synthetic configuration. Preserve the actual
+        # Docker/tool failure instead of hiding it behind a Python traceback.
+        if exc.stderr:
+            print(
+                exc.stderr,
+                file=sys.stderr,
+                end="" if exc.stderr.endswith("\n") else "\n",
+                flush=True,
+            )
+        raise
 
 
 def validate_sample(sample, *, require_telemetry=True, require_margin=True):
@@ -118,7 +131,7 @@ def profile_service(profile, image, env_file, project):
 def measure(compose_file, directory, name, *, recreate):
     compose = ("docker", "compose", "-f", str(compose_file))
     if recreate:
-        command(*compose, "create", "--force-recreate", "--no-deps", "storage-init")
+        command(*compose, "create", "--force-recreate", "storage-init")
     identity = command(*compose, "ps", "-aq", "storage-init")
     before = json.loads(command("docker", "inspect", identity))[0]
     observed = {"peak": 0, "limit": None, "events": {}, "error": None}
@@ -252,6 +265,7 @@ def verify_mounts(data):
         target = slot["mount_path"]
         found = json.loads(
             command(
+                "sudo",
                 "findmnt",
                 "--json",
                 "--mountpoint",
@@ -300,6 +314,20 @@ def main(argv=None):
         "-m",
         "0755",
         str(data),
+    )
+    # Compose's normalized JSON omits create_host_path's default. Provision the
+    # empty bind source explicitly, as the production long-form bind does.
+    command(
+        "sudo",
+        "install",
+        "-d",
+        "-o",
+        "0",
+        "-g",
+        "1000",
+        "-m",
+        "0750",
+        str(data / "spaces"),
     )
     env_file = directory / "fixture.env"
     env_file.write_text(

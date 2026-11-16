@@ -2,6 +2,8 @@
 
 import copy
 import importlib.util
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -104,3 +106,61 @@ def test_qualification_refuses_an_existing_deployment(monkeypatch, tmp_path):
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     with pytest.raises(SystemExit):
         qualification.main(["--image", "unused", "--baseline-image", "unused", "--artifacts", str(tmp_path / "result")])
+
+
+def test_command_failure_keeps_the_actual_tool_diagnostic(monkeypatch, capsys):
+    failure = subprocess.CalledProcessError(1, ["docker", "compose", "create"], stderr="bind source path does not exist\n")
+
+    def refused(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(qualification.subprocess, "check_output", refused)
+    with pytest.raises(subprocess.CalledProcessError) as caught:
+        qualification.command("docker", "compose", "create")
+    assert caught.value is failure
+    assert capsys.readouterr().err == "bind source path does not exist\n"
+
+
+def test_recreation_arguments_are_accepted_by_actual_compose_cli(monkeypatch, tmp_path):
+    if shutil.which("docker") is None or subprocess.run(["docker", "compose", "version"], capture_output=True).returncode:
+        pytest.skip("Docker Compose CLI unavailable")
+
+    class Parsed(Exception):
+        pass
+
+    def parse_without_creating(*args):
+        # --help invokes the real option parser, without a daemon, container,
+        # mount or storage effect. It rejects the former up-only --no-deps flag.
+        result = subprocess.run([*args, "--help"], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        raise Parsed
+
+    monkeypatch.setattr(qualification, "command", parse_without_creating)
+    with pytest.raises(Parsed):
+        qualification.measure(tmp_path / "service.json", tmp_path, "fixture", recreate=True)
+
+
+@pytest.mark.parametrize("mismatched", [False, True])
+def test_mount_evidence_reads_protected_pool_and_checks_real_identity(monkeypatch, tmp_path, mismatched):
+    import json
+
+    slots = [{"mount_path": f"/protected/spaces/{index}.volume", "filesystem_uuid": f"fixture-uuid-{index}"} for index in range(31)]
+    by_target = {row["mount_path"]: row["filesystem_uuid"] for row in slots}
+    reads = []
+
+    def protected_read(*args):
+        if args[0] != "sudo":
+            raise PermissionError("pool and loop metadata require host-root read authority")
+        if args[1] == "cat":
+            return json.dumps({"volumes": slots})
+        target = args[args.index("--mountpoint") + 1]
+        reads.append(target)
+        return json.dumps({"filesystems": [{"target": target, "fstype": "ext4", "uuid": "another-filesystem" if mismatched else by_target[target]}]})
+
+    monkeypatch.setattr(qualification, "command", protected_read)
+    if mismatched:
+        with pytest.raises(ValueError, match="does not match"):
+            qualification.verify_mounts(tmp_path)
+    else:
+        qualification.verify_mounts(tmp_path)
+        assert set(reads) == set(by_target) and len(reads) == 31
