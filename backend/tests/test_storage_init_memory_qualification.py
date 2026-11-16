@@ -18,10 +18,10 @@ def prepared_sample():
         "exit_code": 0,
         "oom_killed": False,
         "memory_events": {"oom_kill": 0},
-        "limit_bytes": 128 << 20,
-        "peak_bytes": 96 << 20,
-        "observed_peak_bytes": 95 << 20,
-        "reported_memory": {"limit_bytes": 128 << 20, "peak_bytes": 96 << 20},
+        "limit_bytes": 192 << 20,
+        "peak_bytes": 144 << 20,
+        "observed_peak_bytes": 143 << 20,
+        "reported_memory": {"limit_bytes": 192 << 20, "peak_bytes": 144 << 20},
         "document": {"command": "prepare", "returncode": 0, "verdict": "complete", "prepared": {"user": 10, "assistant": 10, "employee": 10, "company": 1}, "spaces": [{"mounted": True} for _ in range(31)]},
     }
 
@@ -52,7 +52,7 @@ def test_process_exit_zero_cannot_qualify_bad_preparation_or_memory(mutation):
     elif mutation == "wrong-limit":
         sample["reported_memory"]["limit_bytes"] *= 2
     else:
-        sample["reported_memory"]["peak_bytes"] = 94 << 20
+        sample["reported_memory"]["peak_bytes"] = 142 << 20
     with pytest.raises(ValueError):
         qualification.validate_sample(sample)
 
@@ -61,13 +61,14 @@ def test_baseline_admission_removes_only_new_telemetry_and_margin_requirements()
     sample = prepared_sample()
     sample["reported_memory"] = None
     sample["peak_bytes"] = 128 << 20
-    qualification.validate_sample(sample, require_telemetry=False, require_margin=False)
+    sample["limit_bytes"] = 128 << 20
+    qualification.validate_sample(sample, require_telemetry=False, require_margin=False, expected_limit=128 << 20)
     sample["document"]["returncode"] = 1
     with pytest.raises(ValueError, match="did not complete"):
-        qualification.validate_sample(sample, require_telemetry=False, require_margin=False)
+        qualification.validate_sample(sample, require_telemetry=False, require_margin=False, expected_limit=128 << 20)
 
 
-@pytest.mark.parametrize("limit", [128 << 20, 192 << 20])
+@pytest.mark.parametrize("limit", [192 << 20, 256 << 20])
 def test_service_extraction_retains_production_command_and_containment(tmp_path, monkeypatch, limit):
     import json
 
@@ -94,7 +95,7 @@ def test_service_extraction_retains_production_command_and_containment(tmp_path,
 
     monkeypatch.setattr(qualification, "command", render)
     (tmp_path / "env").write_text("HARTMESH_USERS=10\n", encoding="utf-8")
-    if limit != 128 << 20:
+    if limit != 192 << 20:
         with pytest.raises(ValueError, match="memory limits differ"):
             qualification.profile_service(tmp_path / "compose.yaml", expected["image"], tmp_path / "env", "test-project")
     else:
@@ -177,13 +178,16 @@ def test_failed_margin_retains_all_readings_and_never_passes_run(monkeypatch, tm
     # No Docker, mounts or host writes: exercise admission/collection with
     # independent structured inputs. Only actual CI supplies native evidence.
     monkeypatch.setattr(qualification, "command", lambda *args: "fixture-source")
-    monkeypatch.setattr(qualification, "profile_service", lambda *args: {"fixture": True})
+    monkeypatch.setattr(qualification, "profile_service", lambda *args, **kwargs: {"fixture": True})
     monkeypatch.setattr(qualification, "verify_mounts", lambda *args: None)
 
     def measured(compose_file, directory, name, **kwargs):
         sample = prepared_sample()
         sample["name"] = name
-        if name == "candidate-empty-pool" or name.startswith("baseline-"):
+        if name == "candidate-empty-pool":
+            sample["peak_bytes"] = 192 << 20
+        elif name.startswith("baseline-"):
+            sample["limit_bytes"] = 128 << 20
             sample["peak_bytes"] = 128 << 20
         return sample
 

@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supervisor, disabled bytecode writes and direct-I/O formatting. Report cgroup
   peak and limit without
   changing preparation documents, exit codes or child containment. Qualify the
-  production Docker service with 31 real spaces and a 25% memory reserve.
+  production Docker service with 31 real spaces and a 25% memory reserve;
+  preparation has a 192 MiB cap and the mount-only helper retains 128 MiB.
 
 ### Schema changes
 

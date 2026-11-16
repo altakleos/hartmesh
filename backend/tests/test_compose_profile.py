@@ -1605,9 +1605,10 @@ def test_summary_line_reports_the_spaces_and_the_agents(render_config: ModuleTyp
 def test_storage_init_is_pinned_outside_the_memory_equality(compose: dict) -> None:
     service = compose["services"]["storage-init"]
     assert service["privileged"] is True and service["pid"] == "host" and service["network_mode"] == "none"
-    assert service["restart"] == "no" and service["mem_limit"] == service["memswap_limit"] == "128m" and service["pids_limit"] == 64
+    assert service["restart"] == "no" and service["mem_limit"] == service["memswap_limit"] == "192m" and service["pids_limit"] == 64
     assert service["working_dir"] == "/app/backend"
-    assert service["entrypoint"] == ["uv", "run", "--no-sync", "python", "-m", "app.gateway.storage_init"]
+    assert service["entrypoint"] == ["uv", "run", "--no-sync", "python", "-m", "app.storage_init"]
+    assert service["environment"]["PYTHONDONTWRITEBYTECODE"] == "1"
     assert service["command"] == ["prepare", "--at-start"]
     assert not {"user", "cap_drop", "env_file", "healthcheck", "logging", "networks"}.intersection(service)
     assert "storage-init" not in MEMORY_MIB

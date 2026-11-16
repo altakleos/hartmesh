@@ -47,7 +47,7 @@ async def test_storage_init_is_not_run_when_the_image_key_is_unset(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gateway_storage_init_command_matches_the_compose_service(monkeypatch):
+async def test_gateway_mount_only_command_retains_its_own_budget_and_service_containment(monkeypatch):
     monkeypatch.setenv("HARTMESH_STORAGE_INIT_IMAGE", IMAGE)
     monkeypatch.setenv("HARTMESH_DATA_DIR", "/srv/hartmesh")
     for index, key in enumerate(KEYS):
@@ -109,7 +109,8 @@ async def test_gateway_storage_init_command_matches_the_compose_service(monkeypa
     service = yaml.safe_load((Path(__file__).resolve().parents[2] / "deploy/compose/compose.yaml").read_text(encoding="utf-8"))["services"]["storage-init"]
     assert command[-6:-2] == service["entrypoint"][1:-1]
     assert service["entrypoint"][-1] == "app.storage_init"
-    assert command[command.index("--memory") + 1] == service["mem_limit"]
+    assert command[command.index("--memory") + 1] == "128m"
+    assert service["mem_limit"] == service["memswap_limit"] == "192m"
     assert set(service["environment"]) == {"PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "UV_CACHE_DIR", "HARTMESH_DATA_DIR", *KEYS}
     assert service["environment"]["PYTHONDONTWRITEBYTECODE"] == "1"
 

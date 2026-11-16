@@ -101,8 +101,8 @@ services:
         bind:
           propagation: rslave
           create_host_path: true
-    mem_limit: 128m
-    memswap_limit: 128m
+    mem_limit: 192m
+    memswap_limit: 192m
     pids_limit: 64
     restart: "no"
 

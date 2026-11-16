@@ -21,7 +21,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MEMORY = re.compile(r"memory peak .*\(peak_bytes=(\d+) limit_bytes=(\d+)\)")
 IMAGE = re.compile(r"[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}\Z")
-EXPECTED_LIMIT = 128 << 20
+EXPECTED_LIMIT = 192 << 20
+BASELINE_LIMIT = 128 << 20
 COUNTS = {"user": 10, "assistant": 10, "employee": 10, "company": 1}
 
 
@@ -47,7 +48,13 @@ def command(*args, env=None):
         raise
 
 
-def validate_sample(sample, *, require_telemetry=True, require_margin=True):
+def validate_sample(
+    sample,
+    *,
+    require_telemetry=True,
+    require_margin=True,
+    expected_limit=EXPECTED_LIMIT,
+):
     """No process-exit-only success: admission needs the actual preparation result."""
     if (
         sample["exit_code"] != 0
@@ -71,7 +78,7 @@ def validate_sample(sample, *, require_telemetry=True, require_margin=True):
     limit, peak = sample["limit_bytes"], sample["peak_bytes"]
     if (
         type(limit) is not int
-        or limit != EXPECTED_LIMIT
+        or limit != expected_limit
         or type(peak) is not int
         or peak <= 0
     ):
@@ -92,7 +99,9 @@ def validate_sample(sample, *, require_telemetry=True, require_margin=True):
         )
 
 
-def profile_service(profile, image, env_file, project):
+def profile_service(
+    profile, image, env_file, project, *, expected_limit=EXPECTED_LIMIT
+):
     frozen = dict(
         line.split("=", 1)
         for line in env_file.read_text(encoding="utf-8").splitlines()
@@ -125,8 +134,8 @@ def profile_service(profile, image, env_file, project):
         raise ValueError("production storage service containment differs")
     if (
         service["command"] != ["prepare", "--at-start"]
-        or int(service["mem_limit"]) != EXPECTED_LIMIT
-        or int(service["memswap_limit"]) != EXPECTED_LIMIT
+        or int(service["mem_limit"]) != expected_limit
+        or int(service["memswap_limit"]) != expected_limit
     ):
         raise ValueError("production startup command or memory limits differ")
     return {"name": project, "services": {"storage-init": service}}
@@ -401,7 +410,13 @@ def main(argv=None):
             ("baseline", old_profile, args.baseline_image),
         ):
             project = profile_service(
-                profile, image, env_file, f"storage-memory-{label}"
+                profile,
+                image,
+                env_file,
+                f"storage-memory-{label}",
+                expected_limit=EXPECTED_LIMIT
+                if label == "candidate"
+                else BASELINE_LIMIT,
             )
             compose_file = directory / f"{label}-service.json"
             compose_file.write_text(json.dumps(project, indent=2), encoding="utf-8")
@@ -429,7 +444,10 @@ def main(argv=None):
                         "oom_kill", 0
                     ):
                         validate_sample(
-                            sample, require_telemetry=False, require_margin=False
+                            sample,
+                            require_telemetry=False,
+                            require_margin=False,
+                            expected_limit=BASELINE_LIMIT,
                         )
                     negative.append(
                         sample["peak_bytes"] * 4 > sample["limit_bytes"] * 3
