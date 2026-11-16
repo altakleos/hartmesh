@@ -1,5 +1,11 @@
 # Persistence lifecycle
 
+`readers.reader_session` owns a read session: the body stays cancellable and
+`finally` drains close across repeated cancellation before returning its owner.
+Use it for owned eligibility/account/connection/instance reads. Borrowed
+transactions and writers keep their existing lifetimes; never close a borrowed
+session through this helper. Actual held-close tests cover SQLite/PostgreSQL.
+
 `init_engine`/`init_engine_from_config` preserve normal bootstrap by default.
 Operator callers may use `existing_only=True` to prohibit directory/database/
 schema creation, bootstrap and migration stamping. `read_only=True` also implies

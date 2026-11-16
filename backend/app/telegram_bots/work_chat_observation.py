@@ -4,6 +4,7 @@ import logging
 
 from sqlalchemy import func, or_, select
 
+from app.telegram_bots.sql_readers import reader_session
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramOutboxRow
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,7 @@ class WorkChatObservation:
         key = link.id, family
         saved = self._cursors.get(key)
         after, horizon = saved[1:] if saved is not None and saved[0] == link.binding_generation else (None, None)
-        async with self.chat.host.outbox.sessions() as reader:
+        async with reader_session(self.chat.host.outbox.sessions) as reader:
             if horizon is None:
                 horizon = await reader.scalar(query.with_only_columns(func.max(table.id)))
             if horizon is None:

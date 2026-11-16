@@ -24,6 +24,7 @@ from deerflow.persistence.channel_connections.model import (
     ChannelCredentialRow,
     ChannelOAuthStateRow,
 )
+from deerflow.persistence.readers import reader_session
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
@@ -587,7 +588,7 @@ class ChannelConnectionRepository:
         workspace_id: str | None = None,
         status: str = "connected",
     ) -> dict[str, Any] | None:
-        async with self.session_factory() as session:
+        async with reader_session(self.session_factory) as session:
             result = await session.execute(
                 select(ChannelConnectionRow)
                 .where(

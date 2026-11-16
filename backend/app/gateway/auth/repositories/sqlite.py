@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
 from deerflow.config.auth_config import LOCAL_ACCOUNT_ISSUER
+from deerflow.persistence.readers import reader_session
 from deerflow.persistence.user.access import LIMIT_ROLES, ROLES, DisabledIdentityRow, IdentityHoldRow, RoleLimitRow, identity_lock_key, issuer_key, limited_role, local_account
 from deerflow.persistence.user.model import OAUTH_IDENTITY_INDEX_NAME, UserRow
 
@@ -405,7 +406,7 @@ class SQLiteUserRepository(UserRepository):
             if not session.in_transaction() or not session.is_active:
                 raise ValueError("Borrowed account lookup requires an active transaction")
             return await self._load(session, await session.get(UserRow, user_id, populate_existing=True))
-        async with self._sf() as session:
+        async with reader_session(self._sf) as session:
             return await self._load(session, await session.get(UserRow, user_id))
 
     async def get_user_by_email(self, email: str) -> User | None:

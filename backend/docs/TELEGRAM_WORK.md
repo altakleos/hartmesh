@@ -2409,3 +2409,13 @@ Work UI test clocks advance monotonically to the real fixture Work's committed
 `created_at` before opening a frozen list. A fixed startup offset cannot establish
 that boundary when native SQL uses wall time. Keep actual SDK ACK/control checks
 and production snapshot filtering intact; model clock lag without changing rows.
+
+
+Sender eligibility can be cancelled while reading its current account, channel
+connection or instance. These repository/service-owned read scopes share
+`deerflow.persistence.readers.reader_session`, also re-exported by Telegram's
+`sql_readers`. Body cancellation remains immediate; the caller retains actual SQL
+close through repeated cancellation. Borrowed account reads and all writers keep
+their ownership. Observation pages use the same owned reader defensively; their
+normal maintenance task is separately tracked and drained. Held-close tests prove
+these mechanisms, without identifying an unobserved historical CI leaking task.
