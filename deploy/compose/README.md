@@ -2342,14 +2342,21 @@ routes return a structured refusal when their own role is unavailable.
 
 ### Fixed-image trim policy
 
-Each Space image must stay fully allocated on the data disk. Trimming the ext4
-filesystem inside a loop image punches holes in that image, releasing its reserved
+Each Space image must stay fully allocated on the data disk. Trimming an unprotected
+ext4 filesystem inside a loop image punches holes in that image, releasing its reserved
 capacity. The verifier then refuses the Space, even if its files remain readable.
 
 Storage preparation mounts images with `nodiscard` and writes `X-fstrim.notrim`
 in their managed `/etc/fstab` entries. The standard util-linux scheduled service
 uses `fstrim --listed-in /etc/fstab:/proc/self/mountinfo` and skips these entries.
 It can still trim the underlying data disk and other eligible filesystems.
+
+Preparation also disables deallocation on each qualified loop device, by setting
+its `queue/discard_max_bytes` to zero and verifying the result while retaining
+the exact mounted root and image. This blocks loop zeroout from punching holes
+when the inner ext4 filesystem runs out of space. Startup `mount-all` protects
+already mounted pools too; each admission requires a fresh zero readback. The
+underlying data-disk queue is unchanged. An unsupported control refuses the Space.
 
 For an existing pool, update only the managed entries with `si fstab-sync` or run
 normal preparation using the updated image. This preserves the inventory and files.
@@ -2359,7 +2366,8 @@ mount options take effect at the next normal unmount/mount maintenance window.
 Custom host trim automation must also exclude these loop filesystems. `fstrim -a`,
 the QEMU guest agent's `guest-fstrim` and direct `fstrim <Space mountpoint>` read the
 mount table rather than fstab, so they bypass the exclusion. `nodiscard` prevents
-online discard when blocks are freed; it does not block an explicit FITRIM request.
+online discard when blocks are freed; the additional loop queue protection
+refuses explicit FITRIM deallocation too.
 
 Normal preparation, which runs at `hm up`, and `si verify --repair` restore a trimmed
 image. They fill its holes in place, on a mounted image and with its files intact,

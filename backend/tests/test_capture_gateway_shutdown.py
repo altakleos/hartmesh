@@ -2,7 +2,6 @@
 
 import asyncio
 import threading
-import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -31,8 +30,10 @@ async def test_inflight_drain_reports_failed_owned_resource_cleanup():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("absolute", [True, False])
-async def test_queued_shutdown_start_does_not_receive_an_expired_grace_again(absolute):
+async def test_queued_shutdown_start_does_not_receive_an_expired_grace_again(absolute, monkeypatch):
     loop, calls = asyncio.get_running_loop(), []
+    clock = [loop.time()]
+    monkeypatch.setattr(loop, "time", lambda: clock[0])
     deadline, blocked_at = loop.time() + 0.03, []
 
     class Manager:
@@ -41,8 +42,10 @@ async def test_queued_shutdown_start_does_not_receive_an_expired_grace_again(abs
 
     def delay_queued_start():
         blocked_at.append(loop.time())
-        # Exercise the scheduling delay between the host helper and its child.
-        time.sleep(0.06)
+        # Advance the controlled monotonic clock between the host helper and
+        # its actual queued child. CPU descheduling cannot expire the fixture's
+        # deadline before this boundary, and the real task/shield topology stays.
+        clock[0] += 0.06
 
     closing = asyncio.create_task(deps._drain_inflight_runs(Manager(), deadline=deadline if absolute else None))
     loop.call_soon(delay_queued_start)

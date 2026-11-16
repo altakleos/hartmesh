@@ -247,6 +247,9 @@ def operator(tmp_path, monkeypatch):
     monkeypatch.setattr(si.StorageInitializer, "preflight", lambda self: None)
     monkeypatch.setattr(si.StorageInitializer, "mounted_image_facts", lambda self, spec, **kwargs: {"type": "ext4", "root": "/", "path": str(spec.mount_path), "options": {"rw", "nodev", "nosuid"}})
     monkeypatch.setattr(si.StorageInitializer, "_mounted_root_facts", lambda self, spec, root, **kwargs: {"type": "ext4", "root": "/", "path": str(spec.mount_path), "options": {"rw", "nodev", "nosuid"}})
+    # Ordinary-directory syscall fixture; the separate loop guard suite checks
+    # raw identity and effects, and native CI qualifies actual device queues.
+    monkeypatch.setattr(si.StorageInitializer, "_protect_loop", lambda *args: None)
     monkeypatch.setattr(si, "verify_image_extents", lambda *_args: None)
     monkeypatch.setattr(si, "mounted_ext4_identity", lambda fd: si.read_ext4_identity(Path(os.readlink(f"/proc/self/fd/{fd}")).with_suffix(".img")))
     monkeypatch.setattr(si, "container_holders", lambda *args, **kwargs: [])

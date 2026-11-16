@@ -290,6 +290,9 @@ class PreparedVolumeCatalog:
                 raise BackingUnavailable("Provider image pathname changed during verification")
             loop = loop_file.parent
             validate_loop_range({name: int((loop / name).read_text(encoding="utf-8").strip()) for name in ("offset", "sizelimit", "autoclear")})
+            from deerflow.spaces.loop_reservation import verify_loop_reservation
+
+            verify_loop_reservation(device)
             data_fd = os.open("data", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
             control_fd = os.open("control", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
             data, control = os.fstat(data_fd), os.fstat(control_fd)

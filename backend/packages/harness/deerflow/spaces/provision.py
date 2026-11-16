@@ -13,6 +13,7 @@ from pathlib import Path
 
 from deerflow.config.storage_spaces_config import StoragePlan
 from deerflow.spaces.backings import RESERVE_INODES, FixedVolumeSpec, PreparedVolumeCatalog
+from deerflow.spaces.loop_reservation import protect_loop_reservation
 
 MAX_SPACES = 256
 INODE_BYTES = 8192
@@ -178,11 +179,21 @@ def prepare_volumes(
                 timeout=30,
             )
             owned[-1]["mounted"] = True
+            spec = FixedVolumeSpec(slot, mount, image, identity, size_bytes, inodes)
+            root_fd = os.open(mount, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                image_fd = os.open(image, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                try:
+                    protect_loop_reservation(spec, root_fd, image_fd)
+                finally:
+                    os.close(image_fd)
+            finally:
+                os.close(root_fd)
             (mount / "data").mkdir(mode=0o770)
             (mount / "control").mkdir(mode=0o700)
             os.chown(mount / "data", data_uid, data_uid)
             os.chown(mount / "control", data_uid, data_uid)
-            specs.append(FixedVolumeSpec(slot, mount, image, identity, size_bytes, inodes))
+            specs.append(spec)
         catalog = PreparedVolumeCatalog(
             specs,
             data_disk=data_disk,

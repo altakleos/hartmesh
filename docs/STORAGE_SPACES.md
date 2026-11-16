@@ -246,13 +246,20 @@ outside the visible root. Displayed available capacity excludes filesystem
 overhead. Image allocation leaves the configured platform byte/inode reserve;
 ordinary resource writes cannot grow these fixed image files.
 
-Preparation explicitly mounts fixed images with `nodiscard`. Host trim policy
-must exclude their mounted filesystems: FITRIM through a loop device punches holes
-in its backing image and invalidates the physical reservation. Compose-generated
+Preparation explicitly mounts fixed images with `nodiscard` and sets only each
+qualified loop's `queue/discard_max_bytes` to zero. Linux loop can otherwise punch
+holes for filesystem zeroout even when online discard is disabled. The exact
+mounted root and image remain pinned through the queue change and its readback;
+missing, unreadable or nonzero protection refuses admission. Gateway `mount-all`
+also protects existing mounts. Qualification remains read-only and never repairs
+allocation or changes a queue. No underlying data-disk queue is changed.
+
+Host trim policy must still exclude these filesystems. Compose-generated
 fstab entries carry `X-fstrim.notrim` for the standard scheduled trim service;
 the standalone helper does not manage host fstab, so its operator must supply an
 equivalent exclusion. Direct trim, `fstrim -a` and `guest-fstrim` bypass that fstab
-marker. Preparation and `verify --repair` fill the holes as root; qualification and
+marker; the loop queue protection additionally refuses their deallocation.
+Preparation and `verify --repair` fill previously punched holes as root; qualification and
 the Gateway never do.
 See the [operator trim policy](../deploy/compose/README.md#fixed-image-trim-policy).
 

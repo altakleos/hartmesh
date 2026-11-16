@@ -151,9 +151,10 @@ class Host:
     def __init__(self):
         self.lock_fd: int | None = None
 
-    def run(self, *args: str, input: str | None = None, timeout: int = 30, accepted=(0,)) -> str:
+    def run(self, *args: str, input: str | None = None, timeout: int = 30, accepted=(0,), pass_fds: tuple[int, ...] = ()) -> str:
+        inherited = tuple(dict.fromkeys((*pass_fds, *((self.lock_fd,) if self.lock_fd is not None else ()))))
         try:
-            result = subprocess.run(["nsenter", "-m", "-t", "1", "--", *map(str, args)], input=input, capture_output=True, text=True, timeout=timeout, check=False, pass_fds=() if self.lock_fd is None else (self.lock_fd,))
+            result = subprocess.run(["nsenter", "-m", "-t", "1", "--", *map(str, args)], input=input, capture_output=True, text=True, timeout=timeout, check=False, pass_fds=inherited)
         except OSError as exc:
             raise Refused(f"cannot enter the host mount namespace (nsenter -m -t 1: {exc}); the service needs privileged: true and pid: host") from exc
         if result.returncode not in accepted:
@@ -509,7 +510,7 @@ sync -f "$(dirname -- "$p")"
         return fit, fields
 
     def layout(self, spec):
-        with self._qualified_parent(spec) as (root, image):
+        with self._qualified_parent(spec, repair_image=True) as (root, image):
             self._set_mode(image, 0, 1000, 0o640)
             self._set_mode(root, 0, 1000, 0o770)
             for name, mode in (("data", 0o770), ("control", 0o700)):
@@ -533,7 +534,7 @@ sync -f "$(dirname -- "$p")"
             os.fsync(fd)
 
     @contextlib.contextmanager
-    def _qualified_parent(self, spec):
+    def _qualified_parent(self, spec, *, repair_image=False):
         """Retain the exact image and mounted root through permission repair."""
         image = root = None
         try:
@@ -554,6 +555,9 @@ sync -f "$(dirname -- "$p")"
             if mounted_ext4_identity(root) != identity:
                 raise Refused(f"slot {spec.slot_id} has another mounted UUID")
             self._current_parent_names(spec, root, image)
+            if repair_image:
+                self._set_mode(image, 0, 1000, 0o640)
+            self._protect_loop(spec, root, image)
             yield root, image
             self._current_parent_names(spec, root, image)
         finally:
@@ -563,6 +567,21 @@ sync -f "$(dirname -- "$p")"
             finally:
                 if image is not None:
                     os.close(image)
+
+    def _protect_loop(self, spec, root, image):
+        from deerflow.spaces.loop_reservation import protect_loop_reservation
+
+        def write(path, *, pass_fds):
+            # The helper's sysfs can be read-only. Change only this pinned
+            # loop's queue in the host mount namespace. Inherited root/image
+            # descriptors retain the qualification if the Python owner dies.
+            script = 'test -d "/proc/self/fd/$2" && test -f "/proc/self/fd/$3" && printf "0\\n" > "$1" && test "$(cat "$1")" = 0'
+            self.host.run("sh", "-eu", "-c", script, "storage-init-reservation", str(path), str(root), str(image), pass_fds=pass_fds)
+
+        try:
+            protect_loop_reservation(spec, root, image, writer=write)
+        except BackingUnavailable as exc:
+            raise Refused(f"slot {spec.slot_id} cannot protect its physical reservation: {exc}") from exc
 
     @staticmethod
     def _current_parent_names(spec, root, image):
@@ -1056,6 +1075,10 @@ sync -f "$(dirname -- "$p")"
             except Refused as exc:
                 row.update(state="wrong-mount", detail=str(exc))
                 return row
+            if repair:
+                with self._qualified_parent(spec, repair_image=True):
+                    pass
+                repaired = repaired or (image.st_uid, image.st_gid, stat.S_IMODE(image.st_mode)) != (0, 1000, 0o640)
             root = os.open(spec.mount_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
             try:
                 cap = os.fstatvfs(root)

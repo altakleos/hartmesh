@@ -11,7 +11,7 @@ from _run_output_capture_test_support import capture_environment as capture_envi
 from _run_output_capture_test_support import output_store as output_store
 from _telegram_bot_test_support import update_payload
 from _telegram_compose_turn_support import PERSON, _delivered, render_compose_config
-from _telegram_work_worker_support import installed_worker
+from _telegram_work_worker_support import installed_worker, owned_retry_observation
 from sqlalchemy import select
 from telegram import Update
 from test_telegram_retained_management_refusals import button, tap
@@ -59,7 +59,7 @@ async def settle_denial(e, identity, *, retired):
                 async with e.e.sf() as reader:
                     row = await reader.get(TelegramOutboxRow, identity)
                     assert row is not None
-                    observed = (row.state, row.skip_reason, row.failed_reason, row.not_before, e.clock.now(), row.claim_owner, row.claim_id, row.attempts, row.parts, e.denial_retirements)
+                    observed = (row.state, row.skip_reason, row.failed_reason, row.not_before, e.clock.now(), row.claim_owner, row.claim_id, row.attempts, row.parts, getattr(e, "denial_retirements", ()))
                     assert row.state != "failed", observed
                     if retired:
                         assert not any(part["message_ids"] for part in row.parts), observed
@@ -250,9 +250,7 @@ async def test_current_execution_retry_preserves_actual_native(capture_environme
             assert original.state in ({"uncertain", "refused"} if context else {"uncertain"}) and original.attempts == 1
         # Keep the positive denial's genuine acknowledged card stable. The
         # explicit race case below drives the real observer through this lock.
-        await phase.enter_async_context(e.host.notifications._maintenance_lock)
-        await phase.enter_async_context(e.host.notifications._send_lock)
-        await e.host.sender.drain()
+        await phase.enter_async_context(owned_retry_observation(e))
         if context and original.state == "refused":
             assert original.reason == "conversation-changed"
         effective = original
