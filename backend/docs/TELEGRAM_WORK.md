@@ -2419,3 +2419,41 @@ close through repeated cancellation. Borrowed account reads and all writers keep
 their ownership. Observation pages use the same owned reader defensively; their
 normal maintenance task is separately tracked and drained. Held-close tests prove
 these mechanisms, without identifying an unobserved historical CI leaking task.
+
+
+## Current admission on Retry
+
+`work_retry_denials.py` qualifies a new `act_check` gesture separately from its
+unknown Save, Start, Stop, Change or Withdraw journal. The original body, attempt
+counter, Native reservation and receipt retain their owner. Healthy admission
+falls through to existing recovery. A fixed denial requires current Use, then
+Inspect, then route capabilities, then Manage where the original action needs it.
+Context activations additionally require `threads:write`; a foreign Stop names
+its actual requester only under current Inspect. Receipt settlement takes priority
+but first locks and validates the actual complete acknowledged, live Retry group,
+original/effective body and scope, and absence of effects owned by new members.
+
+The closed `work_retry_denial` carrier owns only feedback. Its durable namespace
+also selects this source: a missing origin cannot become a generic fixed reply.
+Its family companion
+qualifies historical consent and the real saved source without authorizing an
+operation. Recovery-only projection modes cannot be used without origin-only
+mode and leave ordinary Saved* validation unchanged. Final SQL repeats full group,
+original/effective journal, known receipt and native reservation checks together
+with current grants, capabilities, preference, claim, locale and names. Restored
+rights or a newly committed receipt retire the denial before the SDK call.
+
+A done management command with uncertain physical cancellation uses its actual
+remaining Native requester and exact attempt/work/thread/run scope. The original
+requester needs Use, Inspect and cancellation capability, without new Manage.
+Captured remaining ownership is compared again at delivery; a different scope
+cannot authorize feedback about the old command. Never treat an initial runless
+activation reservation event as evidence that its launch committed.
+
+Actual default-supervisor tests in `test_telegram_*_retry_refusals.py` and
+`test_telegram_retry_dispatch_permissions.py`, with strict wrappers in
+`blocking_io/test_telegram_current_retry_refusals.py`, cover both SQL backends,
+unknown owners, actual context children, foreign requesters, final authority and
+receipt races, negative Retry custody and aged retention. Native owners come from
+real public reservation APIs; provider/SDK and directory/readiness adapters do
+not qualify native containment or Compose acceptance.

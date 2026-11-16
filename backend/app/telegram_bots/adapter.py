@@ -1927,7 +1927,12 @@ class TelegramBotChannel(TelegramChannel):
         source_key = part.get("source_ref", {}).get("key", "")
         work_part = None
         work_sources = getattr(self._services, "work_request_sources", None)
-        if "work_callback_denial" in saved.item.payload:
+        if "work_retry_denial" in saved.item.payload or saved.item.dedupe_key.startswith("notice:work-retry-denial:"):
+            work_sources = getattr(self._services, "work_retry_denials", None)
+            if work_sources is None:
+                raise PermanentDeliveryError("unsupported-retry-denial-source")
+            work_part = await work_sources.read_part(saved)
+        elif "work_callback_denial" in saved.item.payload:
             work_sources = getattr(self._services, "work_callback_denials", None)
             if work_sources is None:
                 raise PermanentDeliveryError("unsupported-callback-denial-source")
@@ -2342,7 +2347,7 @@ class TelegramBotChannel(TelegramChannel):
                 from app.telegram_bots.notification_authority import authorize_notification
 
                 if work_part is not None:
-                    if "work_callback_denial" in latest_notification.item.payload or "work_saved_refusal" in latest_notification.item.payload:
+                    if latest_notification.item.dedupe_key.startswith("notice:work-retry-denial:") or {"work_callback_denial", "work_saved_refusal", "work_retry_denial"}.intersection(latest_notification.item.payload):
                         await work_sources.authorize(latest_notification, silent=silent, now=self._now(), rendered=work_part)
                     else:
                         await work_sources.authorize(latest_notification, silent=silent, now=self._now())

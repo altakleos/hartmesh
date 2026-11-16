@@ -300,13 +300,13 @@ def test_blocking_io_shards_cover_every_group_and_preserve_the_required_gate() -
     shard = workflow["jobs"]["blocking-io-shard"]
     assert shard["timeout-minutes"] == 15
     assert shard["strategy"]["fail-fast"] is False
-    assert shard["strategy"]["matrix"] == {"shard": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]}
+    assert shard["strategy"]["matrix"] == {"shard": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]}
     calls = [step["run"] for step in shard["steps"] if step.get("run", "").startswith("make test-blocking-io")]
-    assert calls == ["make test-blocking-io SPLITS=20 GROUP=${{ matrix.shard }}"]
-    for group in range(1, 21):
-        command = _dry_run_make_target("test-blocking-io", "SPLITS=20", f"GROUP={group}")
+    assert calls == ["make test-blocking-io SPLITS=26 GROUP=${{ matrix.shard }}"]
+    for group in range(1, 27):
+        command = _dry_run_make_target("test-blocking-io", "SPLITS=26", f"GROUP={group}")
         assert "pytest tests/blocking_io" in command
-        assert "--splits 20" in command and f"--group {group}" in command
+        assert "--splits 26" in command and f"--group {group}" in command
         assert "--splitting-algorithm least_duration" in command
         assert "--durations-path=.test_durations" in command
         assert "--store-durations" not in command

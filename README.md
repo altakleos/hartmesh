@@ -145,6 +145,10 @@ while preserving their original Save or Save and Start operation.
 Saved Change, Withdraw and Stop refusals explain current permission loss without
 reissuing the command. Typed Stop replies remain tied to every selected attempt.
 Restoring Stop access offers a full preview and requires a new press.
+A Retry on an unknown operation explains current permission loss while preserving
+that operation and its original execution. Known committed results remain visible.
+A requester can retry their own unfinished physical Stop without Manage access;
+the original target and run-cancellation permission still apply.
 Current Inspect grants control visibility; referenced files retain separate access
 checks. Uncertain execution requires qualified containment and explicit recovery.
 The Work command API can stop one exact running attempt without cancelling the

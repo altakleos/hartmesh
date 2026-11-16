@@ -245,9 +245,11 @@ class WorkExecutionReader(WorkViewReader):
 
 
 class WorkExecutionProjection:
-    def __init__(self, reader, link, item, source=None, *, detail=None, clock, allow_empty=False, origin_only=False):
+    def __init__(self, reader, link, item, source=None, *, detail=None, clock, allow_empty=False, origin_only=False, recovery_only=False):
         self.reader, self.link, self.item, self.source, self.clock = reader, link, item, source, clock
-        self.origin_only = origin_only
+        self.origin_only, self.recovery_only = origin_only, recovery_only
+        if recovery_only and not origin_only:
+            raise ProductSourceRetired()
         self.allow_empty = allow_empty
         self.expected_act = None
         self.detail = detail or detail_read(source.work["detail"])
@@ -513,7 +515,7 @@ class WorkExecutionProjection:
         if self.origin_only:
             expected = self.source.work
             proof = {"act": facts, "original": original_facts, "dispatch": effective.stop_dispatch, "effective": act_facts(effective), "origin": origin, "event_proof": event_proof, "notice": asdict(notice)}
-            if not notice.preview or any(not same_body(expected.get(key), value) for key, value in proof.items()):
+            if not (notice.retry if self.recovery_only else notice.preview) or any(not same_body(expected.get(key), value) for key, value in proof.items()):
                 raise ProductSourceRetired()
             return
         record = detail.record
