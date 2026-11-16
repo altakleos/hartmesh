@@ -73,6 +73,37 @@ async def test_inactive_instance_keeps_polling_and_answers_fixed_status(lifecycl
     assert (await e.db.links.get(e.link.id)).health == "ok"
 
 
+async def test_lifecycle_notice_rejects_replaced_loaded_configuration(lifecycle, monkeypatch):
+    from deerflow.config import app_config
+
+    e = lifecycle
+    assert app_config.peek_current_app_config() is None
+    assert app_config.peek_loaded_app_config() is e.live.config
+    async with e.db.sessions.begin() as writer:
+        await writer.execute(update(AgentInstanceRow).where(AgentInstanceRow.id == e.link.agent_ref).values(status="suspended"))
+    replacement = e.live.config.model_copy(deep=True)
+    replacement.authorization.fail_closed = not replacement.authorization.fail_closed
+    actual_policy, changed = e.live.authority.instance_send_policy, []
+
+    async def policy(link, **kwargs):
+        if kwargs.get("expected_lifecycle") == "agent.paused" and not changed:
+
+            async def replace_configuration():
+                changed.append(True)
+                app_config.set_app_config(replacement)
+
+            kwargs["before_snapshot"] = replace_configuration
+        return await actual_policy(link, **kwargs)
+
+    monkeypatch.setattr(e.live.authority, "instance_send_policy", policy)
+    before = len(e.runtime.normal.calls)
+    await e.supervisor.notice_instance_unavailable(e.link)
+    assert changed == [True]
+    assert app_config.peek_loaded_app_config() is replacement
+    assert not [call for call in e.runtime.normal.calls[before:] if call.endpoint == "sendMessage"]
+    assert e.runtime.service.bus.inbound_queue.empty()
+
+
 async def test_deleted_instance_removes_link_and_records_owner_notice_once(lifecycle):
     e = lifecycle
     async with e.db.sessions.begin() as writer:
