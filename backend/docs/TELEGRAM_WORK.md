@@ -2403,3 +2403,9 @@ origin metadata is damaged. Missing original proofs cannot downgrade admission
 to an ordinary Work view. Pending/live/admitted preview ancestry retains the
 actual primary outcome, consumed original controls and input family; retention
 only pins existing scoped history and never grants effect authority.
+
+
+Work UI test clocks advance monotonically to the real fixture Work's committed
+`created_at` before opening a frozen list. A fixed startup offset cannot establish
+that boundary when native SQL uses wall time. Keep actual SDK ACK/control checks
+and production snapshot filtering intact; model clock lag without changing rows.

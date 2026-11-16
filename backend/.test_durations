@@ -1,4 +1,6 @@
 {
+    "tests/blocking_io/test_telegram_closed_assignment_prompts.py::test_actual_work_creation_horizon_keeps_the_loop_clear[postgres]": 13.974492080509663,
+    "tests/blocking_io/test_telegram_closed_assignment_prompts.py::test_actual_work_creation_horizon_keeps_the_loop_clear[sqlite]": 2.795963724143803,
     "tests/blocking_io/test_telegram_continuation_resume_views.py::test_actual_native_reservation[postgres-decision]": 29.255785242654383,
     "tests/blocking_io/test_telegram_continuation_resume_views.py::test_actual_native_reservation[postgres-voice]": 35.43308184389025,
     "tests/blocking_io/test_telegram_continuation_resume_views.py::test_actual_native_reservation[sqlite-decision]": 62.83856065198779,

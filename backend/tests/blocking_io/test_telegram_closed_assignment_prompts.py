@@ -10,6 +10,7 @@ from test_telegram_closed_assignment_prompts import test_damaged_reopen_retains_
 from test_telegram_closed_assignment_prompts import test_legacy_acknowledged_transcript_is_not_echoed_again_before_choices as voice
 from test_telegram_closed_assignment_prompts import test_reopen_assignment_prompt_opens_fresh_question_without_using_held_words as reopen
 from test_telegram_closed_assignment_prompts import test_reopened_prompt_final_sdk_refuses_lost_original_proof as proof
+from test_telegram_work_chat_management_runtime import test_detail_listing_includes_actual_work_created_after_test_clock as horizon
 from test_telegram_work_source_delivery import work_delivery as work_delivery
 from test_work_attention_pages import work_pages as work_pages
 
@@ -39,3 +40,8 @@ async def test_reopen_final_source_check_keeps_the_loop_clear(work_delivery, mon
 @pytest.mark.asyncio
 async def test_damaged_recovery_retention_keeps_the_loop_clear(work_delivery, monkeypatch):
     await retain(work_delivery, monkeypatch, "descriptor", False)
+
+
+@pytest.mark.asyncio
+async def test_actual_work_creation_horizon_keeps_the_loop_clear(work_delivery, monkeypatch):
+    await horizon(work_delivery, monkeypatch)
