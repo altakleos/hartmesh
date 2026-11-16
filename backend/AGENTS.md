@@ -64,7 +64,8 @@ boundaries.
 make install            # Install backend dependencies
 make dev                # Gateway API, reload (port 8001)
 make gateway            # Gateway API only (port 8001)
-make test               # four offline workers; TEST_JOBS=1 for serial
+make test               # four offline workers; excludes bundled examples
+make test-bundled-extensions # optional example behavior, separate CI gate
 make test-live          # live tests (real APIs)
 make test-blocking-io   # all strict tests; CI: 28 duration-balanced shards
 make test-shard SPLITS=4 GROUP=2  # one duration-aware shard

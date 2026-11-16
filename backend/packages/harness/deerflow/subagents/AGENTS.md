@@ -195,7 +195,7 @@ using the existing run index. This pages one task without a run-wide limit
 truncating its tail. Keep `step_events.py` pure and unit-tested.
 
 **Deferred MCP tools** (if `tool_search.enabled`): `SubagentExecutor._build_initial_state` applies the subagent name allow/deny list and assembly-time authorization before calling the shared `assemble_deferred_tools`, appends the `tool_search` tool, injects the `<available-deferred-tools>` section into the subagent's `SystemMessage`, and threads the setup to `_create_agent`, which attaches `McpRoutingMiddleware` (when PR1 routing metadata matches deferred tools) before `DeferredToolFilterMiddleware` through `build_subagent_runtime_middlewares(...)`. Skill `allowed-tools` is compatibility metadata and never removes or blocks a promoted business tool; the authorization Guardrail on the same chain still denies genuinely unauthorized tools. Subagents thus withhold full MCP schemas until promotion, same as the lead agent; each task run gets a fresh `ThreadState` so promotion is isolated per run
-**Checkpointer isolation**: Subagent graphs are compiled with `checkpointer=False` to avoid inheriting the parent run's checkpointer, since subagents are one-shot and never resume.
+**Checkpointer isolation**: By default subagent graphs compile with `checkpointer=False`. Optional history uses a loop-owned peer saver under a server-generated execution namespace; it never shares the parent connection or adds resumable task semantics.
 **Checkpoint lineage / stream isolation**: `_aexecute` deliberately omits checkpoint-coordinate keys (`thread_id`, `checkpoint_ns`, `checkpoint_id`, `checkpoint_map`) from the child `RunnableConfig`. LangGraph must inherit those coordinates from the copied parent ContextVar so the delegated graph retains a non-root subgraph namespace; explicitly re-supplying even the same parent `thread_id` starts a new root lineage on LangGraph 1.2.6+ and can route child AI/tool frames into the parent `messages` stream. DeerFlow business components still receive the parent `thread_id` through `runtime.context`, which is the preferred lookup path for sandbox, middleware, and attribution code. Regression coverage in `tests/test_subagent_executor.py::TestSubagentCheckpointLineage` keeps the invocation-contract assertion active on every supported version and version-gates the production-shaped parent-stream test to LangGraph 1.2.6+, where the leak exists.
 
 **Isolated-loop callback boundary**: sync delegation from an active event loop and `execute_async()` copy the ambient ContextVars into the persistent subagent loop so checkpoint lineage, user identity, tracing context, tags, metadata, and LangGraph's namespaced message-stream handler survive. Before submission, `_copy_isolated_subagent_context()` copies the callback manager/list and removes only handlers marked `deerflow_loop_bound`; `RunJournal` carries that marker because it owns parent-loop tasks and a SQL store/pool. LangGraph merges inherited callbacks with the child run's explicit `SubagentTokenCollector`/tracing callbacks, so letting `RunJournal` cross loops causes duplicate accounting and `Future attached to a different loop` failures, while dropping the whole callback chain silently removes child token frames. Do not replace the boundary with a blank `Context`; the inherited checkpoint namespace and framework stream callback are required by the stream-isolation contract above.
@@ -209,3 +209,18 @@ Built-in child prompts leave filesystem layout to the per-execution runtime scop
 rendered after tool authorization. Preserve the warning that fewer tools do not
 narrow native Home filesystem authority. Do not mutate shared role definitions
 or infer instance persistence from configured provider names.
+
+### Middleware tool policy and optional checkpoint history
+
+Apply each subagent's name allow/deny policy to extension-declared tools even
+without global authorization. Audit final explicit and middleware tools after
+delta schema normalization; exempt only exact generated discovery instances.
+Do not consume shared iterators or mutate extension middleware declarations.
+
+`subagent_runtime.checkpoint_enabled` defaults off. File-backed SQLite opts into
+a separately loop-owned peer saver; retain its resources through child cleanup
+and close it before the parent saver. Delta mode normalizes final middleware
+instances before the tool-policy audit. Other database backends fail explicitly
+when enabled. This history grants no resumable Work or tool approval semantics.
+Durable batches refresh the current principal before queue entry and again after
+capacity admission; stored roles do not preserve authority.

@@ -18,6 +18,7 @@ from typing import Any
 
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 
+from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
 
 # Reserved sub-key of the run context that holds request-scoped secrets supplied
@@ -192,7 +193,9 @@ REDACTED_CONTEXT_KEYS = frozenset(
     {
         SECRETS_CONTEXT_KEY,
         AGENT_RUNS_CONTEXT_KEY,
+        AGENT_AUTH_CONTEXT_KEY,
         "__run_input_control",
+        "__tool_approval_runtime",
         ACTIVE_SECRETS_CONTEXT_KEY,
         _SLASH_SECRET_SOURCE_KEY,
         _SECRETS_BINDING_AUDIT_KEY,

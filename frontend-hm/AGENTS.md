@@ -1,11 +1,8 @@
 # AGENTS.md
 
-This file guides development of the Hartmesh frontend in `frontend-hm/`. The
-sibling `CLAUDE.md` imports it via `@AGENTS.md`. This app owns its dependencies,
-assets, API clients, and tests. Never import or link application material from
-the pinned upstream `../frontend/`; port changes deliberately. The Gateway
-HTTP/SSE/WebSocket protocols and shared `../contracts/` fixtures define the
-backend boundary. See [the isolation guide](../docs/FRONTEND_ISOLATION.md).
+Product code lives in `frontend-hm/`; `CLAUDE.md` imports this guide. Never import
+from the pinned upstream `../frontend/`; port deliberately. HTTP/SSE/WebSocket
+and `../contracts/` define the backend boundary; see [isolation](../docs/FRONTEND_ISOLATION.md).
 
 Management UI uses `useCustomerAdministration()` from `/api/features`, keyed by
 account ID and role, with missing flags denied. Never derive mutation authority
@@ -122,8 +119,6 @@ Product scope: [frontend isolation guide](../docs/FRONTEND_ISOLATION.md#product-
 - **LangChain Core** (`@langchain/core` ^1.1.15) — Fundamental AI building blocks
 - **TanStack Query** (`@tanstack/react-query` ^5.90.17) — Server state management
 - **UI**: Shadcn UI, MagicUI, React Bits, and Vercel AI SDK elements (generated from registries — see Code Style)
-
-Route layouts use Next.js metadata directly; the product has no Nuxt image module.
 
 ## Commands
 
@@ -470,3 +465,6 @@ Collapsed provider support keeps its named logo link. Browser-mocked Playwright 
 `tests/fixtures/product-gateway.mjs` for product identity and explicit legacy selection (other routes 503);
 retain real-service outage checks. See the
 [runtime contract](../docs/RUNTIME_PRODUCT_IDENTITY.md).
+
+Chat scrolling offers an accessible jump-to-bottom control above task cards.
+User-scrolled history stays in place until that control is activated.

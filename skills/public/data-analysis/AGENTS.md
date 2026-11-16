@@ -43,7 +43,10 @@ over canonical tables in the main schema, including on read-only cache hits.
 Keep these views connection-local and preserve normal CTE shadowing.
 
 The sandbox image provides DuckDB, pandas, openpyxl and xlrd. Workbook loading
-uses pandas with the content-appropriate reader, including XLS/XLSM. Never launch
+uses pandas with the content-appropriate reader, including XLS/XLSM. Preserve
+literal NA/NULL strings, text identifiers and nulls; normalize incompatible mixed
+columns to text and infer compatible columns from every row. Restore DuckDB
+sampling after failures and invalidate the Excel cache key when semantics change. Never launch
 installers or download DuckDB extensions. CSV analysis does not require the Excel
 reader to import successfully. Preserve unavailable-cache in-memory operation.
 

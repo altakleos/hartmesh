@@ -73,7 +73,7 @@ IMPORTED_UPSTREAM_DIAMOND = {
     "0050_history_seed_authority": "0049_run_producer_fencing",
     "0051_merge_run_inputs_fencing": ("0049_run_inputs", "0050_history_seed_authority"),
 }
-HEAD = "0053_work_operation_indexes"
+HEAD = "0056_upstream_adoption"
 PUBLISHED_FIXTURES = [
     "release_39_ancestry.json",
     "release_43_ancestry.json",
@@ -99,9 +99,14 @@ def test_the_step_two_import_keeps_upstreams_diamond_on_the_appended_chain():
         assert len(revision) <= 32, "alembic_version.version_num is VARCHAR(32)"
     fresh = [step.revision.revision for step in script._upgrade_revs("head", "base")]
     assert fresh[-1] == HEAD
-    assert script.get_revision(HEAD).down_revision == "0052_batch_continuation"
+    assert set(script.get_revision(HEAD).down_revision) == {"0053_work_operation_indexes", "0055_thread_shares"}
+    assert script.get_revision("0053_work_operation_indexes").down_revision == "0052_batch_continuation"
+    assert script.get_revision("0055_thread_shares").down_revision == "0054_project_memory"
+    assert script.get_revision("0054_project_memory").down_revision == "0053_tool_approvals"
+    assert script.get_revision("0053_tool_approvals").down_revision == "0052_batch_continuation"
     assert script.get_revision("0052_batch_continuation").down_revision == "0051_merge_run_inputs_fencing"
-    assert set(fresh[-len(IMPORTED_UPSTREAM_DIAMOND) - 2 : -2]) == set(IMPORTED_UPSTREAM_DIAMOND)
+    diamond_positions = [fresh.index(revision) for revision in IMPORTED_UPSTREAM_DIAMOND]
+    assert max(diamond_positions) < fresh.index("0052_batch_continuation")
 
 
 def test_each_distribution_revision_follows_the_one_before():

@@ -152,3 +152,8 @@ coverage across name/description, then name hits; ties preserve catalog order an
 results stay capped at five. Keyword matching never invokes the regex helpers.
 Bare queries and `+required` keep regex semantics; `select:` stays exact and
 uncapped. Keep query grammar and examples in the `tool_search` description aligned.
+
+Task delegation validates context mode, host Bash policy and registry membership
+in a read-only preflight on the assembly pool before constructing an executor,
+assembling tools or capturing history. Config and registry fallback reads stay
+off-loop. Invalid delegation never consumes or supersedes source work.

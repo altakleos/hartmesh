@@ -249,3 +249,9 @@ it identifies the current conversation stop, never client source authority.
 Assembly installs it only with the authorized proposal tool, before Clarification;
 the latter retains priority. Preserve issuer-scoped IDs and actual create_agent
 sync/async tests; Command END alone does not override outgoing tool routing.
+
+Progress hints fence late assessment results and retries by graph entry, including
+new entries of the same run. The delegation ledger pairs each tool result with
+its issuing AIMessage, retaining distinct dispatch IDs when providers reuse call
+IDs. A delayed Steer report remains sanitized history in child context snapshots.
+Compaction preserves agreed constraints, approval conditions and unresolved work.

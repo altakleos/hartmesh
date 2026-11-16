@@ -34,7 +34,7 @@ same resulting prompt. Empty overlays preserve bytes.
 
 **ThreadState** (`packages/harness/deerflow/agents/thread_state.py`):
 - Extends `AgentState` with: `sandbox`, `thread_data`, `title`, `artifacts`, `todos`, `uploaded_files`, `viewed_images`, `goal`, `promoted`, `delegations`, `skill_context`, `summary_text`
-- Uses custom reducers: `merge_artifacts` (deduplicate), `merge_viewed_images` (merge/clear), `merge_goal` (preserve the active goal across ordinary state updates unless the goal writer replaces it), `merge_promoted` (union deferred tools within one catalog/user turn; replace on scope change; hash-only tool updates inherit scope), `merge_delegations` (append task delegation entries, same (run,id) wins, terminal status never downgraded, capped to the most recent entries), and `merge_skill_context` (dedupe active-skill references by path, keep the most recently read entries; entries store a name/path/description reference, not the SKILL.md body). `summary_text` is a LastValue channel updated by summarization and projected into model requests as durable context data instead of being stored as a `messages` item.
+- Uses custom reducers: `merge_artifacts` (deduplicate), `merge_viewed_images` (merge/clear), `merge_goal` (preserve the active goal across ordinary state updates unless the goal writer replaces it), `merge_promoted` (union deferred tools within one catalog/user turn; replace on scope change; hash-only tool updates inherit scope), `merge_delegations` (append task delegation entries, same (run,id,dispatch_message_id) wins, terminal status never downgraded, capped to the most recent entries), and `merge_skill_context` (dedupe active-skill references by path, keep the most recently read entries; entries store a name/path/description reference, not the SKILL.md body). `summary_text` is a LastValue channel updated by summarization and projected into model requests as durable context data instead of being stored as a `messages` item.
 - Delta-mode `merge_message_writes` normalizes the current message state once,
   then folds normalized writes in order with message-ID position indexes and
   deferred tombstone compaction. It preserves public `add_messages` behavior,
@@ -54,3 +54,10 @@ Direct `create_deerflow_agent(..., subagent_runtime=...)` callers own one starte
 Work attempts use `autonomous` interaction mode, so `ask_clarification` is never
 offered. `runtime_scope.py::ASSIGNMENT_QUESTION_RULE` directs `report_work` with
 `action: request_input` before stopping with a question; prose alone is no blocker.
+
+Named-agent MCP credentials use a host-pinned definition and SOUL for an admitted
+ordinary custom-agent run. A typed employee instance keeps its own definition,
+memory audience and management policy and never inherits that human credential
+grant. Runtime capabilities never come from checkpoint or request copies.
+Delegations identify their dispatch message as well as run and provider call ID,
+so repeated provider IDs cannot merge different tasks or under-count the cap.

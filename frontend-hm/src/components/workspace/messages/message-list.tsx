@@ -22,6 +22,7 @@ import { toast } from "sonner";
 import {
   Conversation,
   ConversationContent,
+  ConversationScrollButton,
   type ConversationProps,
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
@@ -1582,6 +1583,10 @@ export function MessageList({
           )}
           <div style={{ height: `${paddingBottom}px` }} />
         </ConversationContent>
+        <ConversationScrollButton
+          aria-label={t.common.scrollToBottom}
+          className="z-10"
+        />
       </Conversation>
       {conversationOutlineEnabled && (
         <ConversationOutline

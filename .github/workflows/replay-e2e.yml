@@ -13,6 +13,7 @@ on:
     branches: ["main", "*-dev"]
     paths:
       - "frontend-hm/**"
+      - ".github/upstream-frontend.json"
       - "contracts/**"
       - "scripts/pnpm.py"
       - "backend/app/gateway/**"
@@ -28,6 +29,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "frontend-hm/**"
+      - ".github/upstream-frontend.json"
       - "contracts/**"
       - "scripts/pnpm.py"
       - "backend/app/gateway/**"

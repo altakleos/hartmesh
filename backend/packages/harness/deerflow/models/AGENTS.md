@@ -280,3 +280,13 @@ Tests: `test_managed_models.py`, `test_managed_deepseek.py`,
 `test_managed_provider_presets.py` (real vendor SDKs with HTTP doubles), opt-in
 `test_managed_deepseek_live.py` / `test_managed_presets_live.py`, and
 `tests/blocking_io/test_managed_models.py`.
+
+### Provider request and cancellation compatibility
+
+Claude OAuth betas precede both request betas and an `anthropic-beta` header;
+copy caller lists/dicts before merging them so request overrides cannot erase
+`oauth-2025-04-20` or mutate another request. Codex async generation owns its
+HTTPX stream; offload trust loading, keep retry sleeps cancellable and drain
+client close across repeated cancellation. Regressions use offline serialization
+and real loopback EOF. Replayed vLLM reasoning remains token-countable while
+staying outside summarization input.

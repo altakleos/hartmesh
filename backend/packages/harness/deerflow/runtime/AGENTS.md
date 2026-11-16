@@ -539,3 +539,18 @@ retaining its own finalizing barrier. Require the exact registered object, ownin
 task/worker, owner/thread and acknowledged current outcome; competing runs still
 win. Captured runs additionally require matching receipt/inventory proofs. Legacy
 non-finalizing paths use ordinary reservation. Never release the barrier early.
+
+### Completed reservation recovery
+
+Only ordinary thread operations whose body exited enter the manager's pending
+release ledger. Retry their exact captured owner/UUID under the same-thread
+admission gate; replay an existing idempotent result before cleanup. Captured
+checkpoint writes keep their original release resource and never enter this
+ledger. An uncertain admission is never a completed operation. Refresh the new
+run's lease after admission and cleanup waits. Assembly evidence writes update
+metadata only under a live owner lease; a full snapshot must not revive a peer's
+reclaimed row.
+
+HartMesh keeps the specialized `artifact_delivery_incomplete` stream verdict and
+durable stop reason. A terminal delivery-receipt persistence failure emits the
+ordinary `RunError` frame after terminal confirmation and before END.

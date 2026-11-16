@@ -351,3 +351,18 @@ describe("zonedLocalToUtcIso DST transitions", () => {
     );
   });
 });
+
+describe("invalid cron preset fields", () => {
+  test("out-of-range fields retain the exact custom expression", () => {
+    for (const raw of [
+      "60 * * * *",
+      "0 24 * * *",
+      "0 9 0 * *",
+      "0 9 32 * *",
+      "-1 9 * * *",
+      "0 24 * * 1,3",
+    ]) {
+      expect(parseCron(raw)).toEqual({ preset: "custom", parts: { raw } });
+    }
+  });
+});

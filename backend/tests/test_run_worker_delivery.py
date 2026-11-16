@@ -26,6 +26,22 @@ def _make_bridge():
     return SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
 
 
+class _RecordingBridge:
+    """A stream bridge that keeps every published event in order."""
+
+    def __init__(self):
+        self.events: list[tuple[str, object]] = []
+
+    async def publish(self, run_id, event, payload=None, **kwargs):
+        self.events.append((event, payload))
+
+    async def publish_end(self, run_id, **kwargs):
+        self.events.append(("end", None))
+
+    async def cleanup(self, run_id, **kwargs):
+        return None
+
+
 async def _delivery_events(store: MemoryRunEventStore, thread_id: str, run_id: str) -> list[dict]:
     events = await store.list_events(thread_id, run_id)
     return [e for e in events if e["event_type"] == "run.delivery"]
@@ -298,6 +314,59 @@ async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
     assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
     # The reason names the delivery failure, so a client that reloads can tell this run from any other failed one.
     assert record.stop_reason == "artifact_delivery_incomplete"
+
+
+@pytest.mark.anyio
+async def test_unpersisted_delivery_receipt_publishes_an_error_frame_before_end(monkeypatch):
+    """The receipt failure also flips the record to ``error``; the stream must follow."""
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
+    )
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._persist_delivery_receipt",
+        AsyncMock(return_value=False),
+    )
+    bridge = _RecordingBridge()
+
+    class PresentingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            ai = AIMessage(content="", tool_calls=[{"id": "call_1", "name": "present_files", "args": {}}])
+            journal._remember_current_run_tool_calls(ai, caller="lead_agent")
+            journal.on_tool_end(
+                Command(
+                    update={
+                        "artifacts": ["/mnt/user-data/outputs/report.md"],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                    }
+                ),
+                run_id=uuid4(),
+            )
+            yield {"messages": []}
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: PresentingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.error
+    assert record.error == "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
+    assert [payload for event, payload in bridge.events if event == "error"] == [
+        {
+            "message": "Artifact delivery verification failed: terminal delivery receipt could not be persisted",
+            "name": "RunError",
+        }
+    ]
+    assert bridge.events[-1][0] == "end"
 
 
 @pytest.mark.anyio

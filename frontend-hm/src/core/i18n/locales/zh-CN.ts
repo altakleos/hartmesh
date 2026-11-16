@@ -906,6 +906,7 @@ export function createZhCN(product: string): Translations {
 
     // Common
     common: {
+      scrollToBottom: "滚动到底部",
       home: "首页",
       settings: "设置",
       delete: "删除",

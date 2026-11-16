@@ -27,6 +27,10 @@ The sibling `frontend/` is the pinned upstream reference. HartMesh's routes and
 selected UI features are listed in the [frontend scope guide](docs/FRONTEND_ISOLATION.md#product-scope);
 the upstream website's landing pages and showcases are separate from this UI.
 
+Chats include a jump-to-bottom control. Invalid cron fields remain custom expressions instead
+of appearing as a valid preset. Optional extension packages can publish bounded
+usage documentation through the authenticated plugin API.
+
 Hartmesh clears private workspace caches when the signed-in account changes.
 Artifact, My Files and Shared reads, copies and hashes refuse symlinks throughout the
 source path; these operations require descriptor-relative no-follow filesystem

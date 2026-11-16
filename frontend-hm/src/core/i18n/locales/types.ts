@@ -764,6 +764,7 @@ export interface Translations {
 
   // Common
   common: {
+    scrollToBottom: string;
     home: string;
     settings: string;
     delete: string;

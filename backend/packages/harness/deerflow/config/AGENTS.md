@@ -319,3 +319,7 @@ thread/process lock, checking the saved source revision before deduplication
 by provider, endpoint, key and model ID. Ordinary edits
 retain revision checks. `_managed_provider` is private runtime display metadata;
 it must never enter serialized config or SDK request kwargs.
+
+Operator-owned `mcp_agent_auth` grants bind exact custom-agent revisions, owners
+and remote destinations. Every call reads current operator policy outside the
+run snapshot; YAML grant changes remain revocable during an active turn.

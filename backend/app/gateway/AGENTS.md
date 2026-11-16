@@ -212,3 +212,11 @@ Team artifact handoffs currently refuse managed Spaces and instance Homes before
 provider resolution or any file effect (`extension_file_scope.py`). Never use a
 legacy shadow root when a qualified storage adapter is unavailable.
 Trials require explicit manual dispatch on `/workspace/scheduled-tasks`; chat tool prose never authorizes execution.
+
+Search (`/api/search`, message `around`) qualifies current instance Inspect after
+history/provider I/O, including title-only hits. Search providers consume only
+the owner-scoped visible corpus. Public conversation shares and approval runtime
+remain unregistered. Project memory requires explicit enablement; its legacy SQL
+API passes `hm.projects` storage admission and returns 501 for plugin-owned
+projects until their memory adapter exists. A from-chat Goal refreshes Manage
+before model disclosure and after synthesis, before its checkpoint CAS.

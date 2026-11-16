@@ -1,7 +1,7 @@
 ### Python Extension System (Runtime and Distribution)
 
 HartMesh and upstream each spent extension API patch numbers 0.2.5–0.2.7 on
-different contracts; the merged host's `API_VERSION` (0.2.10) provides both sets,
+different contracts; the merged host's `API_VERSION` (0.2.12) provides both sets,
 so a version below means "added in that line's history", not a shared order.
 
 Artifact presentations use the existing trusted plugin contribution and startup
@@ -549,3 +549,11 @@ capability's plugin namespace and recheck the authenticated user as usual. Stamp
 fences on internal request state, never HTTP context/config. Forward admission to
 the RunStore transaction; require run heartbeats and a shared stream bridge. Fenced
 cancel uses the durable cancellation request, consumed by the existing child owner.
+
+## Package documentation and search
+
+Installed packages may ship bounded public `deerflow-extension.json` usage. Read
+only beside the already imported entry point; malformed optional documentation
+is attributed without removing otherwise valid contributions. Never project
+private deployment configuration. The generic registry allows one optional async
+workspace search provider; it must retain the host-bound owner/scope contract.

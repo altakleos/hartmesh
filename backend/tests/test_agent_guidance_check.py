@@ -9,6 +9,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CHECKER_PATH = REPO_ROOT / "scripts" / "check_agent_guidance.py"
 EXPECTED_GUIDANCE_PATHS = {
     "AGENTS.md",
+    "docker/AGENTS.md",
+    "skills/AGENTS.md",
+    "backend/scripts/benchmark/AGENTS.md",
+    "backend/packages/harness/deerflow/community/AGENTS.md",
+    "backend/packages/harness/deerflow/community/boxlite/AGENTS.md",
     "skills/public/data-analysis/AGENTS.md",
     "skills/public/video-generation/AGENTS.md",
     "backend/AGENTS.md",
@@ -209,7 +214,7 @@ def test_local_guidance_files_contain_the_split_original_sections() -> None:
         "backend/packages/harness/deerflow/tools/AGENTS.md": "### Tool System",
         "backend/packages/harness/deerflow/tracing/AGENTS.md": "### Tracing System",
         "backend/packages/harness/deerflow/tui/AGENTS.md": "### Terminal Workbench / TUI",
-        "frontend/src/AGENTS.md": "### Data Flow",
+        "frontend-hm/src/AGENTS.md": "### Data Flow",
     }
 
     for relative_text, heading in expected_headings.items():

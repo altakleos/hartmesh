@@ -8,7 +8,7 @@ import os
 import sys
 import threading
 import uuid
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextvars import Context, copy_context
@@ -33,6 +33,7 @@ from deerflow.agents.middlewares.audit_context import (
 )
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.authz.principal import normalize_authz_attributes
+from deerflow.authz.provider import Principal
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
@@ -704,7 +705,27 @@ def _shutdown_isolated_subagent_loop(*, only_if_pending: bool = False) -> None:
                 return
 
         if loop.is_running():
-            loop.call_soon_threadsafe(loop.stop)
+            from deerflow.subagents.checkpoints import drain_checkpoint_runtimes, has_checkpoint_runtimes
+
+            if has_checkpoint_runtimes(loop):
+
+                async def drain_then_stop() -> None:
+                    await drain_checkpoint_runtimes()
+                    loop.call_soon(loop.stop)
+
+                cleanup = asyncio.run_coroutine_threadsafe(drain_then_stop(), loop)
+                if thread is threading.current_thread():
+                    return
+                try:
+                    cleanup.result(timeout=1)
+                except FuturesTimeoutError:
+                    logger.warning("Retaining isolated subagent loop ownership until checkpoint resources finish draining")
+                    return
+                except Exception:
+                    logger.exception("Retaining isolated subagent loop ownership because checkpoint resource cleanup failed")
+                    return
+            else:
+                loop.call_soon_threadsafe(loop.stop)
 
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=1)
@@ -808,10 +829,10 @@ def _run_on_isolated_loop_if_live(callback: Callable[[], None]) -> None:
         callback()
 
 
-def _submit_to_isolated_loop_in_context(
+def _submit_to_isolated_loop_in_context[T](
     context: Context,
-    coro_factory: Callable[[], Coroutine[Any, Any, SubagentResult]],
-) -> Future[SubagentResult]:
+    coro_factory: Callable[[], Coroutine[Any, Any, T]],
+) -> Future[T]:
     """Submit a coroutine to the isolated loop while preserving ContextVar state.
 
     The loop must be resolved before the coroutine is created: as direct
@@ -826,7 +847,7 @@ def _submit_to_isolated_loop_in_context(
     before the error propagates.
     """
 
-    def _submit() -> Future[SubagentResult]:
+    def _submit() -> Future[T]:
         loop = _get_isolated_subagent_loop()
         coroutine = coro_factory()
         try:
@@ -867,6 +888,9 @@ def _copy_isolated_subagent_context() -> Context:
     continue to reach the parent stream.
     """
     context = copy_context()
+    from deerflow.subagents.checkpoints import capture_checkpoint_runtime
+
+    capture_checkpoint_runtime(context)
     inherited_config = context.get(var_child_runnable_config)
     if inherited_config is None or "callbacks" not in inherited_config:
         return context
@@ -963,6 +987,8 @@ class SubagentExecutor:
         customer_administration_policy=None,
         customer_management_actor=None,
         input_gate: Any | None = None,
+        agent_mcp_authority: Any | None = None,
+        principal_resolver: Callable[[], Awaitable[Principal]] | None = None,
     ):
         """Initialize the executor.
 
@@ -1046,6 +1072,7 @@ class SubagentExecutor:
         self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
         self.context_snapshot = context_snapshot
         self.input_gate = input_gate
+        self.agent_mcp_authority = agent_mcp_authority if agent_execution is None else None
         self.thread_id = thread_id
         self.thread_incarnation = thread_incarnation
         # Generate trace_id if not provided (for top-level calls)
@@ -1057,6 +1084,7 @@ class SubagentExecutor:
 
         self.customer_administration_policy = customer_administration_policy if isinstance(customer_administration_policy, CustomerAdministrationPolicy) else DENIED_CUSTOMER_ADMINISTRATION
         self.customer_management_actor = customer_management_actor if isinstance(customer_management_actor, CustomerManagementActor) else CustomerManagementActor()
+        self._principal_resolver = principal_resolver
         self.oauth_provider = oauth_provider
         self.oauth_id = oauth_id
         self.run_id = run_id
@@ -1126,6 +1154,9 @@ class SubagentExecutor:
         self.assembly_descriptor: Any | None = None
         self._assembled_system_prompt = self.config.system_prompt or ""
         self._assembled_skills: list[Any] = []
+        # Only these exact, build-generated instances receive the discovery
+        # exemption in the final name-policy audit; names alone are insufficient.
+        self._policy_discovery_tools: tuple[BaseTool, ...] = ()
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
@@ -1256,7 +1287,6 @@ class SubagentExecutor:
                 authorization_provider=authz_provider,
             )
             middlewares = apply_declared_tool_view(middlewares, authorized_names=declared_authorized)
-            verify_declared_tool_view(middlewares, authorized_names=declared_authorized)
         elif authz_provider is not None:
             # Defense in depth: the provider is configured but the seeded
             # decision state is missing, so the declaration pass is skipped.
@@ -1271,6 +1301,26 @@ class SubagentExecutor:
                 "is" if len(missing) == 1 else "are",
                 self.config.name,
             )
+        bound_tools = list(tools if tools is not None else self.tools)
+        # Extensions can add tools through middleware after the inherited list
+        # was filtered. Apply the same subagent policy to those declarations,
+        # independently of global authorization, without changing shared stacks
+        # or re-filtering generated discovery helpers in bound_tools.
+        from deerflow.agents.middlewares.tool_declarations import ToolPolicyNameResolver, apply_declared_tool_policy, verify_subagent_tool_policy
+
+        policy_names = ToolPolicyNameResolver()
+        middlewares = apply_declared_tool_policy(middlewares, allowed=self.config.tools, disallowed=self.config.disallowed_tools, name_resolver=policy_names)
+
+        from deerflow.subagents.checkpoints import checkpoint_runtime
+
+        history_runtime = checkpoint_runtime()
+        state_schema = ThreadState
+        if history_runtime is not None and history_runtime.mode == "delta":
+            from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
+
+            state_schema = get_thread_state_schema("delta")
+            middlewares = normalize_middleware_state_schemas(middlewares, "delta")
+
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware,
         # ModelLengthFinishReasonMiddleware) so _aexecute can read
@@ -1283,19 +1333,33 @@ class SubagentExecutor:
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
-        bound_tools = list(tools if tools is not None else self.tools)
         if self.agent_execution is not None:
             from deerflow.agent_instances.memory import execution_memory_enabled
             from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
 
             middlewares.insert(0, InstanceAuthorityMiddleware(require_memory_audience=execution_memory_enabled(self.agent_execution, (self.app_config or get_app_config()).memory)))
+        # Delta normalization can copy middleware, so audit both policies on
+        # the final instances that create_agent will bind.
+        if declared_authorized is not None:
+            verify_declared_tool_view(middlewares, authorized_names=declared_authorized)
+        verify_subagent_tool_policy(
+            bound_tools,
+            middlewares,
+            allowed=self.config.tools,
+            disallowed=self.config.disallowed_tools,
+            discovery_tools=getattr(self, "_policy_discovery_tools", ()),
+            name_resolver=policy_names,
+        )
         agent = create_agent(
             model=model,
             tools=bound_tools,
             middleware=middlewares,
             system_prompt=None,
-            state_schema=ThreadState,
-            checkpointer=False,
+            state_schema=state_schema,
+            # The opted-in scope replaces the inherited saver with its
+            # loop-owned peer before graph construction. All other entrypoints
+            # keep isolation from a possibly synchronous parent saver.
+            checkpointer=None if history_runtime is not None else False,
         )
         # Use the compiled registry: it includes middleware tools, normalized
         # callables, and LangChain's last-definition-wins name precedence.
@@ -1624,6 +1688,7 @@ class SubagentExecutor:
             enabled=resolved_app_config.tool_search.enabled,
         )
         final_tools.extend(late_tools)
+        self._policy_discovery_tools = tuple(helper for helper in (deferred_setup.tool_search_tool, skill_setup.describe_skill_tool) if helper is not None and any(helper is tool for tool in final_tools))
 
         # Combine the system prompt and skill discovery metadata into a single
         # SystemMessage. Full SKILL.md bodies are loaded only when activated.
@@ -1735,6 +1800,7 @@ class SubagentExecutor:
                 status=SubagentStatus.PENDING,
             )
         from deerflow.runtime.customer_administration import bind_customer_administration_policy, bind_customer_management_actor, bind_customer_management_actor_role, customer_management_actor_role
+        from deerflow.subagents.checkpoints import SubagentCheckpointError, subagent_checkpoint_scope
 
         with (
             ensure_trace_context(self.deerflow_trace_id),
@@ -1745,13 +1811,37 @@ class SubagentExecutor:
             try:
                 capacity = self.execution_capacity or get_subagent_execution_capacity()
                 slot = capacity.slot(wait=False) if self.input_gate is not None and not self.input_gate.can_queue else capacity.slot()
-                async with slot:
+                async with (
+                    subagent_checkpoint_scope(execution_id=result.task_id, run_id=self.run_id, tool_call_id=result.external_task_id, agent_name=self.config.name),
+                    slot,
+                ):
+                    if self._principal_resolver is not None:
+                        # Durable work can wait behind ordinary subagents after
+                        # its worker-side check. Revalidate before marking it
+                        # running or entering any task lifecycle hooks.
+                        try:
+                            principal = await self._principal_resolver()
+                            if not isinstance(principal, Principal) or principal.user_id != self.user_id:
+                                raise PermissionError("Subagent principal does not match its owner")
+                            self.user_role = principal.role
+                            self.oauth_provider = principal.oauth_provider
+                            self.oauth_id = principal.oauth_id
+                            self.channel_user_id = principal.channel_user_id
+                            self.is_internal = principal.is_internal
+                            self.authz_attributes = normalize_authz_attributes(principal.attributes)
+                            self._skill_authorization = None
+                        except Exception as exc:
+                            result.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
+                            return result
                     with result._state_lock:
                         if result.status.is_terminal:
                             return result
                         result.status = SubagentStatus.RUNNING
                         result.started_at = _utcnow()
                     return await self._aexecute_admitted(task, result)
+            except SubagentCheckpointError as exc:
+                result.try_set_terminal(SubagentStatus.FAILED, error=str(exc), admission_failure=True)
+                return result
             except SubagentCapacityError as exc:
                 result.try_set_terminal(
                     SubagentStatus.FAILED,
@@ -1947,6 +2037,10 @@ class SubagentExecutor:
                 from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY
 
                 context[AGENT_EXECUTION_CONTEXT_KEY] = self.agent_execution
+            if self.agent_mcp_authority is not None:
+                from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY
+
+                context[AGENT_AUTH_CONTEXT_KEY] = self.agent_mcp_authority
             context["user_role"] = self.user_role
             from deerflow.runtime.customer_administration import CUSTOMER_ADMINISTRATION_CONTEXT_KEY, CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY
 

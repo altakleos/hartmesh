@@ -257,6 +257,59 @@ async def test_no_verdict_once_is_failed_and_receipt_backfill_preserves_unmet(tm
         assert (await tasks.get("task", user_id="owner"))["run_count"] == 1
 
 
+@pytest.mark.parametrize("newer_status", ["running", "queued"])
+@pytest.mark.asyncio
+async def test_reconcile_keeps_terminal_run_when_newer_occurrence_is_active(tmp_path, database_backend, newer_status):
+    async with database(tmp_path, backend=database_backend) as (_sf, tasks, runs):
+        await task(tasks)
+        await runs.create(
+            run_record_id="occ-old",
+            task_id="task",
+            thread_id="thread-old",
+            scheduled_for=NOW,
+            trigger="scheduled",
+            status="failed",
+        )
+        # Seed the real terminal payload: runs.create cannot set error or
+        # finished_at, and the guard must preserve both, not just the status.
+        await runs.update_status("occ-old", status="failed", error="queue timeout", finished_at=NOW)
+        await runs.create(
+            run_record_id="occ-new",
+            task_id="task",
+            thread_id="thread-new",
+            scheduled_for=NOW + timedelta(minutes=1),
+            trigger="manual",
+            status=newer_status,
+        )
+
+        assert await runs.reconcile_launched_run("occ-old", task_id="task", run_id="run-late", started_at=NOW + timedelta(seconds=1)) is True
+
+        rows = {row["id"]: row for row in await runs.list_by_task("task")}
+        assert rows["occ-old"]["status"] == "failed"
+        assert rows["occ-old"]["error"] == "queue timeout"
+        assert datetime.fromisoformat(rows["occ-old"]["finished_at"]) == NOW
+        assert rows["occ-old"]["started_at"] is None
+        assert rows["occ-old"]["run_id"] == "run-late"
+        assert rows["occ-new"]["status"] == newer_status
+        from deerflow.persistence.scheduled_task_runs.retirement import EXECUTION_RETIREMENT_PENDING
+
+        assert rows["occ-old"]["lease_owner"] == EXECUTION_RETIREMENT_PENDING
+        assert [row["id"] for row in await runs.list_retirement_pending()] == ["occ-old"]
+        assert await runs.count_active_runs() == (2 if newer_status == "running" else 1)
+        assert await runs.reconcile_launched_run("occ-old", task_id="task", run_id="run-late", started_at=NOW + timedelta(seconds=2))
+        replay = next(row for row in await runs.list_by_task("task") if row["id"] == "occ-old")
+        assert replay["started_at"] is None and replay["lease_owner"] == EXECUTION_RETIREMENT_PENDING
+        assert not await runs.confirm_execution_retirement("occ-old", run_id="other-run")
+        assert await runs.confirm_execution_retirement("occ-old", run_id="run-late")
+        assert await runs.count_active_runs() == (1 if newer_status == "running" else 0)
+        assert await runs.reconcile_launched_run("occ-old", task_id="task", run_id="run-late", started_at=NOW + timedelta(seconds=3))
+        assert await runs.update_status("occ-old", status="running", run_id="run-late", started_at=NOW + timedelta(seconds=4), protect_terminal=True)
+        confirmed = next(row for row in await runs.list_by_task("task") if row["id"] == "occ-old")
+        assert confirmed["started_at"] is None
+        assert confirmed["finished_at"] == rows["occ-old"]["finished_at"]
+        assert confirmed["status"] == "failed" and confirmed["error"] == "queue timeout"
+
+
 @pytest.mark.asyncio
 async def test_success_resets_unmet_streak_and_old_callback_cannot_pause_new_parent(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):

@@ -68,12 +68,17 @@ from deerflow.persistence.telegram_bots import (
 )
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_reads.model import ThreadReadMarkerRow, ThreadReadVersionRow
+from deerflow.persistence.thread_shares.model import ShareArtifactRow, ThreadShareRow
+from deerflow.persistence.tool_approvals.model import ToolApprovalRow
 from deerflow.persistence.user.access import DisabledIdentityRow, IdentityHoldRow, RoleLimitRow
 from deerflow.persistence.user.im_notifications import ImNotificationPreferenceRow
 from deerflow.persistence.user.model import UserPreferenceRow, UserRow
 from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow
 
 __all__ = [
+    "ShareArtifactRow",
+    "ThreadShareRow",
+    "ToolApprovalRow",
     "HumanInputEventRow",
     "HumanInputReadRow",
     "HumanInputRequestRow",

@@ -108,7 +108,7 @@ jobs:
         working-directory: backend
         run: uv sync --group dev --extra postgres
 
-      - name: Run unit tests of backend (shard ${{ matrix.shard }} of 12)
+      - name: Run unit tests of backend (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
         working-directory: backend
         env:
           # Expose the job's Postgres service to the cross-pod dedupe integration
@@ -118,7 +118,7 @@ jobs:
           DEERFLOW_TEST_WORKFLOW_POSTGRES: ${{ env.TEST_POSTGRES_URI }}
           DEDUPE_TEST_POSTGRES_URL: ${{ env.TEST_POSTGRES_URI }}
           PYTEST_ADDOPTS: --junitxml=test-results/backend-unit-shard-${{ matrix.shard }}.xml
-        run: make test-shard SPLITS=12 GROUP=${{ matrix.shard }}
+        run: make test-shard SPLITS=${{ strategy.job-total }} GROUP=${{ matrix.shard }}
 
       - name: Upload backend unit test results (shard ${{ matrix.shard }})
         if: always()

@@ -359,7 +359,15 @@ def _validated_members(
         for path in paths
     ]
     collision_keys = [unicodedata.normalize("NFC", member.entry).casefold() for member in members]
-    if len(collision_keys) != len(set(collision_keys)):
+    collision_set = set(collision_keys)
+    if len(collision_keys) != len(collision_set):
+        raise _reject()
+    implicit_dirs = set()
+    for key in collision_keys:
+        parts = key.split("/")
+        for i in range(1, len(parts)):
+            implicit_dirs.add("/".join(parts[:i]))
+    if collision_set & implicit_dirs:
         raise _reject()
 
     sizes = [member.initial.st_size for member in members]
