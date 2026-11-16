@@ -79,7 +79,7 @@ auth:
 # ── Sandbox: the Gateway's local Docker backend (no provisioner_url) ────────
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
-  image: ghcr.io/altakleos/hartmesh-sandbox@sha256:c634bdd61b3b0d9c1ce7d5af7da071283b702dbde469a6241a4455b702a4d06a
+  image: ghcr.io/altakleos/hartmesh-sandbox@sha256:47324d93b7942c9f424c7c35379606736501a623a373e936f55ba2afb4619139
   # The HartMesh image build asserts the imports promised to the lead agent.
   python_libraries_profile: hartmesh
   port: 8080
@@ -166,7 +166,7 @@ sandbox:
       - files.pythonhosted.org
       - registry.npmjs.org
       - github.com
-    proxy_image: ghcr.io/altakleos/hartmesh-sandbox-network-proxy@sha256:caac32e83f272698acf5b8c9c07e2bf383b95554e2f4d842a5a7e546d9fabc56
+    proxy_image: ghcr.io/altakleos/hartmesh-sandbox-network-proxy@sha256:26b73434bceacd53d8c56230eb8f2569ca23e581c5ffebe9c7f4e7daedeb63ef
 
 skills:
   # Skill library on the tenant data disk: public/ is mirrored from the
