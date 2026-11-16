@@ -37,9 +37,10 @@ merge. No release is authorized by this synchronization.
 
 ## Decisions and progress
 
-The table accounts for the complete pinned interval. The integration is staged;
-independent review and focused qualification are followed by final published CI
-and an ancestry-preserving PR merge. CI and merge are not yet completion evidence.
+The table accounts for the complete pinned interval. The reviewed integration is
+tracked in [PR #550](https://github.com/altakleos/hartmesh/pull/550), which records
+published source revisions, focused validation, exact-head CI and merge status.
+Ancestry alone is not implementation evidence.
 
 | Upstream commit | Decision | Intention / compatibility |
 | --- | --- | --- |
@@ -182,7 +183,7 @@ and an ancestry-preserving PR merge. CI and merge are not yet completion evidenc
 Independent agents reviewed separate implementation areas and cross-reviewed the
 other implementations. Review found and corrected an accidental deferred-approval
 MCP import, mismatched product scrolling assumptions, memory authority crossings,
-and a scheduler list/claim cutoff inconsistency. The PR will carry reviewed source
+and a scheduler list/claim cutoff inconsistency. The PR records reviewed source
 fingerprints, exact commands and final CI/merge evidence.
 
 Focused checks passed for runtime/peer recovery, input and authorization boundaries,
@@ -194,8 +195,9 @@ policy was relaxed. Fresh required CI must qualify these and every applicable
 native/Compose workflow on the final published revision before merge.
 
 The staged reference frontend and marker equal upstream tree
-`330ae40e7e41fbf440375cd7d06a50a92fcddf51`. The full isolation ancestry check runs
-after the merge commit makes the fixed target an ancestor. HartMesh's version
+`330ae40e7e41fbf440375cd7d06a50a92fcddf51`. The full isolation ancestry check passed
+on integration commit `7f2ad71d756791caa1f56dcbaf399734003c75e3`, whose parents are
+the HartMesh base and fixed upstream target. HartMesh's version
 sources remain `2.2.0+hartmesh.59`.
 
 ## Delivery boundary

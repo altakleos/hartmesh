@@ -1,7 +1,7 @@
 """Regression anchors: starting a run must read the live config off the loop.
 
 ``start_run`` needs the hot-reloaded ``AppConfig`` for the run context, the
-recursion limits, the model allowlist and the approval switch. Each inline
+recursion limits and the model allowlist. Each inline
 ``get_app_config()`` stats and hashes ``config.yaml`` and
 ``extensions_config.json`` and reparses them after an edit, so the run start
 builds its context, and with it one config snapshot, in a worker and reuses it.
@@ -101,15 +101,29 @@ async def test_run_start_with_a_model_reads_the_allowlist_off_the_loop(runs) -> 
     assert rejected.value.status_code == 400
 
 
-async def test_resuming_a_paused_run_reads_the_config_off_the_loop(runs) -> None:
+async def test_resuming_an_interrupted_graph_reads_live_config_off_the_loop(runs, tmp_path: Path) -> None:
     agent_runs, built, _ = runs
     thread = await agent_runs.create_thread(thread_id="config-read-resume")
     first = await agent_runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "approve"}]})
-    assert (await agent_runs.wait(thread_id=thread, run_id=first.run_id, timeout=5)).status == "waiting_for_input"
-
-    resumed = await agent_runs.resume(thread_id=thread, resume="yes")
-    assert (await agent_runs.wait(thread_id=thread, run_id=resumed.run_id, timeout=5)).status == "success"
+    # Native graph interrupts retain HartMesh's existing completed-run status;
+    # the checkpoint, rather than deferred tool approvals, owns the continuation.
+    assert (await agent_runs.wait(thread_id=thread, run_id=first.run_id, timeout=5)).status == "success"
+    assert (await agent_runs.get_state(thread_id=thread))["next"] == ["answer"]
     assert {config["recursion_limit"] for config in built} == {37}
+
+    await asyncio.to_thread((tmp_path / "config.yaml").write_text, _CONFIG_YAML.replace("recursion_limit: 37", "recursion_limit: 41"), encoding="utf-8")
+
+    before_resume = len(built)
+    resumed = await agent_runs.resume(thread_id=thread, resume="yes")
+    # Inspect the admission configs before get_state can build another one.
+    assert built[before_resume:]
+    assert {config["recursion_limit"] for config in built[before_resume:]} == {41}
+    assert (await agent_runs.wait(thread_id=thread, run_id=resumed.run_id, timeout=5)).status == "success"
+    snapshot = await agent_runs.get_state(thread_id=thread)
+    assert snapshot["next"] == []
+    assert snapshot["values"]["messages"][-1]["content"] == "answer:yes"
+    assert built[-1]["recursion_limit"] == 41
+    assert {config["recursion_limit"] for config in built} == {37, 41}
 
 
 async def test_run_input_submission_does_not_load_the_config_on_the_loop(runs) -> None:
