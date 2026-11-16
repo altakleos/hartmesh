@@ -20,6 +20,7 @@ from app.telegram_bots.acts import ActsWorker
 from app.telegram_bots.authority import get_local_provider
 from app.telegram_bots.producer import DeliveryClaimRetired, ProductSourceRetired
 from app.telegram_bots.render import render
+from app.telegram_bots.work_retry_denials import source_id
 from deerflow.agent_instances.work import AgentWork
 from deerflow.agent_instances.work_contract import DelegateWork
 from deerflow.agent_instances.work_execution import WorkExecution
@@ -44,6 +45,34 @@ async def deliver_owned(e, identity):
             if row.state == "sent" and current and all(part["state"] == "sent" and part["message_ids"] for part in current):
                 return
         await asyncio.sleep(0.05)
+
+
+async def settle_denial(e, identity, *, retired):
+    observed = None
+    try:
+        async with asyncio.timeout(30):
+            while True:
+                e.clock.advance(1)
+                await e.host.sender.tick()
+                await e.host.sender.drain()
+                async with e.e.sf() as reader:
+                    row = await reader.get(TelegramOutboxRow, identity)
+                    assert row is not None
+                    observed = (row.state, row.skip_reason, row.failed_reason, row.not_before, e.clock.now(), row.claim_owner, row.claim_id, row.attempts, row.parts)
+                    assert row.state != "failed", observed
+                    if retired:
+                        assert not any(part["message_ids"] for part in row.parts), observed
+                        if row.state == "skipped":
+                            assert row.skip_reason == "superseded", observed
+                            return
+                    else:
+                        assert row.state != "skipped", observed
+                        current = [part for part in row.parts if part.get("presentation_version", 0) == row.payload.get("presentation_version", 0)]
+                        if row.state == "sent" and row.sent_at and current and all(part["state"] == "sent" and part["message_ids"] and part["sent_at"] for part in current):
+                            return
+                await asyncio.sleep(0.05)
+    except TimeoutError as exc:
+        raise AssertionError((identity, observed)) from exc
 
 
 @pytest.mark.asyncio
@@ -227,17 +256,33 @@ async def test_current_execution_retry_preserves_actual_native(capture_environme
             monkeypatch.setattr(e.host.sender, "tick", paused_tick)
         before = len(e.normal.calls)
         await tap(e, retry, 7113)
+        if change != "paused":
+            async with e.e.sf() as reader:
+                denial = (
+                    await reader.scalars(
+                        select(TelegramOutboxRow).where(
+                            TelegramOutboxRow.link_id == e.link.id,
+                            TelegramOutboxRow.owner_user_id == e.link.owner_user_id,
+                            TelegramOutboxRow.binding_generation == e.link.binding_generation,
+                            TelegramOutboxRow.chat_id == retry.chat_id,
+                            TelegramOutboxRow.message_thread_id == retry.message_thread_id,
+                            TelegramOutboxRow.payload["work_retry_denial"]["act_id"].as_string() == original.id,
+                            TelegramOutboxRow.payload["work_retry_denial"]["callback"]["id"].as_string() == retry.id,
+                            TelegramOutboxRow.payload["work_retry_denial"]["query_id"].as_string() == "query-7113",
+                        )
+                    )
+                ).one()
+                assert denial.dedupe_key == "notice:" + source_id(e.link, denial.payload["work_retry_denial"])
+                denial_id = denial.id
         if carrier:
             async with e.e.sf.begin() as writer:
-                fixed = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.payload["work_retry_denial"]["act_id"].as_string() == original.id))
+                fixed = await writer.get(TelegramOutboxRow, denial_id)
                 assert fixed is not None and fixed.state == "pending" and all(not part["message_ids"] for part in fixed.parts)
                 fixed.payload = {key: value for key, value in fixed.payload.items() if key != "work_retry_denial"}
                 (await writer.get(AgentInstanceGrantRow, (e.instance.id, e.link.owner_user_id))).permissions = 7
             monkeypatch.setattr(e.host.sender, "tick", tick)
-        for _ in range(4):
-            e.clock.advance(1)
-            await e.host.sender.tick()
-            await e.host.sender.drain()
+        if change != "paused":
+            await settle_denial(e, denial_id, retired=carrier)
         supervisor = await get_local_provider().get_user(e.instance.supervisor.subject_id)
         key = "agent.paused" if change == "paused" else "denied.start" if kind == "activate" else "work.need_inspect" if change == "inspect" else "stop.not_yours" if change == "manage" else "denied.other"
         expected = render(key, "en-US", name=e.instance.name, supervisor=str(supervisor.email), person="colleague@example.com" if foreign else "")
