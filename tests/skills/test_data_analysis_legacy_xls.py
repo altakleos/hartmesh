@@ -363,3 +363,36 @@ def test_excel_content_detection_preserves_literal_cells_in_any_suffix(analysis,
         analysis["_load_excel"](con, str(source), tables)
         assert tables == {"Identifiers": "Identifiers"}
         assert con.execute('SELECT * FROM "Identifiers"').fetchall() == [("NA", "00123"), ("NULL", "00456")]
+
+
+@pytest.mark.parametrize("suffix", [".xlsx", ".xlsm", ".xls"])
+def test_excel_integer_columns_keep_bigint_without_losing_cells(analysis, tmp_path, suffix):
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Numbers"
+    sheet.append(["small", "signed", "nullable", "literal", "wide", "fraction"])
+    rows = [
+        (1, 2**40, 1, "00123", 2**63, 1.25),
+        (2, -(2**40), None, "NA", None, None),
+        (3, 2**53 - 1, 2**40, "NULL", 2**63, -2.5),
+    ]
+    for row in rows:
+        sheet.append(row)
+    source = tmp_path / ("numbers" + suffix)
+    workbook.save(source)
+    workbook.close()
+    scope = analysis["main"].__globals__
+    scope["CACHE_DIR"] = str(tmp_path / "cache")
+    for _ in range(2):
+        with analysis["open_analysis_cache"]([str(source)]) as (con, tables):
+            assert tables == {"Numbers": "Numbers"}
+            types = {row[0]: row[1] for row in con.execute('DESCRIBE "Numbers"').fetchall()}
+            assert types == {
+                "small": "BIGINT",
+                "signed": "BIGINT",
+                "nullable": "BIGINT",
+                "literal": "VARCHAR",
+                "wide": "UBIGINT",
+                "fraction": "DOUBLE",
+            }
+            assert con.execute('SELECT * FROM "Numbers" ORDER BY small').fetchall() == rows

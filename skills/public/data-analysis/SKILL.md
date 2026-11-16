@@ -16,7 +16,9 @@ load offline without DuckDB extensions. The reader uses the workbook content, so
 exports mislabeled with another Excel suffix still load. Text identifiers retain
 leading zeros and literal `NA`/`NULL` values remain text; empty cells become nulls.
 Columns containing incompatible types are stored as text while compatible numeric
-columns stay numeric. Empty or unreadable sheets are reported and skipped.
+columns stay numeric. Integral columns within signed 64-bit range retain their
+BIGINT type, including nulls; wider integers and fractional values keep their
+existing numeric inference. Empty or unreadable sheets are reported and skipped.
 
 ## Core Capabilities
 

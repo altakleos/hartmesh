@@ -36,6 +36,11 @@ Customer management: [admission rules](docs/CONFIGURATION.md#customer-administra
 Redis login counters use bounded WATCH/MULTI, committing TTLs atomically and
 failing closed. Gateway batches inject `batch_owner_allowed`; cancelled claimed
 items stay unconfirmed without worker stop evidence.
+Batch principal refresh reads canonical account refusal off-loop. Pending setup
+confines sessions; admitted automation keeps running. Built-in promotion retains
+the saved role ceiling; demotions and ambiguous custom-role changes refuse.
+OAuth provider and subject must still match after capacity waits; missing users
+retain only the original unbound internal-channel shape.
 
 ### Documentation Update Policy
 Every code change must keep docs accurate and current: update `README.md` for

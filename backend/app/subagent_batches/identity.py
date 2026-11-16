@@ -2,8 +2,12 @@
 
 import logging
 
+from app.gateway.auth.mode import account_refusal
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, get_auth_disabled_user, is_auth_disabled
 from deerflow.authz.provider import Principal
+from deerflow.config.paths import make_safe_user_id
+from deerflow.persistence.user.access import ROLES, limited_role
+from deerflow.utils.assembly_io import run_assembly
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +16,10 @@ async def resolve_batch_principal(batch, *, load_user) -> Principal:
     owner = batch["user_id"]
     spec = batch["execution_spec"]
     internal = spec.get("is_internal") is True
-    if owner == AUTH_DISABLED_USER_ID and is_auth_disabled():
+    admitted_role = spec.get("user_role")
+    oauth_provider, oauth_id = spec.get("oauth_provider"), spec.get("oauth_id")
+    development_owner = owner == AUTH_DISABLED_USER_ID and is_auth_disabled() and admitted_role == "admin" and oauth_provider is None and oauth_id is None
+    if development_owner:
         user = get_auth_disabled_user()
     else:
         try:
@@ -26,18 +33,32 @@ async def resolve_batch_principal(batch, *, load_user) -> Principal:
     if user is None:
         # Gateway stamps no role on an unmapped, trusted internal identity.
         # A missing formerly mapped account must not take this fallback.
-        if internal and spec.get("user_role") is None:
-            return Principal(user_id=owner, is_internal=True, channel_user_id=spec.get("channel_user_id"))
+        channel_user_id = spec.get("channel_user_id")
+        if internal and isinstance(channel_user_id, str) and channel_user_id and admitted_role is None and oauth_provider is None and oauth_id is None and owner == make_safe_user_id(channel_user_id):
+            return Principal(user_id=owner, is_internal=True, channel_user_id=channel_user_id)
         raise PermissionError("Batch owner is no longer available")
-    if str(user.id) != owner or getattr(user, "disabled", False) or user.needs_setup:
+    try:
+        # HartMesh derives disabled/released access from the current identity
+        # and account records. Live sign-on policy can also make local users
+        # inert; reading it belongs off the dispatch loop.
+        refusal = None if development_owner else await run_assembly(account_refusal, user)
+    except Exception as exc:
+        logger.warning("Batch owner policy lookup failed (batch_id=%s, error_type=%s)", batch.get("id"), type(exc).__name__)
+        raise PermissionError("Batch owner could not be verified") from None
+    # needs_setup confines interactive sessions; it does not revoke automation
+    # already admitted under the saved identity and role.
+    if str(user.id) != owner or refusal is not None:
         raise PermissionError("Batch owner is no longer active")
-    if user.system_role != spec.get("user_role"):
-        # Custom roles are not ordered. Refuse changed grants rather than
-        # retaining a revoked role or widening old work after a promotion.
-        raise PermissionError("Batch owner role changed; submit a new batch with current permissions")
+    if oauth_provider != user.oauth_provider or oauth_id != getattr(user, "oauth_id", None):
+        raise PermissionError("Batch owner identity changed; submit a new batch with current permissions")
+    if user.system_role != admitted_role:
+        # Preserve HartMesh's existing automation ceiling on a known built-in
+        # promotion. Custom roles remain unordered and demotions revoke work.
+        if admitted_role not in ROLES or user.system_role not in ROLES or limited_role(admitted_role, user.system_role) != admitted_role:
+            raise PermissionError("Batch owner role changed; submit a new batch with current permissions")
     return Principal(
         user_id=owner,
-        role=user.system_role,
+        role=admitted_role,
         oauth_provider=user.oauth_provider,
         oauth_id=getattr(user, "oauth_id", None),
         channel_user_id=spec.get("channel_user_id"),
