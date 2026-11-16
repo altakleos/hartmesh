@@ -498,3 +498,15 @@ dotenv files. Unset/empty selection preserves the optional root .env default;
 explicit invalid files reject build/start before Docker. Stopping remains
 possible after the selected file is removed. Tests: `test_deploy_env_file.py`
 and the existing deployment/Compose suites.
+
+## Storage startup memory qualification
+
+`qualify_storage_init_memory.py` runs only on a disposable GitHub-hosted Linux
+Docker runner. It uses the production service, immutable backend digests and
+real ext4/loop preparation for 31 spaces. Preserve the empty-pool check, five
+fresh containers, five restarts, external cgroup counters, actual child verdict,
+mount/inventory verification and the 75% memory gate. The old-image negative
+control must fail for memory margin, not an unrelated refusal. No developer-host
+mounts or THP changes. Record kernel/THP and individual logs/results; this is
+Docker memory evidence, not tenant-class qualification. Workflow dispatch accepts
+an exact published digest to repeat against delivered bytes.

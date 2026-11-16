@@ -2507,6 +2507,18 @@ It binds only the pool and enters the host mount namespace with `nsenter -m -t 1
 It reads the data-directory and planning environment, never app configuration
 or the database. It knows slots and kinds, not accounts or agents.
 
+The service enters through `python -m app.storage_init`. Its standard-library-only
+parent supervises the existing `app.gateway.storage_init prepare` child, without
+loading Gateway or application configuration in both processes. Bytecode writes
+are disabled for this service. Other operator verbs still use the same storage
+implementation and return codes.
+
+After child cleanup, stderr records `storage-init: memory peak … MiB of … MiB`
+with the raw byte values. Unlimited limits are explicit; unreadable counters say
+`memory unavailable` and do not change the preparation result. An OOM kill can
+prevent a process from writing its last line; inspect Docker's OOM state and
+cgroup events as well. The peak covers the container's whole current lifetime.
+
 At every `up`, `prepare --at-start` has a 600-second limit and exits zero so a
 storage failure does not prevent Gateway startup. Its JSON `returncode`,
 `verdict` and `problems` retain the actual outcome. An interrupted plan continues

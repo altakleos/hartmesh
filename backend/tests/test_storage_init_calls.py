@@ -107,9 +107,11 @@ async def test_gateway_storage_init_command_matches_the_compose_service(monkeypa
         "mount-all",
     ]
     service = yaml.safe_load((Path(__file__).resolve().parents[2] / "deploy/compose/compose.yaml").read_text(encoding="utf-8"))["services"]["storage-init"]
-    assert command[-6:-1] == service["entrypoint"][1:]
+    assert command[-6:-2] == service["entrypoint"][1:-1]
+    assert service["entrypoint"][-1] == "app.storage_init"
     assert command[command.index("--memory") + 1] == service["mem_limit"]
-    assert set(service["environment"]) == {"PYTHONPATH", "UV_CACHE_DIR", "HARTMESH_DATA_DIR", *KEYS}
+    assert set(service["environment"]) == {"PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "UV_CACHE_DIR", "HARTMESH_DATA_DIR", *KEYS}
+    assert service["environment"]["PYTHONDONTWRITEBYTECODE"] == "1"
 
 
 @pytest.mark.asyncio

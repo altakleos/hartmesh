@@ -485,7 +485,9 @@ def test_at_start_ends_descendants_even_if_leader_exits_or_descendant_ignores_te
     )
     original = subprocess.Popen
     monkeypatch.setattr(si.subprocess, "Popen", lambda args, **kwargs: original([sys.executable, str(program)], **kwargs))
-    monkeypatch.setattr(si, "AT_START_LIMIT_SECONDS", 0.5)
+    from app import storage_init as startup
+
+    monkeypatch.setattr(startup, "AT_START_LIMIT_SECONDS", 0.5)
     doc = si.at_start()
     assert doc["returncode"] == (0 if leader_exits else 2)
     assert pidfile.exists()
@@ -947,7 +949,9 @@ def test_at_start_incomplete_document_lists_persisted_slots_and_marks_unknown_fa
             raise subprocess.TimeoutExpired("owned fixture", 600)
 
     monkeypatch.setattr(si.subprocess, "Popen", lambda *args, **kwargs: Child())
-    monkeypatch.setattr(si, "end_owned_group", lambda child: True)
+    from app import storage_init as startup
+
+    monkeypatch.setattr(startup, "end_owned_group", lambda child: True)
     doc = si.at_start()
     assert doc["returncode"] == 2 and len(doc["spaces"]) == 6
     assert all(row["mounted"] and row["mounted_now"] is None for row in doc["spaces"])

@@ -378,6 +378,14 @@ Unverified geometry is never published by a metadata edit.
 Feature and quota projections
 use the `shared` editor label; native attachments remain separately advertised.
 
+Compose startup enters through the standard-library-only `app.storage_init`
+supervisor; its real child remains `app.gateway.storage_init prepare`. The parent
+retains the 600-second deadline, owned process-group cleanup and incomplete
+verdict when containment is uncertain. Persisted-state fallback imports storage
+only after confirmed containment. Its best-effort cgroup-v2 peak/limit diagnostic
+uses stderr, leaving the preparation JSON unchanged; a killed process may emit
+no final diagnostic.
+
 The backend image also includes `python -m app.gateway.storage_init` for typed
 Compose pools. Its verbs are `prepare`, `mount-all`, `fstab-sync`, `verify`,
 `resize`, `forget`, `quiesce` and `status`. It reads `HARTMESH_DATA_DIR` and the

@@ -1,0 +1,77 @@
+name: Storage initialization memory
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      backend_image:
+        description: Immutable published backend digest; empty builds the selected source
+        required: false
+        type: string
+
+concurrency:
+  group: storage-init-memory-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  storage-memory:
+    name: Storage startup memory (31 real spaces)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Require real ext4, cgroup v2 and loop-device access
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          test "$(docker info --format '{{.CgroupVersion}}')" = 2
+          command -v mkfs.ext4 e2fsck resize2fs losetup mount umount findmnt fallocate nsenter flock
+          test -c /dev/loop-control
+          sudo mkdir -p /srv
+          test "$(findmnt -no FSTYPE --target /srv)" = ext4
+          test "$(findmnt -no PROPAGATION --target /srv)" = shared
+          # This dedicated disposable runner is the Docker host for this job.
+          # Reproduce the more demanding allocation policy, never a dev-host change.
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          echo always | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
+          cat /sys/kernel/mm/transparent_hugepage/enabled
+          grep -F '[always]' /sys/kernel/mm/transparent_hugepage/enabled
+          test "$(df --output=avail -BG /srv | tail -n 1 | tr -dc 0-9)" -ge 48
+      - name: Build or pull the exact backend image
+        env:
+          PUBLISHED_IMAGE: ${{ inputs.backend_image }}
+        run: |
+          if test -n "$PUBLISHED_IMAGE"; then
+            case "$PUBLISHED_IMAGE" in *@sha256:*) ;; *) echo 'An immutable image digest is required'; exit 1 ;; esac
+            docker pull "$PUBLISHED_IMAGE"
+            echo "BACKEND_IMAGE=$PUBLISHED_IMAGE" >> "$GITHUB_ENV"
+          else
+            docker build --build-arg UV_EXTRAS=postgres -t localhost:80/hartmesh-backend:memory -f backend/Dockerfile .
+            docker run -d --name storage-memory-registry -p 127.0.0.1:80:5000 registry:2
+            for attempt in $(seq 1 20); do curl -fsS http://127.0.0.1/v2/ && break; sleep 0.5; done
+            docker push localhost:80/hartmesh-backend:memory
+            digest=$(docker image inspect --format '{{index .RepoDigests 0}}' localhost:80/hartmesh-backend:memory)
+            case "$digest" in localhost:80/hartmesh-backend@sha256:*) ;; *) exit 1 ;; esac
+            echo "BACKEND_IMAGE=$digest" >> "$GITHUB_ENV"
+          fi
+      - name: Qualify empty preparation, five fresh containers and five restarts
+        run: |
+          baseline=$(git show v2.2.0+hartmesh.55:deploy/compose/images.txt | head -n 1)
+          docker pull "$baseline"
+          python3 scripts/qualify_storage_init_memory.py --image "$BACKEND_IMAGE" --baseline-image "$baseline" --artifacts "$RUNNER_TEMP/storage-memory-evidence"
+      - name: Preserve exact-image memory and preparation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-memory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/storage-memory-evidence/
+          if-no-files-found: error
+          retention-days: 90

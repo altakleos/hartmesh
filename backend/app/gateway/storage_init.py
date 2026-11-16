@@ -12,7 +12,6 @@ import fcntl
 import json
 import os
 import re
-import signal
 import stat
 import subprocess
 import sys
@@ -22,6 +21,7 @@ import uuid
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from app.storage_init import at_start
 from deerflow.config.storage_spaces_config import StoragePlan
 from deerflow.spaces.backings import (
     RESERVE_BYTES,
@@ -38,7 +38,6 @@ from deerflow.spaces.backings import (
 from deerflow.spaces.provision import FIXED_VOLUME_MOUNT_OPTIONS, INODE_BYTES, KINDS, MAX_SPACES, plan_capacities, plan_counts, storage_fit
 
 ABSENT_MEANS_DEFAULT = True
-AT_START_LIMIT_SECONDS = 600
 LOCK_WAIT_SECONDS = 30
 USERS_RANGE = (1, 100)
 ASSISTANTS_PER_USER_RANGE = (0, 10)
@@ -1166,110 +1165,6 @@ def parser():
     resize.add_argument("values", nargs="+")
     resize.add_argument("--kind", choices=KINDS)
     return p
-
-
-def end_owned_group(child) -> bool:
-    # The group, not completion of its Python leader, owns host-tool execution.
-    try:
-        os.killpg(child.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        child.communicate(timeout=5)
-    except subprocess.TimeoutExpired:
-        return False
-    deadline = time.monotonic() + 5
-    while True:
-        live = False
-        for proc in Path("/proc").iterdir():
-            if not proc.name.isdigit():
-                continue
-            try:
-                fields = (proc / "stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
-                if int(fields[2]) == child.pid and fields[0] not in ("Z", "X"):
-                    live = True
-                    break
-            except FileNotFoundError:
-                continue
-            except (OSError, ValueError, IndexError):
-                return False
-        if not live:
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.02)
-
-
-def at_start():
-    child = None
-    previous = signal.getsignal(signal.SIGTERM)
-
-    def interrupted(signum, frame):
-        raise InterruptedError("prepare supervisor was interrupted")
-
-    signal.signal(signal.SIGTERM, interrupted)
-    try:
-        child = subprocess.Popen([sys.executable, "-m", "app.gateway.storage_init", "prepare"], stdout=subprocess.PIPE, text=True, start_new_session=True)
-        try:
-            stdout, _ = child.communicate(timeout=AT_START_LIMIT_SECONDS)
-            doc = json.loads(stdout)
-            if not isinstance(doc, dict) or doc.get("command") != "prepare" or doc.get("returncode") not in (0, 1, 2):
-                raise ValueError("prepare child returned an invalid document")
-            if not end_owned_group(child):
-                doc.update(returncode=2, verdict="incomplete", note="prepare ended; child containment could not be confirmed")
-                doc.setdefault("problems", []).append(doc["note"])
-            return doc
-        except (subprocess.TimeoutExpired, InterruptedError, KeyboardInterrupt) as exc:
-            confirmed = end_owned_group(child)
-            cause = "prepare did not finish within 600 s" if isinstance(exc, subprocess.TimeoutExpired) else "prepare supervisor was interrupted"
-            note = cause + ("; its children were ended" if confirmed else "; child containment could not be confirmed")
-            data = os.environ.get("HARTMESH_DATA_DIR", "")
-            doc = dict(
-                command="prepare",
-                returncode=2,
-                note=note,
-                verdict="incomplete",
-                pool=str(Path(data) / "spaces"),
-                problems=[note],
-                plan=None,
-                prepared=None,
-                missing=None,
-                prepared_now=None,
-                restored=None,
-                required_bytes=None,
-                reserved_bytes=None,
-                headroom_bytes=None,
-                free_bytes=None,
-                free_inodes=None,
-                fits=None,
-                data_disk=None,
-                spaces=[],
-                fstab=dict(entries=None, changed=None),
-                seconds=AT_START_LIMIT_SECONDS,
-            )
-            try:
-                tool = StorageInitializer(Path(data), parse_plan(os.environ))
-                inventory = tool.load(optional=True)
-                if inventory:
-                    doc["spaces"] = [dict(slot_id=s.slot_id, kind=s.kind, max_bytes=s.max_bytes, max_inodes=s.max_inodes, mounted=os.path.ismount(s.mount_path), mounted_now=None) for s in inventory.volumes.values()]
-                    doc["prepared"] = {kind: sum(s.kind == kind for s in inventory.volumes.values()) for kind in KINDS}
-                    doc["reserved_bytes"] = sum(s.max_bytes for s in inventory.volumes.values())
-                if tool.plan:
-                    _, fields = tool.pool_plan(inventory)
-                    # Current pool facts are available; which slots this run made,
-                    # its initial fit and its fstab publication remain unknown.
-                    fields["fits"] = None
-                    doc.update(fields)
-            except Exception as state_error:
-                doc["problems"].append(f"persisted preparation state could not be read: {state_error}")
-            return doc
-    finally:
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        try:
-            if child is not None:
-                end_owned_group(child)
-        finally:
-            signal.signal(signal.SIGTERM, previous)
 
 
 def main(argv=None) -> int:

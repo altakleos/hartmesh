@@ -1001,7 +1001,9 @@ do not grant permissions. See `config.example.yaml` for the fields and
 The backend image includes an operator CLI for preparing and maintaining
 typed storage pools. It checks disk headroom before preparation and supports
 offline growth that preserves files; see [Storage Spaces](docs/STORAGE_SPACES.md)
-for its privilege requirements and current scope.
+for its privilege requirements and current scope. The Compose `storage-init`
+one-shot uses a lightweight supervisor, disables bytecode writes, and logs its
+cgroup memory peak and limit without changing preparation results.
 
 Managed loop-backed Spaces reserve their full image capacity. New mounts use
 `nodiscard`, and generated fstab entries exclude them from the standard scheduled
