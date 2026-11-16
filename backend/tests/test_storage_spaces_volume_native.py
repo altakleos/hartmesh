@@ -43,7 +43,7 @@ def _allow_disposable_loop_deallocation(catalog, spec):
     image = os.open(spec.image_path, os.O_RDONLY | os.O_NOFOLLOW)
     control = root = None
     owned = None
-    node = spec.image_path.with_suffix(".negative-loop")
+    node = None
     node_identity = None
     qualified = False
     try:
@@ -65,9 +65,19 @@ def _allow_disposable_loop_deallocation(catalog, spec):
         sysfs = Path(f"/sys/class/block/loop{owned}")
         major, minor = map(int, (sysfs / "dev").read_text(encoding="ascii").strip().split(":"))
         device = os.makedev(major, minor)
-        os.mknod(node, stat.S_IFBLK | 0o600, device)
+        # libmount expects the canonical loop-device name. udev may have
+        # already created this node; validate it and retain it in that case.
+        node = Path(f"/dev/loop{owned}")
+        try:
+            os.mknod(node, stat.S_IFBLK | 0o600, device)
+        except FileExistsError:
+            created_here = False
+        else:
+            created_here = True
         created = node.lstat()
-        node_identity = created.st_dev, created.st_ino
+        assert stat.S_ISBLK(created.st_mode) and created.st_rdev == device
+        if created_here:
+            node_identity = created.st_dev, created.st_ino
         subprocess.run(["umount", str(spec.mount_path)], check=True, timeout=30)
         subprocess.run(["mount", "-o", f"loop={node},nodev,nosuid,nodiscard", str(spec.image_path), str(spec.mount_path)], check=True, timeout=30)
         root = os.open(spec.mount_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -93,9 +103,13 @@ def _allow_disposable_loop_deallocation(catalog, spec):
                 # the fixture rather than detaching an unproved attachment.
                 assert fcntl.ioctl(control, 0x4C81, owned) == 0
             if node_identity is not None:
-                named = node.lstat()
-                assert (named.st_dev, named.st_ino) == node_identity
-                node.unlink()
+                try:
+                    named = node.lstat()
+                except FileNotFoundError:
+                    pass  # udev already retired this exact removed device.
+                else:
+                    assert (named.st_dev, named.st_ino) == node_identity
+                    node.unlink()
         finally:
             if control is not None:
                 os.close(control)
