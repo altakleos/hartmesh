@@ -206,11 +206,16 @@ or job deadline was extended, and no timing measurements were invented.
 The reference frontend and marker equal upstream tree
 `330ae40e7e41fbf440375cd7d06a50a92fcddf51`. The full isolation ancestry check passed
 on integration commit `7f2ad71d756791caa1f56dcbaf399734003c75e3`, whose parents are
-the HartMesh base and fixed upstream target. HartMesh's version
-sources remain `2.2.0+hartmesh.59`.
+the HartMesh base and fixed upstream target. At that source integration commit,
+HartMesh's version sources remained `2.2.0+hartmesh.59`.
 
 ## Delivery boundary
 
-This source integration does not publish a release, image set or deployment.
-Release-delivery evidence for this adoption is pending a separately authorized
-publication and qualification; it must not cause the source changes to be reapplied.
+Implementation evidence remains with [PR #550](https://github.com/altakleos/hartmesh/pull/550).
+Release delivery is tracked separately in
+[v2.2.0+hartmesh.60](https://github.com/altakleos/hartmesh/releases/tag/v2.2.0%2Bhartmesh.60).
+Its `release-manifest.json` and separate `release-acceptance.json` assets bind the
+release commit, five immutable image digests and authenticated exact-image
+qualification. Only published, successfully verified assets establish delivery;
+source adoption must not be reapplied merely to publish them. Deployment and
+tenant-class qualification remain separate consumer work.
