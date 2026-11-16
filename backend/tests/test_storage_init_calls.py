@@ -110,7 +110,7 @@ async def test_gateway_mount_only_command_retains_its_own_budget_and_service_con
     assert command[-6:-2] == service["entrypoint"][1:-1]
     assert service["entrypoint"][-1] == "app.storage_init"
     assert command[command.index("--memory") + 1] == "128m"
-    assert service["mem_limit"] == service["memswap_limit"] == "192m"
+    assert service["mem_limit"] == service["memswap_limit"] == "256m"
     assert set(service["environment"]) == {"PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "UV_CACHE_DIR", "HARTMESH_DATA_DIR", *KEYS}
     assert service["environment"]["PYTHONDONTWRITEBYTECODE"] == "1"
 

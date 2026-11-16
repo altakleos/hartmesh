@@ -1778,7 +1778,7 @@ Moving the 5.0 GiB line instead is the operator's call, not this profile's.
 Every term of that line, so a change to one has to name the other it took
 from: services 2880 MiB (the table above), two 1024 MiB sandbox slots, and
 their two 96 MiB relays is 5120 MiB, exactly 5.0 GiB.
-`storage-init`'s 192 MiB is outside that sum: the one-shot exits before the
+`storage-init`'s 256 MiB is outside that sum: the one-shot exits before the
 Gateway starts. Its separate startup `mount-all` helper retains 128 MiB and uses
 the remaining VM headroom.
 `backend/tests/test_compose_profile.py` adds them up, so a limit cannot move
@@ -2503,7 +2503,7 @@ can still mount existing slots at start.
 ### storage-init
 
 This is the profile's only privileged service: the same backend image digest
-as the Gateway, `pid: host`, no network, 192 MiB, 64 processes, and no restart.
+as the Gateway, `pid: host`, no network, 256 MiB, 64 processes, and no restart.
 The mount-only Gateway helper retains its separate 128 MiB budget. The preparation
 limit includes initial formatting and mount-cache charges as well as Python;
 the Docker qualification gate requires its peak to stay below 75% of this limit.

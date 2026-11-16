@@ -8,6 +8,7 @@ unavailable on developer machines. It never changes the host's THP setting.
 from __future__ import annotations
 
 import argparse
+import errno
 from datetime import datetime, timezone
 import json
 import os
@@ -21,7 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MEMORY = re.compile(r"memory peak .*\(peak_bytes=(\d+) limit_bytes=(\d+)\)")
 IMAGE = re.compile(r"[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}\Z")
-EXPECTED_LIMIT = 192 << 20
+EXPECTED_LIMIT = 256 << 20
 BASELINE_LIMIT = 128 << 20
 COUNTS = {"user": 10, "assistant": 10, "employee": 10, "company": 1}
 
@@ -141,6 +142,21 @@ def profile_service(
     return {"name": project, "services": {"storage-init": service}}
 
 
+def cgroup_retired_after_exit(identity, error):
+    """ENOENT/ENODEV is expected only after this exact container has ended."""
+    if error.errno not in {errno.ENOENT, errno.ENODEV}:
+        return False
+    facts = json.loads(command("docker", "inspect", identity))[0]
+    state = facts["State"]
+    finished = state.get("FinishedAt", "")
+    return (
+        facts["Id"] == identity
+        and not state["Running"]
+        and bool(finished)
+        and not finished.startswith("0001-")
+    )
+
+
 def measure(compose_file, directory, name, *, recreate):
     compose = ("docker", "compose", "-f", str(compose_file))
     if recreate:
@@ -201,8 +217,10 @@ def measure(compose_file, directory, name, *, recreate):
                             for line in (cg / "memory.events").read_text().splitlines()
                         )
                     }
-                except FileNotFoundError:
-                    break
+                except OSError as exc:
+                    if cgroup_retired_after_exit(identity, exc):
+                        break
+                    raise
                 time.sleep(0.005)
         except Exception as exc:
             observed["error"] = f"{type(exc).__name__}: {exc}"

@@ -1,6 +1,7 @@
 """Memory admission requires the real preparation verdict and external counters."""
 
 import copy
+import errno
 import importlib.util
 import shutil
 import subprocess
@@ -18,10 +19,10 @@ def prepared_sample():
         "exit_code": 0,
         "oom_killed": False,
         "memory_events": {"oom_kill": 0},
-        "limit_bytes": 192 << 20,
-        "peak_bytes": 144 << 20,
-        "observed_peak_bytes": 143 << 20,
-        "reported_memory": {"limit_bytes": 192 << 20, "peak_bytes": 144 << 20},
+        "limit_bytes": 256 << 20,
+        "peak_bytes": 192 << 20,
+        "observed_peak_bytes": 191 << 20,
+        "reported_memory": {"limit_bytes": 256 << 20, "peak_bytes": 192 << 20},
         "document": {"command": "prepare", "returncode": 0, "verdict": "complete", "prepared": {"user": 10, "assistant": 10, "employee": 10, "company": 1}, "spaces": [{"mounted": True} for _ in range(31)]},
     }
 
@@ -52,7 +53,7 @@ def test_process_exit_zero_cannot_qualify_bad_preparation_or_memory(mutation):
     elif mutation == "wrong-limit":
         sample["reported_memory"]["limit_bytes"] *= 2
     else:
-        sample["reported_memory"]["peak_bytes"] = 142 << 20
+        sample["reported_memory"]["peak_bytes"] = 190 << 20
     with pytest.raises(ValueError):
         qualification.validate_sample(sample)
 
@@ -68,7 +69,7 @@ def test_baseline_admission_removes_only_new_telemetry_and_margin_requirements()
         qualification.validate_sample(sample, require_telemetry=False, require_margin=False, expected_limit=128 << 20)
 
 
-@pytest.mark.parametrize("limit", [192 << 20, 256 << 20])
+@pytest.mark.parametrize("limit", [256 << 20, 384 << 20])
 def test_service_extraction_retains_production_command_and_containment(tmp_path, monkeypatch, limit):
     import json
 
@@ -95,7 +96,7 @@ def test_service_extraction_retains_production_command_and_containment(tmp_path,
 
     monkeypatch.setattr(qualification, "command", render)
     (tmp_path / "env").write_text("HARTMESH_USERS=10\n", encoding="utf-8")
-    if limit != 192 << 20:
+    if limit != 256 << 20:
         with pytest.raises(ValueError, match="memory limits differ"):
             qualification.profile_service(tmp_path / "compose.yaml", expected["image"], tmp_path / "env", "test-project")
     else:
@@ -185,7 +186,7 @@ def test_failed_margin_retains_all_readings_and_never_passes_run(monkeypatch, tm
         sample = prepared_sample()
         sample["name"] = name
         if name == "candidate-empty-pool":
-            sample["peak_bytes"] = 192 << 20
+            sample["peak_bytes"] = 256 << 20
         elif name.startswith("baseline-"):
             sample["limit_bytes"] = 128 << 20
             sample["peak_bytes"] = 128 << 20
@@ -201,3 +202,24 @@ def test_failed_margin_retains_all_readings_and_never_passes_run(monkeypatch, tm
     assert result["margin_failures"] == ["candidate-empty-pool"]
     assert len(result["samples"]) == 16
     assert {row["name"] for row in result["samples"]} >= {"candidate-fresh-5", "candidate-restart-5", "baseline-fresh-5"}
+
+
+@pytest.mark.parametrize("code", [errno.ENOENT, errno.ENODEV])
+@pytest.mark.parametrize("lifetime", ["running", "never-started", "different-container", "finished"])
+def test_cgroup_retirement_requires_exact_completed_container(monkeypatch, code, lifetime):
+    import json
+
+    facts = {"Id": "owned-container", "State": {"Running": False, "FinishedAt": "2026-11-16T10:36:18Z"}}
+    if lifetime == "running":
+        facts["State"]["Running"] = True
+    elif lifetime == "never-started":
+        facts["State"]["FinishedAt"] = "0001-01-01T00:00:00Z"
+    elif lifetime == "different-container":
+        facts["Id"] = "another-container"
+    monkeypatch.setattr(qualification, "command", lambda *args: json.dumps([facts]))
+    assert qualification.cgroup_retired_after_exit("owned-container", OSError(code, "cgroup read raced exit")) is (lifetime == "finished")
+
+
+def test_unrelated_cgroup_read_error_cannot_be_dismissed(monkeypatch):
+    monkeypatch.setattr(qualification, "command", lambda *args: pytest.fail("permission failure is not teardown evidence"))
+    assert qualification.cgroup_retired_after_exit("owned-container", PermissionError(errno.EACCES, "denied")) is False
