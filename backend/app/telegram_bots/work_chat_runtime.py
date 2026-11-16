@@ -66,6 +66,7 @@ class WorkChatRuntime:
 
         self.saved_refusals = WorkSavedRefusals(self)
         host.work_callbacks.outcomes.fixed_refusals = self.saved_refusals
+        host.work_callbacks.outcomes.continuation_views = self.views
         self.executions.fixed_refusals = self.saved_refusals
         host.work_saved_refusals = self.saved_refusals
         self.stops = WorkStopAdmissions(self.views, host.acts)

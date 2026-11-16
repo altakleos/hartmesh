@@ -2378,3 +2378,44 @@ outcome and phase. Primary body, receipt, counter and consent remain unchanged.
 Qualification uses actual SQL/default-supervisor primaries, recorded SDK and
 typed directory/readiness adapters. Late Work, Manage, URL and readiness changes
 must veto stale SDK delivery while preserving the primary and child custody.
+
+
+### Fresh previews after an unadmitted combined Start ends
+
+A completed Decision/Voice primary with a refused or expired absent child can
+own a separate current `view.detail` reply. `work_continuation_views.py` binds its
+closed origin to the actual primary, original consent/result/counter, canonical
+outcome and ended phase. It composes `RequestPrimaryProof`, actual complete
+primary SDK ACKs and the global child namespace absence with a fresh
+`WorkDetailProjection` in the final authority statement. It never manufactures a
+callback gesture or changes the saved primary to a different presentation.
+
+The deterministic preview is independent of current refusal advice. Its current
+Work fields, rights and state decide which controls appear. Expiry explains the
+old Start window ending without describing the saved answer/decision as failed.
+Ordinary materialization/recovery supplies complete multipart ACKs before any
+new `work_start`. That fresh gesture creates its own activation identity and
+independent news witness. Native admission retains the historical primary proof
+while permitting revisions from that new activation's own reservation.
+
+The continuation delivery namespace also classifies its carrier when optional
+origin metadata is damaged. Missing original proofs cannot downgrade admission
+to an ordinary Work view. Pending/live/admitted preview ancestry retains the
+actual primary outcome, consumed original controls and input family; retention
+only pins existing scoped history and never grants effect authority.
+
+
+Work UI test clocks advance monotonically to the real fixture Work's committed
+`created_at` before opening a frozen list. A fixed startup offset cannot establish
+that boundary when native SQL uses wall time. Keep actual SDK ACK/control checks
+and production snapshot filtering intact; model clock lag without changing rows.
+
+
+Sender eligibility can be cancelled while reading its current account, channel
+connection or instance. These repository/service-owned read scopes share
+`deerflow.persistence.readers.reader_session`, also re-exported by Telegram's
+`sql_readers`. Body cancellation remains immediate; the caller retains actual SQL
+close through repeated cancellation. Borrowed account reads and all writers keep
+their ownership. Observation pages use the same owned reader defensively; their
+normal maintenance task is separately tracked and drained. Held-close tests prove
+these mechanisms, without identifying an unobserved historical CI leaking task.

@@ -1,17 +1,22 @@
 """Shutdown retains real reader sessions until their SQL cleanup completes."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from _telegram_repository_test_support import db as db
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from test_telegram_supervisor import _supervisor_logging as _supervisor_logging
 from test_telegram_supervisor import build
 
+from app.telegram_bots.work_chat_observation import WorkChatObservation
+from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
+
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.parametrize("reader", ["sender", "snapshot", "links", "settings"])
+@pytest.mark.parametrize("reader", ["sender", "snapshot", "links", "settings", "observation"])
 @pytest.mark.parametrize("phase", ["body", "close"])
 async def test_shutdown_waits_for_reader_close(db, monkeypatch, reader, phase):
     host = build(db, monkeypatch).supervisor
@@ -41,13 +46,14 @@ async def test_shutdown_waits_for_reader_close(db, monkeypatch, reader, phase):
 
             return query
 
-        for method in ("get", "execute"):
+        for method in ("get", "execute", "scalar", "scalars"):
             monkeypatch.setattr(AsyncSession, method, hold_query(getattr(AsyncSession, method)))
     operation = {
         "sender": host.sender.tick,
         "snapshot": lambda: host.sender._snapshot("absent-link", "absent-delivery"),
         "links": host.links.list_all,
         "settings": lambda: host.settings.get("absent-owner"),
+        "observation": lambda: WorkChatObservation(SimpleNamespace(host=host)).page(SimpleNamespace(id="absent-link", binding_generation=0), "shutdown", TelegramOutboxRow, select(TelegramOutboxRow)),
     }[reader]
     owner = asyncio.create_task(operation(), name="telegram-retained-reader")
     host._background.add(owner)

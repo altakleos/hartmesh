@@ -7,7 +7,7 @@ from test_telegram_supervisor import _supervisor_logging as _supervisor_logging
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reader", ["sender", "snapshot", "links", "settings"])
+@pytest.mark.parametrize("reader", ["sender", "snapshot", "links", "settings", "observation"])
 @pytest.mark.parametrize("phase", ["body", "close"])
 async def test_reader_cleanup(db, monkeypatch, reader, phase):
     await reader_shutdown(db, monkeypatch, reader, phase)

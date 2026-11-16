@@ -138,6 +138,8 @@ async def refresh_dependencies(session, now, *, max_age_days=180):
             select(delivery).where(
                 or_(
                     delivery.dedupe_key.startswith("notice:work-start-refresh:"),
+                    delivery.dedupe_key.startswith("notice:work-view:continuation:"),
+                    delivery.payload["work_view_intent"]["origin"]["kind"].as_string() == "continuation",
                     delivery.payload["work_view_intent"]["origin"]["refusal"].as_string() == "start.changed",
                     delivery.payload["work_news_basis"]["source"]["work"]["origin"]["refusal"].as_string() == "start.changed",
                     delivery.id.in_(admitted),
@@ -180,6 +182,11 @@ async def refresh_dependencies(session, now, *, max_age_days=180):
         for key in ("act_id", "callback_id")
         if (identity := identifier(origin.get(key))) is not None
     }
+    review_ids.update(identifier(origin.get("act_id")) for view in views.values() for origin in origins(view) if origin.get("kind") == "continuation")
+    from app.telegram_bots.work_continuation_views import continuation_primary_id
+
+    review_ids.update(continuation_primary_id(view) for view in views.values())
+    review_ids.discard(None)
     journals = {}
     ordered = sorted(review_ids)
     for start in range(0, len(ordered), 500):
@@ -188,6 +195,14 @@ async def refresh_dependencies(session, now, *, max_age_days=180):
     locators = {
         identity for view in all_views.values() for origin in [*origins(view), *(mapping(row.payload) for row in gestures[view.id])] for key in ("anchor_outbox_id", "cleanup_id") if (identity := identifier(origin.get(key))) is not None
     }
+    # Namespaced pending previews retain their actual scoped primary even
+    # when both optional origin descriptors are damaged. This only pins rows.
+    for view in views.values():
+        primary = journals.get(continuation_primary_id(view))
+        if primary is not None:
+            value = identifier(mapping(mapping(primary.continuation).get("request_activation")).get("outcome_id"))
+            if value is not None:
+                locators.add(value)
     ordered = sorted(locators - parents.keys())
     for start in range(0, len(ordered), 500):
         parents.update({row.id: row for row in await session.scalars(select(delivery).where(delivery.id.in_(ordered[start : start + 500])))})
@@ -236,6 +251,44 @@ async def refresh_dependencies(session, now, *, max_age_days=180):
                 group = identifier(mapping(part).get("callback_group_id"))
                 if group is not None and owned_group(group, view, anchor=view.id):
                     result.groups.add(group)
+            continuation = None
+            named_primary = journals.get(continuation_primary_id(view))
+            if named_primary is not None:
+                try:
+                    from app.telegram_bots.acts import _snapshot
+                    from app.telegram_bots.work_continuation_views import continuation_origin
+
+                    # Retention follows the independent deterministic identity.
+                    # Damaged or substituted descriptors cannot redirect it.
+                    continuation = continuation_origin(_snapshot(named_primary))
+                except (KeyError, TypeError, ValueError, AttributeError, ProductSourceRetired):
+                    break
+            if continuation is not None:
+                from app.telegram_bots.acts import _snapshot
+                from app.telegram_bots.work_continuation_views import continuation_origin
+
+                primary = journals.get(identifier(continuation.get("act_id")))
+                parent = parents.get(identifier(continuation.get("anchor_outbox_id")))
+                try:
+                    if primary is None or parent is None or continuation_origin(_snapshot(primary)) != continuation:
+                        break
+                    if scope(parent) != scope(view) or (parent.owner_user_id, parent.instance_id, parent.work_id, parent.request_id) != (view.owner_user_id, view.instance_id, view.work_id, primary.request_id):
+                        break
+                    if (primary.link_id, primary.owner_user_id, primary.binding_generation, primary.chat_id, primary.instance_id, primary.work_id) != (
+                        view.link_id,
+                        view.owner_user_id,
+                        view.binding_generation,
+                        view.chat_id,
+                        view.instance_id,
+                        view.work_id,
+                    ):
+                        break
+                except (KeyError, TypeError, ValueError, AttributeError, ProductSourceRetired):
+                    break
+                # No callback gesture is invented for this receipt-owned view.
+                # The request-family retention owner follows its own outcome.
+                result.deliveries.add(parent.id)
+                break
             candidates = [row for row in gestures[view.id] if scope(row) == scope(view) and mapping(row.payload).get("gesture_id") == row.id]
             if len(candidates) != 1:
                 break

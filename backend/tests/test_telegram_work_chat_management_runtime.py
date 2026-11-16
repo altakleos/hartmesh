@@ -16,6 +16,11 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCal
 
 
 async def open_detail(e, *, first=6171, topic=None):
+    from datetime import datetime
+
+    created = datetime.fromisoformat(e.work["created_at"])
+    if created >= e.clock.now():
+        e.clock.advance((created - e.clock.now()).total_seconds() + 0.000001)
     assert await e.channel.handle_update(make_update(first, account=e.link.chat_id, text="/work", topic=topic))
     await e.channel._drain_ingress()
     async with e.db.sessions() as reader:
@@ -175,5 +180,30 @@ async def test_installed_saved_edit_typing_is_private_until_fresh_save_changes(w
             act = await reader.get(TelegramActRow, start.id)
             assert act is not None and act.kind == "activate" and act.state == "done"
             assert len(e.launches) == 1
+    finally:
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_detail_listing_includes_actual_work_created_after_test_clock(work_delivery, monkeypatch):
+    from datetime import timedelta
+
+    from test_telegram_work_start import prepare_startable
+
+    e = work_delivery
+    captured = e.sender.outbox.clock() - timedelta(seconds=60)
+    e.sender.outbox.clock = lambda: captured
+    owner = await installed_work_runtime(e)
+    try:
+        await prepare_startable(e, monkeypatch)
+        # Native Work timestamps use the real service clock. Model the captured
+        # test clock lagging startup; the list's horizon must include that real row.
+        await open_detail(e, first=6180)
+        async with e.db.sessions() as reader:
+            actual = await reader.get(TelegramOutboxRow, e.identity)
+            assert actual.state == "sent" and actual.work_id == e.work["id"]
+            current = [part for part in actual.parts if part["presentation_version"] == actual.payload["presentation_version"]]
+            assert current and all(part["state"] == "sent" and part["message_ids"] for part in current)
+        assert not e.launches and not e.dispatch_errors
     finally:
         await owner.stop()

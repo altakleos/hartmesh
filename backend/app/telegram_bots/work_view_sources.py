@@ -57,6 +57,9 @@ def present_view(source, basis, link):
         link=link,
         public_base_url=basis["public_base_url"],
     )
+    if source.work.get("origin", {}).get("kind") == "continuation" and source.work["origin"]["phase"] == "expired":
+        html = render("start.saved_expired", basis["locale"]) + "\n\n" + "".join(part["html"] for part in shown.parts)
+        return replace(shown, parts=tuple({"kind": "text", "html": chunk, "visible_text": visible_text(chunk), "protect_content": source.protected} for chunk in split_html(html)))
     if source.work.get("origin", {}).get("refusal") == "start.changed":
         html = render("start.changed", basis["locale"]) + "\n\n" + "".join(part["html"] for part in shown.parts)
         return replace(shown, parts=tuple({"kind": "text", "html": chunk, "visible_text": visible_text(chunk), "protect_content": source.protected} for chunk in split_html(html)))
@@ -74,6 +77,10 @@ class WorkViewReader(WorkViewsReader):
         async def perform():
             intent = item.payload.get("work_view_intent", {})
             if intent.get("version") != 1 or type(intent.get("version")) is not int or intent.get("key") not in VIEW_KEYS:
+                raise ProductSourceRetired()
+            from app.telegram_bots.work_continuation_views import is_continuation_view
+
+            if is_continuation_view(item) and intent.get("origin", {}).get("kind") != "continuation":
                 raise ProductSourceRetired()
             clock = await self.prepare_clock(link, item)
             if intent["key"] == "view.list":
@@ -105,6 +112,7 @@ class WorkViewProjection:
         self.reader, self.link, self.item, self.source, self.clock = reader, link, item, source, clock
         self.origin_only, self.original_projection = origin_only, None
         self.refresh = None
+        self.continuation = source.work["origin"].get("kind") == "continuation"
         if source.work["origin"].get("refusal") is not None:
             from app.telegram_bots.work_start_refresh import UnadmittedStartProjection
 
@@ -119,7 +127,11 @@ class WorkViewProjection:
             raise ProductSourceRetired()
 
     async def prepare_source(self, *, trail=(), activation_id=None):
-        if self.refresh is not None:
+        if self.continuation:
+            from app.telegram_bots.work_continuation_views import ContinuationViewOrigin
+
+            self.original_projection = await ContinuationViewOrigin.prepare(self.reader, self.link, self.item)
+        elif self.refresh is not None:
             from app.telegram_bots.work_start_refresh import refresh_origin_projection
 
             self.original_projection = await refresh_origin_projection(self.reader, self.link, self.item, trail=trail, activation_id=activation_id)
@@ -147,7 +159,7 @@ class WorkViewProjection:
             result = query.add_columns(*columns).outerjoin(nested, true())
         else:
             result = self._extend_local(query)
-        if self.refresh is not None and self.original_projection is None:
+        if (self.refresh is not None or self.continuation) and self.original_projection is None:
             raise ProductSourceRetired()
         return self.original_projection.extend(result) if self.original_projection is not None else result
 

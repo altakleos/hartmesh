@@ -7,6 +7,7 @@ TEXTS: dict[str, str] = {
     "label.stop_everything": "Everything",
     "label.stop_answer": "The answer",
     "start.superseded": "This Start request is no longer current. Open the assignment to review it.",
+    "start.saved_expired": "Your answer or decision was saved. The earlier Start request expired. Review the current assignment below before starting again.",
     "start.changed": "This assignment changed. The current version is below.",
     "start.already": "{name} is already working on this.",
     "start.not_settled": "{name}'s last work on this is still being closed. Resume when the status says Interrupted or Stopped.",

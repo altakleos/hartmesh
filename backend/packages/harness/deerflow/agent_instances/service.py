@@ -16,6 +16,7 @@ from deerflow.agent_instances.contract import ALL_AGENT_PERMISSIONS, AgentConfli
 from deerflow.agent_instances.directory import InstanceDirectory
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.persistence.agent_instances.model import AgentDefinitionRevisionRow, AgentInstanceGrantRow, AgentInstanceRow, AgentLifecycleRow
+from deerflow.persistence.readers import reader_session
 from deerflow.persistence.spaces.model import SpaceGrantRow
 from deerflow.spaces.contract import Custody, MutationMode, Permission, PrincipalRef, SpaceConflict, validate_generation, validate_name
 from deerflow.spaces.service import SpaceCapacityExhausted, SpaceFiles
@@ -117,7 +118,7 @@ class AgentInstances:
         await self._human(actor)
         if not isinstance(permission, AgentPermission) or not 1 <= int(permission) <= 7:
             raise ValueError("A valid instance permission is required")
-        async with self._sf() as session:
+        async with reader_session(self._sf) as session:
             result = (
                 await session.execute(
                     select(AgentInstanceRow, AgentInstanceGrantRow.permissions)
