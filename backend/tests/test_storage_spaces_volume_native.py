@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from _storage_spaces_native_test_support import prepare_consumer_container, remove_owned_loop
+from _storage_spaces_native_test_support import prepare_consumer_container, read_sqlite_page_snapshot, remove_owned_loop
 
 from deerflow.spaces.backings import BackingUnavailable, PreparedVolumeCatalog
 
@@ -757,8 +757,6 @@ async def test_host_containment_removes_the_real_container_and_the_next_run_atta
 @pytest.mark.asyncio
 async def test_real_attachment_fences_children_and_replaces_environment(backing, tmp_path):
     """A real container can span calls; exact removal stops every mounted writer."""
-    import sqlite3
-
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from deerflow.persistence.base import Base
@@ -856,9 +854,9 @@ while True: time.sleep(.1)
         assert (volume.data_path / "child").read_bytes() == before
         assert (volume.data_path / "pages.sqlite-wal").exists(), "Fixture must exercise interrupted SQLite WAL"
         await recovery.restore(actor=actor, space_id=space.id, expected_generation=1, operation_id=uuid.uuid4().hex, backup_id=backup.id)
-        with sqlite3.connect(volume.data_path / "pages.sqlite") as restored:
-            assert restored.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-            assert restored.execute("SELECT body FROM pages").fetchall() == [("committed",)]
+        integrity, pages = read_sqlite_page_snapshot(volume.data_path / "pages.sqlite")
+        assert integrity == ("ok",)
+        assert pages == [("committed",)]
         # A new environment sees persisted files under the same resource ID.
         await mounts.attach(actor=actor, incarnation=uuid.uuid4().hex, resources=[ResourceMount(space.id, 2, "home", writable=True)])
         await mounts.retire(reason="storage-recovery", actor=actor, space_id=space.id, expected_generation=2)

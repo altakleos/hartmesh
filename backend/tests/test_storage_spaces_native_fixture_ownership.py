@@ -2,12 +2,48 @@
 
 import ast
 import errno
+import sqlite3
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from _storage_spaces_native_test_support import prepare_consumer_container, remove_owned_loop
+from _storage_spaces_native_test_support import prepare_consumer_container, read_sqlite_page_snapshot, remove_owned_loop
+
+
+@pytest.mark.parametrize("missing_table", [False, True])
+def test_native_readback_closes_the_actual_connection_before_backing_retirement(tmp_path, monkeypatch, missing_table):
+    database = tmp_path / "pages.sqlite"
+    seed = sqlite3.connect(database)
+    try:
+        if not missing_table:
+            seed.execute("CREATE TABLE pages (body TEXT)")
+            seed.execute("INSERT INTO pages VALUES ('committed')")
+            seed.commit()
+    finally:
+        seed.close()
+    original_connect = sqlite3.connect
+    retained = []
+
+    def connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        retained.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    try:
+        if missing_table:
+            with pytest.raises(sqlite3.OperationalError, match="no such table"):
+                read_sqlite_page_snapshot(database)
+        else:
+            assert read_sqlite_page_snapshot(database) == (("ok",), [("committed",)])
+        assert len(retained) == 1
+        # Holding the real connection prevents GC from hiding missing closure.
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            retained[0].execute("SELECT 1")
+    finally:
+        for connection in retained:
+            connection.close()
 
 
 def test_create_effect_before_lost_acknowledgement_preserves_fixture_uncertainty(tmp_path):
