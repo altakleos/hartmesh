@@ -54,6 +54,11 @@ async def test_context_capability(capture_environment, monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_observer_source_retirement(capture_environment, monkeypatch, tmp_path):
+    await execution(capture_environment, monkeypatch, tmp_path, "activate", "capability", observer_race=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["manage", "capability"])
 async def test_foreign_stop_priority(capture_environment, monkeypatch, tmp_path, change):
     await execution(capture_environment, monkeypatch, tmp_path, "stop", change, foreign=True)
