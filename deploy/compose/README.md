@@ -1778,8 +1778,9 @@ Moving the 5.0 GiB line instead is the operator's call, not this profile's.
 Every term of that line, so a change to one has to name the other it took
 from: services 2880 MiB (the table above), two 1024 MiB sandbox slots, and
 their two 96 MiB relays is 5120 MiB, exactly 5.0 GiB.
-`storage-init`'s 128 MiB is outside that sum: the one-shot exits before the
-Gateway starts, and its startup `mount-all` helper uses the remaining VM headroom.
+`storage-init`'s 256 MiB is outside that sum: the one-shot exits before the
+Gateway starts. Its separate startup `mount-all` helper retains 128 MiB and uses
+the remaining VM headroom.
 `backend/tests/test_compose_profile.py` adds them up, so a limit cannot move
 without a counterpart moving with it.
 
@@ -2341,14 +2342,21 @@ routes return a structured refusal when their own role is unavailable.
 
 ### Fixed-image trim policy
 
-Each Space image must stay fully allocated on the data disk. Trimming the ext4
-filesystem inside a loop image punches holes in that image, releasing its reserved
+Each Space image must stay fully allocated on the data disk. Trimming an unprotected
+ext4 filesystem inside a loop image punches holes in that image, releasing its reserved
 capacity. The verifier then refuses the Space, even if its files remain readable.
 
 Storage preparation mounts images with `nodiscard` and writes `X-fstrim.notrim`
 in their managed `/etc/fstab` entries. The standard util-linux scheduled service
 uses `fstrim --listed-in /etc/fstab:/proc/self/mountinfo` and skips these entries.
 It can still trim the underlying data disk and other eligible filesystems.
+
+Preparation also disables deallocation on each qualified loop device, by setting
+its `queue/discard_max_bytes` to zero and verifying the result while retaining
+the exact mounted root and image. This blocks loop zeroout from punching holes
+when the inner ext4 filesystem runs out of space. Startup `mount-all` protects
+already mounted pools too; each admission requires a fresh zero readback. The
+underlying data-disk queue is unchanged. An unsupported control refuses the Space.
 
 For an existing pool, update only the managed entries with `si fstab-sync` or run
 normal preparation using the updated image. This preserves the inventory and files.
@@ -2358,7 +2366,8 @@ mount options take effect at the next normal unmount/mount maintenance window.
 Custom host trim automation must also exclude these loop filesystems. `fstrim -a`,
 the QEMU guest agent's `guest-fstrim` and direct `fstrim <Space mountpoint>` read the
 mount table rather than fstab, so they bypass the exclusion. `nodiscard` prevents
-online discard when blocks are freed; it does not block an explicit FITRIM request.
+online discard when blocks are freed; the additional loop queue protection
+refuses explicit FITRIM deallocation too.
 
 Normal preparation, which runs at `hm up`, and `si verify --repair` restore a trimmed
 image. They fill its holes in place, on a mounted image and with its files intact,
@@ -2502,10 +2511,28 @@ can still mount existing slots at start.
 ### storage-init
 
 This is the profile's only privileged service: the same backend image digest
-as the Gateway, `pid: host`, no network, 128 MiB, 64 processes, and no restart.
+as the Gateway, `pid: host`, no network, 256 MiB, 64 processes, and no restart.
+The mount-only Gateway helper retains its separate 128 MiB budget. The preparation
+limit includes initial formatting and mount-cache charges as well as Python;
+the Docker qualification gate requires its peak to stay below 75% of this limit.
 It binds only the pool and enters the host mount namespace with `nsenter -m -t 1`.
 It reads the data-directory and planning environment, never app configuration
 or the database. It knows slots and kinds, not accounts or agents.
+
+The service enters through `python -m app.storage_init`. Its standard-library-only
+parent supervises the existing `app.gateway.storage_init prepare` child, without
+loading Gateway or application configuration in both processes. Bytecode writes
+are disabled for this service. New images are formatted with direct I/O to avoid
+filling the startup memory budget with buffer cache; eager inode/journal
+initialization, full allocation and fsync remain required. After fsync, preparation
+requests clean-cache release for that exact new image before mounting it; this
+is advisory and never targets existing mounted spaces. Formatting can take longer. Other operator verbs retain their implementation and return codes.
+
+After child cleanup, stderr records `storage-init: memory peak … MiB of … MiB`
+with the raw byte values. Unlimited limits are explicit; unreadable counters say
+`memory unavailable` and do not change the preparation result. An OOM kill can
+prevent a process from writing its last line; inspect Docker's OOM state and
+cgroup events as well. The peak covers the container's whole current lifetime.
 
 At every `up`, `prepare --at-start` has a 600-second limit and exits zero so a
 storage failure does not prevent Gateway startup. Its JSON `returncode`,

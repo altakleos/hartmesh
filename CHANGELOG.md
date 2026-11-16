@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.59] - 2026-11-16
+
+### Storage startup
+
+- Reduce privileged storage preparation's startup memory with a lightweight
+  supervisor, disabled bytecode writes and direct-I/O formatting. Report cgroup
+  peak and limit without
+  changing preparation documents, exit codes or child containment. Qualify the
+  production Docker service with 31 real spaces and a 25% memory reserve;
+  preparation has a 256 MiB cap and the mount-only helper retains 128 MiB.
+- Protect each qualified loop device from discard and zeroout deallocation so
+  filesystem disk pressure cannot release a Space's reserved image blocks.
+  Apply the protection to existing mounts at startup and require it at admission.
+
+### Schema changes
+
+- No database schema changes since v2.2.0+hartmesh.58.
+
 ## [2.2.0+hartmesh.58] - 2026-11-16
 
 ### Schema changes

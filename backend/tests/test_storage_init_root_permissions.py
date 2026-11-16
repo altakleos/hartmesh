@@ -169,3 +169,11 @@ def test_explicit_verify_repairs_the_old_parent_layout(verified_operator):
     assert spec.mount_path.stat().st_mode & 0o777 == 0o770
     assert (spec.mount_path / "data").stat().st_mode & 0o777 == 0o770
     assert (spec.mount_path / "control").stat().st_mode & 0o777 == 0o700
+
+
+def test_explicit_verify_reports_repair_when_only_image_mode_changed(verified_operator):
+    tool, spec, _, _ = verified_operator
+    spec.image_path.chmod(0o666)
+    assert tool.slot_state(spec)["state"] == "wrong-modes"
+    assert tool.slot_state(spec, repair=True)["state"] == "repaired"
+    assert spec.image_path.stat().st_mode & 0o777 == 0o640

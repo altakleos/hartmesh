@@ -1,10 +1,55 @@
-"""Task-owned native fixture creation, never a production attachment adapter."""
+"""Task-owned native fixture lifecycle, never a production attachment adapter."""
 
+import errno
 import os
 import re
 import subprocess
+import time
 
 from deerflow.spaces.docker import ATTACHMENT_LABEL, HOST_LABEL
+
+
+def remove_owned_loop(control, number, sysfs, *, expected, retiring_binding=None, ioctl=None, clock=time.monotonic, sleep=time.sleep):
+    """Wait for the proved autoclear binding, then drain unbound openers."""
+    if ioctl is None:
+        import fcntl
+
+        ioctl = fcntl.ioctl
+    deadline = clock() + 5
+    while True:
+        current = sysfs.stat()
+        if (current.st_dev, current.st_ino) != expected:
+            raise RuntimeError("Owned loop device changed before removal")
+        binding = sysfs / "loop"
+        if binding.exists():
+            if retiring_binding is None:
+                raise RuntimeError("Owned loop device is still bound; no removal attempted")
+            try:
+                facts = {name: (binding / name).read_text(encoding="utf-8").strip() for name in ("backing_file", "offset", "sizelimit", "autoclear")}
+            except FileNotFoundError:
+                if binding.exists():
+                    raise
+                continue  # Autoclear completed during this read; recheck identity.
+            if facts != retiring_binding or any(facts[name] != value for name, value in (("offset", "0"), ("sizelimit", "0"), ("autoclear", "1"))):
+                raise RuntimeError("Owned loop binding changed during retirement")
+            if clock() >= deadline:
+                raise TimeoutError("Owned autoclear loop binding did not retire")
+            # umount can return before a temporary opener releases the old
+            # autoclear binding. Only observe it; never detach a bound device.
+            sleep(0.05)
+            continue
+        try:
+            result = ioctl(control, 0x4C81, number)
+        except OSError as exc:
+            if exc.errno != errno.EBUSY or clock() >= deadline:
+                raise
+            # udev may still have an unbound device open after umount. Reprove
+            # identity and absence of a binding before every removal attempt.
+            sleep(0.05)
+        else:
+            if result != 0:
+                raise RuntimeError("Owned loop removal returned an unknown result")
+            return
 
 
 def prepare_consumer_container(plan, image, program, containers, containment, *, runner=subprocess.run):

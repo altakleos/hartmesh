@@ -1,6 +1,7 @@
 """An actual unknown Save keeps its consent when the next Retry lacks access."""
 
 import asyncio
+from contextlib import AsyncExitStack
 
 import pytest
 from _config_singleton_guard import restore_config_singletons  # noqa: F401 -- autouse fixture
@@ -8,10 +9,10 @@ from _run_output_capture_test_support import capture_environment as capture_envi
 from _run_output_capture_test_support import output_store as output_store
 from _telegram_bot_test_support import update_payload
 from _telegram_compose_turn_support import PERSON, _delivered, render_compose_config
-from _telegram_work_worker_support import installed_worker
+from _telegram_work_worker_support import installed_worker, owned_retry_observation
 from sqlalchemy import select
 from telegram import Update
-from test_telegram_execution_retry_refusals import deliver_owned
+from test_telegram_execution_retry_refusals import deliver_owned, denial_for, settle_denial
 from test_telegram_retained_management_refusals import button, tap
 from test_telegram_supervisor import _supervisor_logging as _supervisor_logging
 
@@ -32,7 +33,7 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow
 @pytest.mark.parametrize("change", ["inspect", "capability"])
 async def test_current_save_retry_preserves_unknown_delegation(capture_environment, monkeypatch, tmp_path, change, *, no_due=False):
     await asyncio.to_thread(render_compose_config, tmp_path, monkeypatch, keys={"OPENAI_API_KEY": "sk-synthetic"})
-    async with installed_worker(capture_environment, monkeypatch, tmp_path) as e:
+    async with installed_worker(capture_environment, monkeypatch, tmp_path) as e, AsyncExitStack() as phase:
         sdk = e.normal.do_request
 
         async def recorded_sdk(url, method, request_data=None, **kwargs):
@@ -68,9 +69,7 @@ async def test_current_save_retry_preserves_unknown_delegation(capture_environme
         await tap(e, control, 7121)
         original = await e.host.acts._work_record(control.id)
         assert original.state == "pending" and original.attempts == 1 and len(calls) == (2 if no_due else 1)
-        if no_due:
-            await e.host.notifications.worker.stop()
-            await e.host.sender.drain()
+        await phase.enter_async_context(owned_retry_observation(e))
         e.clock.advance(3601)
         worker = ActsWorker(e.host.acts)
         try:
@@ -116,12 +115,11 @@ async def test_current_save_retry_preserves_unknown_delegation(capture_environme
 
             child = await e.host.acts._work_record(no_due_id(original.id))
             assert original.operation_ids == (child.id,) and child.state in {"pending", "uncertain"} and child.body.get("due_at") is None
-            async with e.host.notifications._maintenance_lock, e.host.notifications._send_lock:
-                await e.host.sender.drain()
-                await actual_delegate(actor=PrincipalRef("human", e.link.owner_user_id), instance_id=e.instance.id, request=DelegateWork.model_validate(thaw(child.body)))
-                async with e.e.sf.begin() as writer:
-                    (await writer.get(AgentInstanceRow, e.instance.id)).status = "suspended"
-                assert await e.host.acts._work_record(original.id) == original
+            await e.host.sender.drain()
+            await actual_delegate(actor=PrincipalRef("human", e.link.owner_user_id), instance_id=e.instance.id, request=DelegateWork.model_validate(thaw(child.body)))
+            async with e.e.sf.begin() as writer:
+                (await writer.get(AgentInstanceRow, e.instance.id)).status = "suspended"
+            assert await e.host.acts._work_record(original.id) == original
         elif change == "paused":
             from deerflow.persistence.agent_instances.model import AgentInstanceRow
 
@@ -149,10 +147,9 @@ async def test_current_save_retry_preserves_unknown_delegation(capture_environme
         monkeypatch.setattr(e.host.notifications.chat.retry_denials, "offer", traced)
         before = len(e.normal.calls)
         await tap(e, retry, 7122)
-        for _ in range(4):
-            e.clock.advance(1)
-            await e.host.sender.tick()
-            await e.host.sender.drain()
+        if change != "paused":
+            identity = await denial_for(e, retry, original.id, "query-7122")
+            await settle_denial(e, identity, retired=False)
         key = "agent.paused" if change == "paused" else "assign.no_access" if change == "inspect" else "denied.other"
         supervisor = await get_local_provider().get_user(e.instance.supervisor.subject_id)
         assert render(key, "en-US", name=e.instance.name, supervisor=str(supervisor.email)) in [call.parameters.get("text") for call in e.normal.calls[before:] if call.endpoint == "sendMessage"]

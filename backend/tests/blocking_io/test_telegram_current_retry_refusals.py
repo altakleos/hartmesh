@@ -18,6 +18,11 @@ async def test_management_owner(capture_environment, monkeypatch, tmp_path, kind
 
 
 @pytest.mark.asyncio
+async def test_management_expiry_receipt_owner(capture_environment, monkeypatch, tmp_path):
+    await management(capture_environment, monkeypatch, tmp_path, "cancel", contend=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["inspect", "capability", "cancel-capability"])
 async def test_management_admission(capture_environment, monkeypatch, tmp_path, change):
     await management(capture_environment, monkeypatch, tmp_path, "cancel", change=change)
@@ -51,6 +56,11 @@ async def test_native_execution_owner(capture_environment, monkeypatch, tmp_path
 @pytest.mark.asyncio
 async def test_context_capability(capture_environment, monkeypatch, tmp_path):
     await execution(capture_environment, monkeypatch, tmp_path, "activate", "capability", context=True)
+
+
+@pytest.mark.asyncio
+async def test_observer_source_retirement(capture_environment, monkeypatch, tmp_path):
+    await execution(capture_environment, monkeypatch, tmp_path, "activate", "capability", observer_race=True)
 
 
 @pytest.mark.asyncio

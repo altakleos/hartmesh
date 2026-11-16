@@ -101,6 +101,11 @@ credentials remain denied by the facade even when their active human identity
 can run a text chat.
 
 Fixed image mounts share `FIXED_VOLUME_MOUNT_OPTIONS`, including `nodiscard`.
+Operator-only `loop_reservation` pins and rechecks image/root/UUID/loop geometry
+before setting that loop's `discard_max_bytes=0`; this also blocks loop zeroout
+from punching its backing file. Host writers inherit both descriptors and the
+pool lock. Both creators, startup existing mounts and explicit repair install it.
+Catalog admission freshly requires zero; unsupported controls fail closed.
 Operators must exclude them from FITRIM; Compose fstab entries use
 `X-fstrim.notrim`. Keep full physical-allocation and FIEMAP qualification intact:
 only root's `prepare` and `verify --repair` refill a hole, never qualification or

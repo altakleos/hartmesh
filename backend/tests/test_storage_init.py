@@ -120,6 +120,49 @@ def test_new_mount_explicitly_disables_online_discard(operator):
     assert "discard" not in options
 
 
+def test_new_image_formatting_uses_direct_io_and_retains_eager_initialization(operator):
+    tool, _, commands = operator
+    tool.prepare()
+    formats = [args for args in commands if args[0] == "mkfs.ext4"]
+    assert formats
+    for args in formats:
+        assert "-D" in args
+        assert args[args.index("-E") + 1] == "nodiscard,lazy_itable_init=0,lazy_journal_init=0"
+        spec = next(spec for spec in tool.load().volumes.values() if str(spec.image_path) == args[-1])
+        assert args[args.index("-U") + 1] == spec.filesystem_uuid
+        assert args[args.index("-N") + 1] == str(spec.max_inodes)
+        assert spec.image_path.stat().st_size == spec.max_bytes
+
+
+@pytest.mark.parametrize("unsupported", [False, True])
+def test_new_image_cache_release_follows_its_fsync_and_is_advisory(operator, monkeypatch, unsupported):
+    tool = operator[0]
+    synced, advised = set(), []
+    fsync = os.fsync
+
+    def durable(fd):
+        fsync(fd)
+        facts = os.fstat(fd)
+        synced.add((facts.st_dev, facts.st_ino))
+
+    def discard_clean_cache(fd, offset, length, advice):
+        facts = os.fstat(fd)
+        token = facts.st_dev, facts.st_ino
+        assert token in synced
+        assert (offset, length, advice) == (0, 0, os.POSIX_FADV_DONTNEED)
+        advised.append(token)
+        if unsupported:
+            raise OSError(errno.EOPNOTSUPP, "advisory cache release unsupported")
+
+    monkeypatch.setattr(os, "fsync", durable)
+    monkeypatch.setattr(os, "posix_fadvise", discard_clean_cache)
+    doc = tool.prepare()
+    inventory = tool.load()
+    expected = {(spec.image_path.stat().st_dev, spec.image_path.stat().st_ino) for spec in inventory.volumes.values()}
+    assert doc["returncode"] == 0
+    assert set(advised) == expected and len(advised) == len(expected)
+
+
 @pytest.mark.parametrize("text", ["# hartmesh-storage begin\n", "# hartmesh-storage end\n", "# hartmesh-storage begin\n# hartmesh-storage end\n# hartmesh-storage begin\n# hartmesh-storage end\n"])
 def test_fstab_sync_refuses_malformed_markers(text):
     with pytest.raises(si.Refused, match="fstab"):
@@ -204,6 +247,9 @@ def operator(tmp_path, monkeypatch):
     monkeypatch.setattr(si.StorageInitializer, "preflight", lambda self: None)
     monkeypatch.setattr(si.StorageInitializer, "mounted_image_facts", lambda self, spec, **kwargs: {"type": "ext4", "root": "/", "path": str(spec.mount_path), "options": {"rw", "nodev", "nosuid"}})
     monkeypatch.setattr(si.StorageInitializer, "_mounted_root_facts", lambda self, spec, root, **kwargs: {"type": "ext4", "root": "/", "path": str(spec.mount_path), "options": {"rw", "nodev", "nosuid"}})
+    # Ordinary-directory syscall fixture; the separate loop guard suite checks
+    # raw identity and effects, and native CI qualifies actual device queues.
+    monkeypatch.setattr(si.StorageInitializer, "_protect_loop", lambda *args: None)
     monkeypatch.setattr(si, "verify_image_extents", lambda *_args: None)
     monkeypatch.setattr(si, "mounted_ext4_identity", lambda fd: si.read_ext4_identity(Path(os.readlink(f"/proc/self/fd/{fd}")).with_suffix(".img")))
     monkeypatch.setattr(si, "container_holders", lambda *args, **kwargs: [])
@@ -485,7 +531,9 @@ def test_at_start_ends_descendants_even_if_leader_exits_or_descendant_ignores_te
     )
     original = subprocess.Popen
     monkeypatch.setattr(si.subprocess, "Popen", lambda args, **kwargs: original([sys.executable, str(program)], **kwargs))
-    monkeypatch.setattr(si, "AT_START_LIMIT_SECONDS", 0.5)
+    from app import storage_init as startup
+
+    monkeypatch.setattr(startup, "AT_START_LIMIT_SECONDS", 0.5)
     doc = si.at_start()
     assert doc["returncode"] == (0 if leader_exits else 2)
     assert pidfile.exists()
@@ -947,7 +995,9 @@ def test_at_start_incomplete_document_lists_persisted_slots_and_marks_unknown_fa
             raise subprocess.TimeoutExpired("owned fixture", 600)
 
     monkeypatch.setattr(si.subprocess, "Popen", lambda *args, **kwargs: Child())
-    monkeypatch.setattr(si, "end_owned_group", lambda child: True)
+    from app import storage_init as startup
+
+    monkeypatch.setattr(startup, "end_owned_group", lambda child: True)
     doc = si.at_start()
     assert doc["returncode"] == 2 and len(doc["spaces"]) == 6
     assert all(row["mounted"] and row["mounted_now"] is None for row in doc["spaces"])

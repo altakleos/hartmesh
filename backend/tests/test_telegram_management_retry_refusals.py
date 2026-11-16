@@ -1,14 +1,16 @@
 """Current Retry refusals preserve an actual uncertain command and Native owner."""
 
 import asyncio
+from contextlib import AsyncExitStack
 
 import pytest
 from _config_singleton_guard import restore_config_singletons  # noqa: F401 -- autouse fixture
 from _run_output_capture_test_support import capture_environment as capture_environment
 from _run_output_capture_test_support import output_store as output_store
 from _telegram_compose_turn_support import _delivered, render_compose_config
-from _telegram_work_worker_support import installed_worker
+from _telegram_work_worker_support import installed_worker, owned_retry_observation
 from sqlalchemy import select
+from test_telegram_execution_retry_refusals import denial_for, settle_denial
 from test_telegram_retained_management_refusals import button, management_preview, tap
 from test_telegram_supervisor import _supervisor_logging as _supervisor_logging
 
@@ -23,10 +25,10 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["edit", "cancel"])
 async def test_current_management_retry_denial_preserves_unknown_owner(
-    capture_environment, monkeypatch, tmp_path, kind, *, change="manage", race=None, invalid=None, known=False, lifecycle_invalid=None, restore_notice=False, inactive_rejection=None
+    capture_environment, monkeypatch, tmp_path, kind, *, change="manage", race=None, invalid=None, known=False, lifecycle_invalid=None, restore_notice=False, inactive_rejection=None, contend=False
 ):
     await asyncio.to_thread(render_compose_config, tmp_path, monkeypatch, keys={"OPENAI_API_KEY": "sk-synthetic"})
-    async with installed_worker(capture_environment, monkeypatch, tmp_path) as e:
+    async with installed_worker(capture_environment, monkeypatch, tmp_path) as e, AsyncExitStack() as phase:
         work, control = await management_preview(e, kind, monkeypatch, reserve=True)
         sdk = e.normal.do_request
 
@@ -48,9 +50,32 @@ async def test_current_management_retry_denial_preserves_unknown_owner(
         await tap(e, control, 7080)
         original = await e.host.acts._work_record(control.id)
         assert original.state == "pending" and original.attempts == 1 and len(calls) == 1
+        await phase.enter_async_context(owned_retry_observation(e))
         e.clock.advance(3601)
         worker = ActsWorker(e.host.acts)
         try:
+            if contend:
+                entered, release = asyncio.Event(), asyncio.Event()
+                receipt_for = e.host.acts.receipt_for
+
+                async def held_receipt(act, **kwargs):
+                    if act.id == original.id:
+                        entered.set()
+                        await release.wait()
+                    return await receipt_for(act, **kwargs)
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(e.host.acts, "receipt_for", held_receipt)
+                    owner = asyncio.create_task(e.host.acts.reconcile_receipt(original.id))
+                    try:
+                        await asyncio.wait_for(entered.wait(), 30)
+                        assert original.id in e.host.acts._work_active
+                        await worker.tick()
+                        held = await e.host.acts._work_record(original.id)
+                        assert held == original and held.state == "pending" and held.attempts == 1 and len(calls) == 1
+                    finally:
+                        release.set()
+                        await owner
             await worker.tick()
         finally:
             await worker.stop()
@@ -99,11 +124,10 @@ async def test_current_management_retry_denial_preserves_unknown_owner(
             from deerflow.agent_instances.work_contract import WorkCommand
             from deerflow.spaces.contract import PrincipalRef
 
-            async with e.host.notifications._maintenance_lock, e.host.notifications._send_lock:
-                await e.host.sender.drain()
-                await actual_command(actor=PrincipalRef("human", e.link.owner_user_id), instance_id=e.instance.id, work_id=original.work_id, request=WorkCommand.model_validate(thaw(original.body)), can_stop=True)
-                await change_authority()
-                assert await e.host.acts._work_record(original.id) == original
+            await e.host.sender.drain()
+            await actual_command(actor=PrincipalRef("human", e.link.owner_user_id), instance_id=e.instance.id, work_id=original.work_id, request=WorkCommand.model_validate(thaw(original.body)), can_stop=True)
+            await change_authority()
+            assert await e.host.acts._work_record(original.id) == original
         else:
             await change_authority()
         if inactive_rejection is not None:
@@ -209,70 +233,69 @@ async def test_current_management_retry_denial_preserves_unknown_owner(
                     (await writer.get(AgentInstanceGrantRow, (e.instance.id, e.link.owner_user_id))).permissions = 7
                 selected_original = await second_unknown_withdrawal(e)
             # Settle the actual Native command while retaining the unknown journal.
-            # Hold the real maintenance lock so no observer reconciles it first.
-            async with e.host.notifications._maintenance_lock, e.host.notifications._send_lock:
-                await e.host.sender.drain()
-                async with e.e.sf.begin() as writer:
-                    (await writer.get(AgentInstanceGrantRow, (e.instance.id, e.link.owner_user_id))).permissions = 7
-                await actual_command(actor=PrincipalRef("human", e.link.owner_user_id), instance_id=e.instance.id, work_id=selected_original.work_id, request=WorkCommand.model_validate(thaw(selected_original.body)), can_stop=True)
-                async with e.e.sf.begin() as writer:
-                    (await writer.get(AgentInstanceGrantRow, (e.instance.id, e.link.owner_user_id))).permissions = 3
-                    control_row = await writer.get(TelegramCallbackRow, retry.id)
-                    if invalid == "retarget":
-                        control_row.target_id = selected_original.id
-                        control_row.payload = {**control_row.payload, "act_id": selected_original.id}
-                    elif invalid == "consumed":
-                        control_row.consumed_at = e.clock.now()
-                    elif invalid == "expired":
-                        from datetime import timedelta
-
-                        control_row.expires_at = e.clock.now() - timedelta(seconds=1)
-                    elif invalid == "target":
-                        from uuid import uuid4
-
-                        control_row.target_id = uuid4().hex
-                    else:
-                        assert invalid == "ack"
-                        parent = await writer.get(TelegramOutboxRow, retry.payload["anchor_outbox_id"])
-                        parent.parts = [{**part, "message_ids": []} for part in parent.parts]
-                assert await e.host.acts._work_record(original.id) == original
-                assert await e.host.acts._work_record(selected_original.id) == selected_original
+            # The enclosing owned phase prevents automatic reconciliation.
+            await e.host.sender.drain()
+            async with e.e.sf.begin() as writer:
+                (await writer.get(AgentInstanceGrantRow, (e.instance.id, e.link.owner_user_id))).permissions = 7
+            await actual_command(actor=PrincipalRef("human", e.link.owner_user_id), instance_id=e.instance.id, work_id=selected_original.work_id, request=WorkCommand.model_validate(thaw(selected_original.body)), can_stop=True)
+            async with e.e.sf.begin() as writer:
+                (await writer.get(AgentInstanceGrantRow, (e.instance.id, e.link.owner_user_id))).permissions = 3
+                control_row = await writer.get(TelegramCallbackRow, retry.id)
                 if invalid == "retarget":
-                    async with e.e.sf() as reader:
-                        retry = await reader.get(TelegramCallbackRow, retry.id)
-                reached = []
+                    control_row.target_id = selected_original.id
+                    control_row.payload = {**control_row.payload, "act_id": selected_original.id}
+                elif invalid == "consumed":
+                    control_row.consumed_at = e.clock.now()
+                elif invalid == "expired":
+                    from datetime import timedelta
 
-                async def forbidden_receipt_lookup(*args, **kwargs):
-                    reached.append(True)
-                    raise AssertionError("invalid Retry reached receipt settlement")
+                    control_row.expires_at = e.clock.now() - timedelta(seconds=1)
+                elif invalid == "target":
+                    from uuid import uuid4
 
-                def native_facts(rows):
-                    return [tuple(getattr(row, key) for key in ("id", "work_id", "activation_id", "requester_id", "status", "thread_id", "run_id")) for row in rows]
-
+                    control_row.target_id = uuid4().hex
+                else:
+                    assert invalid == "ack"
+                    parent = await writer.get(TelegramOutboxRow, retry.payload["anchor_outbox_id"])
+                    parent.parts = [{**part, "message_ids": []} for part in parent.parts]
+            assert await e.host.acts._work_record(original.id) == original
+            assert await e.host.acts._work_record(selected_original.id) == selected_original
+            if invalid == "retarget":
                 async with e.e.sf() as reader:
-                    before_acts = set(await reader.scalars(select(TelegramActRow.id)))
-                    before_native = native_facts(await reader.scalars(select(AgentWorkAttemptRow).order_by(AgentWorkAttemptRow.id)))
-                    before_events = set(await reader.scalars(select(AgentWorkEventRow.id)))
-                cancelled = []
+                    retry = await reader.get(TelegramCallbackRow, retry.id)
+            reached = []
 
-                async def forbidden_cancel(*args, **kwargs):
-                    cancelled.append(True)
-                    raise AssertionError("invalid Retry dispatched cancellation")
+            async def forbidden_receipt_lookup(*args, **kwargs):
+                reached.append(True)
+                raise AssertionError("invalid Retry reached receipt settlement")
 
-                monkeypatch.setattr("app.gateway.work_execution.dispatch_work_stop", forbidden_cancel)
-                monkeypatch.setattr(e.host.acts, "receipt_for", forbidden_receipt_lookup)
-                monkeypatch.setattr(e.host.acts, "reconcile_receipt", forbidden_receipt_lookup)
-                with pytest.raises((CallbackRefused, ProductSourceRetired, PermanentDeliveryError)):
-                    await e.host.notifications.chat.retry_denials.offer(e.link, retry, guard=guard, query_id="invalid-current-retry")
-                assert not reached and await e.host.acts._work_record(original.id) == original
-                async with e.e.sf() as reader:
-                    assert await reader.scalar(select(AgentWorkEventRow.id).where(AgentWorkEventRow.operation_id == selected_original.id)) is not None
-                    assert await reader.get(TelegramActRow, retry.id) is None
-                    assert set(await reader.scalars(select(TelegramActRow.id))) == before_acts
-                    assert set(await reader.scalars(select(AgentWorkEventRow.id))) == before_events
-                    assert native_facts(await reader.scalars(select(AgentWorkAttemptRow).order_by(AgentWorkAttemptRow.id))) == before_native
-                assert not cancelled
-                assert await e.host.acts._work_record(selected_original.id) == selected_original
+            def native_facts(rows):
+                return [tuple(getattr(row, key) for key in ("id", "work_id", "activation_id", "requester_id", "status", "thread_id", "run_id")) for row in rows]
+
+            async with e.e.sf() as reader:
+                before_acts = set(await reader.scalars(select(TelegramActRow.id)))
+                before_native = native_facts(await reader.scalars(select(AgentWorkAttemptRow).order_by(AgentWorkAttemptRow.id)))
+                before_events = set(await reader.scalars(select(AgentWorkEventRow.id)))
+            cancelled = []
+
+            async def forbidden_cancel(*args, **kwargs):
+                cancelled.append(True)
+                raise AssertionError("invalid Retry dispatched cancellation")
+
+            monkeypatch.setattr("app.gateway.work_execution.dispatch_work_stop", forbidden_cancel)
+            monkeypatch.setattr(e.host.acts, "receipt_for", forbidden_receipt_lookup)
+            monkeypatch.setattr(e.host.acts, "reconcile_receipt", forbidden_receipt_lookup)
+            with pytest.raises((CallbackRefused, ProductSourceRetired, PermanentDeliveryError)):
+                await e.host.notifications.chat.retry_denials.offer(e.link, retry, guard=guard, query_id="invalid-current-retry")
+            assert not reached and await e.host.acts._work_record(original.id) == original
+            async with e.e.sf() as reader:
+                assert await reader.scalar(select(AgentWorkEventRow.id).where(AgentWorkEventRow.operation_id == selected_original.id)) is not None
+                assert await reader.get(TelegramActRow, retry.id) is None
+                assert set(await reader.scalars(select(TelegramActRow.id))) == before_acts
+                assert set(await reader.scalars(select(AgentWorkEventRow.id))) == before_events
+                assert native_facts(await reader.scalars(select(AgentWorkAttemptRow).order_by(AgentWorkAttemptRow.id))) == before_native
+            assert not cancelled
+            assert await e.host.acts._work_record(selected_original.id) == selected_original
             return
         raced = []
         if race in {"restore", "receipt"}:
@@ -314,10 +337,11 @@ async def test_current_management_retry_denial_preserves_unknown_owner(
             monkeypatch.setattr(e.host.sender, "tick", paused_tick)
         before = len(e.normal.calls)
         await tap(e, retry, 7081)
-        for _ in range(4):
-            e.clock.advance(1)
-            await e.host.sender.tick()
-            await e.host.sender.drain()
+        inline = change in {"use", "paused", "retired", "read-capability"}
+        if not inline:
+            denial_id = await denial_for(e, retry, original.id, "query-7081")
+            if race != "age":
+                await settle_denial(e, denial_id, retired=race in {"restore", "receipt"})
         key = "access.agent_off" if change in {"use", "read-capability"} else "agent.paused" if change == "paused" else "agent.retired" if change == "retired" else "denied.change" if kind == "edit" else "denied.withdraw"
         from app.telegram_bots.authority import get_local_provider
 
@@ -333,7 +357,7 @@ async def test_current_management_retry_denial_preserves_unknown_owner(
             await e.host.callbacks.sweep(later)
             await sweep_rows(e.e.sf, later, callback_max_age_days=e.host.callbacks.config.callbacks.max_age_days)
             async with e.e.sf() as reader:
-                fixed = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.payload["work_retry_denial"]["act_id"].as_string() == original.id))
+                fixed = await reader.get(TelegramOutboxRow, denial_id)
                 assert fixed is not None and fixed.state == "pending" and all(not part["message_ids"] for part in fixed.parts)
                 assert await reader.get(TelegramCallbackRow, retry.id) is not None
                 assert await reader.get(TelegramOutboxRow, retry.payload["anchor_outbox_id"]) is not None
@@ -386,8 +410,13 @@ async def test_invalid_retry_cannot_reconcile_a_known_native_receipt(capture_env
     await test_current_management_retry_denial_preserves_unknown_owner(capture_environment, monkeypatch, tmp_path, "cancel", invalid=invalid)
 
 
+@pytest.mark.asyncio
+async def test_management_expiry_waits_for_its_actual_receipt_owner(capture_environment, monkeypatch, tmp_path):
+    await test_current_management_retry_denial_preserves_unknown_owner(capture_environment, monkeypatch, tmp_path, "cancel", contend=True)
+
+
 async def second_unknown_withdrawal(e):
-    """A second genuine callback-owned command, never a seeded journal."""
+    """A second genuine command within the caller's owned notification phase."""
     from uuid import uuid4
 
     from _telegram_bot_test_support import update_payload
@@ -411,6 +440,11 @@ async def second_unknown_withdrawal(e):
     # Complete B's actual preview before freezing its later receipt boundary.
     assert await e.channel.handle_update(Update.de_json(update_payload(7180, message_id=7180, account=PERSON, text="/work"), e.channel.bot))
     await e.channel._drain_ingress()
+    # reserve() also commits a real status.starting event. The enclosing phase
+    # owns the send lock, so drive its actual event/materialization owners here;
+    # no card observer or receipt worker may refresh A's retained Retry.
+    await e.host.notifications.tick_events()
+    await e.host.notifications.prepare_deliveries()
     await asyncio.wait_for(_delivered(e.e, e.host, e.clock), 30)
     await tap(e, await button(e, "work_details", target=work["id"]), 7181)
     await asyncio.wait_for(_delivered(e.e, e.host, e.clock), 30)

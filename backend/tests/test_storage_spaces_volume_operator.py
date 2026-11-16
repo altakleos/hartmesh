@@ -74,6 +74,7 @@ def test_successful_publication_then_exception_preserves_published_backings(tmp_
 
     monkeypatch.setattr(module.subprocess, "run", host_run)
     monkeypatch.setattr(module.PreparedVolumeCatalog, "verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("deerflow.spaces.provision.protect_loop_reservation", lambda *args, **kwargs: None)
     monkeypatch.setattr(module.os, "link", link_then_interrupt)
     with pytest.raises(KeyboardInterrupt):
         module.prepare_volumes(tmp_path, count=1, size_bytes=32 << 20, inodes=256, reserve_bytes=16 << 20, reserve_inodes=64, data_uid=1000)

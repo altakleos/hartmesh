@@ -7,21 +7,187 @@ dedicated CI job requires the fixture and rejects every skipped test.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import errno
+import fcntl
 import hashlib
 import importlib.util
 import json
 import os
 import shutil
+import stat
+import struct
 import subprocess
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from _storage_spaces_native_test_support import prepare_consumer_container
+from _storage_spaces_native_test_support import prepare_consumer_container, remove_owned_loop
 
 from deerflow.spaces.backings import BackingUnavailable, PreparedVolumeCatalog
+
+
+@contextmanager
+def _allow_disposable_loop_deallocation(catalog, spec):
+    """Remount this fixture on a freshly owned, never-protected loop.
+
+    Some kernels set discard_granularity=0 when discard is disabled, then
+    reject every nonzero discard_max_bytes write. Never change a borrowed
+    device or manufacture a successful protected catalog verification.
+    """
+    from deerflow.spaces.loop_reservation import _snapshot
+
+    verified = catalog.verify(spec.slot_id)
+    image = os.open(spec.image_path, os.O_RDONLY | os.O_NOFOLLOW)
+    control = root = None
+    owned = None
+    node = None
+    sysfs_identity = None
+    retiring_binding = None
+    node_identity = None
+    qualified = False
+    try:
+        assert (os.fstat(image).st_dev, os.fstat(image).st_ino) == (verified.image_device, verified.image_inode)
+        control = os.open("/dev/loop-control", os.O_RDWR | os.O_CLOEXEC)
+        existing = [int(path.name[4:]) for path in Path("/sys/class/block").iterdir() if path.name.startswith("loop") and path.name[4:].isascii() and path.name[4:].isdigit()]
+        # LOOP_CTL_ADD exclusively creates this exact device or fails. Only
+        # this successful creation permits its later LOOP_CTL_REMOVE.
+        for number in range(max(existing, default=-1) + 1, max(existing, default=-1) + 9):
+            try:
+                assert fcntl.ioctl(control, 0x4C80, number) == number
+            except OSError as exc:
+                if exc.errno == errno.EEXIST:
+                    continue
+                raise
+            owned = number
+            break
+        assert owned is not None, "Could not create an exclusive disposable loop"
+        sysfs = Path(f"/sys/class/block/loop{owned}")
+        metadata = sysfs.stat()
+        sysfs_identity = metadata.st_dev, metadata.st_ino
+        major, minor = map(int, (sysfs / "dev").read_text(encoding="ascii").strip().split(":"))
+        device = os.makedev(major, minor)
+        # libmount expects the canonical loop-device name. udev may have
+        # already created this node; validate it and retain it in that case.
+        node = Path(f"/dev/loop{owned}")
+        try:
+            os.mknod(node, stat.S_IFBLK | 0o600, device)
+        except FileExistsError:
+            created_here = False
+        else:
+            created_here = True
+        created = node.lstat()
+        assert stat.S_ISBLK(created.st_mode) and created.st_rdev == device
+        if created_here:
+            node_identity = created.st_dev, created.st_ino
+        subprocess.run(["umount", str(spec.mount_path)], check=True, timeout=30)
+        subprocess.run(["mount", "-o", f"loop={node},nodev,nosuid,nodiscard", str(spec.image_path), str(spec.mount_path)], check=True, timeout=30)
+        root = os.open(spec.mount_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        snapshot = _snapshot(spec, root, image)
+        assert os.fstat(root).st_dev == device
+        qualified = True
+        retiring_binding = {name: (sysfs / "loop" / name).read_text(encoding="utf-8").strip() for name in ("backing_file", "offset", "sizelimit", "autoclear")}
+        limit = Path(f"/sys/dev/block/{snapshot[0]}/queue/discard_max_bytes")
+        assert int(limit.read_text(encoding="ascii")) > 0
+        yield node
+    finally:
+        try:
+            if root is not None:
+                try:
+                    if qualified:
+                        assert _snapshot(spec, root, image) == snapshot
+                finally:
+                    os.close(root)
+            if qualified:
+                subprocess.run(["umount", str(spec.mount_path)], check=True, timeout=30)
+            if owned is not None:
+                # The kernel refuses removal while bound/open. Ambiguity retains
+                # the fixture rather than detaching an unproved attachment.
+                if sysfs_identity is None:
+                    raise RuntimeError("Fresh loop identity is unavailable; the device was retained")
+                remove_owned_loop(control, owned, sysfs, expected=sysfs_identity, retiring_binding=retiring_binding)
+            if node_identity is not None:
+                try:
+                    named = node.lstat()
+                except FileNotFoundError:
+                    pass  # udev already retired this exact removed device.
+                else:
+                    assert (named.st_dev, named.st_ino) == node_identity
+                    node.unlink()
+        finally:
+            if control is not None:
+                os.close(control)
+            os.close(image)
+
+
+def _zeroout_disposable_data_extent(tool, spec, *, block_path=None):
+    """Real block WRITE_ZEROES/unmap, restricted to our own zero-filled file."""
+    data = os.open(spec.mount_path / "data" / ("zeroout-" + uuid.uuid4().hex), os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    root = block = None
+    try:
+        assert os.write(data, bytes(1 << 20)) == 1 << 20
+        os.fsync(data)
+        # FIEMAP_FLAG_SYNC; only this file's allocated data, never FS metadata.
+        mapping = bytearray(32 + 56)
+        struct.pack_into("=QQIIII", mapping, 0, 0, 1 << 20, 1, 0, 1, 0)
+        fcntl.ioctl(data, 0xC020660B, mapping, True)
+        assert struct.unpack_from("=QQIIII", mapping)[3] == 1
+        logical, physical, length, _r0, _r1, flags, _r2, _r3, _r4 = struct.unpack_from("=QQQQQIIII", mapping, 32)
+        assert logical == 0 and physical > 0 and length >= 4096 and not physical % 4096
+        assert physical + 4096 <= spec.max_bytes and not flags & ~(0x01 | 0x800)
+        root = os.open(spec.mount_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        block = os.open(block_path or tool.loop(spec.image_path), os.O_RDWR | os.O_NOFOLLOW)
+        assert stat.S_ISBLK(os.fstat(block).st_mode) and os.fstat(block).st_rdev == os.fstat(root).st_dev
+        assert os.pread(block, 4096, physical) == bytes(4096)
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.fallocate.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong)
+        libc.fallocate.restype = ctypes.c_int
+        # On a block FD, PUNCH_HOLE|KEEP_SIZE requests zeroout without NOUNMAP
+        # and without ordinary-write fallback. BLKZEROOUT would set NOUNMAP.
+        result = libc.fallocate(block, 0x03, physical, 4096)
+        error = ctypes.get_errno() if result else 0
+        os.fsync(block)
+        return result, error
+    finally:
+        for fd in (block, root, data):
+            if fd is not None:
+                os.close(fd)
+
+
+def test_loop_zeroout_keeps_reserved_blocks_and_unprotected_control_loses_them(typed_prepared_pool, tmp_path):
+    from app.gateway.storage_init import KINDS, StorageInitializer
+    from deerflow.config.storage_spaces_config import StoragePlan
+
+    plan = StoragePlan(users=1, user_gib=1, ai_assistants_per_user=0, ai_assistant_gib=1, ai_employees=0, ai_employee_gib=1, company_gib=1)
+    table = tmp_path / "zeroout-fstab"
+    table.write_text("# isolated zeroout fixture\n", encoding="utf-8")
+    tool = StorageInitializer(tmp_path / "zeroout-pool", plan, capacities=dict.fromkeys(KINDS, 64 << 20), fstab_path=table)
+    try:
+        with tool.locked(repair_pool=True):
+            document = tool.prepare()
+            assert document["returncode"] == 0, document
+        catalog = tool.load()
+        control, protected = catalog.volumes.values()
+        for spec in (control, protected):
+            assert _zeroout_disposable_data_extent(tool, spec) == (-1, errno.EOPNOTSUPP)
+            catalog.verify(spec.slot_id)
+        with _allow_disposable_loop_deallocation(catalog, control) as node:
+            assert control.image_path.stat().st_blocks * 512 >= control.max_bytes
+            with pytest.raises(BackingUnavailable, match="reservation protection"):
+                catalog.verify(control.slot_id)
+            before = control.image_path.stat().st_blocks
+            assert _zeroout_disposable_data_extent(tool, control, block_path=node) == (0, 0)
+            assert control.image_path.stat().st_blocks < before
+            with pytest.raises(BackingUnavailable):
+                catalog.verify(control.slot_id)
+        catalog.verify(protected.slot_id)
+        assert protected.image_path.stat().st_blocks * 512 >= protected.max_bytes
+    finally:
+        with tool.locked():
+            document = tool.quiesce()
+            assert document["returncode"] == 0, document
 
 
 @pytest.fixture(scope="module")
@@ -103,18 +269,19 @@ def test_scheduled_trim_preserves_reserved_images_and_unprotected_control_loses_
             stream.write(b"retained across scheduled trim")
             stream.flush()
             os.fsync(stream.fileno())
-        # Keep nodiscard on the control: it must not be mistaken for FITRIM
-        # protection. Only its scheduled-trim exclusion is deliberately removed.
+        # Keep nodiscard on the control; deliberately remove both deallocation
+        # guards only for this fixture's pinned loop and isolated trim table.
         line = tool.fstab_line(control)
         contents = table.read_text(encoding="utf-8")
         table.write_text(contents.replace(line, line.replace(",X-fstrim.notrim", ""), 1), encoding="utf-8")
-        result = subprocess.run([trim, "--listed-in", str(table), "--verbose"], capture_output=True, text=True, timeout=60)
-        assert result.returncode == 0, result.stderr
-        assert str(control.mount_path) in result.stdout
-        assert str(protected.mount_path) not in result.stdout
-        assert control.image_path.stat().st_blocks * 512 < control.max_bytes
-        with pytest.raises(BackingUnavailable):
-            catalog.verify(control.slot_id)
+        with _allow_disposable_loop_deallocation(catalog, control):
+            result = subprocess.run([trim, "--listed-in", str(table), "--verbose"], capture_output=True, text=True, timeout=60)
+            assert result.returncode == 0, result.stderr
+            assert str(control.mount_path) in result.stdout
+            assert str(protected.mount_path) not in result.stdout
+            assert control.image_path.stat().st_blocks * 512 < control.max_bytes
+            with pytest.raises(BackingUnavailable):
+                catalog.verify(control.slot_id)
         assert protected.image_path.stat().st_blocks * 512 >= protected.max_bytes
         catalog.verify(protected.slot_id)
         assert retained.read_bytes() == b"retained across scheduled trim"
@@ -151,16 +318,19 @@ def test_prepare_restores_a_trimmed_image_and_keeps_its_files(typed_prepared_poo
         line = tool.fstab_line(spec)
         contents = table.read_text(encoding="utf-8")
         table.write_text(contents.replace(line, line.replace(",X-fstrim.notrim", ""), 1), encoding="utf-8")
-        result = subprocess.run([trim, "--listed-in", str(table), "--verbose"], capture_output=True, text=True, timeout=60)
-        assert result.returncode == 0, result.stderr
-        assert spec.image_path.stat().st_blocks * 512 < spec.max_bytes
-        with pytest.raises(BackingUnavailable):
+        with _allow_disposable_loop_deallocation(catalog, spec):
+            result = subprocess.run([trim, "--listed-in", str(table), "--verbose"], capture_output=True, text=True, timeout=60)
+            assert result.returncode == 0, result.stderr
+            assert spec.image_path.stat().st_blocks * 512 < spec.max_bytes
+            with pytest.raises(BackingUnavailable):
+                catalog.verify(spec.slot_id)
+            with tool.locked(repair_pool=True):
+                doc = tool.prepare()
+                assert doc["returncode"] == 0 and doc["restored"]["spaces"] == 1, doc
+            assert spec.image_path.stat().st_blocks * 512 >= spec.max_bytes
             catalog.verify(spec.slot_id)
-        with tool.locked(repair_pool=True):
-            doc = tool.prepare()
-            assert doc["returncode"] == 0 and doc["restored"]["spaces"] == 1, doc
-        assert spec.image_path.stat().st_blocks * 512 >= spec.max_bytes
-        catalog.verify(spec.slot_id)
+            device = spec.mount_path.stat().st_dev
+            assert Path(f"/sys/dev/block/{os.major(device)}:{os.minor(device)}/queue/discard_max_bytes").read_text().strip() == "0"
         # Reading through a fresh mount proves the disk, not the page cache.
         with tool.locked():
             doc = tool.quiesce()

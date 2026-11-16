@@ -323,6 +323,15 @@ async def installed_worker(e, monkeypatch, tmp_path):
                 raise BaseExceptionGroup("Installed Telegram worker cleanup failed", failures)
 
 
+@asynccontextmanager
+async def owned_retry_observation(e):
+    """Drain automatic receipt owners before controlling a Retry's clock/source."""
+    await e.host.notifications.worker.stop()
+    async with e.host.notifications._maintenance_lock, e.host.notifications._send_lock:
+        await e.host.sender.drain()
+        yield
+
+
 async def propose(e):
     update = Update.de_json(update_payload(2701, message_id=2701, account=PERSON, text="Review the guide and give me a result to review."), e.channel.bot)
     assert await e.channel.handle_update(update)

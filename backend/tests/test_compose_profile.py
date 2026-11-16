@@ -1605,9 +1605,10 @@ def test_summary_line_reports_the_spaces_and_the_agents(render_config: ModuleTyp
 def test_storage_init_is_pinned_outside_the_memory_equality(compose: dict) -> None:
     service = compose["services"]["storage-init"]
     assert service["privileged"] is True and service["pid"] == "host" and service["network_mode"] == "none"
-    assert service["restart"] == "no" and service["mem_limit"] == service["memswap_limit"] == "128m" and service["pids_limit"] == 64
+    assert service["restart"] == "no" and service["mem_limit"] == service["memswap_limit"] == "256m" and service["pids_limit"] == 64
     assert service["working_dir"] == "/app/backend"
-    assert service["entrypoint"] == ["uv", "run", "--no-sync", "python", "-m", "app.gateway.storage_init"]
+    assert service["entrypoint"] == ["uv", "run", "--no-sync", "python", "-m", "app.storage_init"]
+    assert service["environment"]["PYTHONDONTWRITEBYTECODE"] == "1"
     assert service["command"] == ["prepare", "--at-start"]
     assert not {"user", "cap_drop", "env_file", "healthcheck", "logging", "networks"}.intersection(service)
     assert "storage-init" not in MEMORY_MIB
@@ -1641,7 +1642,13 @@ def test_gateway_waits_for_storage_init_without_requiring_it(compose: dict) -> N
 
 
 def test_storage_init_receives_the_data_directory_and_the_seven_keys_by_name(compose: dict) -> None:
-    assert compose["services"]["storage-init"]["environment"] == {"PYTHONPATH": ".", "UV_CACHE_DIR": "/tmp/uv-cache", "HARTMESH_DATA_DIR": "${HARTMESH_DATA_DIR}", **{key: "${" + key + ":-}" for key in STORAGE_ENV_KEYS}}
+    assert compose["services"]["storage-init"]["environment"] == {
+        "PYTHONPATH": ".",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "UV_CACHE_DIR": "/tmp/uv-cache",
+        "HARTMESH_DATA_DIR": "${HARTMESH_DATA_DIR}",
+        **{key: "${" + key + ":-}" for key in STORAGE_ENV_KEYS},
+    }
     source = COMPOSE.read_text(encoding="utf-8")
     for key in STORAGE_ENV_KEYS:
         assert len(re.findall(r"\$\{" + key + r"\b", source)) == source.count("${" + key + ":-}") == 1

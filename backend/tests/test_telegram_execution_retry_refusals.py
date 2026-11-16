@@ -1,6 +1,7 @@
 """A real unknown Start/Stop retains its Native promise when new Retry is denied."""
 
 import asyncio
+from contextlib import AsyncExitStack
 from datetime import datetime
 from uuid import uuid4
 
@@ -10,7 +11,7 @@ from _run_output_capture_test_support import capture_environment as capture_envi
 from _run_output_capture_test_support import output_store as output_store
 from _telegram_bot_test_support import update_payload
 from _telegram_compose_turn_support import PERSON, _delivered, render_compose_config
-from _telegram_work_worker_support import installed_worker
+from _telegram_work_worker_support import installed_worker, owned_retry_observation
 from sqlalchemy import select
 from telegram import Update
 from test_telegram_retained_management_refusals import button, tap
@@ -20,6 +21,7 @@ from app.telegram_bots.acts import ActsWorker
 from app.telegram_bots.authority import get_local_provider
 from app.telegram_bots.producer import DeliveryClaimRetired, ProductSourceRetired
 from app.telegram_bots.render import render
+from app.telegram_bots.work_retry_denials import source_id
 from deerflow.agent_instances.work import AgentWork
 from deerflow.agent_instances.work_contract import DelegateWork
 from deerflow.agent_instances.work_execution import WorkExecution
@@ -28,7 +30,7 @@ from deerflow.config.app_config import peek_loaded_app_config
 from deerflow.config.authorization_config import AuthorizationConfig
 from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow
 from deerflow.spaces.contract import PrincipalRef
 
 
@@ -46,13 +48,97 @@ async def deliver_owned(e, identity):
         await asyncio.sleep(0.05)
 
 
+async def settle_denial(e, identity, *, retired):
+    observed = None
+    try:
+        async with asyncio.timeout(30):
+            while True:
+                e.clock.advance(1)
+                await e.host.sender.tick()
+                await e.host.sender.drain()
+                async with e.e.sf() as reader:
+                    row = await reader.get(TelegramOutboxRow, identity)
+                    assert row is not None
+                    observed = (row.state, row.skip_reason, row.failed_reason, row.not_before, e.clock.now(), row.claim_owner, row.claim_id, row.attempts, row.parts, getattr(e, "denial_retirements", ()))
+                    assert row.state != "failed", observed
+                    if retired:
+                        assert not any(part["message_ids"] for part in row.parts), observed
+                        if row.state == "skipped":
+                            assert row.skip_reason == "superseded", observed
+                            return
+                    else:
+                        assert row.state != "skipped", observed
+                        current = [part for part in row.parts if part.get("presentation_version", 0) == row.payload.get("presentation_version", 0)]
+                        if row.state == "sent" and row.sent_at and current and all(part["state"] == "sent" and part["message_ids"] and part["sent_at"] for part in current):
+                            return
+                await asyncio.sleep(0.05)
+    except TimeoutError as exc:
+        raise AssertionError((identity, observed)) from exc
+
+
+async def denial_for(e, retry, act_id, query_id):
+    async with e.e.sf() as reader:
+        denial = (
+            await reader.scalars(
+                select(TelegramOutboxRow).where(
+                    TelegramOutboxRow.link_id == e.link.id,
+                    TelegramOutboxRow.owner_user_id == e.link.owner_user_id,
+                    TelegramOutboxRow.binding_generation == e.link.binding_generation,
+                    TelegramOutboxRow.chat_id == retry.chat_id,
+                    TelegramOutboxRow.message_thread_id == retry.message_thread_id,
+                    TelegramOutboxRow.payload["work_retry_denial"]["act_id"].as_string() == act_id,
+                    TelegramOutboxRow.payload["work_retry_denial"]["callback"]["id"].as_string() == retry.id,
+                    TelegramOutboxRow.payload["work_retry_denial"]["query_id"].as_string() == query_id,
+                )
+            )
+        ).one()
+        assert denial.dedupe_key == "notice:" + source_id(e.link, denial.payload["work_retry_denial"])
+        return denial.id
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["activate", "stop"])
 @pytest.mark.parametrize("change", ["inspect", "capability"])
-async def test_current_execution_retry_preserves_actual_native(capture_environment, monkeypatch, tmp_path, kind, change, *, context=False, foreign=False, carrier=False, known_stop=False, contend=False):
+async def test_current_execution_retry_preserves_actual_native(capture_environment, monkeypatch, tmp_path, kind, change, *, context=False, foreign=False, carrier=False, known_stop=False, contend=False, observer_race=False):
     await asyncio.to_thread(render_compose_config, tmp_path, monkeypatch, keys={"OPENAI_API_KEY": "sk-synthetic"})
-    async with installed_worker(capture_environment, monkeypatch, tmp_path) as e:
+    async with installed_worker(capture_environment, monkeypatch, tmp_path) as e, AsyncExitStack() as phase:
         monkeypatch.setattr("app.telegram_bots.inbox._now", e.clock.now)
+        e.denial_retirements = []
+        e.denial_observed = False
+        read_denial = e.host.notifications.chat.retry_denials.read_part
+
+        async def trace_denial(*args, **kwargs):
+            try:
+                result = await read_denial(*args, **kwargs)
+                if observer_race and not e.denial_observed:
+                    assert kind == "activate" and change == "capability" and not (context or foreign or carrier)
+                    e.denial_observed = True
+                    anchor = args[0].item.payload["work_retry_denial"]["callback"]["payload"]["anchor_outbox_id"]
+                    async with e.e.sf() as reader:
+                        parent = await reader.get(TelegramOutboxRow, anchor)
+                        before_version = parent.payload["presentation_version"]
+                        assert "runs:create" in parent.payload["work_news_basis"]["source"]["work"]["detail"]["held"]
+                    # This is the actual maintenance owner, invoked under its
+                    # lock between the first read and final SDK authority check.
+                    await e.host.notifications.chat_observer.tick(e.link, guard=guard)
+                    async with e.e.sf() as reader:
+                        parent = await reader.get(TelegramOutboxRow, anchor)
+                        assert parent.payload["presentation_version"] > before_version
+                        assert "runs:create" not in parent.payload["work_news_basis"]["source"]["work"]["detail"]["held"]
+                        selected = await reader.get(TelegramCallbackRow, args[0].item.payload["work_retry_denial"]["callback"]["id"])
+                        assert selected.consumed_at is not None and selected.closed_reason == "superseded"
+                        e.refreshed_version = parent.payload["presentation_version"]
+                return result
+            except ProductSourceRetired as error:
+                frames = []
+                current = error.__traceback__
+                while current is not None:
+                    frames.append((current.tb_frame.f_code.co_filename, current.tb_lineno))
+                    current = current.tb_next
+                e.denial_retirements.append(frames)
+                raise
+
+        monkeypatch.setattr(e.host.notifications.chat.retry_denials, "read_part", trace_denial)
         sdk = e.normal.do_request
 
         async def recorded_sdk(url, method, request_data=None, **kwargs):
@@ -162,6 +248,9 @@ async def test_current_execution_retry_preserves_actual_native(capture_environme
                 await worker.stop()
             original = await e.host.acts._work_record(control.id)
             assert original.state in ({"uncertain", "refused"} if context else {"uncertain"}) and original.attempts == 1
+        # Keep the positive denial's genuine acknowledged card stable. The
+        # explicit race case below drives the real observer through this lock.
+        await phase.enter_async_context(owned_retry_observation(e))
         if context and original.state == "refused":
             assert original.reason == "conversation-changed"
         effective = original
@@ -199,12 +288,11 @@ async def test_current_execution_retry_preserves_actual_native(capture_environme
             from deerflow.persistence.agent_instances.model import AgentInstanceRow
 
             assert kind == "stop" and change == "paused"
-            async with e.host.notifications._maintenance_lock, e.host.notifications._send_lock:
-                await e.host.sender.drain()
-                await actual_command(actor=actor, instance_id=e.instance.id, work_id=original.work_id, request=WorkCommand.model_validate(thaw(original.body)), can_stop=True)
-                async with e.e.sf.begin() as writer:
-                    (await writer.get(AgentInstanceRow, e.instance.id)).status = "suspended"
-                assert await e.host.acts._work_record(original.id) == original
+            await e.host.sender.drain()
+            await actual_command(actor=actor, instance_id=e.instance.id, work_id=original.work_id, request=WorkCommand.model_validate(thaw(original.body)), can_stop=True)
+            async with e.e.sf.begin() as writer:
+                (await writer.get(AgentInstanceRow, e.instance.id)).status = "suspended"
+            assert await e.host.acts._work_record(original.id) == original
         elif change == "paused":
             from deerflow.persistence.agent_instances.model import AgentInstanceRow
 
@@ -225,22 +313,42 @@ async def test_current_execution_retry_preserves_actual_native(capture_environme
                 return 0
 
             monkeypatch.setattr(e.host.sender, "tick", paused_tick)
+        supervisor = await get_local_provider().get_user(e.instance.supervisor.subject_id)
+        key = "agent.paused" if change == "paused" else "denied.start" if kind == "activate" else "work.need_inspect" if change == "inspect" else "stop.not_yours" if change == "manage" else "denied.other"
+        expected = render(key, "en-US", name=e.instance.name, supervisor=str(supervisor.email), person="colleague@example.com" if foreign else "")
         before = len(e.normal.calls)
         await tap(e, retry, 7113)
+        if change != "paused":
+            denial_id = await denial_for(e, retry, original.id, "query-7113")
         if carrier:
             async with e.e.sf.begin() as writer:
-                fixed = await writer.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.payload["work_retry_denial"]["act_id"].as_string() == original.id))
+                fixed = await writer.get(TelegramOutboxRow, denial_id)
                 assert fixed is not None and fixed.state == "pending" and all(not part["message_ids"] for part in fixed.parts)
                 fixed.payload = {key: value for key, value in fixed.payload.items() if key != "work_retry_denial"}
                 (await writer.get(AgentInstanceGrantRow, (e.instance.id, e.link.owner_user_id))).permissions = 7
             monkeypatch.setattr(e.host.sender, "tick", tick)
-        for _ in range(4):
-            e.clock.advance(1)
-            await e.host.sender.tick()
-            await e.host.sender.drain()
-        supervisor = await get_local_provider().get_user(e.instance.supervisor.subject_id)
-        key = "agent.paused" if change == "paused" else "denied.start" if kind == "activate" else "work.need_inspect" if change == "inspect" else "stop.not_yours" if change == "manage" else "denied.other"
-        expected = render(key, "en-US", name=e.instance.name, supervisor=str(supervisor.email), person="colleague@example.com" if foreign else "")
+        if change != "paused":
+            await settle_denial(e, denial_id, retired=carrier or observer_race)
+        if observer_race:
+            assert e.denial_observed and e.denial_retirements
+            assert expected not in [call.parameters.get("text") for call in e.normal.calls[before:] if call.endpoint == "sendMessage"]
+            assert await e.host.acts._work_record(original.id) == original and len(calls) == 1
+            async with e.e.sf() as reader:
+                assert (await reader.get(AgentWorkAttemptRow, native_id)).run_id is None
+                assert await reader.get(TelegramActRow, retry.id) is None
+                retired = await reader.get(TelegramOutboxRow, denial_id)
+                retired_payload = retired.payload
+            await asyncio.wait_for(deliver_owned(e, retry.payload["anchor_outbox_id"]), 30)
+            fresh = await button(e, "act_check", target=original.id)
+            assert fresh.id != retry.id and fresh.payload["anchor_outbox_id"] == retry.payload["anchor_outbox_id"] and fresh.payload["presentation_version"] == e.refreshed_version
+            await tap(e, fresh, 7114)
+            fresh_denial = await denial_for(e, fresh, original.id, "query-7114")
+            assert fresh_denial != denial_id
+            await settle_denial(e, fresh_denial, retired=False)
+            async with e.e.sf() as reader:
+                retired = await reader.get(TelegramOutboxRow, denial_id)
+                assert retired.state == "skipped" and retired.skip_reason == "superseded" and retired.payload == retired_payload and not any(part["message_ids"] for part in retired.parts)
+                assert await reader.get(TelegramActRow, fresh.id) is None
         sent = [call.parameters.get("text") for call in e.normal.calls[before:] if call.endpoint == "sendMessage"]
         assert (expected in sent) is not carrier
 
@@ -272,3 +380,8 @@ async def test_foreign_stop_retry_uses_capability_before_manage(capture_environm
 @pytest.mark.asyncio
 async def test_retry_denial_cannot_fall_back_without_its_origin(capture_environment, monkeypatch, tmp_path):
     await test_current_execution_retry_preserves_actual_native(capture_environment, monkeypatch, tmp_path, "stop", "inspect", carrier=True)
+
+
+@pytest.mark.asyncio
+async def test_retry_denial_tracks_actual_observer_source_retirement(capture_environment, monkeypatch, tmp_path):
+    await test_current_execution_retry_preserves_actual_native(capture_environment, monkeypatch, tmp_path, "activate", "capability", observer_race=True)

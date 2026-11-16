@@ -12,7 +12,6 @@ import fcntl
 import json
 import os
 import re
-import signal
 import stat
 import subprocess
 import sys
@@ -22,6 +21,7 @@ import uuid
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from app.storage_init import at_start
 from deerflow.config.storage_spaces_config import StoragePlan
 from deerflow.spaces.backings import (
     RESERVE_BYTES,
@@ -38,7 +38,6 @@ from deerflow.spaces.backings import (
 from deerflow.spaces.provision import FIXED_VOLUME_MOUNT_OPTIONS, INODE_BYTES, KINDS, MAX_SPACES, plan_capacities, plan_counts, storage_fit
 
 ABSENT_MEANS_DEFAULT = True
-AT_START_LIMIT_SECONDS = 600
 LOCK_WAIT_SECONDS = 30
 USERS_RANGE = (1, 100)
 ASSISTANTS_PER_USER_RANGE = (0, 10)
@@ -152,9 +151,10 @@ class Host:
     def __init__(self):
         self.lock_fd: int | None = None
 
-    def run(self, *args: str, input: str | None = None, timeout: int = 30, accepted=(0,)) -> str:
+    def run(self, *args: str, input: str | None = None, timeout: int = 30, accepted=(0,), pass_fds: tuple[int, ...] = ()) -> str:
+        inherited = tuple(dict.fromkeys((*pass_fds, *((self.lock_fd,) if self.lock_fd is not None else ()))))
         try:
-            result = subprocess.run(["nsenter", "-m", "-t", "1", "--", *map(str, args)], input=input, capture_output=True, text=True, timeout=timeout, check=False, pass_fds=() if self.lock_fd is None else (self.lock_fd,))
+            result = subprocess.run(["nsenter", "-m", "-t", "1", "--", *map(str, args)], input=input, capture_output=True, text=True, timeout=timeout, check=False, pass_fds=inherited)
         except OSError as exc:
             raise Refused(f"cannot enter the host mount namespace (nsenter -m -t 1: {exc}); the service needs privileged: true and pid: host") from exc
         if result.returncode not in accepted:
@@ -510,7 +510,7 @@ sync -f "$(dirname -- "$p")"
         return fit, fields
 
     def layout(self, spec):
-        with self._qualified_parent(spec) as (root, image):
+        with self._qualified_parent(spec, repair_image=True) as (root, image):
             self._set_mode(image, 0, 1000, 0o640)
             self._set_mode(root, 0, 1000, 0o770)
             for name, mode in (("data", 0o770), ("control", 0o700)):
@@ -534,7 +534,7 @@ sync -f "$(dirname -- "$p")"
             os.fsync(fd)
 
     @contextlib.contextmanager
-    def _qualified_parent(self, spec):
+    def _qualified_parent(self, spec, *, repair_image=False):
         """Retain the exact image and mounted root through permission repair."""
         image = root = None
         try:
@@ -555,6 +555,9 @@ sync -f "$(dirname -- "$p")"
             if mounted_ext4_identity(root) != identity:
                 raise Refused(f"slot {spec.slot_id} has another mounted UUID")
             self._current_parent_names(spec, root, image)
+            if repair_image:
+                self._set_mode(image, 0, 1000, 0o640)
+            self._protect_loop(spec, root, image)
             yield root, image
             self._current_parent_names(spec, root, image)
         finally:
@@ -564,6 +567,21 @@ sync -f "$(dirname -- "$p")"
             finally:
                 if image is not None:
                     os.close(image)
+
+    def _protect_loop(self, spec, root, image):
+        from deerflow.spaces.loop_reservation import protect_loop_reservation
+
+        def write(path, *, pass_fds):
+            # The helper's sysfs can be read-only. Change only this pinned
+            # loop's queue in the host mount namespace. Inherited root/image
+            # descriptors retain the qualification if the Python owner dies.
+            script = 'test -d "/proc/self/fd/$2" && test -f "/proc/self/fd/$3" && printf "0\\n" > "$1" && test "$(cat "$1")" = 0'
+            self.host.run("sh", "-eu", "-c", script, "storage-init-reservation", str(path), str(root), str(image), pass_fds=pass_fds)
+
+        try:
+            protect_loop_reservation(spec, root, image, writer=write)
+        except BackingUnavailable as exc:
+            raise Refused(f"slot {spec.slot_id} cannot protect its physical reservation: {exc}") from exc
 
     @staticmethod
     def _current_parent_names(spec, root, image):
@@ -581,9 +599,17 @@ sync -f "$(dirname -- "$p")"
         try:
             os.fchown(fd, 0, 1000)
             os.posix_fallocate(fd, 0, spec.max_bytes)
-            self.host.run("mkfs.ext4", "-q", "-F", "-U", spec.filesystem_uuid, "-N", str(spec.max_inodes), "-m", "0", "-E", "nodiscard,lazy_itable_init=0,lazy_journal_init=0", str(spec.image_path), timeout=120)
+            # Direct IO prevents formatting each new image from filling the
+            # startup cgroup with buffer cache. Keep eager initialization and
+            # the existing allocation/fsync/verification boundaries intact.
+            self.host.run("mkfs.ext4", "-D", "-q", "-F", "-U", spec.filesystem_uuid, "-N", str(spec.max_inodes), "-m", "0", "-E", "nodiscard,lazy_itable_init=0,lazy_journal_init=0", str(spec.image_path), timeout=120)
             os.posix_fallocate(fd, 0, spec.max_bytes)
             os.fsync(fd)
+            # Drop only clean pages of this exclusively created, unmounted
+            # image. Never evict an existing pool or replace durability with
+            # cache advice; unsupported advice leaves preparation unchanged.
+            with contextlib.suppress(OSError):
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
         finally:
             os.close(fd)
         self.mount(spec)
@@ -1049,6 +1075,10 @@ sync -f "$(dirname -- "$p")"
             except Refused as exc:
                 row.update(state="wrong-mount", detail=str(exc))
                 return row
+            if repair:
+                with self._qualified_parent(spec, repair_image=True):
+                    pass
+                repaired = repaired or (image.st_uid, image.st_gid, stat.S_IMODE(image.st_mode)) != (0, 1000, 0o640)
             root = os.open(spec.mount_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
             try:
                 cap = os.fstatvfs(root)
@@ -1166,110 +1196,6 @@ def parser():
     resize.add_argument("values", nargs="+")
     resize.add_argument("--kind", choices=KINDS)
     return p
-
-
-def end_owned_group(child) -> bool:
-    # The group, not completion of its Python leader, owns host-tool execution.
-    try:
-        os.killpg(child.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        child.communicate(timeout=5)
-    except subprocess.TimeoutExpired:
-        return False
-    deadline = time.monotonic() + 5
-    while True:
-        live = False
-        for proc in Path("/proc").iterdir():
-            if not proc.name.isdigit():
-                continue
-            try:
-                fields = (proc / "stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
-                if int(fields[2]) == child.pid and fields[0] not in ("Z", "X"):
-                    live = True
-                    break
-            except FileNotFoundError:
-                continue
-            except (OSError, ValueError, IndexError):
-                return False
-        if not live:
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.02)
-
-
-def at_start():
-    child = None
-    previous = signal.getsignal(signal.SIGTERM)
-
-    def interrupted(signum, frame):
-        raise InterruptedError("prepare supervisor was interrupted")
-
-    signal.signal(signal.SIGTERM, interrupted)
-    try:
-        child = subprocess.Popen([sys.executable, "-m", "app.gateway.storage_init", "prepare"], stdout=subprocess.PIPE, text=True, start_new_session=True)
-        try:
-            stdout, _ = child.communicate(timeout=AT_START_LIMIT_SECONDS)
-            doc = json.loads(stdout)
-            if not isinstance(doc, dict) or doc.get("command") != "prepare" or doc.get("returncode") not in (0, 1, 2):
-                raise ValueError("prepare child returned an invalid document")
-            if not end_owned_group(child):
-                doc.update(returncode=2, verdict="incomplete", note="prepare ended; child containment could not be confirmed")
-                doc.setdefault("problems", []).append(doc["note"])
-            return doc
-        except (subprocess.TimeoutExpired, InterruptedError, KeyboardInterrupt) as exc:
-            confirmed = end_owned_group(child)
-            cause = "prepare did not finish within 600 s" if isinstance(exc, subprocess.TimeoutExpired) else "prepare supervisor was interrupted"
-            note = cause + ("; its children were ended" if confirmed else "; child containment could not be confirmed")
-            data = os.environ.get("HARTMESH_DATA_DIR", "")
-            doc = dict(
-                command="prepare",
-                returncode=2,
-                note=note,
-                verdict="incomplete",
-                pool=str(Path(data) / "spaces"),
-                problems=[note],
-                plan=None,
-                prepared=None,
-                missing=None,
-                prepared_now=None,
-                restored=None,
-                required_bytes=None,
-                reserved_bytes=None,
-                headroom_bytes=None,
-                free_bytes=None,
-                free_inodes=None,
-                fits=None,
-                data_disk=None,
-                spaces=[],
-                fstab=dict(entries=None, changed=None),
-                seconds=AT_START_LIMIT_SECONDS,
-            )
-            try:
-                tool = StorageInitializer(Path(data), parse_plan(os.environ))
-                inventory = tool.load(optional=True)
-                if inventory:
-                    doc["spaces"] = [dict(slot_id=s.slot_id, kind=s.kind, max_bytes=s.max_bytes, max_inodes=s.max_inodes, mounted=os.path.ismount(s.mount_path), mounted_now=None) for s in inventory.volumes.values()]
-                    doc["prepared"] = {kind: sum(s.kind == kind for s in inventory.volumes.values()) for kind in KINDS}
-                    doc["reserved_bytes"] = sum(s.max_bytes for s in inventory.volumes.values())
-                if tool.plan:
-                    _, fields = tool.pool_plan(inventory)
-                    # Current pool facts are available; which slots this run made,
-                    # its initial fit and its fstab publication remain unknown.
-                    fields["fits"] = None
-                    doc.update(fields)
-            except Exception as state_error:
-                doc["problems"].append(f"persisted preparation state could not be read: {state_error}")
-            return doc
-    finally:
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        try:
-            if child is not None:
-                end_owned_group(child)
-        finally:
-            signal.signal(signal.SIGTERM, previous)
 
 
 def main(argv=None) -> int:
