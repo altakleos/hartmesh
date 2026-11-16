@@ -7,6 +7,7 @@ TEXTS: dict[str, str] = {
     "label.stop_everything": "全部停止",
     "label.stop_answer": "当前回答",
     "start.superseded": "这次开始请求已失效。请打开任务查看当前内容。",
+    "start.saved_expired": "你的回答或决定已保存。之前的开始请求已过期。请查看下方的当前任务后再开始。",
     "start.changed": "这个任务已更改。下方是当前版本。",
     "start.already": "{name}已经在处理这个任务。",
     "start.not_settled": "{name}上一次处理这个任务的工作尚未结束。状态显示“已中断”或“已停止”后再继续。",

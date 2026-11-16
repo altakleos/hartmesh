@@ -2102,7 +2102,9 @@ Managed agent bots offer these combined confirmations where current access permi
 If saving succeeds but Start cannot be admitted, the save remains confirmed and
 the bot explains current access, assignment settings or workspace availability.
 Restoring access does not restart that old request; starting later requires a
-fresh current preview and press.
+fresh current preview and press. Saved decision and spoken-answer requests that
+expire show the current assignment separately, explaining that the original
+Start window ended; starting again creates a new request.
 Spoken assignment prompts reuse the private draft flow, preserving the original
 prompt and displaying the heard text before the complete review card and its controls.
 

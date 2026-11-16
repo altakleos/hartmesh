@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Telegram Work chat
 
+- Give saved decisions and spoken answers a separate current Resume preview when
+  their original Start is refused or expires. Preserve the saved primary result,
+  explain expiry, and require a new complete preview and explicit Start.
+
 - Offer explicit combined Decision/Resume and spoken-answer/Resume controls in
   managed agent bots. Preserve a successful primary receipt when its Start cannot
   be admitted, explain current access/settings/readiness, and retain actual child

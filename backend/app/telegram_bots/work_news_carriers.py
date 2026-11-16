@@ -45,10 +45,25 @@ def present_news_detail(source, basis, link, view):
 async def news_origin_projection(reader, link, parent, original, *, activation_id=None, historical=False, readonly_start_refresh=False):
     """Prepare the actual native event behind this acknowledged news carrier."""
     from app.telegram_bots.producer import ProductSourceRetired, _item
+    from app.telegram_bots.work_continuation_views import is_continuation_view
     from app.telegram_bots.work_news_sources import WorkNewsProjection, WorkNewsRead, WorkNewsReader
     from app.telegram_bots.work_status_control_origins import carrier_source, resume_projection
 
     value = carrier_source(original, readonly_start_refresh=readonly_start_refresh)
+    if is_continuation_view(parent):
+        if value["key"] != "view.detail" or value["work"].get("origin", {}).get("kind") != "continuation":
+            raise ProductSourceRetired()
+        from app.telegram_bots.work_view_sources import WorkViewProjection
+
+        view_reader = reader
+        if not hasattr(reader, "prepare_clock"):
+            from app.telegram_bots.work_view_sources import WorkViewReader
+
+            view_reader = WorkViewReader(work=reader.work, authority=reader.authority, links=reader.links, clock=reader.outbox.clock)
+            view_reader.acts = reader
+        projection = WorkViewProjection(view_reader, link, _item(parent), WorkNewsRead(**value), clock=await view_reader.prepare_clock(link, _item(parent)), origin_only=True)
+        await projection.prepare_source(activation_id=activation_id)
+        return projection
     if value["key"] == "view.detail" and value["work"].get("origin", {}).get("refusal") == "start.changed":
         from app.telegram_bots.work_view_sources import WorkViewProjection, WorkViewReader
 
@@ -233,7 +248,11 @@ class ActivationNewsOrigin:
             from app.telegram_bots.work_outcome_origins import is_outcome_carrier
 
             outcome_parent = is_outcome_carrier(parent)
-            refresh_parent = parent is not None and (parent.dedupe_key.startswith("notice:work-start-refresh:") or parent.payload.get("work_view_intent", {}).get("origin", {}).get("refusal") == "start.changed")
+            from app.telegram_bots.work_continuation_views import is_continuation_view
+
+            refresh_parent = parent is not None and (
+                is_continuation_view(parent) or parent.dedupe_key.startswith("notice:work-start-refresh:") or parent.payload.get("work_view_intent", {}).get("origin", {}).get("refusal") == "start.changed"
+            )
             if outcome_parent and "work_outcome_basis" not in parent.payload:
                 raise ProductSourceRetired()
             if not outcome_parent and not refresh_parent and (parent is None or "work_event_intent" not in parent.payload or not {"work_news_basis", "work_status_update"}.intersection(parent.payload)):

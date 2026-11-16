@@ -81,6 +81,12 @@ def qualify_origin(link, item, origin, rows, column, clock, *, historical=False)
         ):
             raise ProductSourceRetired()
         return
+    if origin.get("kind") == "continuation":
+        # The separately composed RequestPrimaryProof checks the actual ended
+        # primary and complete SDK receipt in this same authority statement.
+        if set(origin) != {"kind", "act_id", "anchor_outbox_id", "signature", "phase"}:
+            raise ProductSourceRetired()
+        return
     refusal = origin.get("refusal")
     if refusal is not None and refusal != "start.changed":
         raise ProductSourceRetired()

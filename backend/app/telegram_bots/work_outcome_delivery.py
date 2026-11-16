@@ -337,6 +337,7 @@ class WorkOutcomePlans:
         self.reader = WorkOutcomeReader(plans.reader, acts)
         self.inbox = InboxRepository(self.outbox.sessions)
         self.fixed_refusals = None
+        self.continuation_views = None
 
     async def observe_start_refusal(self, link, act_id, *, guard):
         """Observe a saved primary's absent child without retrying either effect."""
@@ -355,7 +356,19 @@ class WorkOutcomePlans:
             if row is None:
                 return None
             item = _item(row)
-        return await self.fixed_refusals.offer(link, item, guard=guard)
+        try:
+            offered = await self.fixed_refusals.offer(link, item, guard=guard)
+        except ProductSourceRetired:
+            # Current advice may retire on a changed assignment. The separate
+            # preview independently proves its historical primary and live Work.
+            if self.continuation_views is None:
+                raise
+            offered = None
+        if self.continuation_views is not None:
+            from app.telegram_bots.work_continuation_views import offer_continuation_view
+
+            await offer_continuation_view(self.continuation_views, link, act_id, guard=guard)
+        return offered
 
     async def plan(self, link, act_id, *, guard):
         async def perform():
