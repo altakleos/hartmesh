@@ -231,6 +231,8 @@ class TelegramAuthority:
         from deerflow.agent_instances.contract import AgentDenied, AgentPermission
         from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow
         from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramInstancePolicyRow
+        from deerflow.persistence.user.access import RoleLimitRow
+        from deerflow.persistence.user.model import UserRow
 
         agents = getattr(getattr(self.app, "state", None), "agent_instances", None)
         if require_use:
@@ -238,16 +240,16 @@ class TelegramAuthority:
             if agents.directory.session_factory.kw.get("bind") is not self.links.session_factory.kw.get("bind"):
                 raise AuthorityUnavailable
 
-        lifecycle_ceiling = True
+        lifecycle_ceiling, lifecycle_decision = True, None
         if expected_lifecycle is not None:
+            from app.telegram_bots.route_permissions import prepare_routes
+
             actual, _identity = await self.instance_lifecycle(link)
             if actual != expected_lifecycle:
                 raise AuthorityUnavailable
-            if expected_lifecycle != "agent.deleted":
-                try:
-                    await await_drained(require(link.owner_user_id, "agents:read"))
-                except CeilingRefused:
-                    lifecycle_ceiling = False
+            routes = await prepare_routes(self.links.session_factory)
+            lifecycle_decision = await routes.evaluate(await routes.users.get_user_by_id(link.owner_user_id))
+            lifecycle_ceiling = "agents:read" in lifecycle_decision.held
 
         if before_snapshot is not None:
             await before_snapshot()
@@ -262,9 +264,13 @@ class TelegramAuthority:
                     .outerjoin(policy, policy.instance_id == instance.id)
                     .where(bot.id == link.id)
                 )
+                if lifecycle_decision is not None:
+                    query = query.add_columns(UserRow, RoleLimitRow).join(UserRow, UserRow.id == bot.owner_user_id).outerjoin(RoleLimitRow, RoleLimitRow.subject == UserRow.oauth_id)
                 facts = (await session.execute(projection.extend(query) if projection is not None else query)).all()
                 if not facts or any(tuple(row[:5]) != tuple(facts[0][:5]) for row in facts):
                     raise AuthorityUnavailable
+                if lifecycle_decision is not None:
+                    lifecycle_decision.check_snapshot(facts[0][5], [row[6] for row in facts])
                 current, custody, status, permissions, value = facts[0][:5]
                 basis = ("owner_user_id", "agent_kind", "agent_ref", "bot_id", "token_revision", "binding_generation", "connection_id", "chat_id", "telegram_user_id")
                 if any(getattr(current, key) != getattr(link, key) for key in basis) or custody not in {"personal", "company"} or bound and current.state != "connected":

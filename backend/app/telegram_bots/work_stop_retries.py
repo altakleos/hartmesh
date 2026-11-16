@@ -59,21 +59,23 @@ class StopRetryMethods:
             children.append(child)
         return children
 
-    async def _stop_chain_receipt(self, parent):
+    async def _stop_chain_receipt(self, parent, *, receipt_reader=None):
         from app.telegram_bots.work_actions import thaw
 
+        reader = receipt_reader or self.receipt_for
         for child in await self._stop_children(parent):
-            receipt = await self.receipt_for(child)
+            receipt = await reader(child)
             if receipt is not None:
                 return {"stop_child_id": child.id, "receipt": thaw(receipt)}
         return None
 
-    async def _reconcile_stop_receipt(self, act):
+    async def _reconcile_stop_receipt(self, act, *, receipt_reader=None):
+        reader = receipt_reader or self.receipt_for
         if not act.operation_ids:
-            receipt = await self.receipt_for(act)
+            receipt = await reader(act)
             return await self._finish_stop(act, receipt) if receipt is not None else act
         for child in await self._stop_children(act):
-            receipt = await self.receipt_for(child)
+            receipt = await reader(child)
             if receipt is not None:
                 async with self._work_serial(child.id):
                     child = await self._finish_stop(await self._work_record(child.id), receipt)

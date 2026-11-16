@@ -22,7 +22,9 @@ from deerflow.persistence.telegram_bots.model import TelegramActRow
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["edit", "cancel"])
-async def test_current_management_retry_denial_preserves_unknown_owner(capture_environment, monkeypatch, tmp_path, kind, *, change="manage", race=None, invalid=None):
+async def test_current_management_retry_denial_preserves_unknown_owner(
+    capture_environment, monkeypatch, tmp_path, kind, *, change="manage", race=None, invalid=None, known=False, lifecycle_invalid=None, restore_notice=False, inactive_rejection=None
+):
     await asyncio.to_thread(render_compose_config, tmp_path, monkeypatch, keys={"OPENAI_API_KEY": "sk-synthetic"})
     async with installed_worker(capture_environment, monkeypatch, tmp_path) as e:
         work, control = await management_preview(e, kind, monkeypatch, reserve=True)
@@ -71,17 +73,129 @@ async def test_current_management_retry_denial_preserves_unknown_owner(capture_e
         await asyncio.wait_for(_delivered(e.e, e.host, e.clock), 30)
         retry = await button(e, "act_check", target=original.id)
         assert retry.message_id is not None and retry.payload["presentation_pending"] is False
-        if change in {"manage", "inspect"}:
-            async with e.e.sf.begin() as writer:
-                (await writer.get(AgentInstanceGrantRow, (e.instance.id, e.link.owner_user_id))).permissions = 1 if change == "inspect" else 3
-        else:
-            from deerflow.config.app_config import peek_loaded_app_config
-            from deerflow.config.authorization_config import AuthorizationConfig
 
-            policy = {"routes": {"allow": "*", "deny": ["runs:cancel" if change == "cancel-capability" else "agents:write"]}}
-            monkeypatch.setattr(
-                peek_loaded_app_config(), "authorization", AuthorizationConfig.model_validate({"enabled": True, "provider": {"use": "deerflow.authz.rbac:RbacAuthorizationProvider", "config": {"roles": {"admin": policy, "user": policy}}}})
-            )
+        async def change_authority():
+            if change in {"use", "paused", "retired"}:
+                from deerflow.persistence.agent_instances.model import AgentInstanceRow
+
+                async with e.e.sf.begin() as writer:
+                    if change == "use":
+                        (await writer.get(AgentInstanceGrantRow, (e.instance.id, e.link.owner_user_id))).permissions = 2
+                    else:
+                        (await writer.get(AgentInstanceRow, e.instance.id)).status = "suspended" if change == "paused" else "archived"
+            elif change in {"manage", "inspect"}:
+                async with e.e.sf.begin() as writer:
+                    (await writer.get(AgentInstanceGrantRow, (e.instance.id, e.link.owner_user_id))).permissions = 1 if change == "inspect" else 3
+            else:
+                from deerflow.config.app_config import peek_loaded_app_config
+                from deerflow.config.authorization_config import AuthorizationConfig
+
+                policy = {"routes": {"allow": "*", "deny": ["agents:read" if change == "read-capability" else "runs:cancel" if change == "cancel-capability" else "agents:write"]}}
+                authorization = AuthorizationConfig.model_validate({"enabled": True, "provider": {"use": "deerflow.authz.rbac:RbacAuthorizationProvider", "config": {"roles": {"admin": policy, "user": policy}}}})
+                monkeypatch.setattr(peek_loaded_app_config(), "authorization", authorization)
+
+        if known:
+            from app.telegram_bots.work_actions import thaw
+            from deerflow.agent_instances.work_contract import WorkCommand
+            from deerflow.spaces.contract import PrincipalRef
+
+            async with e.host.notifications._maintenance_lock, e.host.notifications._send_lock:
+                await e.host.sender.drain()
+                await actual_command(actor=PrincipalRef("human", e.link.owner_user_id), instance_id=e.instance.id, work_id=original.work_id, request=WorkCommand.model_validate(thaw(original.body)), can_stop=True)
+                await change_authority()
+                assert await e.host.acts._work_record(original.id) == original
+        else:
+            await change_authority()
+        if inactive_rejection is not None:
+            from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+            from app.telegram_bots.authority import AccessOff, CeilingRefused
+            from deerflow.agent_instances.contract import AgentDenied
+            from deerflow.config.auth_config import LOCAL_ACCOUNT_ISSUER
+            from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow
+
+            actual_service = e.app.state.agent_instances
+            try:
+                if inactive_rejection == "binding":
+                    async with e.e.sf.begin() as writer:
+                        (await writer.get(TelegramBotLinkRow, e.link.id)).binding_generation += 1
+                elif inactive_rejection == "account":
+                    await SQLiteUserRepository(e.e.sf).disable_identity(LOCAL_ACCOUNT_ISSUER, e.link.owner_user_id)
+                else:
+                    assert inactive_rejection == "service"
+                    e.app.state.agent_instances = object()
+                with pytest.raises((AgentDenied, AccessOff, CeilingRefused)):
+                    await e.host.acts.receipt_for(original, allow_inactive=True)
+                assert await e.host.acts._work_record(original.id) == original and len(calls) == 1
+            finally:
+                e.app.state.agent_instances = actual_service
+            return
+        if lifecycle_invalid is not None:
+            from contextvars import ContextVar
+
+            from app.telegram_bots.callbacks import CallbackRefused
+            from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramOutboxRow
+
+            async with e.e.sf.begin() as writer:
+                if lifecycle_invalid == "consumed":
+                    (await writer.get(TelegramCallbackRow, retry.id)).consumed_at = e.clock.now()
+                else:
+                    assert lifecycle_invalid == "ack"
+                    parent = await writer.get(TelegramOutboxRow, retry.payload["anchor_outbox_id"])
+                    parent.parts = [{**part, "message_ids": []} for part in parent.parts]
+            active = ContextVar("new-lifecycle-gesture", default=False)
+            reached = []
+            actual_receipt, actual_notice = e.host.acts.receipt_for, e.host.notice_instance_unavailable
+
+            async def read_receipt(*args, **kwargs):
+                if active.get():
+                    reached.append("receipt")
+                return await actual_receipt(*args, **kwargs)
+
+            async def notice(*args, **kwargs):
+                if active.get():
+                    reached.append("notice")
+                return await actual_notice(*args, **kwargs)
+
+            monkeypatch.setattr(e.host.acts, "receipt_for", read_receipt)
+            monkeypatch.setattr(e.host, "notice_instance_unavailable", notice)
+            token = active.set(True)
+            try:
+                with pytest.raises((CallbackRefused, ProductSourceRetired, PermanentDeliveryError)):
+                    await e.host.notifications.chat.retry_denials.offer(e.link, retry, guard=guard, query_id="invalid-lifecycle-retry")
+            finally:
+                active.reset(token)
+            assert not reached and await e.host.acts._work_record(original.id) == original and len(calls) == 1
+            return
+        restored = []
+        if restore_notice:
+            from contextvars import ContextVar
+
+            from deerflow.persistence.agent_instances.model import AgentInstanceRow
+
+            protecting = ContextVar("new-retry-status-protection", default=False)
+            actual_protect, actual_policy = e.host.authority.protect_notice, e.host.authority.instance_send_policy
+
+            async def protect(context):
+                token = protecting.set(True)
+                try:
+                    return await actual_protect(context)
+                finally:
+                    protecting.reset(token)
+
+            async def policy_check(link, **kwargs):
+                if protecting.get() and kwargs.get("expected_lifecycle") == "agent.paused" and not restored:
+
+                    async def restore():
+                        if not restored:
+                            restored.append(True)
+                            async with e.e.sf.begin() as writer:
+                                (await writer.get(AgentInstanceRow, e.instance.id)).status = "active"
+
+                    kwargs["before_snapshot"] = restore
+                return await actual_policy(link, **kwargs)
+
+            monkeypatch.setattr(e.host.authority, "protect_notice", protect)
+            monkeypatch.setattr(e.host.authority, "instance_send_policy", policy_check)
         if invalid is not None:
             from app.telegram_bots.callbacks import CallbackRefused
             from app.telegram_bots.work_actions import thaw
@@ -204,7 +318,11 @@ async def test_current_management_retry_denial_preserves_unknown_owner(capture_e
             e.clock.advance(1)
             await e.host.sender.tick()
             await e.host.sender.drain()
-        expected = render("denied.change" if kind == "edit" else "denied.withdraw", "en-US", name=e.instance.name)
+        key = "access.agent_off" if change in {"use", "read-capability"} else "agent.paused" if change == "paused" else "agent.retired" if change == "retired" else "denied.change" if kind == "edit" else "denied.withdraw"
+        from app.telegram_bots.authority import get_local_provider
+
+        supervisor = await get_local_provider().get_user(e.instance.supervisor.subject_id)
+        expected = render(key, "en-US", name=e.instance.name, supervisor=str(supervisor.email), product=e.host.product_name)
         sent = [call.parameters.get("text") for call in e.normal.calls[before:] if call.endpoint == "sendMessage"]
         if race == "age":
             from app.telegram_bots.retention import sweep_rows
@@ -221,10 +339,18 @@ async def test_current_management_retry_denial_preserves_unknown_owner(capture_e
                 assert await reader.get(TelegramOutboxRow, retry.payload["anchor_outbox_id"]) is not None
             assert not sent
         elif race is None:
-            assert expected in sent
+            if restore_notice:
+                assert restored == [True] and expected not in sent
+                assert render("tap.failed", "en-US") not in sent
+            else:
+                assert expected in sent
         else:
             assert raced == [race] and expected not in sent
-        if race == "receipt":
+        if known and change in {"paused", "retired"}:
+            current = await e.host.acts._work_record(original.id)
+            assert current.state == "done" and current.body == original.body and current.attempts == original.attempts
+            assert current.stop_dispatch["attempts"] == 0
+        elif race == "receipt":
             current = await e.host.acts.reconcile_receipt(original.id)
             assert current.state == "done" and current.attempts == original.attempts and current.body == original.body
         else:
@@ -238,7 +364,7 @@ async def test_current_management_retry_denial_preserves_unknown_owner(capture_e
             native = await reader.get(AgentWorkAttemptRow, e.native_original.attempt_id)
             assert native is not None and native.run_id is None
             event = await reader.scalar(select(AgentWorkEventRow.id).where(AgentWorkEventRow.operation_id == original.id))
-            assert (event is not None) is (race == "receipt")
+            assert (event is not None) is (race == "receipt" or known)
             assert await reader.get(TelegramActRow, retry.id) is None
 
 

@@ -149,6 +149,8 @@ A Retry on an unknown operation explains current permission loss while preservin
 that operation and its original execution. Known committed results remain visible.
 A requester can retry their own unfinished physical Stop without Manage access;
 the original target and run-cancellation permission still apply.
+Retry also reports a paused or retired agent and lost chat/read access. A known
+receipt is recovered while paused only when current read access still permits it.
 Current Inspect grants control visibility; referenced files retain separate access
 checks. Uncertain execution requires qualified containment and explicit recovery.
 The Work command API can stop one exact running attempt without cancelling the

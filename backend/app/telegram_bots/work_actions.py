@@ -13,6 +13,7 @@ import json
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from functools import partial
 
 from sqlalchemy import and_, or_, select
 
@@ -100,11 +101,38 @@ class WorkActionMethods(ContinuationActionMethods, ManagementActionMethods, Stop
                 raise ValueError("unsupported-work-act")
             return _snapshot(row)
 
-    async def receipt_for(self, act):
+    async def receipt_for(self, act, *, allow_inactive=False):
         """Read an exact service receipt without calling a command or activation."""
-        return await await_drained(self._receipt_for(act))
+        if type(allow_inactive) is not bool:
+            raise ValueError("invalid-receipt-authority")
+        return await await_drained(self._receipt_for(act, allow_inactive=allow_inactive))
 
-    async def _receipt_for(self, act):
+    async def _inactive_receipt_link(self, link):
+        """Read permission only; never admit effects through inactive send health."""
+        from app.telegram_bots.sql_readers import reader_session
+
+        if link.agent_kind != "instance" or link.state != "connected" or link.health not in {"ok", "agent_unavailable"}:
+            raise AgentDenied("The receipt binding is unavailable")
+        agents = getattr(self.authority.app.state, "agent_instances", None)
+        if agents is not self.work.agents or self.work._sf.kw.get("bind") is not self.session_factory.kw.get("bind"):
+            raise AgentDenied("The receipt service is unavailable")
+        await require(link.owner_user_id, "agents:read")
+        view = await self.authority.instance_view(link)
+        if view.permissions & 3 != 3:
+            raise AgentDenied("Receipt recovery requires current Use and Inspect")
+        key = {"suspended": "agent.paused", "archived": "agent.retired"}.get(view.status)
+        if key is None:
+            await self._work_link(link)
+            return
+        live = await self.authority.prepare_live_owner(link.owner_user_id)
+        async with reader_session(self.session_factory) as reader:
+            async with reader.begin():
+                await live(link.owner_user_id, reader)
+        policy = await self.authority.instance_send_policy(link, require_use=False, require_inspect=True, expected_lifecycle=key)
+        if policy in {"off", "restoring"}:
+            raise AgentDenied("The receipt policy is unavailable")
+
+    async def _receipt_for(self, act, *, allow_inactive=False):
         link = await self.links.get(act.link_id) if act.link_id else None
         if link is None or (link.owner_user_id, link.bot_id, link.agent_ref, link.binding_generation, link.telegram_user_id, link.chat_id) != (
             act.owner_user_id,
@@ -115,11 +143,15 @@ class WorkActionMethods(ContinuationActionMethods, ManagementActionMethods, Stop
             act.chat_id,
         ):
             raise AgentDenied("The action's binding is no longer current")
-        await self._work_link(link)
+        if allow_inactive:
+            await self._inactive_receipt_link(link)
+        else:
+            await self._work_link(link)
         if act.kind == "delegate":
             return await self._delegate_receipt(act)
         if act.kind == "stop" and act.operation_ids:
-            return await self._stop_chain_receipt(act)
+            reader = partial(self.receipt_for, allow_inactive=True) if allow_inactive else self.receipt_for
+            return await self._stop_chain_receipt(act, receipt_reader=reader)
         actor = PrincipalRef("human", link.owner_user_id)
         body = request_for(act.kind, act.body, identity=act.id)
         if act.kind == "activate" and (act.operation_ids or "activation_context" in (act.continuation or {})):
@@ -459,15 +491,18 @@ class WorkActionMethods(ContinuationActionMethods, ManagementActionMethods, Stop
         request = self._changes_command(operation_id=operation_id, request_id=request_id, note=note, seen=seen)
         return await self._issue_work(link, kind="changes_requested", request_id=request_id, work_id=work_id, request=request, seen=seen)
 
-    async def reconcile_receipt(self, act_id):
+    async def reconcile_receipt(self, act_id, *, allow_inactive=False):
         """Settle only an exact committed receipt; absence never authorizes retry."""
+        if type(allow_inactive) is not bool:
+            raise ValueError("invalid-receipt-authority")
 
         async def perform():
             async with self._work_serial(act_id):
                 act = await self._work_record(act_id)
+                reader = partial(self.receipt_for, allow_inactive=True) if allow_inactive else self.receipt_for
                 if act.kind == "stop":
-                    return await self._reconcile_stop_receipt(act)
-                receipt = await self.receipt_for(act)
+                    return await self._reconcile_stop_receipt(act, receipt_reader=reader)
+                receipt = await reader(act)
                 if receipt is None or act.state == "done":
                     return act
                 return await self._work_outcome(act, state="done", result=receipt)
