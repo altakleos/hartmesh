@@ -28,6 +28,11 @@ async def test_unknown_start_retry_keeps_native_on_pause(capture_environment, mo
 
 
 @pytest.mark.asyncio
+async def test_retry_expiry_waits_for_real_receipt_owner(capture_environment, monkeypatch, tmp_path):
+    await execution(capture_environment, monkeypatch, tmp_path, "activate", "paused", contend=True)
+
+
+@pytest.mark.asyncio
 async def test_unknown_save_retry_keeps_original_on_pause(capture_environment, monkeypatch, tmp_path):
     await assignment(capture_environment, monkeypatch, tmp_path, "paused")
 

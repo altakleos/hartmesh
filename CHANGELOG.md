@@ -7,10 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.58] - 2026-11-16
+
 ### Schema changes
 
-- Migration 0053 adds nonunique indexes for Work activation and operation lookups.
-  It changes no existing records or scoped uniqueness constraints.
+- Migration 0053 adds nonunique indexes on `agent_work_attempts.activation_id`
+  and `agent_work_events.operation_id`. It adds no tables or columns and changes
+  no existing records or scoped uniqueness constraints. The normal database upgrade
+  creates the indexes; an existing index with a conflicting definition stops the
+  upgrade and must be corrected by the operator.
 
 ### Telegram Work chat
 
