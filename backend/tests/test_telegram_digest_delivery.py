@@ -268,15 +268,19 @@ async def test_digest_reminder_keeps_quiet_summary_suppression(work_delivery):
     plans = DigestPlans(outbox=e.sender.outbox, callbacks=e.plans.callbacks, members=DigestMembers(requests=e.reader, news=news.reader))
     e.channel._services.work_digest_sources = DigestSources(plans)
     await plans.materialize(e.link, identity)
+    quiet_start = clock.now().hour * 60 + clock.now().minute
     async with e.db.sessions.begin() as writer:
         settings = await writer.get(TelegramPersonSettingsRow, e.link.owner_user_id)
         settings.timezone = "UTC"
-        settings.quiet_enabled, settings.quiet_start_minute, settings.quiet_end_minute = True, 0, 1439
+        settings.quiet_enabled, settings.quiet_start_minute, settings.quiet_end_minute = True, quiet_start, (quiet_start + 60) % 1440
         settings.summary_enabled = True
     message(e.channel.bot.request, identity=5251)
     assert await e.sender.tick() == 1
     await e.sender.drain()
     assert not [call for call in e.channel.bot.request.calls if call.endpoint == "sendMessage"]
+    async with e.db.sessions() as reader:
+        row = await reader.get(TelegramOutboxRow, identity)
+        assert (row.state, row.skip_reason) == ("skipped", "quiet-hours")
 
 
 @pytest.mark.asyncio

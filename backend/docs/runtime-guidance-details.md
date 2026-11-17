@@ -419,7 +419,11 @@ writes. `RunRecord.terminal_commit_pending` keeps `_renew_leases()` renewing tha
 still-active row until its own terminal write is acknowledged or ownership is
 lost. Manager-owned attempts register separate futures before Store I/O and
 publish an immutable outcome proof only on explicit successful commit results;
-matching row fields and legacy `None` results cannot confirm a commit. Atomic
+matching row fields and legacy `None` results cannot confirm a commit. SQL recovery
+registers one attempt before its lock or first read, retaining it across retries
+and commit acknowledgment so a rejected renewal can wait for that writer.
+Cancellation removes the attempt; expiry still fences, and a late response cannot
+restore the fenced status or grant terminal proof. Atomic
 replacement registers attempts before admission I/O and acknowledges only the
 returned claimed rows, using their committed outcome fields. It does not repeat
 the interrupted update. An interrupted ACK is intermediate while a live Worker

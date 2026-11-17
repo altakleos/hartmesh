@@ -83,6 +83,8 @@ PUBLISHED_FIXTURES = [
     "release_50_ancestry.json",
     "release_53_ancestry.json",
     "release_54_ancestry.json",
+    "release_59_ancestry.json",
+    "release_60_ancestry.json",
 ]
 
 

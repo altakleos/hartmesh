@@ -113,6 +113,31 @@ def diagnostic(record, status, *, outcome, exception_class="none", attempt=0):
 
 
 async def persist_terminal(manager, record, status, *, error=None, stop_reason=None, respect_cancellation=False, output_receipt=None, inventory_evidence=None, goal_verdict=None, _inventory_attempt=None):
+    """Keep SQL recovery observable through its own terminal acknowledgment."""
+    attempt = manager._begin_terminal_attempt(record)
+    committed = False
+    try:
+        result = await _persist_terminal(
+            manager,
+            record,
+            status,
+            error=error,
+            stop_reason=stop_reason,
+            respect_cancellation=respect_cancellation,
+            output_receipt=output_receipt,
+            inventory_evidence=inventory_evidence,
+            goal_verdict=goal_verdict,
+            _inventory_attempt=_inventory_attempt,
+        )
+        # Recovery may acknowledge a repaired or already committed outcome.
+        # Its actual ACK remains authoritative, rather than the requested status.
+        committed = result.finalized and manager._has_final_terminal_ack(record)
+        return result
+    finally:
+        manager._end_terminal_attempt(record, attempt, committed)
+
+
+async def _persist_terminal(manager, record, status, *, error=None, stop_reason=None, respect_cancellation=False, output_receipt=None, inventory_evidence=None, goal_verdict=None, _inventory_attempt=None):
     """Confirm or recover one owned outcome; never replay an ambiguous transaction.
 
     The SQL CAS uses the original observed change position, owner, source status,
@@ -201,6 +226,8 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                         output_confirmed = wanted is not None and source == status.value and saved_receipt == wanted
                         inventory_confirmed = wants_inventory and output_confirmed and saved_inventory == inventory_evidence
                         async with manager._lock:
+                            if record.ownership_lost:
+                                return StatusFinalization(finalized=False)
                             record.status = RunStatus(source)
                             record.error = row.get("error")
                             record.stop_reason = row.get("stop_reason")
@@ -280,6 +307,8 @@ async def persist_terminal(manager, record, status, *, error=None, stop_reason=N
                     )
                     if finalized:
                         async with manager._lock:
+                            if record.ownership_lost:
+                                return StatusFinalization(finalized=False)
                             record.status = status
                             record.error = saved_error
                             record.stop_reason = saved_reason

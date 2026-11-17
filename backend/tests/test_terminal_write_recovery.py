@@ -4,6 +4,7 @@ import asyncio
 import os
 import sqlite3
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -465,6 +466,92 @@ async def test_staged_finalizing_run_keeps_its_lease_until_terminal_confirmation
     await manager._renew_leases()
     assert (await repository.get(record.run_id))["lease_expires_at"] > before
     assert not record.ownership_lost
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("transition", ["current", "unless-cancelled"])
+@pytest.mark.parametrize("acknowledgment", ["committed", "expired", "cancelled"])
+@pytest.mark.parametrize("ack_path", ["commit", "readback"])
+async def test_sql_terminal_commit_waits_for_its_ack_during_lease_renewal(repository, monkeypatch, transition, acknowledgment, ack_path):
+    manager = RunManager(repository, run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True))
+    record = await manager.create_or_reject("sql-terminal-ack")
+    await manager.try_start(record.run_id)
+    await manager.set_status(record.run_id, RunStatus.success, persist=False)
+    committed, release, barrier_entered, fenced = asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event()
+    finalize = repository.finalize_owned
+    get = repository.get
+    wait_for_ack = manager._await_rollback_retry_authority
+    fence = manager._fence_local_record
+
+    async def hold_committed_ack(*args, **kwargs):
+        result = await finalize(*args, **kwargs)
+        assert result is True
+        if ack_path == "readback":
+            raise ConnectionError("terminal response lost")
+        committed.set()
+        await release.wait()
+        return result
+
+    async def hold_readback_ack(*args, **kwargs):
+        row = await get(*args, **kwargs)
+        if ack_path == "readback" and row is not None and row["status"] == "success":
+            committed.set()
+            await release.wait()
+        return row
+
+    async def observe_barrier(*args, **kwargs):
+        barrier_entered.set()
+        return await wait_for_ack(*args, **kwargs)
+
+    def observe_fence(*args, **kwargs):
+        result = fence(*args, **kwargs)
+        fenced.set()
+        return result
+
+    monkeypatch.setattr(repository, "finalize_owned", hold_committed_ack)
+    monkeypatch.setattr(repository, "get", hold_readback_ack)
+    monkeypatch.setattr(manager, "_await_rollback_retry_authority", observe_barrier)
+    monkeypatch.setattr(manager, "_fence_local_record", observe_fence)
+    operation = manager.persist_current_status(record.run_id) if transition == "current" else manager.set_status_if_not_cancelled(record.run_id, RunStatus.success)
+    terminal = asyncio.create_task(operation)
+    renewal = None
+    try:
+        await asyncio.wait_for(committed.wait(), 5)
+        assert (await get(record.run_id))["status"] == "success"
+        assert not manager._has_final_terminal_ack(record)
+        renewal = asyncio.create_task(manager._renew_leases())
+        await asyncio.wait_for(barrier_entered.wait(), 5)
+        assert not record.ownership_lost, "a rejected renewal must wait for the owning SQL writer's held ACK"
+        assert not renewal.done()
+        assert not manager._has_final_terminal_ack(record), "a matching terminal row cannot replace its writer's ACK"
+        if acknowledgment == "expired":
+            record.lease_expires_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+            manager._arm_lease_deadline(record)
+            await asyncio.wait_for(fenced.wait(), 5)
+        elif acknowledgment == "cancelled":
+            terminal.cancel()
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(terminal, renewal, return_exceptions=True), 5)
+        if acknowledgment == "committed":
+            assert not any(isinstance(result, BaseException) for result in results)
+            assert not record.ownership_lost
+            assert manager._has_final_terminal_ack(record)
+            assert record.terminal_status_persisted and not record.terminal_commit_pending
+        else:
+            assert isinstance(results[0], asyncio.CancelledError) if acknowledgment == "cancelled" else not any(isinstance(result, BaseException) for result in results)
+            assert record.ownership_lost
+            assert record.status == RunStatus.error
+            assert not manager._has_final_terminal_ack(record)
+            assert not record.terminal_status_persisted
+        assert manager._terminal_attempts == {}
+    finally:
+        release.set()
+        tasks = [terminal, *([renewal] if renewal is not None else [])]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await manager.stop_heartbeat()
 
 
 @pytest.mark.anyio

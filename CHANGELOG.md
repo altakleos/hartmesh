@@ -7,12 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Adopt DeerFlow reliability improvements for scheduling, memory, cancellation,
-  input validation and delegation while preserving HartMesh storage and ownership.
-- Add chat scrolling controls, bounded extension usage documentation and optional
-  owner-qualified search providers; retain explicit opt-in project memory.
-- Join the upstream schema branch through an additive migration. Publication and
-  exact release artifact qualification remain separate from source adoption.
+## [2.2.0+hartmesh.60] - 2026-11-17
+
+### Upstream adoption
+
+- Adopt compatible DeerFlow changes through `ea1833bd7`, covering 92 upstream
+  commits, with explicit adaptations for HartMesh account, instance, Work,
+  storage and verified-output ownership. The complete decisions are recorded in
+  [the adoption record](https://github.com/altakleos/hartmesh/blob/3701441ba156e0a73c0d1b3f1c051868fd1dd47c/docs/plans/2026-11-16-upstream-adoption.md).
+- Improve scheduled-run recovery, same-thread FIFO ordering, occurrence history,
+  provider cancellation, delegation validation and memory import/retrieval.
+- Add opt-in SQLite subagent checkpoints, bounded extension usage documentation
+  and owner-qualified extension search APIs.
+- Support operator-approved MCP credential grants for ordinary named agents,
+  checking the saved owner, definition and destination and live revocation.
+  Instance employees retain their separate authority and credentials.
+- Add an accessible jump-to-bottom control and bounded cron-expression handling
+  to the product UI. Preserve the exact independent upstream frontend snapshot.
+
+### Compatibility fixes
+
+- Keep SQL terminal settlement registered through its commit acknowledgment so
+  a concurrent heartbeat cannot mistake a just-committed run for lost ownership.
+  Lease expiry and cancellation retain their fences; late acknowledgments cannot
+  restore a fenced run's status or authority.
+- Recheck current batch-owner access and OAuth identity after waiting for
+  execution capacity. Preserve the saved role ceiling after built-in promotion
+  and refuse disabled, demoted or changed identities before execution.
+- Preserve literal Excel text and nulls alongside signed 64-bit integer types
+  through cold reads and cache reuse, without coercing fractions or wider
+  unsigned values. The new cache generation invalidates older inferred types.
+- Keep project-memory extraction explicitly opt-in and existing summaries off
+  by default. Managed storage, instance memory and output receipts retain their
+  current admission and ownership checks.
+- Tool approval pause/resume, legacy cross-thread handoffs, public conversation
+  sharing/forking, Office previews and remaining upstream UI integrations stay
+  deferred pending the adaptations described in the adoption record.
+
+### Schema changes
+
+- Upgrade from v2.2.0+hartmesh.59's `0053_work_operation_indexes` head to
+  `0056_upstream_adoption`, preserving all published migration identities and
+  ancestry. The additive merge revision joins the existing Work-index branch
+  with upstream's `0053_tool_approvals`, `0054_project_memory` and
+  `0055_thread_shares`; the merge revision itself adds no DDL.
+- Add the `tool_approvals` table with request/owner/thread/run identity,
+  decision and payload fields, timing fields and run/scope indexes.
+- Add nullable JSON `projects.memory`; existing projects retain their current
+  data and start without extracted project facts.
+- Add `thread_shares` for immutable share metadata/snapshots and
+  `share_artifacts` for copied artifact bytes, with their keys, ownership index
+  and cascading foreign keys. These tables preserve upstream schema ancestry;
+  approval and public conversation-sharing APIs remain unexposed.
+- No existing tables or columns are removed. Normal Gateway startup applies the
+  upgrade on SQLite and PostgreSQL; no manual SQL conversion is required.
+  Historical release ancestry and existing-row upgrade checks cover both
+  branches of the new head.
 
 ## [2.2.0+hartmesh.59] - 2026-11-16
 
