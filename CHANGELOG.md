@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compatibility fixes
 
+- Keep SQL terminal settlement registered through its commit acknowledgment so
+  a concurrent heartbeat cannot mistake a just-committed run for lost ownership.
+  Lease expiry and cancellation retain their fences; late acknowledgments cannot
+  restore a fenced run's status or authority.
 - Recheck current batch-owner access and OAuth identity after waiting for
   execution capacity. Preserve the saved role ceiling after built-in promotion
   and refuse disabled, demoted or changed identities before execution.

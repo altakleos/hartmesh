@@ -2663,6 +2663,11 @@ finalization) keep the existing completion-data behavior: they receive the
 zero-delivery receipt but do not overwrite RunStore completion fields with an
 empty snapshot.
 
+SQL-backed run settlement coordinates with lease renewal through the database
+commit acknowledgment. A heartbeat waits for the owning writer's result instead
+of prematurely stopping a run that has just committed; lease expiry still stops
+unconfirmed workers, and late responses cannot restore their authority.
+
 When `tool_progress.enabled` is true, the same run event history also records
 result-quality guard phase changes. It records loop-detection decisions and
 deferred MCP tool promotions for both the lead agent and ordinary task

@@ -97,6 +97,8 @@ source status, cancellation action and current lease. Never recreate missing row
 or log raw persistence exceptions. A local error/fence is not durable confirmation.
 Recovery preserves the executed outcome; it never mutates checkpoints. Keep staged
 finalization leased and included in shutdown drainage until confirmation.
+Register the complete SQL recovery attempt before I/O and retain it through ACK
+publication. Late responses after fencing cannot restore status or terminal proof.
 Live SQL workers own terminal settlement after cancellation; callers retain the
 active durable fence through checkpoint and receipt drainage. Exhausted persistence
 recovery may publish `run_state_unconfirmed` before END while the last lease remains
