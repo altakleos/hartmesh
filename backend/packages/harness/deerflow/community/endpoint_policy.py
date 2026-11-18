@@ -21,7 +21,8 @@ import logging
 import os
 import re
 from functools import lru_cache
-from urllib.parse import urlsplit
+
+import httpx
 
 from deerflow.community.url_safety import validate_public_http_url
 
@@ -58,38 +59,32 @@ def address_problem(url: str) -> str | None:
     """Return ``None`` when *url* may be used, otherwise a short reason.
 
     A listed private endpoint is accepted; any other address must be a public
-    HTTP(S) one. Resolves a host name synchronously, so async callers run it
-    in a worker thread.
+    HTTP(S) one. The address is judged in the form an HTTP client derives from
+    it, which is the one a connection goes to; a URL the client cannot take is
+    refused. Resolves a host name synchronously, so async callers run it in a
+    worker thread.
     """
     try:
-        parsed = urlsplit(url)
-        host, port = parsed.hostname, parsed.port
-    except (ValueError, AttributeError, TypeError):
+        parsed = httpx.URL(url)
+        scheme, host, port = parsed.scheme, parsed.raw_host.decode("ascii"), parsed.port
+    except (httpx.InvalidURL, TypeError, ValueError):
         return "Error: URL could not be parsed"
-    if parsed.scheme in _DEFAULT_PORTS and is_private_endpoint(parsed.scheme, host, port):
+    if scheme in _DEFAULT_PORTS and is_private_endpoint(scheme, host, port):
         return None
-    return validate_public_http_url(url, action="connect to")
+    return validate_public_http_url(str(parsed), action="connect to")
 
 
 def _normalized_host(host: str) -> str:
-    """One form for a host wherever it is compared: lower case, and ASCII for a name outside it.
+    """One form for a host wherever it is compared: lower case, and one spelling for a numeric address.
 
-    A list entry is ASCII. A URL can carry the same name in Unicode, and an
-    HTTP client reports it decoded, so both are brought to the encoded form
-    the client puts on the wire. A name that cannot be encoded matches nothing.
+    A list entry is ASCII, and callers pass a URL's host in the encoded form
+    an HTTP client puts on the wire, so a name outside ASCII is compared
+    encoded. Nothing is trimmed: a host with a space in it is another host.
     """
-    host = host.strip().lower()
+    host = host.lower()
     try:
         return str(ipaddress.ip_address(host))
     except ValueError:
-        pass
-    if host.isascii():
-        return host
-    try:
-        import idna
-
-        return idna.encode(host).decode("ascii")
-    except Exception:  # noqa: BLE001 - any name the encoder refuses is simply not listed
         return host
 
 

@@ -201,6 +201,16 @@ def test_a_public_address_and_a_listed_private_endpoint_are_accepted(gateway, mo
     assert set(gateway.stored()) == {"records", "ledger"}
 
 
+@pytest.mark.parametrize("typed", ["https://records.internal.test :8443/mcp", "https:// records.internal.test:8443/mcp", "https://records.internal.test\t:8443/mcp"])
+def test_an_address_is_judged_in_the_host_form_the_client_connects_to(gateway, typed, monkeypatch):
+    """A host that an HTTP client would not take for the listed one is not accepted as listed."""
+    monkeypatch.setenv(PRIVATE_ENDPOINTS, "records.internal.test:8443")
+
+    assert _refused(gateway.client.post("/api/mcp/config/servers", json={"mcp_servers": {"records": {"type": "http", "url": typed}}}), ADDRESS_NOT_PUBLIC, route="add")
+    assert gateway.client.post("/api/mcp/config/servers", json={"mcp_servers": {"ledger": {"type": "http", "url": "https://records.internal.test:8443/mcp"}}}).status_code == 200
+    assert set(gateway.stored()) == {"ledger"}
+
+
 def test_refused_save_reports_values_as_typed(gateway):
     before = gateway.path.read_bytes()
     # Two different texts as typed.
