@@ -17,9 +17,11 @@ from app.gateway.deps import require_admin_user
 from app.gateway.mcp_oauth_tokens import forget_unconfigured_mcp_oauth_tokens
 from app.gateway.persistent_writes import run_drained_write
 from app.gateway.secret_masking import MASKED_VALUE, mask_secret_values, normalize_config_key
+from deerflow.community.endpoint_policy import address_problem, tenant_written
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
     McpRoutingConfig,
+    McpServerConfig,
     McpTaskToolsetConfig,
     McpToolOverride,
     atomic_write_extensions_config,
@@ -67,6 +69,60 @@ def _admit_mcp_transition(policy, previous, candidate, *, resolve_environment: b
         require_mcp_management_transition(policy, previous, candidate, resolve_environment=resolve_environment)
     except CustomerManagementDenied as exc:
         raise HTTPException(403, str(exc)) from None
+    _require_tenant_written_definition(previous, candidate, deployment_connection=resolve_environment)
+
+
+_ADDRESS_NOT_PUBLIC_DETAIL = "MCP connections on this deployment must use a public HTTP(S) address."
+_ENVIRONMENT_REFERENCE_DETAIL = "Values that begin with `$` are not accepted for MCP connections on this deployment."
+
+
+def _stored_definition_is_kept(previous: Any, candidate: Any) -> bool:
+    """Whether *candidate* is the stored definition, as it is or only switched off.
+
+    Both are read through the connection's model first: a stored definition and
+    its merged form differ in defaults that mean nothing.
+    """
+    if previous is None:
+        return False
+    try:
+        stored = McpServerConfig.model_validate(previous).model_dump()
+        new = McpServerConfig.model_validate(candidate).model_dump()
+    except (ValueError, TypeError, ValidationError):
+        return False
+    return new == stored or (new["enabled"] is False and new == {**stored, "enabled": False})
+
+
+def _has_environment_reference(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.startswith("$")
+    if isinstance(value, dict):
+        return any(_has_environment_reference(item) for item in value.values())
+    if isinstance(value, list | tuple):
+        return any(_has_environment_reference(item) for item in value)
+    return False
+
+
+def _require_tenant_written_definition(previous: Any, candidate: Any, *, deployment_connection: bool) -> None:
+    """Hold a definition this write creates, changes or switches on to the tenant-written rules.
+
+    Checked on the definition as it would be stored, after masked values were
+    put back. A definition the write leaves as stored, or only switches off, is
+    not checked, so an earlier entry never blocks an unrelated write; removal
+    is always allowed. Runs inside the caller's mutation lock and can look a
+    host name up, like the personal route's own address check.
+    """
+    # A candidate that is not an object is refused by validation before it is stored.
+    if not isinstance(candidate, dict) or not tenant_written() or _stored_definition_is_kept(previous, candidate):
+        return
+    definition = normalize_mcp_transport_alias(candidate)
+    remote = str(definition.get("type") or "stdio").lower() in {"http", "sse"}
+    oauth = definition.get("oauth")
+    if (remote and address_problem(definition.get("url"))) or (isinstance(oauth, dict) and address_problem(oauth.get("token_url"))):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_ADDRESS_NOT_PUBLIC_DETAIL)
+    # A personal connection's values were always used as typed, so there a
+    # leading `$` is ordinary text.
+    if deployment_connection and _has_environment_reference(definition):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_ENVIRONMENT_REFERENCE_DETAIL)
 
 
 _MCP_STDIO_COMMAND_ALLOWLIST_ENV = "DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST"
