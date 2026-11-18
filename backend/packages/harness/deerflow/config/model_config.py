@@ -179,6 +179,7 @@ class ModelConfig(BaseModel):
         default=None,
         description=(
             "Set to 'public' for a model whose address a tenant chose (a custom managed model sets it itself). "
+            "An operator's profile may set it too and must then give its own address and key. "
             "On a tenant-written deployment such a model is given the deployment's public-endpoint HTTP clients; "
             "never a provider kwarg. A declared field, so it survives re-validation of a profile."
         ),

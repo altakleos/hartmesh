@@ -4272,7 +4272,12 @@ must be a public HTTP(S) address or a pair listed in
 
 The models this profile renders from `config.yaml` and `providers/`, an
 operator's own models file (§ "Operator-managed models") and the models of
-the fixed provider list are not affected, whatever their address.
+the fixed provider list are not affected, whatever their address, unless a
+profile sets `endpoint_policy: public` (see `backend/docs/CONFIGURATION.md`).
+One thing is the same for every model: one that cannot be built shows "This
+model could not be built", and the Gateway log line `Model '<name>' could not
+be built (<error type>)` says what failed; for a validation error it also
+names the fields, `(<error type>: <fields>)`.
 
 **Upgrading a tenant that already has custom models.** Nothing stored is
 changed: a custom model saved earlier at a private address stays in the list

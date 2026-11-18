@@ -4,7 +4,8 @@ With ``DEER_FLOW_TENANT_WRITTEN_ENDPOINTS=on`` the address of a custom model, th
 one kind whose address an administrator chooses, must be a public HTTP(S)
 address or a provider-listed private endpoint when it is saved, tested,
 discovered or imported, and again at every connection. Models of the provider's
-own configuration and of the fixed catalog are untouched.
+own configuration and of the fixed catalog are untouched unless their profile
+sets the policy field; the text of a build error is the same for every model.
 
 Every test drives the real routes, the real store with its encryption, the
 product's own ``get_app_config()`` and ``create_chat_model``, and a real call of

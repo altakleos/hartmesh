@@ -25,11 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model switched on, testing, discovering and importing refuse another address
   (`endpoint_not_public`); a model can still be saved switched off. Every
   request of a custom model uses HTTP clients that check the address again,
-  follow no redirect and open a connection of their own. Models of the
-  operator's own configuration and of the fixed provider catalog are
-  unchanged, and nothing stored is changed. See the Compose bundle guide,
-  "Custom model addresses", for what an earlier custom model does after an
-  upgrade.
+  follow no redirect and open a connection of their own. A model of any kind
+  that cannot be built reports a fixed sentence, and the Gateway log names the
+  error's type and, for a validation error, the fields that failed. Models of
+  the operator's own configuration and of the fixed provider catalog are
+  otherwise unchanged unless their profile sets `endpoint_policy: public`, and
+  nothing stored is changed. See the Compose bundle guide, "Custom model
+  addresses", for what an earlier custom model does after an upgrade.
 
 ## [2.2.0+hartmesh.60] - 2026-11-17
 
