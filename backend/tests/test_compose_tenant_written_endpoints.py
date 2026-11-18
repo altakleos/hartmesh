@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from support import loopback_only
 from support.compose import DOCKER, requires_docker_compose
 
 from deerflow.community import endpoint_policy
@@ -25,6 +26,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = REPO_ROOT / "deploy" / "compose"
 LINE = "DEER_FLOW_TENANT_WRITTEN_ENDPOINTS"
 PRIVATE_ENDPOINTS = "DEER_FLOW_PRIVATE_ENDPOINTS"
+
+
+@pytest.fixture(autouse=True)
+def network(monkeypatch):
+    """No name used here is looked up outside the process."""
+    guard = loopback_only.install(monkeypatch)
+    yield guard
+    guard.assert_nothing_blocked()
 
 
 def test_bundle_gateway_declares_tenant_written_endpoints():

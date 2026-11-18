@@ -78,7 +78,7 @@ def _mutate(user_id: str, operation: Literal["create", "update", "delete", "stat
                 mcp._ensure_no_masked_secrets(incoming)
                 _validate_personal_server(incoming, admin=admin)
                 definition = incoming.model_dump()
-                mcp._admit_mcp_definition(policy, definition, resolve_environment=False)
+                mcp._admit_mcp_definition(policy, definition, resolve_environment=False, server_name=name)
                 metadata = definition.get("capability")
                 definition["capability"] = {**(metadata if isinstance(metadata, dict) else {}), "id": str(uuid4())}
                 definition["personal_public_network"] = not admin

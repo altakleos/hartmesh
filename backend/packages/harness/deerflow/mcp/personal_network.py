@@ -49,7 +49,8 @@ class _PersonalTransport(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         # A provider-listed private endpoint skips the public-address check and
         # the pinning that depends on it; every other request is vetted again.
-        listed = self._allow_listed_private_endpoints and is_private_endpoint(request.url.scheme, request.url.host, request.url.port)
+        # The host is compared in the encoded form that goes on the wire.
+        listed = self._allow_listed_private_endpoints and is_private_endpoint(request.url.scheme, request.url.raw_host.decode("ascii"), request.url.port)
         addresses = [] if listed else await asyncio.to_thread(_public_addresses, request.url, self._refusal)
         # The synchronous client factory can run on the event loop. Load TLS
         # trust lazily off-loop, sharing one context across concurrent requests.

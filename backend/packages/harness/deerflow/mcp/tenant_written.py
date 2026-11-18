@@ -25,11 +25,16 @@ _SENTENCES: dict[RefusalReason, str] = {
 
 
 class TenantWrittenDefinitionRefused(ValueError):
-    """A definition a write would store breaks a tenant-written rule; the message says what is accepted."""
+    """A definition a write would store breaks a tenant-written rule; the message says what is accepted.
 
-    def __init__(self, reason: RefusalReason) -> None:
-        super().__init__(_SENTENCES[reason])
+    A write that takes several definitions gives ``server_name``, and the
+    message then names the one that was refused.
+    """
+
+    def __init__(self, reason: RefusalReason, *, server_name: str | None = None) -> None:
+        super().__init__(_SENTENCES[reason] if server_name is None else f"MCP server '{server_name}': {_SENTENCES[reason]}")
         self.reason = reason
+        self.server_name = server_name
 
 
 def _stored_definition_is_kept(previous: Any, candidate: Any) -> bool:
@@ -58,14 +63,16 @@ def _has_environment_reference(value: Any) -> bool:
     return False
 
 
-def require_tenant_written_definition(previous: Any, candidate: Any, *, deployment_connection: bool) -> None:
+def require_tenant_written_definition(previous: Any, candidate: Any, *, deployment_connection: bool, server_name: str | None = None) -> None:
     """Hold a definition a write creates, changes or switches on to the tenant-written rules.
 
     Checked on the definition as it would be stored, after masked values were
     put back. A definition the write leaves as stored, or only switches off, is
     not checked, so an earlier entry never blocks an unrelated write; removal
     is always allowed. Can look a host name up, so callers run it off the event
-    loop. Raises :class:`TenantWrittenDefinitionRefused`.
+    loop. Raises :class:`TenantWrittenDefinitionRefused`; a write that takes
+    several definitions passes ``server_name``, and checks them in a fixed
+    order so the same request is always refused for the same definition.
     """
     # A candidate that is not an object is refused by validation before it is stored.
     if not isinstance(candidate, dict) or not tenant_written() or _stored_definition_is_kept(previous, candidate):
@@ -76,8 +83,8 @@ def require_tenant_written_definition(previous: Any, candidate: Any, *, deployme
     # The token address is used only while the OAuth setup is switched on.
     token_address_used = isinstance(oauth, dict) and oauth.get("enabled", True) is not False
     if (remote and address_problem(definition.get("url"))) or (token_address_used and address_problem(oauth.get("token_url"))):
-        raise TenantWrittenDefinitionRefused("address-not-public")
+        raise TenantWrittenDefinitionRefused("address-not-public", server_name=server_name)
     # A personal connection's values were always used as typed, so there a
     # leading `$` is ordinary text.
     if deployment_connection and _has_environment_reference(definition):
-        raise TenantWrittenDefinitionRefused("environment-reference")
+        raise TenantWrittenDefinitionRefused("environment-reference", server_name=server_name)

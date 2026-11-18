@@ -72,10 +72,24 @@ def address_problem(url: str) -> str | None:
 
 
 def _normalized_host(host: str) -> str:
+    """One form for a host wherever it is compared: lower case, and ASCII for a name outside it.
+
+    A list entry is ASCII. A URL can carry the same name in Unicode, and an
+    HTTP client reports it decoded, so both are brought to the encoded form
+    the client puts on the wire. A name that cannot be encoded matches nothing.
+    """
     host = host.strip().lower()
     try:
         return str(ipaddress.ip_address(host))
     except ValueError:
+        pass
+    if host.isascii():
+        return host
+    try:
+        import idna
+
+        return idna.encode(host).decode("ascii")
+    except Exception:  # noqa: BLE001 - any name the encoder refuses is simply not listed
         return host
 
 

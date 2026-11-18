@@ -905,7 +905,12 @@ def tenant_written(monkeypatch):
     # or "the stub received nothing" would hold for the wrong reason.
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
-    return lambda *stubs: monkeypatch.setenv("DEER_FLOW_PRIVATE_ENDPOINTS", ",".join(stub.host_port for stub in stubs))
+    # These tests never leave the loopback interface, whatever the code under test does.
+    from support import loopback_only
+
+    guard = loopback_only.install(monkeypatch)
+    yield lambda *stubs: monkeypatch.setenv("DEER_FLOW_PRIVATE_ENDPOINTS", ",".join(stub.host_port for stub in stubs))
+    guard.assert_nothing_blocked()
 
 
 def _plant_personal(user, servers):
@@ -939,16 +944,17 @@ async def test_an_administrators_own_connection_must_use_public_addresses(person
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(platform))
     administrator = {"test-user": "alice"}
 
-    def refused(response):
-        return response.status_code == 400 and response.json()["detail"] == _ADDRESS_NOT_PUBLIC
+    def refused(response, *, added: bool = False):
+        # A route that takes several definitions at once says which one it refused.
+        return response.status_code == 400 and response.json()["detail"] == (f"MCP server 'records': {_ADDRESS_NOT_PUBLIC}" if added else _ADDRESS_NOT_PUBLIC)
 
     with EndpointStub() as service, EndpointStub() as token:
         private = {"type": "http", "url": service.url("/mcp")}
         private_token = {"type": "http", "url": "https://8.8.8.8/mcp", "oauth": {"token_url": token.url("/token"), "client_id": "records-client", "client_secret": "typed-value"}}
         for definition in (private, private_token):
-            assert refused(personal_client.post("/api/mcp/personal/config/servers", headers=administrator, json={"mcp_servers": {"records": definition}}))
+            assert refused(personal_client.post("/api/mcp/personal/config/servers", headers=administrator, json={"mcp_servers": {"records": definition}}), added=True)
             # Installing a capability for oneself stores through the same check.
-            assert refused(personal_client.post("/api/capabilities/installations", headers=administrator, json={"plugin_id": "github", "name": "records", "scope": "user", "configuration": definition}))
+            assert refused(personal_client.post("/api/capabilities/installations", headers=administrator, json={"plugin_id": "github", "name": "records", "scope": "user", "configuration": definition}), added=True)
         assert read_user_mcp_config("alice")["mcpServers"] == {}
 
         # A definition already in the file is neither contacted nor switched on, and can be removed.

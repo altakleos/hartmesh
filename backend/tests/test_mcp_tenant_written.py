@@ -14,11 +14,13 @@ from collections import Counter
 from contextlib import ExitStack
 
 import pytest
+from support import loopback_only
 from support.mcp_endpoint_stubs import EndpointStub
 
 LINE = "DEER_FLOW_TENANT_WRITTEN_ENDPOINTS"
 PRIVATE_ENDPOINTS = "DEER_FLOW_PRIVATE_ENDPOINTS"
 MARKER = "plain-marker-word"
+MADE_UP_NAME = "records.example.test"
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +35,14 @@ def _isolated_configuration(monkeypatch):
     reset_extensions_config()
     yield
     reset_extensions_config()
+
+
+@pytest.fixture(autouse=True)
+def network(monkeypatch):
+    """No test here leaves the loopback interface, whatever the code under test does."""
+    guard = loopback_only.install(monkeypatch)
+    yield guard
+    guard.assert_nothing_blocked()
 
 
 @pytest.fixture
@@ -297,63 +307,55 @@ async def test_only_public_addresses_are_contacted(stubs, company_file, monkeypa
     assert token.connections == 0
 
 
-@pytest.fixture
-def changing_name(monkeypatch):
-    """Answer ``records.example.test`` with a public address first and the loopback address afterwards."""
-    import socket
-
-    lookups: list[str] = []
-    system_lookup = socket.getaddrinfo
-
-    def lookup(host, port, *args, **kwargs):
-        # An HTTP client may hand the name over already encoded.
-        if (host.decode("ascii") if isinstance(host, bytes) else host) != "records.example.test":
-            return system_lookup(host, port, *args, **kwargs)
-        lookups.append("8.8.8.8" if not lookups else "127.0.0.1")
-        return system_lookup(lookups[-1], port, *args, **kwargs)
-
-    monkeypatch.setattr(socket, "getaddrinfo", lookup)
-    return lookups
-
-
 @pytest.mark.asyncio
-async def test_a_name_that_stops_being_public_after_saving_is_not_contacted(stubs, company_file, changing_name, monkeypatch):
+async def test_a_name_that_stops_being_public_after_saving_is_not_contacted(stubs, company_file, network, monkeypatch):
     from deerflow.community.endpoint_policy import address_problem
 
     service = stubs()
     _tenant_written(monkeypatch)
-    url = service.url("/mcp", host="records.example.test")
+    network.names[MADE_UP_NAME] = ["8.8.8.8", "127.0.0.1"]
+    url = service.url("/mcp", host=MADE_UP_NAME)
     assert address_problem(url) is None
     company_file({"records": {"type": "http", "url": url}})
 
     assert await _discover() == []
-    assert changing_name[:2] == ["8.8.8.8", "127.0.0.1"]
+    assert network.answers(MADE_UP_NAME)[:2] == ["8.8.8.8", "127.0.0.1"]
     assert service.connections == 0
 
 
 @pytest.mark.asyncio
-async def test_a_connection_goes_to_the_address_that_was_checked(stubs, company_file, changing_name, monkeypatch):
+async def test_a_connection_goes_to_the_address_that_was_checked(stubs, company_file, network, monkeypatch):
     """One lookup per request: the answer that passed the check is the address connected to."""
-    import httpcore
-    from httpcore._backends.anyio import AnyIOBackend
-
     service = stubs()
     _tenant_written(monkeypatch)
-    connects: list[tuple[str, int]] = []
+    network.names[MADE_UP_NAME] = ["8.8.8.8"]
+    # The public address cannot be contacted from a test: a connect to it lands on the stub instead.
+    network.routes[("8.8.8.8", service.port)] = ("127.0.0.1", service.port)
+    company_file({"records": {"type": "http", "url": service.url("/mcp", host=MADE_UP_NAME)}})
 
-    async def connect(self, host, port, **kwargs):
-        # A public address cannot be contacted from a test; record where the client was going.
-        connects.append((host.decode("ascii") if isinstance(host, bytes) else host, port))
-        raise httpcore.ConnectError("unreachable from tests")
+    assert [tool.name for tool in await _discover()] == ["records_echo"]
 
-    monkeypatch.setattr(AnyIOBackend, "connect_tcp", connect)
-    company_file({"records": {"type": "http", "url": service.url("/mcp", host="records.example.test"), "session_init_timeout": 2}})
+    assert network.routed and set(network.routed) == {("8.8.8.8", service.port)}
+    assert set(service.header_values("Host")) == {f"{MADE_UP_NAME}:{service.port}"}
+    # Connecting by name instead would look the name up a second time.
+    assert len(network.answers(MADE_UP_NAME)) == len(service.calls())
 
-    assert await _discover() == []
-    # A second lookup of the name would have answered with the stub's address.
-    assert connects == [("8.8.8.8", service.port)]
-    assert changing_name == ["8.8.8.8"]
-    assert service.connections == 0
+
+@pytest.mark.asyncio
+async def test_a_listed_endpoint_is_matched_in_the_host_form_the_client_sends(stubs, company_file, network, monkeypatch):
+    """A listed name outside ASCII is compared in its encoded form when saving and when connecting."""
+    from deerflow.community.endpoint_policy import address_problem
+
+    service = stubs()
+    encoded = "xn--bcher-kva.example"
+    monkeypatch.setenv(LINE, "on")
+    monkeypatch.setenv(PRIVATE_ENDPOINTS, f"{encoded}:{service.port}")
+    network.names[encoded] = ["127.0.0.1"]
+    for typed in (encoded, "bücher.example", "BÜCHER.example"):
+        assert address_problem(service.url("/mcp", host=typed)) is None, typed
+    company_file({"records": {"type": "http", "url": service.url("/mcp", host=encoded)}, "ledger": {"type": "http", "url": service.url("/mcp", host="bücher.example")}})
+
+    assert sorted(tool.name for tool in await _discover()) == ["ledger_echo", "records_echo"]
 
 
 @pytest.mark.asyncio
@@ -379,7 +381,7 @@ async def test_each_client_names_its_own_rule(monkeypatch):
 
 
 def test_remote_connections_are_not_handed_to_acp_agents(company_file, monkeypatch):
-    """An ACP agent connects with a client of its own, so it is given no remote connection."""
+    """Remote connections are not handed to an ACP agent on a tenant-written deployment."""
     from deerflow.tools.builtins.invoke_acp_agent_tool import _build_acp_mcp_servers
 
     company_file(
@@ -420,6 +422,11 @@ def test_the_embedded_client_writer_follows_the_same_rules(company_file, tmp_pat
         reset_mcp_tools_cache()
     assert set(saved["mcp_servers"]) == {"records", "ledger"}
     assert json.loads(path.read_text(encoding="utf-8"))["mcpServers"]["records"] == stored["records"]
+
+    # Several refused definitions: the refusal names the first by name.
+    private = {"type": "http", "url": "http://127.0.0.1:9/mcp"}
+    with pytest.raises(ValueError, match=r"^MCP server 'alpha': MCP connections on this deployment must use a public HTTP\(S\) address\.$"):
+        client.update_mcp_config({name: private for name in ("mike", "zulu", "echo", "alpha", "kilo", "sierra", "delta", "bravo")})
 
 
 @pytest.mark.asyncio

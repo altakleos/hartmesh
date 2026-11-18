@@ -16,7 +16,6 @@ from __future__ import annotations
 import _socket
 import asyncio
 import json
-import socket
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -24,6 +23,7 @@ import langchain_mcp_adapters.client  # noqa: F401 - imported before the gate is
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from support import loopback_only
 from support.mcp_endpoint_stubs import EndpointStub
 
 from app.gateway.deps import get_config
@@ -83,23 +83,24 @@ def gateway(tmp_path, monkeypatch):
     reset_mcp_tools_cache()
 
 
+@pytest.fixture(autouse=True)
+def network(monkeypatch):
+    """No test here leaves the loopback interface; lookups are answered below the instrumented wrapper."""
+    guard = loopback_only.install(monkeypatch, resolver_module=_socket)
+    yield guard
+    guard.assert_nothing_blocked()
+
+
 @pytest.fixture
-def private_name(monkeypatch):
-    """Resolve one made-up name to a private address, below the instrumented lookup."""
-    native_getaddrinfo = _socket.getaddrinfo
-
-    def getaddrinfo(host, port, family=socket.AF_UNSPEC, *args, **kwargs):
-        if host == PRIVATE_NAME:
-            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("10.0.0.5", port or 0))]
-        return native_getaddrinfo(host, port, family, *args, **kwargs)
-
-    monkeypatch.setattr(_socket, "getaddrinfo", getaddrinfo)
+def private_name(network):
+    """Resolve one made-up name to a private address."""
+    network.names[PRIVATE_NAME] = ["10.0.0.5"]
 
 
-def _refused(response, detail: str, *, route: str | None = None) -> bool:
+def _refused(response, detail: str, *, route: str | None = None, name: str = "records") -> bool:
     assert response.status_code == 400, response.text
-    # The route that takes every definition at once says which one it refused.
-    assert response.json()["detail"] == (f"MCP server 'records': {detail}" if route == "whole_file" else detail)
+    # A route that takes several definitions at once says which one it refused.
+    assert response.json()["detail"] == (f"MCP server '{name}': {detail}" if route in {"add", "whole_file"} else detail)
     return True
 
 
@@ -116,12 +117,12 @@ def _write(client, route: str, name: str, definition: dict):
 def test_adding_a_value_that_begins_with_dollar_is_refused(gateway):
     before = gateway.path.read_bytes()
 
-    assert _refused(gateway.client.post("/api/mcp/config/servers", json={"mcp_servers": {"records": TYPED}}), ENVIRONMENT_REFERENCE)
+    assert _refused(gateway.client.post("/api/mcp/config/servers", json={"mcp_servers": {"records": TYPED}}), ENVIRONMENT_REFERENCE, route="add")
     for nested in ({"oauth": {"token_url": PUBLIC, "client_id": "records-client", "client_secret": "$HM_TEST_VALUE"}}, {"routing": {"mode": "prefer", "keywords": ["reports", "$HM_TEST_VALUE"]}}, {"description": "$HM_TEST_VALUE"}):
-        assert _refused(gateway.client.post("/api/mcp/config/servers", json={"mcp_servers": {"records": {"type": "http", "url": PUBLIC, **nested}}}), ENVIRONMENT_REFERENCE)
+        assert _refused(gateway.client.post("/api/mcp/config/servers", json={"mcp_servers": {"records": {"type": "http", "url": PUBLIC, **nested}}}), ENVIRONMENT_REFERENCE, route="add")
     # Installing a capability for the deployment stores through the same check.
     installation = {"plugin_id": "github", "name": "team-records", "scope": "deployment", "configuration": TYPED}
-    assert _refused(gateway.client.post("/api/capabilities/installations", json=installation), ENVIRONMENT_REFERENCE)
+    assert _refused(gateway.client.post("/api/capabilities/installations", json=installation), ENVIRONMENT_REFERENCE, route="add", name="team-records")
 
     assert gateway.path.read_bytes() == before
 
@@ -196,7 +197,7 @@ def test_a_public_address_and_a_listed_private_endpoint_are_accepted(gateway, mo
     for name, url in (("records", PUBLIC), ("ledger", "https://10.0.0.5:8443/mcp")):
         response = gateway.client.post("/api/mcp/config/servers", json={"mcp_servers": {name: {"type": "http", "url": url, "headers": {"X-Records-Key": "typed-value"}}}})
         assert response.status_code == 200, response.text
-    assert _refused(gateway.client.post("/api/mcp/config/servers", json={"mcp_servers": {"other-port": {"type": "http", "url": "https://10.0.0.5:9443/mcp"}}}), ADDRESS_NOT_PUBLIC)
+    assert _refused(gateway.client.post("/api/mcp/config/servers", json={"mcp_servers": {"other-port": {"type": "http", "url": "https://10.0.0.5:9443/mcp"}}}), ADDRESS_NOT_PUBLIC, route="add", name="other-port")
     assert set(gateway.stored()) == {"records", "ledger"}
 
 
@@ -209,6 +210,19 @@ def test_refused_save_reports_values_as_typed(gateway):
 
     assert _refused(response, ENVIRONMENT_REFERENCE, route="whole_file")
     assert MARKER not in response.text
+    assert gateway.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("route", ["add", "whole_file"])
+def test_a_refusal_of_several_definitions_names_one_and_always_the_same(gateway, route):
+    private = {"type": "http", "url": "http://127.0.0.1:9/mcp"}
+    several = {name: private for name in ("mike", "zulu", "echo", "alpha", "kilo", "sierra", "delta", "bravo")}
+    before = gateway.path.read_bytes()
+
+    response = gateway.client.post("/api/mcp/config/servers", json={"mcp_servers": several}) if route == "add" else gateway.client.put("/api/mcp/config", json={"mcp_servers": several})
+
+    # Adding checks in the order given; the whole-file route compares against what is stored and checks in name order.
+    assert _refused(response, ADDRESS_NOT_PUBLIC, route=route, name="mike" if route == "add" else "alpha")
     assert gateway.path.read_bytes() == before
 
 

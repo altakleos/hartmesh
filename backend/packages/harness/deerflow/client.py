@@ -1643,10 +1643,11 @@ class DeerFlowClient:
             from deerflow.mcp.tenant_written import require_tenant_written_definition
             from deerflow.runtime.customer_administration import require_mcp_management_transition
 
-            for name in previous_servers.keys() | mcp_servers.keys():
+            # In name order, so the same request is always refused for the same definition.
+            for name in sorted(previous_servers.keys() | mcp_servers.keys()):
                 require_mcp_management_transition(getattr(self, "_customer_administration_policy", None), previous_servers.get(name), mcp_servers.get(name), resolve_environment=True)
-                # The same write-time rules as the Gateway routes; a refusal is a ValueError.
-                require_tenant_written_definition(previous_servers.get(name), mcp_servers.get(name), deployment_connection=True)
+                # The same write-time rules as the Gateway routes; a refusal is a ValueError that names the definition.
+                require_tenant_written_definition(previous_servers.get(name), mcp_servers.get(name), deployment_connection=True, server_name=name)
             self._atomic_write_json(config_path, config_data)
             try:
                 reloaded = reload_extensions_config()
