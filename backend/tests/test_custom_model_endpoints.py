@@ -518,6 +518,23 @@ def test_a_listed_model_endpoint_is_matched_in_the_host_form_the_client_sends(de
         assert [call().content for call in _calls(_model(f"records-model-{index}"))] == [ANSWER, ANSWER]
 
 
+@pytest.mark.parametrize("typed", ["models.internal.test ", " models.internal.test", "models.internal.test\t"])
+def test_a_model_address_is_judged_in_the_host_form_the_client_connects_to(typed, deployment, client, stubs, network, monkeypatch):
+    """A host that an HTTP client would not take for the listed one is not accepted as listed."""
+    service = stubs()
+    listed = "models.internal.test"
+    monkeypatch.setenv(LINE, "on")
+    monkeypatch.setenv(PRIVATE_ENDPOINTS, f"{listed}:{service.port}")
+    network.names[listed] = ["127.0.0.1"]
+
+    assert _refused(client.put("/api/managed-models", json=_draft(service.base_url(host=typed), name="records-model")))
+    assert _refused(client.post("/api/managed-models/test", json=_draft(service.base_url(host=typed))))
+    assert _refused(client.post("/api/managed-models/discover", json=_connection(service.base_url(host=typed))))
+    assert service.connections == 0
+    assert client.put("/api/managed-models", json=_draft(service.base_url(host=listed), name="records-model")).status_code == 200
+    assert [call().content for call in _calls(_model())] == [ANSWER, ANSWER]
+
+
 def test_an_earlier_stored_model_keeps_the_list_and_the_configuration_readable(deployment, client, stubs, monkeypatch):
     service = stubs()
     private = _store(deployment, service.base_url(), name="records-model")
