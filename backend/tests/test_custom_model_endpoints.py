@@ -15,6 +15,7 @@ hand or replaces an HTTP client, its transport or the address check.
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 import ssl
 from concurrent.futures import ThreadPoolExecutor
@@ -25,6 +26,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from support import loopback_only
 from support.model_endpoint_stubs import ANSWER, MODEL_ID, ModelEndpointStub
 
@@ -358,20 +360,28 @@ def test_proxy_settings_of_the_environment_are_not_used(deployment, stubs, monke
     assert proxy.connections == 0
 
 
-def test_a_custom_model_that_cannot_be_built_says_nothing_of_its_settings(deployment, stubs, monkeypatch):
+@pytest.mark.parametrize("policy_field", [[], ["endpoint_policy: public"]], ids=["provider-model", "provider-model-with-the-policy-field"])
+def test_a_model_that_cannot_be_built_says_nothing_of_its_settings(policy_field, deployment, stubs, monkeypatch, caplog):
     service = stubs()
     monkeypatch.setenv("HM_TEST_VALUE", "plain-marker-word")
-    # A provider's own profile that opted into the policy, with a setting its class refuses.
-    profile = ["name: provider-model", "use: langchain_openai:ChatOpenAI", f"model: {MODEL_ID}", f"base_url: {service.base_url()}", f"api_key: {KEY}", "max_retries: $HM_TEST_VALUE", "endpoint_policy: public"]
+    # A provider's own profile with a setting its class refuses.
+    profile = ["name: provider-model", "use: langchain_openai:ChatOpenAI", f"model: {MODEL_ID}", f"base_url: {service.base_url()}", f"api_key: {KEY}", "max_retries: $HM_TEST_VALUE", *policy_field]
     deployment.config.write_text("sandbox:\n  use: test\nmodels:\n  - " + "\n    ".join(profile) + "\n", encoding="utf-8")
-    _tenant_written(monkeypatch, service)
     reset_app_config()
 
-    with pytest.raises(ValueError) as failure:
+    # Without the setting the class's own error is shown, as it always was.
+    with pytest.raises(ValidationError, match="plain-marker-word"):
         create_chat_model("provider-model", attach_tracing=False)
 
-    assert str(failure.value) == "This model could not be built with the deployment's HTTP clients"
+    _tenant_written(monkeypatch, service)
+    with caplog.at_level(logging.ERROR, logger="deerflow.models.factory"), pytest.raises(ValueError) as failure:
+        create_chat_model("provider-model", attach_tracing=False)
+
+    assert str(failure.value) == "This model could not be built"
     assert failure.value.__cause__ is None and failure.value.__suppress_context__
+    # The log has the kind of error and the field that failed, not what the field held.
+    assert caplog.messages == ["Model 'provider-model' could not be built (ValidationError: max_retries)"]
+    assert "plain-marker-word" not in caplog.text
 
 
 def test_a_caller_cannot_put_another_client_in_their_place(deployment, stubs, monkeypatch):
