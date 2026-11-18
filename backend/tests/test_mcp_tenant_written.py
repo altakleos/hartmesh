@@ -149,6 +149,30 @@ async def test_token_request_values_are_sent_as_typed(stubs, company_file, monke
     assert MARKER not in token.received_text() + service.received_text()
 
 
+def test_the_tool_cache_publishes_tenant_written_connections_once(stubs, company_file, monkeypatch):
+    """The cached entry a chat uses publishes the same tools and does not rediscover them."""
+    from deerflow.mcp.cache import get_cached_mcp_tools, reset_mcp_tools_cache
+
+    service = stubs()
+    _tenant_written(monkeypatch, service)
+    monkeypatch.setenv("HM_TEST_VALUE", MARKER)
+    company_file({"records": {"type": "http", "url": service.url("/mcp"), "headers": {"X-Records-Key": "$HM_TEST_VALUE"}}, "feed": {"type": "sse", "url": service.url("/sse")}})
+    reset_mcp_tools_cache()
+    try:
+        tools = get_cached_mcp_tools()
+        assert [tool.name for tool in tools] == ["records_echo", "feed_echo"]
+        discovered = len(service.calls())
+        assert [tool.name for tool in get_cached_mcp_tools()] == ["records_echo", "feed_echo"]
+        assert len(service.calls()) == discovered
+
+        for tool in tools:
+            assert "echo:hello" in str(tool.invoke({"text": "hello"}))
+        assert set(service.header_values("X-Records-Key")) == {"$HM_TEST_VALUE"}
+        assert MARKER not in service.received_text()
+    finally:
+        reset_mcp_tools_cache()
+
+
 def test_program_environment_values_are_used_as_typed(company_file, monkeypatch):
     from deerflow.config.extensions_config import ExtensionsConfig
     from deerflow.mcp.client import build_servers_config
