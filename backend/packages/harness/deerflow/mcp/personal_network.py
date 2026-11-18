@@ -16,6 +16,7 @@ is not followed.
 import asyncio
 import ipaddress
 import ssl
+import threading
 
 import httpx
 
@@ -67,15 +68,8 @@ class _PersonalTransport(httpx.AsyncBaseTransport):
         if listed:
             return await transport.handle_async_request(request)
         for index, address in enumerate(addresses):
-            pinned = httpx.Request(
-                request.method,
-                request.url.copy_with(host=address),
-                headers=request.headers,
-                stream=request.stream,
-                extensions={**request.extensions, "sni_hostname": request.url.raw_host.decode("ascii")},
-            )
             try:
-                return await transport.handle_async_request(pinned)
+                return await transport.handle_async_request(_pinned(request, address))
             except (httpx.ConnectError, httpx.ConnectTimeout):
                 if index == len(addresses) - 1:
                     raise
@@ -84,6 +78,17 @@ class _PersonalTransport(httpx.AsyncBaseTransport):
     async def aclose(self):
         for transport in self._transports.values():
             await transport.aclose()
+
+
+def _pinned(request: httpx.Request, address: str) -> httpx.Request:
+    """The same request addressed to one vetted IP, keeping the name for TLS and the Host header."""
+    return httpx.Request(
+        request.method,
+        request.url.copy_with(host=address),
+        headers=request.headers,
+        stream=request.stream,
+        extensions={**request.extensions, "sni_hostname": request.url.raw_host.decode("ascii")},
+    )
 
 
 def _client(transport: _PersonalTransport, headers, timeout, auth) -> httpx.AsyncClient:
@@ -101,3 +106,118 @@ def personal_httpx_client_factory(headers=None, timeout=None, auth=None):
 def tenant_written_httpx_client_factory(headers=None, timeout=None, auth=None):
     """Public addresses, or a private endpoint the provider listed."""
     return _client(_PersonalTransport(allow_listed_private_endpoints=True), headers, timeout, auth)
+
+
+# ── Custom model endpoints on a tenant-written deployment ────────────────────
+#
+# The same rule for a model whose address a tenant chose: public addresses or
+# a provider-listed private endpoint, checked at every request and pinned to
+# the checked address, with redirect following off. A model is built for every
+# reply, is called both the plain and the asynchronous way from more than one
+# event loop and thread, and never closes a client it was handed. These
+# transports therefore keep nothing: each request gets a connection of its
+# own, closed with its response.
+
+_MODEL_REFUSAL = "Custom model endpoints require a public HTTP(S) endpoint"
+_model_trust_lock = threading.Lock()
+_model_trust: ssl.SSLContext | None = None
+
+
+def _shared_model_trust() -> ssl.SSLContext:
+    """One TLS trust for every model request; loading it blocks, so async callers use a worker thread."""
+    global _model_trust
+    with _model_trust_lock:
+        if _model_trust is None:
+            _model_trust = httpx.create_ssl_context(trust_env=False)
+        return _model_trust
+
+
+def _model_request_candidates(request: httpx.Request) -> list[httpx.Request]:
+    """The requests to try in order: a listed endpoint as it is, else one per vetted address. May resolve a name."""
+    if is_private_endpoint(request.url.scheme, request.url.host, request.url.port):
+        return [request]
+    return [_pinned(request, address) for address in _public_addresses(request.url, _MODEL_REFUSAL)]
+
+
+class _ClosingStream(httpx.SyncByteStream):
+    def __init__(self, stream, transport: httpx.HTTPTransport):
+        self._stream = stream
+        self._transport = transport
+
+    def __iter__(self):
+        yield from self._stream
+
+    def close(self) -> None:
+        try:
+            self._stream.close()
+        finally:
+            self._transport.close()
+
+
+class _ClosingAsyncStream(httpx.AsyncByteStream):
+    def __init__(self, stream, transport: httpx.AsyncHTTPTransport):
+        self._stream = stream
+        self._transport = transport
+
+    async def __aiter__(self):
+        async for chunk in self._stream:
+            yield chunk
+
+    async def aclose(self) -> None:
+        try:
+            await self._stream.aclose()
+        finally:
+            await self._transport.aclose()
+
+
+class _ModelTransport(httpx.BaseTransport):
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        candidates = _model_request_candidates(request)
+        trust = _shared_model_trust()
+        for index, candidate in enumerate(candidates):
+            transport = httpx.HTTPTransport(verify=trust, trust_env=False)
+            try:
+                response = transport.handle_request(candidate)
+            except BaseException as exc:
+                transport.close()
+                if isinstance(exc, httpx.ConnectError | httpx.ConnectTimeout) and index < len(candidates) - 1:
+                    continue
+                raise
+            response.stream = _ClosingStream(response.stream, transport)
+            return response
+        raise AssertionError("Public address validation returned no addresses")
+
+
+class _ModelAsyncTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        candidates = await asyncio.to_thread(_model_request_candidates, request)
+        trust = _model_trust or await asyncio.to_thread(_shared_model_trust)
+        for index, candidate in enumerate(candidates):
+            transport = httpx.AsyncHTTPTransport(verify=trust, trust_env=False)
+            try:
+                response = await transport.handle_async_request(candidate)
+            except BaseException as exc:
+                await transport.aclose()
+                if isinstance(exc, httpx.ConnectError | httpx.ConnectTimeout) and index < len(candidates) - 1:
+                    continue
+                raise
+            response.stream = _ClosingAsyncStream(response.stream, transport)
+            return response
+        raise AssertionError("Public address validation returned no addresses")
+
+
+def public_endpoint_model_clients() -> tuple[httpx.Client, httpx.AsyncClient]:
+    """The plain and the asynchronous HTTP client of one custom model.
+
+    Building them does no I/O, and they hold nothing open between requests,
+    so nobody has to close them.
+    """
+    return (
+        httpx.Client(transport=_ModelTransport(), follow_redirects=False, trust_env=False),
+        httpx.AsyncClient(transport=_ModelAsyncTransport(), follow_redirects=False, trust_env=False),
+    )
+
+
+def public_endpoint_model_async_client(*, timeout: float) -> httpx.AsyncClient:
+    """An asynchronous client under the same rule, for a caller that closes it (model discovery)."""
+    return httpx.AsyncClient(transport=_ModelAsyncTransport(), timeout=timeout, follow_redirects=False, trust_env=False)

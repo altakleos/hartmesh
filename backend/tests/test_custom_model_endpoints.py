@@ -137,6 +137,13 @@ def _calls(model) -> list:
     return [lambda: model.invoke("hello"), lambda: asyncio.run(model.ainvoke("hello"))]
 
 
+def _streamed_calls(model) -> list:
+    async def streamed() -> list:
+        return [chunk async for chunk in model.astream("hello")]
+
+    return [lambda: list(model.stream("hello")), lambda: asyncio.run(streamed())]
+
+
 @pytest.mark.parametrize("address", ["loopback", "private-number", "name-resolving-to-private"])
 def test_custom_model_endpoints_must_be_public(address, deployment, client, stubs, made_up_name, monkeypatch):
     service = stubs()
@@ -160,7 +167,7 @@ def test_a_stored_custom_model_at_a_private_address_is_not_contacted(deployment,
     _tenant_written(monkeypatch)
 
     assert get_app_config().get_model_config("records-model") is not None
-    for call in _calls(_model()):
+    for call in [*_calls(_model()), *_streamed_calls(_model())]:
         with pytest.raises(Exception) as failure:
             call()
         shown = f"{failure.value!r} {failure.value} {failure.value.__cause__!r}"
@@ -195,6 +202,30 @@ def test_a_listed_custom_model_answers_on_every_loop_and_thread_and_leaves_nothi
 
     assert f"Bearer {KEY}" in service.received_text()
     assert service.settled_open_connections() == 0
+
+
+def test_a_custom_model_keeps_its_time_limit_and_its_retry(deployment, stubs, monkeypatch):
+    service = stubs()
+    _store(deployment, service.base_url())
+    _tenant_written(monkeypatch, service)
+
+    for call_with in (lambda model: model.invoke("hello"), lambda model: asyncio.run(model.ainvoke("hello"))):
+        answered = len(service.calls())
+        # The first answer comes later than the model's own time limit; its one retry is answered.
+        service.stall_next_seconds = 3.0
+        model = create_chat_model("records-model", attach_tracing=False, max_retries=1, timeout=1)
+        assert call_with(model).content == ANSWER
+        assert len(service.calls()) == answered + 2
+
+
+def test_the_adapter_of_a_recognised_official_address_takes_the_clients(deployment, monkeypatch):
+    deployment.store.save(ManagedModel(name="records-model", model="deepseek-flash", base_url="https://api.deepseek.com", api_key=KEY), expected_revision=None)
+    _tenant_written(monkeypatch)
+
+    profile = get_app_config().get_model_config("records-model")
+    assert (profile.use, profile.endpoint_policy) == ("deerflow.models.patched_deepseek:PatchedChatDeepSeek", "public")
+    model = _model()
+    assert model.http_client is not None and model.http_async_client is not None
 
 
 def test_a_name_that_changes_its_answer_is_not_contacted(deployment, client, stubs, made_up_name, monkeypatch):

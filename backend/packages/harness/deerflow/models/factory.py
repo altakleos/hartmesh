@@ -6,6 +6,7 @@ from langchain.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import BaseChatOpenAI
 
+from deerflow.community.endpoint_policy import tenant_written
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.config.managed_model_providers import OPENAI_GPT6_MODELS, get_managed_model_provider
@@ -42,6 +43,9 @@ _MODEL_METADATA_FIELDS: frozenset[str] = frozenset(
         # forward unknown kwargs into the completion request payload.
         "pricing",
         "request_admission",
+        # Selects the HTTP clients on a tenant-written deployment (see
+        # ``_use_public_endpoint_clients``); never a provider kwarg.
+        "endpoint_policy",
     }
 )
 
@@ -346,6 +350,21 @@ def _normalize_openai_base_url(model_class: type, model_settings_from_config: di
         return
     model_settings_from_config["base_url"] = model_settings_from_config.pop("api_base")
     logger.debug("Normalized model config key 'api_base' -> 'base_url' for OpenAI-compatible client.")
+
+
+def _use_public_endpoint_clients(model_class, effective_model_settings: dict) -> None:
+    """Hand a model whose address a tenant chose the deployment's public-endpoint HTTP clients.
+
+    Applied last, so neither the profile nor a caller can put another client in
+    their place. A class that takes no HTTP clients is not built: it would
+    connect with a client of its own. The error names no address.
+    """
+    known = getattr(model_class, "model_fields", None) or {}
+    if not {"http_client", "http_async_client"} <= set(known):
+        raise ValueError("This model cannot use the deployment's HTTP clients, so it is not available on this deployment")
+    from deerflow.mcp.personal_network import public_endpoint_model_clients
+
+    effective_model_settings["http_client"], effective_model_settings["http_async_client"] = public_endpoint_model_clients()
 
 
 def _warn_unknown_model_settings(model_class, model_name: str, model_settings_from_config: dict) -> None:
@@ -729,6 +748,8 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         # The locked SDK only applies these sampling restrictions to GPT-5.
         for key in ("temperature", "top_p", "top_logprobs"):
             effective_model_settings.pop(key, None)
+    if model_config.endpoint_policy == "public" and tenant_written():
+        _use_public_endpoint_clients(model_class, effective_model_settings)
     model_instance = model_class(**effective_model_settings)
 
     if translate_context_window:

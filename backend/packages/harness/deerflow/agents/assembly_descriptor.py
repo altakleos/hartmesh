@@ -51,6 +51,9 @@ _MODEL_METADATA_FIELDS = frozenset(
         "use",
         "context_window",
         "pricing",
+        # Selects the HTTP clients on a tenant-written deployment, never the
+        # request; excluded so a custom model's fingerprint does not move.
+        "endpoint_policy",
         # ``reasoning`` is deliberately *not* excluded: as a bool or level
         # string it is ChatOllama's native provider kwarg, and as a declared
         # contract its dialect/history change the request payload. Both must

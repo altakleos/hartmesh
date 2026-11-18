@@ -8,7 +8,8 @@ HTTP/1.1 with keep-alive, so a client that pools connections keeps one open and
   request, with one ``connection_check`` tool call.
 - ``GET /v1/models`` lists one model.
 
-``redirect_to`` answers every request with a 307 to that address instead.
+``redirect_to`` answers every request with a 307 to that address instead, and
+``stall_next_seconds`` delays the next chat answer once.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ class ModelEndpointStub:
         self.connections = 0
         self.open_connections = 0
         self.redirect_to: str | None = None
+        self.stall_next_seconds = 0.0
         self._lock = threading.Lock()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
@@ -139,6 +141,10 @@ class ModelEndpointStub:
                     self._send(404)
                     return
                 request = json.loads(body or b"{}")
+                with stub._lock:
+                    stall, stub.stall_next_seconds = stub.stall_next_seconds, 0.0
+                if stall:
+                    time.sleep(stall)
                 if not request.get("stream"):
                     message = {"role": "assistant", "content": ANSWER}
                     usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
