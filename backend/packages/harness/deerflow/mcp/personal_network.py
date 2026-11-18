@@ -1,10 +1,13 @@
 """Public-network policy for HTTP MCP connections that must use public endpoints.
 
-Used by non-operator personal connections everywhere and, on deployments whose
-connections are written by tenants (``community/endpoint_policy.py``), by every
-remote connection and OAuth token request. A provider-listed private endpoint
-is the one exception: it is reached by ordinary name lookup, with the same
-client settings otherwise.
+Two client factories share one transport. ``personal_httpx_client_factory`` is
+for a non-operator personal connection on any deployment: public addresses
+only. ``tenant_written_httpx_client_factory`` is for every other remote
+connection and OAuth token request on a deployment whose connections are
+written by tenants (``community/endpoint_policy.py``): the same rule, except
+that a provider-listed private endpoint is reached by ordinary name lookup.
+Neither follows a redirect or reads proxy and trust settings from the
+environment.
 """
 
 import asyncio
@@ -32,7 +35,8 @@ def _public_addresses(url: httpx.URL) -> list[str]:
 
 
 class _PersonalTransport(httpx.AsyncBaseTransport):
-    def __init__(self):
+    def __init__(self, *, allow_listed_private_endpoints: bool = False):
+        self._allow_listed_private_endpoints = allow_listed_private_endpoints
         self._ssl_context: ssl.SSLContext | None = None
         self._ssl_context_lock = asyncio.Lock()
         self._transports: dict[tuple[bytes, bytes, int | None], httpx.AsyncHTTPTransport] = {}
@@ -40,7 +44,7 @@ class _PersonalTransport(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         # A provider-listed private endpoint skips the public-address check and
         # the pinning that depends on it; every other request is vetted again.
-        listed = is_private_endpoint(request.url.scheme, request.url.host, request.url.port)
+        listed = self._allow_listed_private_endpoints and is_private_endpoint(request.url.scheme, request.url.host, request.url.port)
         addresses = [] if listed else await asyncio.to_thread(_public_addresses, request.url)
         # The synchronous client factory can run on the event loop. Load TLS
         # trust lazily off-loop, sharing one context across concurrent requests.
@@ -76,8 +80,18 @@ class _PersonalTransport(httpx.AsyncBaseTransport):
             await transport.aclose()
 
 
-def personal_httpx_client_factory(headers=None, timeout=None, auth=None):
-    kwargs = {"headers": headers, "auth": auth, "follow_redirects": False, "trust_env": False, "transport": _PersonalTransport()}
+def _client(transport: _PersonalTransport, headers, timeout, auth) -> httpx.AsyncClient:
+    kwargs = {"headers": headers, "auth": auth, "follow_redirects": False, "trust_env": False, "transport": transport}
     if timeout is not None:
         kwargs["timeout"] = timeout
     return httpx.AsyncClient(**kwargs)
+
+
+def personal_httpx_client_factory(headers=None, timeout=None, auth=None):
+    """Public addresses only."""
+    return _client(_PersonalTransport(), headers, timeout, auth)
+
+
+def tenant_written_httpx_client_factory(headers=None, timeout=None, auth=None):
+    """Public addresses, or a private endpoint the provider listed."""
+    return _client(_PersonalTransport(allow_listed_private_endpoints=True), headers, timeout, auth)

@@ -472,9 +472,9 @@ class OAuthTokenManager:
         if tenant_written():
             # The token address is held to the same rule as the connection's
             # own: public or provider-listed, checked at every request.
-            from deerflow.mcp.personal_network import personal_httpx_client_factory
+            from deerflow.mcp.personal_network import tenant_written_httpx_client_factory
 
-            token_client = personal_httpx_client_factory(timeout=15.0)
+            token_client = tenant_written_httpx_client_factory(timeout=15.0)
         else:
             token_client = httpx.AsyncClient(timeout=15.0)
         async with token_client as client:
