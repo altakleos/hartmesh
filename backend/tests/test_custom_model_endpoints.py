@@ -280,6 +280,8 @@ def test_a_public_custom_model_over_tls_keeps_its_name_at_the_checked_address(de
             call()
 
     assert network.routed == [("8.8.8.8", 8443)] * 2
+    # One lookup for each request: connecting by name instead would look it up again.
+    assert network.answers(MADE_UP_NAME) == ["8.8.8.8"] * 2
     assert socket_settings.tls_names == [MADE_UP_NAME] * 2
     assert service.calls() == []
 
