@@ -191,18 +191,10 @@ Agent/profile and deployment/personal MCP mutation 500s plus the
 scheduled-task `invalid_assistant` 422 use fixed text. Log exceptions
 server-side; they can carry host paths.
 
-On a tenant-written deployment (`deerflow.community.endpoint_policy`),
-`mcp._admit_mcp_transition` also holds a definition that a write creates,
-changes or switches on to public addresses (connection and OAuth token
-address; provider-listed pairs pass) and, for deployment writes
-(`resolve_environment=True`), to no value beginning with `$`. It checks the
-definition as it would be stored, after masked values are restored, and skips
-one that equals the stored definition through `McpServerConfig`, or only
-switches it off. Every deployment and personal MCP write and capability
-installation passes this one function; keep new writers on it. Refusals are
-HTTP 400 with a plain-text `detail`, which the Tools screen shows as it is.
-The address check can resolve a name inside the config locks, as the personal
-route's does. Tests: `tests/blocking_io/test_mcp_router_tenant_written.py`.
+Every deployment and personal MCP write and capability installation passes
+`mcp._admit_mcp_transition`, which also applies `deerflow.mcp.tenant_written`
+(HTTP 400, plain-text `detail`). Keep new writers on it. Tests:
+`tests/blocking_io/test_mcp_router_tenant_written.py`.
 
 Committed MCP reconciliation failures are logged once by
 `fail_mcp_reconciliation`, with only the underlying exception type.

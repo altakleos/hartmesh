@@ -4192,7 +4192,8 @@ deployment, and an administrator's own personal connection.
   this deployment must use a public HTTP(S) address." The rule also holds
   each time a connection is used, whatever is stored: the address is checked
   again at every request and the request goes to the address that was
-  checked, a redirect to another origin is not followed, and the proxy and
+  checked, a redirect to another origin is not followed (one that stays on
+  the connection's own origin still is), and the proxy and
   certificate-authority settings of the Gateway's environment are not read.
 
 The checks at saving apply to a connection that a request creates, changes or
@@ -4217,7 +4218,10 @@ and the port is always written. A connection whose address has exactly that
 host and port (the port `https` or `http` implies when the address writes
 none) can be saved and is reached by ordinary name lookup; any other port on
 the same host is refused. The same holds for an OAuth token address. Values
-are still sent as typed and redirects are still not followed. The list
+are still sent as typed and a redirect to another origin is still not
+followed. A listed `https` endpoint needs a certificate from a publicly
+trusted authority: certificate-authority settings of the Gateway's
+environment are not read for listed endpoints either. The list
 applies to deployment connections and to an administrator's own; a personal
 connection of someone who is not an administrator cannot use a private
 address at all. An entry that is not of this form is ignored, with the log

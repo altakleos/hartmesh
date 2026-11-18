@@ -16,9 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other addresses, and values that begin with `$` in a deployment connection,
   with a plain-text reason. A provider can allow named private endpoints as
   exact `host:port` pairs (`DEER_FLOW_PRIVATE_ENDPOINTS`, the bundle's
-  `HARTMESH_PRIVATE_ENDPOINTS`). Deployments that do not set the value are
-  unchanged. See the Compose bundle guide, "MCP connections", for what a stored
-  connection does after an upgrade.
+  `HARTMESH_PRIVATE_ENDPOINTS`). ACP agents receive only program-type
+  connections there. Deployments that do not set the value are unchanged. See
+  the Compose bundle guide, "MCP connections", for what a stored connection
+  does after an upgrade.
 
 ## [2.2.0+hartmesh.60] - 2026-11-17
 

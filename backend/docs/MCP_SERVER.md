@@ -849,22 +849,36 @@ described in the rest of this document. With it:
 
 - **Values are used as typed.** `extensions_config.json` is loaded without
   `$NAME` substitution, for every field. A value that begins with `$` is that
-  text. The MCP write routes refuse to store such a value in a deployment
-  connection (HTTP 400, "Values that begin with `$` are not accepted for MCP
-  connections on this deployment.").
-- **Remote connections use public addresses.** Every HTTP/SSE connection and
-  every OAuth token request goes through the public-endpoint client: the
-  address must be a public HTTP(S) one, it is checked at each request and the
-  request is sent to the address that was checked, redirects to another origin
-  are not followed, and proxy and certificate-authority settings from the
-  environment are not read. The write routes refuse a connection address or
-  token address that is not public (HTTP 400, "MCP connections on this
+  text. A write refuses to store such a value in a deployment connection
+  (HTTP 400, "Values that begin with `$` are not accepted for MCP connections
+  on this deployment."). A personal connection's values, an administrator's
+  included, were never substituted on any deployment, so a leading `$` there
+  is ordinary text and is accepted.
+- **Remote connections use public addresses.** Every HTTP/SSE connection the
+  Gateway opens and every OAuth token request goes through the public-endpoint
+  client: the address must be a public HTTP(S) one, it is checked at each
+  request and the request is sent to the address that was checked, a redirect
+  to another origin is not followed (the MCP transports still follow one that
+  stays on the endpoint's origin, through the same client), and proxy and
+  certificate-authority settings from the environment are not read. A write
+  refuses a connection address that is not public, and the token address of
+  an OAuth setup that is switched on (HTTP 400, "MCP connections on this
   deployment must use a public HTTP(S) address."), for deployment connections
   and for personal ones, an administrator's included.
+- **ACP agents receive no remote connection.** `invoke_acp_agent` hands an
+  agent the enabled program-type connections only, because the agent would
+  open a remote one with a client of its own.
 
-The write checks apply to a definition that a request creates, changes or
+The write checks apply to a definition that a write creates, changes or
 switches on, in the form it would be stored in. Switching off and deleting are
-always allowed, and a definition a request leaves as stored is not checked.
+always allowed, and a definition a write leaves as stored is not checked. The
+Gateway routes and `DeerFlowClient.update_mcp_config` apply the same checks;
+the route that takes every definition at once names the one it refused.
+
+An operator-approved program launch (`approved_local_mcp_definitions`) is
+matched against the definition as typed. An approval written with `$NAME`
+values in `config.yaml` is filled by that file's own substitution, so it no
+longer matches what a tenant submits; approve literal values here.
 
 A provider can allow named private endpoints with a comma-separated list of
 exact `host:port` pairs:
@@ -875,14 +889,18 @@ DEER_FLOW_PRIVATE_ENDPOINTS=mcp.internal.example:8443,10.0.4.7:9000
 
 Hosts are compared exactly and without regard to case; there is no wildcard
 and the port is always written (an IPv6 address goes in square brackets). A
-listed pair passes the write check and is reached by ordinary name lookup,
-still without redirects. The list is read only when
+listed pair passes the write check and is reached by ordinary name lookup; a
+redirect to another origin is still not followed, and a listed HTTPS endpoint
+needs a publicly trusted certificate, because certificate-authority settings
+from the environment are not read. The list is read only when
 `DEER_FLOW_TENANT_WRITTEN_ENDPOINTS=on`, and it does not apply to a personal
 connection of someone who is not an administrator. An entry that is not of this
 form is ignored and logged; it allows nothing and never prevents a start.
 
-Both values are read from the process environment at the moment of use.
-`config.yaml` keeps its own `$NAME` substitution and is not affected.
+Set both values in the Gateway's environment before it starts. The extensions
+file is loaded under the value in force at that load and kept until the file
+changes, so changing either value takes a restart. `config.yaml` keeps its own
+`$NAME` substitution and is not affected.
 
 ## Tool Discovery Cache
 
