@@ -265,7 +265,8 @@ models from the encrypted runtime-home catalog. YAML entries win name conflicts;
 managed changes create new effective snapshots and do not alter an active runtime
 or an explicitly injected AppConfig. See `../models/AGENTS.md` for storage and reload
 boundaries. `managed_model_providers.py` derives provider defaults from validated
-endpoints; `ManagedModel.runtime_config()` combines them with profile fields.
+endpoints; `ManagedModel.runtime_config()` combines them with profile fields and
+marks a custom model `endpoint_policy: public` (see `../models/AGENTS.md`).
 `AppConfig.from_file()` remains YAML-only.
 
 The tenant bundle's optional `provider.json` supplies `display_name` and an

@@ -103,7 +103,7 @@ get explicit `environment:` entries and never see a provider key.
 | `HARTMESH_MODELS_FILE` | The path of the operator's own model file, read by `gateway/render_config.py` at every Gateway start. Absent -- which is what every existing tenant `.env` is -- the rendered `models:` section comes from the bundled provider catalog exactly as before. Set, that one file is the whole model list (§ "Operator-managed models"). |
 | `HARTMESH_PROVIDER_KEYS_SECRET` | The wrapping key for provider keys an administrator sets in the product and for the tokens of Telegram bots people connect, at least 32 characters (`openssl rand -base64 32`). Absent -- which is what every existing tenant `.env` is -- nothing changes and the product refuses to store a key, saying why, and no Telegram bot can be added or polled (§ "Telegram bots"). Best supplied from the environment of the `docker compose` command rather than this file, which shares a disk with the database it protects (§ "Provider keys in the product"). |
 | `HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS` | Only while rotating that key: the old value, so keys wrapped under it are read and rewrapped under the new one at the next start (§ "Provider keys in the product"). |
-| `HARTMESH_PRIVATE_ENDPOINTS` | Private endpoints that an MCP connection made in the product may use although they are not public: exact `host:port` pairs separated by commas, for example `mcp.internal.example:8443,10.0.4.7:9000`. No wildcard, and the port is always written. Absent -- which is what every existing tenant `.env` is -- none. An entry that is not a `host:port` pair is ignored and logged; it allows nothing and never stops a start. Read at Gateway start (§ "MCP connections"). |
+| `HARTMESH_PRIVATE_ENDPOINTS` | Private endpoints that an MCP connection or a custom model made in the product may use although they are not public: exact `host:port` pairs separated by commas, for example `mcp.internal.example:8443,10.0.4.7:9000`. No wildcard, and the port is always written. Absent -- which is what every existing tenant `.env` is -- none. An entry that is not a `host:port` pair is ignored and logged; it allows nothing and never stops a start. Read at Gateway start (§ "MCP connections"). |
 | `SANDBOX_READY_TIMEOUT` | The cold-start readiness budget, `sandbox.ready_timeout` in the rendered `config.yaml`: whole seconds from 60 to 600. Absent -- which is what every existing tenant `.env` is -- the template's 120 applies. Anything else (zero, a negative or fractional number, text, a value outside the range) refuses to render and the Gateway does not start, so no value can turn the deadline off (§ "Sandbox readiness budget"). |
 | `SANDBOX_CAPACITY_WAIT_TIMEOUT` | How long an acquisition waits for one of the two sandbox slots when both are in active use and nothing is parked to evict, `sandbox.capacity_wait_timeout` in the rendered `config.yaml`: whole seconds from 0 to 60, where 0 refuses at once. Absent, the template's 5 applies. Anything else refuses to render, so no value makes the wait unbounded (§ "Memory budget"). |
 | `HARTMESH_SIGN_ON_ADMINS` | Sign-on only. Comma-separated email addresses that become the provider's `admin_emails`: an address on it is created as `admin` at its first sign-in, every other address as `user`. Absent, the deployment has **no administrator** (§ "Sign-in"). |
@@ -4249,6 +4249,37 @@ before upgrading to see which ones a tenant has.
 
 Rolling back to a release without the rule restores the earlier behaviour for
 every stored connection; the two lines are ignored by an older Gateway.
+
+### Custom model addresses
+
+The same line governs the address of a model an administrator adds as
+**Custom OpenAI-compatible** (§ "Models and tools"). Its address must be a
+public HTTP(S) address or a pair listed in `HARTMESH_PRIVATE_ENDPOINTS`:
+
+- Saving, testing, discovering and importing refuse another address: "Custom
+  model endpoints on this deployment must use a public HTTP(S) address."
+- Every request to such a model is checked again and goes to the address that
+  was checked. No redirect is followed, and the proxy and
+  certificate-authority settings of the Gateway's environment are not read,
+  so a listed `https` endpoint needs a certificate from a publicly trusted
+  authority.
+
+The models this profile renders from `config.yaml` and `providers/`, an
+operator's own models file (§ "Operator-managed models") and the models of
+the fixed provider list are not affected, whatever their address.
+
+**Upgrading a tenant that already has custom models.** Nothing stored is
+changed: a custom model saved earlier at a private address stays in the list
+with its address and key. Every chat that uses it fails as when a model
+cannot be reached, and if it is the tenant's only or default model nobody in
+that company can chat, until an administrator gives it a public address or
+its `host:port` is listed for that tenant. An administrator can still open
+the list, edit such a model or switch it off; saving it switched on at the
+same address is refused. A custom model reached only through a proxy, a
+certificate authority of the Gateway's environment or a redirect fails the
+same way. Before upgrading, read each tenant's models as an administrator
+(`GET /api/managed-models`) and write the `host:port` of every private
+address you mean to keep into that tenant's `HARTMESH_PRIVATE_ENDPOINTS`.
 
 ## Durability
 

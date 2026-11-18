@@ -442,6 +442,31 @@ for routing, authentication, streaming, tool choice and token limits, plus
 positive and negative capability-rule cases. The frontend discovers the new
 entry from `/providers`; it should not gain a routing map.
 
+On a deployment whose connections are written by tenants
+(`DEER_FLOW_TENANT_WRITTEN_ENDPOINTS=on`; see
+[MCP Server Configuration](MCP_SERVER.md#deployments-whose-connections-are-written-by-tenants)),
+the address of a custom OpenAI-compatible model must be a public HTTP(S)
+address, or an exact `host:port` pair listed in `DEER_FLOW_PRIVATE_ENDPOINTS`:
+
+- Save, test, discover and import refuse another address with HTTP 422
+  `{"code": "endpoint_not_public", "message": "Custom model endpoints on this
+  deployment must use a public HTTP(S) address."}`. Saving a model switched
+  off is not checked, so an earlier model can always be switched off.
+- Every request of a custom model, and discovery, uses the deployment's
+  public-endpoint HTTP clients: the address is checked again and the request
+  goes to the address that was checked, no redirect is followed, and proxy and
+  certificate-authority settings from the environment are not read (a listed
+  HTTPS endpoint needs a publicly trusted certificate). Each request uses a
+  connection of its own. A custom model whose provider class cannot take
+  those clients is not built.
+- Nothing stored is changed. A custom model saved earlier at another address
+  stays in the list with its key and can be edited or switched off; chats that
+  use it fail until its address is public or listed.
+
+Models in `config.yaml`, in an operator's models file and of the fixed
+provider catalog are not affected, whatever their address. Without the setting
+nothing changes.
+
 `PUT /api/managed-models` and `POST /api/managed-models/test` keep their existing
 `{config, expected_revision}` envelope. A preset create needs only
 `config.provider`, `config.model` and `config.api_key`; omitted `name` and

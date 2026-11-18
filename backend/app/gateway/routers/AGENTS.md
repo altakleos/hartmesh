@@ -250,7 +250,9 @@ and requests identity encoding, rejecting compressed bodies before decoding.
 Import probes each new profile, saves through the drained writer, and atomically
 deduplicates retries without changing existing disabled profiles. Saved-key reuse
 requires matching connection and revision, checked again under the write lock
-after probing (409 on change); provider errors remain redacted.
+after probing (409 on change); provider errors remain redacted. On a
+tenant-written deployment save (unless switched off), test, discover and import
+pass `_require_allowed_endpoint` for a custom address (422 `endpoint_not_public`).
 
 Agent-scoped memory routes take `agent_name` and validate it with
 `AGENT_NAME_PATTERN`; the backend must also declare

@@ -902,6 +902,9 @@ from the environment are not read. The list is read only when
 connection of someone who is not an administrator. An entry that is not of this
 form is ignored and logged; it allows nothing and never prevents a start.
 
+The same setting and list govern the address of a custom model; see
+[models registered through the web](CONFIGURATION.md#models-registered-through-the-web).
+
 Set both values in the Gateway's environment before it starts. The extensions
 file is loaded under the value in force at that load and kept until the file
 changes, so changing either value takes a restart. `config.yaml` keeps its own
