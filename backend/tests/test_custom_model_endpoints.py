@@ -15,14 +15,18 @@ hand or replaces an HTTP client, its transport or the address check.
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from types import SimpleNamespace
 
+import httpcore
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpcore._backends.anyio import AnyIOBackend
+from httpcore._backends.sync import SyncBackend
 from support.model_endpoint_stubs import ANSWER, MODEL_ID, ModelEndpointStub
 
 from app.gateway.routers import managed_models as managed_models_router
@@ -204,6 +208,103 @@ def test_a_listed_custom_model_answers_on_every_loop_and_thread_and_leaves_nothi
     assert service.settled_open_connections() == 0
 
 
+_CANNED_ANSWER = json.dumps({"id": "chatcmpl-canned", "object": "chat.completion", "created": 0, "model": MODEL_ID, "choices": [{"index": 0, "message": {"role": "assistant", "content": ANSWER}, "finish_reason": "stop"}]}).encode()
+_CANNED_RESPONSE = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + str(len(_CANNED_ANSWER)).encode() + b"\r\n\r\n" + _CANNED_ANSWER
+
+
+class _RecordedConnection:
+    """What one connection was asked to do, in place of the TCP connection a public address would need."""
+
+    def __init__(self, host, port, socket_options):
+        self.host = host.decode("ascii") if isinstance(host, bytes) else host
+        self.port = port
+        self.socket_options = list(socket_options or [])
+        self.tls_names: list[str | None] = []
+        self.written = b""
+        self.closed = False
+
+    def get_extra_info(self, info):
+        return None
+
+
+class _PlainStream(_RecordedConnection, httpcore.NetworkStream):
+    def read(self, max_bytes, timeout=None):
+        return _CANNED_RESPONSE
+
+    def write(self, buffer, timeout=None):
+        self.written += buffer
+
+    def close(self):
+        self.closed = True
+
+    def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        assert ssl_context.check_hostname
+        self.tls_names.append(server_hostname)
+        return self
+
+
+class _AsyncStream(_RecordedConnection, httpcore.AsyncNetworkStream):
+    async def read(self, max_bytes, timeout=None):
+        return _CANNED_RESPONSE
+
+    async def write(self, buffer, timeout=None):
+        self.written += buffer
+
+    async def aclose(self):
+        self.closed = True
+
+    async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        assert ssl_context.check_hostname
+        self.tls_names.append(server_hostname)
+        return self
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_a_public_custom_model_is_reached_at_the_address_that_was_checked(scheme, deployment, made_up_name, monkeypatch):
+    """A public address cannot be contacted from a test, so only the TCP connect is replaced."""
+    connections: list[_RecordedConnection] = []
+
+    def connect(self, host, port, timeout=None, local_address=None, socket_options=None):
+        connections.append(_PlainStream(host, port, socket_options))
+        return connections[-1]
+
+    async def connect_async(self, host, port, timeout=None, local_address=None, socket_options=None):
+        connections.append(_AsyncStream(host, port, socket_options))
+        return connections[-1]
+
+    monkeypatch.setattr(SyncBackend, "connect_tcp", connect)
+    monkeypatch.setattr(AnyIOBackend, "connect_tcp", connect_async)
+    _store(deployment, f"{scheme}://{MADE_UP_NAME}:8443/v1")
+    _tenant_written(monkeypatch)
+    # Each request looks the name up once; a second lookup within a request would get the loopback address.
+    made_up_name.answers[:] = ["8.8.8.8", "8.8.8.8", "127.0.0.1"]
+
+    assert [call().content for call in _calls(_model())] == [ANSWER, ANSWER]
+
+    assert made_up_name.lookups == ["8.8.8.8", "8.8.8.8"]
+    assert [(connection.host, connection.port) for connection in connections] == [("8.8.8.8", 8443)] * 2
+    for connection in connections:
+        assert f"Host: {MADE_UP_NAME}:8443".encode() in connection.written
+        assert connection.tls_names == ([MADE_UP_NAME] if scheme == "https" else [])
+        # Nothing is kept open, and a silent peer is noticed as with the library's own clients.
+        assert connection.closed
+        assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in connection.socket_options
+
+
+def test_the_endpoint_policy_is_not_a_model_parameter(deployment, monkeypatch):
+    from deerflow.agents.assembly_descriptor import _model_parameters
+
+    _store(deployment, PUBLIC)
+    profile = get_app_config().get_model_config("records-model")
+    assert profile.endpoint_policy == "public"
+
+    assert "endpoint_policy" not in _model_parameters(profile)
+    for setting in (None, "on"):
+        if setting:
+            _tenant_written(monkeypatch)
+        assert "endpoint_policy" not in _model().model_kwargs
+
+
 def test_a_custom_model_keeps_its_time_limit_and_its_retry(deployment, stubs, monkeypatch):
     service = stubs()
     _store(deployment, service.base_url())
@@ -261,6 +362,13 @@ def test_a_custom_model_redirect_is_not_followed(deployment, stubs, monkeypatch)
 
     assert service.calls() == [("POST", "/v1/chat/completions")] * 2
     assert elsewhere.connections == 0
+
+    # Nor is a redirect that stays on the model's own origin.
+    service.redirect_to = f"{service.base_url()}/chat/completions"
+    for call in _calls(_model()):
+        with pytest.raises(Exception):
+            call()
+    assert service.calls() == [("POST", "/v1/chat/completions")] * 4
 
 
 def test_provider_models_keep_their_endpoints(deployment, stubs, monkeypatch):

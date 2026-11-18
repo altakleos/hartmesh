@@ -15,7 +15,9 @@ is not followed.
 
 import asyncio
 import ipaddress
+import socket
 import ssl
+import sys
 import threading
 
 import httpx
@@ -119,6 +121,17 @@ def tenant_written_httpx_client_factory(headers=None, timeout=None, auth=None):
 # own, closed with its response.
 
 _MODEL_REFUSAL = "Custom model endpoints require a public HTTP(S) endpoint"
+
+
+def _model_socket_options() -> list[tuple[int, int, int]]:
+    """Notice a silent peer within about two minutes, as the model library does for the clients it builds itself."""
+    options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    if sys.platform == "linux":
+        options += [(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60), (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10), (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3), (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 120_000)]
+    return options
+
+
+_MODEL_SOCKET_OPTIONS = _model_socket_options()
 _model_trust_lock = threading.Lock()
 _model_trust: ssl.SSLContext | None = None
 
@@ -175,7 +188,7 @@ class _ModelTransport(httpx.BaseTransport):
         candidates = _model_request_candidates(request)
         trust = _shared_model_trust()
         for index, candidate in enumerate(candidates):
-            transport = httpx.HTTPTransport(verify=trust, trust_env=False)
+            transport = httpx.HTTPTransport(verify=trust, trust_env=False, socket_options=_MODEL_SOCKET_OPTIONS)
             try:
                 response = transport.handle_request(candidate)
             except BaseException as exc:
@@ -193,7 +206,7 @@ class _ModelAsyncTransport(httpx.AsyncBaseTransport):
         candidates = await asyncio.to_thread(_model_request_candidates, request)
         trust = _model_trust or await asyncio.to_thread(_shared_model_trust)
         for index, candidate in enumerate(candidates):
-            transport = httpx.AsyncHTTPTransport(verify=trust, trust_env=False)
+            transport = httpx.AsyncHTTPTransport(verify=trust, trust_env=False, socket_options=_MODEL_SOCKET_OPTIONS)
             try:
                 response = await transport.handle_async_request(candidate)
             except BaseException as exc:
