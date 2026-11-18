@@ -457,7 +457,8 @@ address, or an exact `host:port` pair listed in `DEER_FLOW_PRIVATE_ENDPOINTS`:
   goes to the address that was checked, no redirect is followed, and proxy and
   certificate-authority settings from the environment, `OPENAI_PROXY`
   included, are not used (a listed HTTPS endpoint needs a publicly trusted
-  certificate). A listed endpoint is reached by ordinary name lookup. Each
+  certificate). A custom model's requests carry no `OpenAI-Organization` or
+  `OpenAI-Project` header. A listed endpoint is reached by ordinary name lookup. Each
   request opens a connection of its own, so a custom model pays a name lookup,
   a TCP connection and, over HTTPS, a TLS handshake on every request. A custom
   model whose provider class cannot take those clients is not built, and a

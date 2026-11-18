@@ -172,8 +172,15 @@ def _shared_model_trust() -> ssl.SSLContext:
         return _model_trust
 
 
+# A custom model has no organization or project setting, so no request of
+# these clients carries either header.
+_MODEL_HEADERS_NOT_SENT = ("OpenAI-Organization", "OpenAI-Project")
+
+
 def _model_request_candidates(request: httpx.Request) -> list[httpx.Request]:
-    """The requests to try in order: a listed endpoint as it is, else one per vetted address. May resolve a name."""
+    """The requests to try in order, less the headers above: a listed endpoint at its own address, else one per vetted address. May resolve a name."""
+    for name in _MODEL_HEADERS_NOT_SENT:
+        request.headers.pop(name, None)
     # The host is compared in the encoded form that goes on the wire.
     if is_private_endpoint(request.url.scheme, request.url.raw_host.decode("ascii"), request.url.port):
         return [request]

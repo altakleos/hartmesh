@@ -43,6 +43,9 @@ _AMBIENT_SETTINGS = (
     "OPENAI_PROXY",
     "OPENAI_ORG_ID",
     "OPENAI_ORGANIZATION",
+    "OPENAI_PROJECT_ID",
+    "OPENAI_WEBHOOK_SECRET",
+    "OPENAI_API_KEY",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
@@ -565,3 +568,75 @@ def test_deployments_without_the_setting_are_unchanged(deployment, client, stubs
     model = _model()
     assert (model.http_client, model.http_async_client) == (None, None)
     assert [call().content for call in _calls(model)] == [ANSWER, ANSWER]
+
+
+@pytest.fixture(params=["OPENAI_ORG_ID", "OPENAI_ORGANIZATION"])
+def library_environment(request, monkeypatch) -> dict[str, str]:
+    """Every setting the model library reads from the environment by itself, each with a made-up value.
+
+    The library knows the organization under two names and reads the second
+    only when the first is unset, so each is set in a run of its own.
+    """
+    settings = {
+        request.param: "made-up-organization",
+        "OPENAI_PROJECT_ID": "made-up-project",
+        "OPENAI_WEBHOOK_SECRET": "made-up-webhook-word",
+        "OPENAI_API_KEY": "made-up-environment-key",
+        "OPENAI_BASE_URL": "http://environment-base.example.test/v1",
+        "OPENAI_API_BASE": "http://environment-api-base.example.test/v1",
+    }
+    for name, value in settings.items():
+        monkeypatch.setenv(name, value)
+    return settings
+
+
+@pytest.mark.parametrize("reached", ["listed-endpoint", "public-address"])
+def test_a_custom_model_request_carries_no_setting_of_the_environment(reached, library_environment, deployment, client, stubs, network, monkeypatch):
+    service = stubs()
+    if reached == "listed-endpoint":
+        _tenant_written(monkeypatch, service)
+        base_url = service.base_url()
+    else:
+        _tenant_written(monkeypatch)
+        network.names[MADE_UP_NAME] = ["8.8.8.8"]
+        network.routes[("8.8.8.8", 8443)] = ("127.0.0.1", service.port)
+        base_url = f"http://{MADE_UP_NAME}:8443/v1"
+
+    assert client.post("/api/managed-models/test", json=_draft(base_url)).json() == {"ok": True, "message": "success"}
+    assert client.post("/api/managed-models/discover", json=_connection(base_url)).status_code == 200
+    assert client.put("/api/managed-models", json=_draft(base_url, name="records-model")).status_code == 200
+    model = _model()
+    for call in [*_calls(model), *_streamed_calls(model)]:
+        assert call()
+
+    assert service.calls() == [("POST", "/v1/chat/completions"), ("GET", "/v1/models"), *[("POST", "/v1/chat/completions")] * 4]
+    for request in service.requests:
+        assert not {"openai-organization", "openai-project"} & set(request.headers)
+        # The key that was typed for this model is the one that arrives.
+        assert request.headers["authorization"] == f"Bearer {KEY}"
+    received = service.received_text()
+    assert [value for value in library_environment.values() if value in received] == []
+
+
+@pytest.mark.parametrize("deployment_kind", ["without-the-setting", "provider-model-with-the-setting"])
+def test_other_models_keep_the_settings_the_library_reads(deployment_kind, library_environment, deployment, client, stubs, monkeypatch):
+    service = stubs()
+    if deployment_kind == "without-the-setting":
+        assert client.put("/api/managed-models", json=_draft(service.base_url(), name="records-model")).status_code == 200
+        model = _model()
+    else:
+        deployment.config.write_text(
+            f"sandbox:\n  use: test\nmodels:\n  - name: provider-model\n    use: langchain_openai:ChatOpenAI\n    model: {MODEL_ID}\n    base_url: {service.base_url()}\n    api_key: {KEY}\n",
+            encoding="utf-8",
+        )
+        _tenant_written(monkeypatch)
+        reset_app_config()
+        model = _model("provider-model")
+
+    # The library's own asynchronous client stays with the first loop that used it: one call each way.
+    assert [call().content for call in _calls(model)] == [ANSWER, ANSWER]
+
+    assert service.calls() == [("POST", "/v1/chat/completions")] * 2
+    for request in service.requests:
+        assert (request.headers["openai-organization"], request.headers["openai-project"]) == ("made-up-organization", "made-up-project")
+        assert request.headers["authorization"] == f"Bearer {KEY}"
