@@ -15,27 +15,42 @@ hand or replaces an HTTP client, its transport or the address check.
 from __future__ import annotations
 
 import asyncio
-import json
 import socket
+import ssl
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from types import SimpleNamespace
 
-import httpcore
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from httpcore._backends.anyio import AnyIOBackend
-from httpcore._backends.sync import SyncBackend
+from support import loopback_only
 from support.model_endpoint_stubs import ANSWER, MODEL_ID, ModelEndpointStub
 
 from app.gateway.routers import managed_models as managed_models_router
 from deerflow.config.app_config import get_app_config, reset_app_config
 from deerflow.config.managed_models import ManagedModel, ManagedModelStore
+from deerflow.mcp import personal_network
 from deerflow.models.factory import create_chat_model
 
 LINE = "DEER_FLOW_TENANT_WRITTEN_ENDPOINTS"
 PRIVATE_ENDPOINTS = "DEER_FLOW_PRIVATE_ENDPOINTS"
+# Settings a developer's environment may carry that the code under test reads.
+_AMBIENT_SETTINGS = (
+    "OPENAI_BASE_URL",
+    "OPENAI_API_BASE",
+    "OPENAI_PROXY",
+    "OPENAI_ORG_ID",
+    "OPENAI_ORGANIZATION",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "LANGCHAIN_OPENAI_TCP_KEEPALIVE",
+)
 ENDPOINT_NOT_PUBLIC = {"code": "endpoint_not_public", "message": "Custom model endpoints on this deployment must use a public HTTP(S) address."}
 KEY = "typed-model-key"
 PUBLIC = "https://8.8.8.8/v1"
@@ -59,14 +74,25 @@ def deployment(tmp_path, monkeypatch):
     # An ordinary client reads proxy settings; loopback stubs must stay direct.
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
-    for name in (LINE, PRIVATE_ENDPOINTS, "OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENAI_PROXY"):
+    # Nothing here depends on what the developer's own environment sets.
+    for name in (LINE, PRIVATE_ENDPOINTS, *_AMBIENT_SETTINGS):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(managed_models, "_cache", None)
+    personal_network._supported_model_socket_options.cache_clear()
     reset_app_config()
     reset_extensions_config()
     yield SimpleNamespace(config=config, store=ManagedModelStore())
     reset_app_config()
     reset_extensions_config()
+    personal_network._supported_model_socket_options.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def network(monkeypatch):
+    """No test here leaves the loopback interface, whatever the code under test does."""
+    guard = loopback_only.install(monkeypatch)
+    yield guard
+    guard.assert_nothing_blocked()
 
 
 @pytest.fixture
@@ -88,24 +114,6 @@ def client():
     app.include_router(managed_models_router.router)
     with TestClient(app) as test_client:
         yield test_client
-
-
-@pytest.fixture
-def made_up_name(monkeypatch):
-    """Answer ``models.example.test`` from a script: each lookup takes the next address, the last one repeating."""
-    answers: list[str] = ["127.0.0.1"]
-    lookups: list[str] = []
-    system_lookup = socket.getaddrinfo
-
-    def lookup(host, port, *args, **kwargs):
-        # An HTTP client may hand the name over already encoded.
-        if (host.decode("ascii") if isinstance(host, bytes) else host) != MADE_UP_NAME:
-            return system_lookup(host, port, *args, **kwargs)
-        lookups.append(answers[min(len(lookups), len(answers) - 1)])
-        return system_lookup(lookups[-1], port, *args, **kwargs)
-
-    monkeypatch.setattr(socket, "getaddrinfo", lookup)
-    return SimpleNamespace(answers=answers, lookups=lookups)
 
 
 def _tenant_written(monkeypatch, *listed: ModelEndpointStub) -> None:
@@ -149,8 +157,9 @@ def _streamed_calls(model) -> list:
 
 
 @pytest.mark.parametrize("address", ["loopback", "private-number", "name-resolving-to-private"])
-def test_custom_model_endpoints_must_be_public(address, deployment, client, stubs, made_up_name, monkeypatch):
+def test_custom_model_endpoints_must_be_public(address, deployment, client, stubs, network, monkeypatch):
     service = stubs()
+    network.names[MADE_UP_NAME] = ["127.0.0.1"]
     base_url = {"loopback": service.base_url(), "private-number": f"http://10.0.0.5:{service.port}/v1", "name-resolving-to-private": service.base_url(host=MADE_UP_NAME)}[address]
     _store(deployment, PUBLIC, name="ledger-model")
     before = deployment.store.path.read_bytes()
@@ -208,87 +217,158 @@ def test_a_listed_custom_model_answers_on_every_loop_and_thread_and_leaves_nothi
     assert service.settled_open_connections() == 0
 
 
-_CANNED_ANSWER = json.dumps({"id": "chatcmpl-canned", "object": "chat.completion", "created": 0, "model": MODEL_ID, "choices": [{"index": 0, "message": {"role": "assistant", "content": ANSWER}, "finish_reason": "stop"}]}).encode()
-_CANNED_RESPONSE = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + str(len(_CANNED_ANSWER)).encode() + b"\r\n\r\n" + _CANNED_ANSWER
+@pytest.fixture
+def socket_settings(monkeypatch):
+    """Record the options set on sockets and the server names asked of TLS, calling through."""
+    seen = SimpleNamespace(options=[], tls_names=[])
+    set_option, wrap_socket, wrap_bio = socket.socket.setsockopt, ssl.SSLContext.wrap_socket, ssl.SSLContext.wrap_bio
+
+    def setsockopt(self, level, option, *value):
+        seen.options.append((level, option, *value))
+        return set_option(self, level, option, *value)
+
+    def asked_name(kwargs) -> str | None:
+        name = kwargs.get("server_hostname")
+        return name.decode("ascii") if isinstance(name, bytes) else name
+
+    def recording_wrap_socket(self, *args, **kwargs):
+        seen.tls_names.append(asked_name(kwargs))
+        return wrap_socket(self, *args, **kwargs)
+
+    def recording_wrap_bio(self, *args, **kwargs):
+        seen.tls_names.append(asked_name(kwargs))
+        return wrap_bio(self, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "setsockopt", setsockopt)
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", recording_wrap_socket)
+    monkeypatch.setattr(ssl.SSLContext, "wrap_bio", recording_wrap_bio)
+    return seen
 
 
-class _RecordedConnection:
-    """What one connection was asked to do, in place of the TCP connection a public address would need."""
-
-    def __init__(self, host, port, socket_options):
-        self.host = host.decode("ascii") if isinstance(host, bytes) else host
-        self.port = port
-        self.socket_options = list(socket_options or [])
-        self.tls_names: list[str | None] = []
-        self.written = b""
-        self.closed = False
-
-    def get_extra_info(self, info):
-        return None
-
-
-class _PlainStream(_RecordedConnection, httpcore.NetworkStream):
-    def read(self, max_bytes, timeout=None):
-        return _CANNED_RESPONSE
-
-    def write(self, buffer, timeout=None):
-        self.written += buffer
-
-    def close(self):
-        self.closed = True
-
-    def start_tls(self, ssl_context, server_hostname=None, timeout=None):
-        assert ssl_context.check_hostname
-        self.tls_names.append(server_hostname)
-        return self
-
-
-class _AsyncStream(_RecordedConnection, httpcore.AsyncNetworkStream):
-    async def read(self, max_bytes, timeout=None):
-        return _CANNED_RESPONSE
-
-    async def write(self, buffer, timeout=None):
-        self.written += buffer
-
-    async def aclose(self):
-        self.closed = True
-
-    async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
-        assert ssl_context.check_hostname
-        self.tls_names.append(server_hostname)
-        return self
-
-
-@pytest.mark.parametrize("scheme", ["http", "https"])
-def test_a_public_custom_model_is_reached_at_the_address_that_was_checked(scheme, deployment, made_up_name, monkeypatch):
-    """A public address cannot be contacted from a test, so only the TCP connect is replaced."""
-    connections: list[_RecordedConnection] = []
-
-    def connect(self, host, port, timeout=None, local_address=None, socket_options=None):
-        connections.append(_PlainStream(host, port, socket_options))
-        return connections[-1]
-
-    async def connect_async(self, host, port, timeout=None, local_address=None, socket_options=None):
-        connections.append(_AsyncStream(host, port, socket_options))
-        return connections[-1]
-
-    monkeypatch.setattr(SyncBackend, "connect_tcp", connect)
-    monkeypatch.setattr(AnyIOBackend, "connect_tcp", connect_async)
-    _store(deployment, f"{scheme}://{MADE_UP_NAME}:8443/v1")
+def test_a_public_custom_model_is_reached_at_the_address_that_was_checked(deployment, stubs, network, socket_settings, monkeypatch):
+    """A public address cannot be contacted from a test: a connect to it lands on the stub, over a real socket."""
+    service = stubs()
+    _store(deployment, f"http://{MADE_UP_NAME}:8443/v1")
     _tenant_written(monkeypatch)
-    # Each request looks the name up once; a second lookup within a request would get the loopback address.
-    made_up_name.answers[:] = ["8.8.8.8", "8.8.8.8", "127.0.0.1"]
+    network.names[MADE_UP_NAME] = ["8.8.8.8"]
+    network.routes[("8.8.8.8", 8443)] = ("127.0.0.1", service.port)
+    # What the one-time probe of the options set is not what a connection was given.
+    personal_network._supported_model_socket_options()
+    socket_settings.options.clear()
 
     assert [call().content for call in _calls(_model())] == [ANSWER, ANSWER]
 
-    assert made_up_name.lookups == ["8.8.8.8", "8.8.8.8"]
-    assert [(connection.host, connection.port) for connection in connections] == [("8.8.8.8", 8443)] * 2
-    for connection in connections:
-        assert f"Host: {MADE_UP_NAME}:8443".encode() in connection.written
-        assert connection.tls_names == ([MADE_UP_NAME] if scheme == "https" else [])
-        # Nothing is kept open, and a silent peer is noticed as with the library's own clients.
-        assert connection.closed
-        assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in connection.socket_options
+    assert network.routed == [("8.8.8.8", 8443)] * 2
+    # One lookup for each request: connecting by name instead would look it up again.
+    assert network.answers(MADE_UP_NAME) == ["8.8.8.8"] * 2
+    assert {request.headers["host"] for request in service.requests} == {f"{MADE_UP_NAME}:8443"}
+    # A silent peer is noticed as with the clients the model library builds itself, and nothing stays open.
+    assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in socket_settings.options
+    assert service.settled_open_connections() == 0
+
+
+def test_a_public_custom_model_over_tls_keeps_its_name_at_the_checked_address(deployment, stubs, network, socket_settings, monkeypatch):
+    """The stub does not speak TLS, so the call ends at the handshake: where it went and for which name is what is shown."""
+    service = stubs()
+    _store(deployment, f"https://{MADE_UP_NAME}:8443/v1")
+    _tenant_written(monkeypatch)
+    network.names[MADE_UP_NAME] = ["8.8.8.8"]
+    network.routes[("8.8.8.8", 8443)] = ("127.0.0.1", service.port)
+
+    for call in _calls(_model()):
+        with pytest.raises(Exception):
+            call()
+
+    assert network.routed == [("8.8.8.8", 8443)] * 2
+    assert socket_settings.tls_names == [MADE_UP_NAME] * 2
+    assert service.calls() == []
+
+
+def test_connection_options_follow_the_library_switch_and_what_the_system_supports(deployment, stubs, socket_settings, monkeypatch):
+    service = stubs()
+    _store(deployment, service.base_url())
+    _tenant_written(monkeypatch, service)
+    refused_option = getattr(socket, "TCP_USER_TIMEOUT", None)
+    set_option = socket.socket.setsockopt
+
+    def setsockopt(self, level, option, *value):
+        # A system that does not know one of the options.
+        if option == refused_option and level == socket.IPPROTO_TCP:
+            raise OSError("Protocol not available")
+        return set_option(self, level, option, *value)
+
+    monkeypatch.setattr(socket.socket, "setsockopt", setsockopt)
+    personal_network._supported_model_socket_options.cache_clear()
+    assert [call().content for call in _calls(_model())] == [ANSWER, ANSWER]
+    assert refused_option not in {option for _level, option, *_value in personal_network._supported_model_socket_options()}
+
+    # The model library's own switch turns the options off here too.
+    monkeypatch.setenv("LANGCHAIN_OPENAI_TCP_KEEPALIVE", "0")
+    socket_settings.options.clear()
+    assert [call().content for call in _calls(_model())] == [ANSWER, ANSWER]
+    assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) not in socket_settings.options
+
+
+def test_proxy_settings_of_the_environment_are_not_used(deployment, stubs, monkeypatch):
+    service, proxy = stubs(), stubs()
+    _store(deployment, service.base_url())
+    _tenant_written(monkeypatch, service)
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name)
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "OPENAI_PROXY"):
+        monkeypatch.setenv(name, f"http://proxy-user:typed-proxy-word@{proxy.host_port}")
+
+    assert [call().content for call in _calls(_model())] == [ANSWER, ANSWER]
+
+    assert proxy.connections == 0
+
+
+def test_a_custom_model_that_cannot_be_built_says_nothing_of_its_settings(deployment, stubs, monkeypatch):
+    service = stubs()
+    monkeypatch.setenv("HM_TEST_VALUE", "plain-marker-word")
+    # A provider's own profile that opted into the policy, with a setting its class refuses.
+    profile = ["name: provider-model", "use: langchain_openai:ChatOpenAI", f"model: {MODEL_ID}", f"base_url: {service.base_url()}", f"api_key: {KEY}", "max_retries: $HM_TEST_VALUE", "endpoint_policy: public"]
+    deployment.config.write_text("sandbox:\n  use: test\nmodels:\n  - " + "\n    ".join(profile) + "\n", encoding="utf-8")
+    _tenant_written(monkeypatch, service)
+    reset_app_config()
+
+    with pytest.raises(ValueError) as failure:
+        create_chat_model("provider-model", attach_tracing=False)
+
+    assert str(failure.value) == "This model could not be built with the deployment's HTTP clients"
+    assert failure.value.__cause__ is None and failure.value.__suppress_context__
+
+
+def test_a_caller_cannot_put_another_client_in_their_place(deployment, stubs, monkeypatch):
+    service = stubs()
+    _store(deployment, service.base_url())
+    _tenant_written(monkeypatch)
+
+    ready_made = object()
+    with httpx.Client(trust_env=False) as plain:
+        supplied = {"http_client": plain, "http_async_client": httpx.AsyncClient(trust_env=False), "client": ready_made, "async_client": ready_made, "root_client": ready_made, "root_async_client": ready_made}
+        model = create_chat_model("records-model", attach_tracing=False, max_retries=0, timeout=5, **supplied)
+        assert model.http_client is not plain
+        assert ready_made not in (model.client, model.async_client, model.root_client, model.root_async_client)
+        for call in [*_calls(model), *_streamed_calls(model)]:
+            with pytest.raises(Exception) as failure:
+                call()
+            assert str(failure.value.__cause__) == "Custom model endpoints require a public HTTP(S) endpoint"
+
+    assert service.connections == 0
+
+
+def test_a_probe_keeps_the_policy_of_the_model_it_builds(deployment, client, stubs, network, monkeypatch):
+    """The name answers with a public address first and with the loopback address afterwards."""
+    service = stubs()
+    _tenant_written(monkeypatch)
+    network.names[MADE_UP_NAME] = ["8.8.8.8", "127.0.0.1"]
+
+    response = client.post("/api/managed-models/test", json=_draft(service.base_url(host=MADE_UP_NAME)))
+
+    assert response.json() == {"ok": False, "message": "connection_failed"}
+    assert network.answers(MADE_UP_NAME)[:2] == ["8.8.8.8", "127.0.0.1"]
+    assert service.connections == 0
 
 
 def test_the_endpoint_policy_is_not_a_model_parameter(deployment, monkeypatch):
@@ -319,29 +399,44 @@ def test_a_custom_model_keeps_its_time_limit_and_its_retry(deployment, stubs, mo
         assert len(service.calls()) == answered + 2
 
 
-def test_the_adapter_of_a_recognised_official_address_takes_the_clients(deployment, monkeypatch):
-    deployment.store.save(ManagedModel(name="records-model", model="deepseek-flash", base_url="https://api.deepseek.com", api_key=KEY), expected_revision=None)
+def test_the_adapter_of_a_recognised_official_address_uses_the_clients(deployment, network, socket_settings, monkeypatch):
+    official = "api.deepseek.com"
+    deployment.store.save(ManagedModel(name="records-model", model="deepseek-flash", base_url=f"https://{official}", api_key=KEY), expected_revision=None)
     _tenant_written(monkeypatch)
-
     profile = get_app_config().get_model_config("records-model")
     assert (profile.use, profile.endpoint_policy) == ("deerflow.models.patched_deepseek:PatchedChatDeepSeek", "public")
-    model = _model()
-    assert model.http_client is not None and model.http_async_client is not None
+    network.names[official] = ["127.0.0.1"]
+
+    # An answer that is not public: the adapter's own calls are refused by the deployment's clients.
+    for call in [*_calls(_model()), *_streamed_calls(_model())]:
+        with pytest.raises(Exception) as failure:
+            call()
+        assert str(failure.value.__cause__) == "Custom model endpoints require a public HTTP(S) endpoint"
+    assert network.answers(official) == ["127.0.0.1"] * 4
+
+    # A public answer: the call goes to that address for that name (nothing listens there, so it ends at the connect).
+    network.lookups.clear()
+    network.names[official] = ["8.8.8.8"]
+    network.routes[("8.8.8.8", 443)] = ("127.0.0.1", 9)
+    for call in _calls(_model()):
+        with pytest.raises(Exception):
+            call()
+    assert network.routed == [("8.8.8.8", 443)] * 2
 
 
-def test_a_name_that_changes_its_answer_is_not_contacted(deployment, client, stubs, made_up_name, monkeypatch):
+def test_a_name_that_changes_its_answer_is_not_contacted(deployment, client, stubs, network, monkeypatch):
     service = stubs()
     base_url = service.base_url(host=MADE_UP_NAME)
     _tenant_written(monkeypatch)
-    # A public address when the address is checked at the route, the stub's afterwards.
-    made_up_name.answers[:] = ["8.8.8.8", "127.0.0.1"]
+    # The name answers with a public address first and with the loopback address afterwards.
+    network.names[MADE_UP_NAME] = ["8.8.8.8", "127.0.0.1"]
 
     response = client.post("/api/managed-models/discover", json=_connection(base_url))
     assert (response.status_code, response.json()["detail"]["code"]) == (502, "discovery_failed")
-    assert made_up_name.lookups[:2] == ["8.8.8.8", "127.0.0.1"]
+    assert network.answers(MADE_UP_NAME)[:2] == ["8.8.8.8", "127.0.0.1"]
     assert service.connections == 0
 
-    made_up_name.lookups.clear()
+    network.lookups.clear()
     assert client.put("/api/managed-models", json=_draft(base_url, name="records-model")).status_code == 200
     for call in _calls(_model()):
         with pytest.raises(Exception):
@@ -404,6 +499,18 @@ def test_a_listed_private_endpoint_serves_a_custom_model(deployment, client, stu
     assert _refused(client.post("/api/managed-models/test", json=_draft(other_port.base_url())))
     assert _refused(client.post("/api/managed-models/discover", json=_connection(other_port.base_url())))
     assert other_port.connections == 0
+
+
+def test_a_listed_model_endpoint_is_matched_in_the_host_form_the_client_sends(deployment, client, stubs, network, monkeypatch):
+    service = stubs()
+    encoded = "xn--bcher-kva.example"
+    monkeypatch.setenv(LINE, "on")
+    monkeypatch.setenv(PRIVATE_ENDPOINTS, f"{encoded}:{service.port}")
+    network.names[encoded] = ["127.0.0.1"]
+
+    for index, typed in enumerate((encoded, "bücher.example")):
+        assert client.put("/api/managed-models", json=_draft(service.base_url(host=typed), name=f"records-model-{index}")).status_code == 200
+        assert [call().content for call in _calls(_model(f"records-model-{index}"))] == [ANSWER, ANSWER]
 
 
 def test_an_earlier_stored_model_keeps_the_list_and_the_configuration_readable(deployment, client, stubs, monkeypatch):

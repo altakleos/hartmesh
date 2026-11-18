@@ -15,10 +15,11 @@ is not followed.
 
 import asyncio
 import ipaddress
+import os
 import socket
 import ssl
-import sys
 import threading
+from functools import lru_cache
 
 import httpx
 
@@ -123,15 +124,41 @@ def tenant_written_httpx_client_factory(headers=None, timeout=None, auth=None):
 _MODEL_REFUSAL = "Custom model endpoints require a public HTTP(S) endpoint"
 
 
-def _model_socket_options() -> list[tuple[int, int, int]]:
-    """Notice a silent peer within about two minutes, as the model library does for the clients it builds itself."""
-    options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
-    if sys.platform == "linux":
-        options += [(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60), (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10), (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3), (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 120_000)]
-    return options
+@lru_cache(maxsize=1)
+def _supported_model_socket_options() -> tuple[tuple[int, int, int], ...]:
+    """The keepalive profile the model library gives the clients it builds itself, less what this system refuses.
+
+    It notices a silent peer within about two minutes. The library's own
+    helpers for it are private, so the options are probed here, once: one this
+    system does not know is dropped rather than failing every connection.
+    """
+    wanted = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    for name, value in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3), ("TCP_USER_TIMEOUT", 120_000)):
+        option = getattr(socket, name, None)
+        if option is not None:
+            wanted.append((socket.IPPROTO_TCP, option, value))
+    supported: list[tuple[int, int, int]] = []
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:
+        return ()
+    with probe:
+        for option in wanted:
+            try:
+                probe.setsockopt(*option)
+            except OSError:
+                continue
+            supported.append(option)
+    return tuple(supported)
 
 
-_MODEL_SOCKET_OPTIONS = _model_socket_options()
+def _model_socket_options() -> list[tuple[int, int, int]] | None:
+    """The options for one model connection; the model library's own switch turns them off here too."""
+    if os.environ.get("LANGCHAIN_OPENAI_TCP_KEEPALIVE", "1") == "0":
+        return None
+    return list(_supported_model_socket_options()) or None
+
+
 _model_trust_lock = threading.Lock()
 _model_trust: ssl.SSLContext | None = None
 
@@ -147,7 +174,8 @@ def _shared_model_trust() -> ssl.SSLContext:
 
 def _model_request_candidates(request: httpx.Request) -> list[httpx.Request]:
     """The requests to try in order: a listed endpoint as it is, else one per vetted address. May resolve a name."""
-    if is_private_endpoint(request.url.scheme, request.url.host, request.url.port):
+    # The host is compared in the encoded form that goes on the wire.
+    if is_private_endpoint(request.url.scheme, request.url.raw_host.decode("ascii"), request.url.port):
         return [request]
     return [_pinned(request, address) for address in _public_addresses(request.url, _MODEL_REFUSAL)]
 
@@ -188,7 +216,7 @@ class _ModelTransport(httpx.BaseTransport):
         candidates = _model_request_candidates(request)
         trust = _shared_model_trust()
         for index, candidate in enumerate(candidates):
-            transport = httpx.HTTPTransport(verify=trust, trust_env=False, socket_options=_MODEL_SOCKET_OPTIONS)
+            transport = httpx.HTTPTransport(verify=trust, trust_env=False, socket_options=_model_socket_options())
             try:
                 response = transport.handle_request(candidate)
             except BaseException as exc:
@@ -206,7 +234,7 @@ class _ModelAsyncTransport(httpx.AsyncBaseTransport):
         candidates = await asyncio.to_thread(_model_request_candidates, request)
         trust = _model_trust or await asyncio.to_thread(_shared_model_trust)
         for index, candidate in enumerate(candidates):
-            transport = httpx.AsyncHTTPTransport(verify=trust, trust_env=False, socket_options=_MODEL_SOCKET_OPTIONS)
+            transport = httpx.AsyncHTTPTransport(verify=trust, trust_env=False, socket_options=_model_socket_options())
             try:
                 response = await transport.handle_async_request(candidate)
             except BaseException as exc:

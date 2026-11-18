@@ -353,17 +353,23 @@ def _normalize_openai_base_url(model_class: type, model_settings_from_config: di
 
 
 def _use_public_endpoint_clients(model_class, effective_model_settings: dict) -> None:
-    """Hand a model whose address a tenant chose the deployment's public-endpoint HTTP clients.
+    """Give a model whose address a tenant chose the deployment's public-endpoint HTTP clients.
 
-    Applied last, so neither the profile nor a caller can put another client in
-    their place. A class that takes no HTTP clients is not built: it would
-    connect with a client of its own. The error names no address.
+    Applied after the profile's and the caller's settings were merged: the two
+    HTTP clients are replaced, ready-made SDK clients among the settings are
+    dropped, and the class's own proxy setting is set to none. A class that
+    does not take the two HTTP clients is not built on a tenant-written
+    deployment. The error names no address.
     """
     known = getattr(model_class, "model_fields", None) or {}
     if not {"http_client", "http_async_client"} <= set(known):
         raise ValueError("This model cannot use the deployment's HTTP clients, so it is not available on this deployment")
     from deerflow.mcp.personal_network import public_endpoint_model_clients
 
+    for ready_made in ("client", "async_client", "root_client", "root_async_client"):
+        effective_model_settings.pop(ready_made, None)
+    if "openai_proxy" in known:
+        effective_model_settings["openai_proxy"] = None
     effective_model_settings["http_client"], effective_model_settings["http_async_client"] = public_endpoint_model_clients()
 
 
@@ -750,7 +756,15 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             effective_model_settings.pop(key, None)
     if model_config.endpoint_policy == "public" and tenant_written():
         _use_public_endpoint_clients(model_class, effective_model_settings)
-    model_instance = model_class(**effective_model_settings)
+        try:
+            model_instance = model_class(**effective_model_settings)
+        except Exception as exc:
+            # A build error on this path is a fixed sentence that quotes no
+            # setting; the log keeps the error's type.
+            logger.error("Model '%s' could not be built with the deployment's HTTP clients (%s)", name, type(exc).__name__)
+            raise ValueError("This model could not be built with the deployment's HTTP clients") from None
+    else:
+        model_instance = model_class(**effective_model_settings)
 
     if translate_context_window:
         # Applied *after* construction and merged into the provider's inferred

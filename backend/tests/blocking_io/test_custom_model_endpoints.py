@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import _socket
 import asyncio
-import socket
 import ssl
 import threading
 
 import pytest
+from support import loopback_only
 from support.model_endpoint_stubs import ANSWER, MODEL_ID, ModelEndpointStub
 
 from app.gateway.model_discovery import DiscoveryError, fetch_model_catalog
@@ -38,7 +38,10 @@ def deployment(tmp_path, monkeypatch):
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "config.yaml"))
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(tmp_path / "extensions_config.json"))
     monkeypatch.setenv("DEER_FLOW_TENANT_WRITTEN_ENDPOINTS", "on")
-    monkeypatch.delenv("DEER_FLOW_PRIVATE_ENDPOINTS", raising=False)
+    # Nothing here depends on what the developer's own environment sets.
+    ambient = ("OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENAI_PROXY", "OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "LANGCHAIN_OPENAI_TCP_KEEPALIVE")
+    for name in ("DEER_FLOW_PRIVATE_ENDPOINTS", *ambient):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(managed_models, "_cache", None)
     # Start from no loaded trust, so the first request has to load it.
     monkeypatch.setattr(personal_network, "_model_trust", None)
@@ -47,17 +50,18 @@ def deployment(tmp_path, monkeypatch):
     reset_app_config()
 
 
+@pytest.fixture(autouse=True)
+def network(monkeypatch):
+    """No test here leaves the loopback interface; lookups are answered below the instrumented wrapper."""
+    guard = loopback_only.install(monkeypatch, resolver_module=_socket)
+    yield guard
+    guard.assert_nothing_blocked()
+
+
 @pytest.fixture
-def made_up_name(monkeypatch):
-    """Resolve one made-up name to the loopback address, below the instrumented lookup."""
-    native_getaddrinfo = _socket.getaddrinfo
-
-    def getaddrinfo(host, port, family=socket.AF_UNSPEC, *args, **kwargs):
-        if host == MADE_UP_NAME:
-            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port or 0))]
-        return native_getaddrinfo(host, port, family, *args, **kwargs)
-
-    monkeypatch.setattr(_socket, "getaddrinfo", getaddrinfo)
+def made_up_name(network):
+    """Resolve one made-up name to the loopback address, in the family that was asked for."""
+    network.names[MADE_UP_NAME] = ["127.0.0.1"]
 
 
 def _custom_model(base_url: str) -> ManagedModel:
