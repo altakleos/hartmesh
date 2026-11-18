@@ -103,6 +103,7 @@ get explicit `environment:` entries and never see a provider key.
 | `HARTMESH_MODELS_FILE` | The path of the operator's own model file, read by `gateway/render_config.py` at every Gateway start. Absent -- which is what every existing tenant `.env` is -- the rendered `models:` section comes from the bundled provider catalog exactly as before. Set, that one file is the whole model list (§ "Operator-managed models"). |
 | `HARTMESH_PROVIDER_KEYS_SECRET` | The wrapping key for provider keys an administrator sets in the product and for the tokens of Telegram bots people connect, at least 32 characters (`openssl rand -base64 32`). Absent -- which is what every existing tenant `.env` is -- nothing changes and the product refuses to store a key, saying why, and no Telegram bot can be added or polled (§ "Telegram bots"). Best supplied from the environment of the `docker compose` command rather than this file, which shares a disk with the database it protects (§ "Provider keys in the product"). |
 | `HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS` | Only while rotating that key: the old value, so keys wrapped under it are read and rewrapped under the new one at the next start (§ "Provider keys in the product"). |
+| `HARTMESH_PRIVATE_ENDPOINTS` | Private endpoints that an MCP connection made in the product may use although they are not public: exact `host:port` pairs separated by commas, for example `mcp.internal.example:8443,10.0.4.7:9000`. No wildcard, and the port is always written. Absent -- which is what every existing tenant `.env` is -- none. An entry that is not a `host:port` pair is ignored and logged; it allows nothing and never stops a start. Read at Gateway start (§ "MCP connections"). |
 | `SANDBOX_READY_TIMEOUT` | The cold-start readiness budget, `sandbox.ready_timeout` in the rendered `config.yaml`: whole seconds from 60 to 600. Absent -- which is what every existing tenant `.env` is -- the template's 120 applies. Anything else (zero, a negative or fractional number, text, a value outside the range) refuses to render and the Gateway does not start, so no value can turn the deadline off (§ "Sandbox readiness budget"). |
 | `SANDBOX_CAPACITY_WAIT_TIMEOUT` | How long an acquisition waits for one of the two sandbox slots when both are in active use and nothing is parked to evict, `sandbox.capacity_wait_timeout` in the rendered `config.yaml`: whole seconds from 0 to 60, where 0 refuses at once. Absent, the template's 5 applies. Anything else refuses to render, so no value makes the wait unbounded (§ "Memory budget"). |
 | `HARTMESH_SIGN_ON_ADMINS` | Sign-on only. Comma-separated email addresses that become the provider's `admin_emails`: an address on it is created as `admin` at its first sign-in, every other address as `user`. Absent, the deployment has **no administrator** (§ "Sign-in"). |
@@ -142,6 +143,9 @@ interpolation, so validation reads the file Docker will bind into the sandbox.
 come from the environment of the `docker compose` command itself: the shell's
 value wins over the `--env-file` one, and absent from both they are simply
 unset.
+`HARTMESH_PRIVATE_ENDPOINTS` is interpolated by `compose.yaml` once, with an
+empty default, into the Gateway's `DEER_FLOW_PRIVATE_ENDPOINTS`, so an
+existing `.env` without it still renders and lists nothing.
 The four Telegram keys are not interpolated by `compose.yaml`: they reach the
 Gateway through `env_file` and are read by `gateway/render_config.py`.
 
@@ -4164,6 +4168,80 @@ Telegram is a service of its own, and some of what it does no setting of this pr
 - Files larger than 20 MB coming in and 50 MB going out are Telegram's limits for bots; the bot hands the person over to the web app for them.
 - The other channels of this profile have no words for a person whose access is turned off (§ "Sign-in").
 - On a deployment with local passwords no command turns one person's access off, so that person's bots are stopped only by removing them (§ "Removing the bots of a person who left").
+
+## MCP connections
+
+In this profile the people who administer a deployment are tenants, not its
+operator. `compose.yaml` says so to the Gateway with
+`DEER_FLOW_TENANT_WRITTEN_ENDPOINTS: "on"`. It is a fixed value in the
+Gateway's `environment:` block, so a line of the same name in the tenant
+`.env` does not change it; only the exact value `on` counts.
+
+With it, MCP connections made in the product follow two rules. They cover a
+deployment connection on the Tools screen, a capability installed for the
+deployment, and an administrator's own personal connection.
+
+- **Values are sent as typed.** A value that begins with `$` is that text,
+  not a reference: the `$NAME` substitution of `extensions_config.json` does
+  not apply in this profile, for any field. Saving a deployment connection
+  with such a value is refused: "Values that begin with `$` are not accepted
+  for MCP connections on this deployment."
+- **Addresses are public.** A connection's address, and the token address of
+  its OAuth setup, must be a public HTTP(S) address, whether it is written as
+  numbers or as a name. Saving another one is refused: "MCP connections on
+  this deployment must use a public HTTP(S) address." The rule also holds
+  each time a connection is used, whatever is stored: the address is checked
+  again at every request and the request goes to the address that was
+  checked, a redirect to another origin is not followed, and the proxy and
+  certificate-authority settings of the Gateway's environment are not read.
+
+The checks at saving apply to a connection that a request creates, changes or
+switches on. Switching a connection off and deleting it are always allowed,
+and a connection that a request leaves exactly as stored is not checked, so
+one earlier entry never blocks saving the others.
+
+A person's own connection saved by someone who is not an administrator
+already followed both rules and is unchanged.
+
+**Allowing a service of your own.** `HARTMESH_PRIVATE_ENDPOINTS` in the
+tenant `.env` lists private endpoints that are allowed all the same, as
+exact `host:port` pairs separated by commas:
+
+```dotenv
+HARTMESH_PRIVATE_ENDPOINTS=mcp.internal.example:8443,10.0.4.7:9000
+```
+
+A host is a name or an address written as numbers (an IPv6 address in square
+brackets), compared exactly and without regard to case. There is no wildcard
+and the port is always written. A connection whose address has exactly that
+host and port (the port `https` or `http` implies when the address writes
+none) can be saved and is reached by ordinary name lookup; any other port on
+the same host is refused. The same holds for an OAuth token address. Values
+are still sent as typed and redirects are still not followed. The list
+applies to deployment connections and to an administrator's own; a personal
+connection of someone who is not an administrator cannot use a private
+address at all. An entry that is not of this form is ignored, with the log
+line `Ignoring entry <n> of DEER_FLOW_PRIVATE_ENDPOINTS: expected host:port`;
+it allows nothing and never stops a start. The list is read at Gateway start
+(§ "Applying a `.env` re-render").
+
+**Upgrading a tenant that already has connections.** Nothing stored is
+changed. A stored connection keeps working unless it relies on what the rules
+exclude:
+
+| A stored connection that | After the upgrade |
+| --- | --- |
+| has a value beginning with `$` | That text is sent as it is, which the service will most likely refuse. Edit the connection and type the value. |
+| has an address, or an OAuth token address, that is not public | It no longer connects and shows no tools. List its `host:port` in `HARTMESH_PRIVATE_ENDPOINTS` before the upgrade to keep it. |
+| is reached only through a proxy, or trusted only through a certificate authority, named in the Gateway's environment | It no longer connects. |
+| starts a program and takes a value of its environment from a `$` name | The program is started with that text. |
+
+Such a connection stays in the list, switched on and without tools, like any
+connection that fails. Read `${HARTMESH_DATA_DIR}/home/extensions_config.json`
+before upgrading to see which ones a tenant has.
+
+Rolling back to a release without the rule restores the earlier behaviour for
+every stored connection; the two lines are ignored by an older Gateway.
 
 ## Durability
 

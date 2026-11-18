@@ -85,6 +85,10 @@ OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET", "HARTMESH_SANDBOX_RESOLV_CONF"}
 # come from the environment of the `docker compose` command and stay off the
 # data disk the .env lives on (README: "Provider keys in the product").
 COMMAND_ENVIRONMENT_KEYS = {"HARTMESH_PROVIDER_KEYS_SECRET", "HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS"}
+# An optional list compose.yaml interpolates with an empty default and hands to
+# the Gateway under the name it reads; absent means no entry (README: "MCP
+# connections"). See tests/test_compose_tenant_written_endpoints.py.
+EMPTY_DEFAULT_KEYS = {"HARTMESH_PRIVATE_ENDPOINTS"}
 # Optional keys compose.yaml never interpolates: they reach the Gateway
 # through the tenant .env (`env_file`) and are read by the profile's own
 # scripts. See tests/test_compose_operator_models.py.
@@ -800,7 +804,7 @@ def test_env_example_lists_exactly_the_fixed_contract_keys() -> None:
     keys = {line.split("=", 1)[0] for line in lines if line and not line.startswith("#")}
     assert keys == CONTRACT_KEYS | SIGN_ON_KEYS, "the example shows sign-on-only mode"
     comments = [line for line in lines if line.startswith("#")]
-    assert len(comments) == 26
+    assert len(comments) == 28
     assert "sign-on-only" in comments[0] and LOCAL_PASSWORDS_KEY in comments[0] and "callback" in comments[0]
     assert "Membership follows the claim" in comments[1] and "HARTMESH_SIGN_ON_ROLES" in comments[1]
     assert [line.split("=", 1)[0] for line in comments[2:5]] == ["#HARTMESH_SIGN_ON_ACCESS_CLAIM", "#HARTMESH_SIGN_ON_ACCESS_VALUES", "#HARTMESH_SIGN_ON_ROLES"], "the optional access keys are shown commented out"
@@ -827,7 +831,9 @@ def test_env_example_lists_exactly_the_fixed_contract_keys() -> None:
     assert "on when absent" in comments[19]
     assert comments[20] == "#HARTMESH_TELEGRAM=on"
     assert comments[22:25] == ["#HARTMESH_TELEGRAM_VOICE=auto", "#HARTMESH_TELEGRAM_MAX_BOTS=100", "#HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON=10"]
-    assert "verbatim" in comments[25] and "subset" in comments[25]
+    assert "MCP connections" in comments[25] and "host:port" in comments[25]
+    assert comments[26] == "#HARTMESH_PRIVATE_ENDPOINTS=", "optional, shown commented out and empty: absent means none"
+    assert "verbatim" in comments[27] and "subset" in comments[27]
     values = dict(line.split("=", 1) for line in lines if line and not line.startswith("#"))
     assert values["HARTMESH_TRUSTED_PROXIES"] == "192.0.2.10,192.0.2.11"
     assert values["HARTMESH_PUBLIC_HOST"] == "tenant.example.com"
@@ -863,8 +869,8 @@ def test_compose_renders_one_subnet_into_both_places_with_and_without_the_overri
 def test_profile_consumes_no_key_outside_the_contract() -> None:
     source = COMPOSE.read_text(encoding="utf-8")
     referenced = set(_ENV_REFERENCE.findall(source))
-    assert referenced <= CONTRACT_KEYS | OPTIONAL_KEYS | COMMAND_ENVIRONMENT_KEYS | STORAGE_INIT_KEYS, referenced - CONTRACT_KEYS - OPTIONAL_KEYS - COMMAND_ENVIRONMENT_KEYS - STORAGE_INIT_KEYS
-    for key in COMMAND_ENVIRONMENT_KEYS:
+    assert referenced <= CONTRACT_KEYS | OPTIONAL_KEYS | COMMAND_ENVIRONMENT_KEYS | EMPTY_DEFAULT_KEYS | STORAGE_INIT_KEYS, referenced - CONTRACT_KEYS - OPTIONAL_KEYS - COMMAND_ENVIRONMENT_KEYS - EMPTY_DEFAULT_KEYS - STORAGE_INIT_KEYS
+    for key in COMMAND_ENVIRONMENT_KEYS | EMPTY_DEFAULT_KEYS:
         # Absent is a supported state (keys cannot be set in the product), so
         # the only default is empty, and the Gateway is the only reader.
         assert len(re.findall(r"\$\{" + key + r"\b", source)) == source.count("${" + key + ":-}") == 1, key
@@ -880,6 +886,7 @@ def test_profile_consumes_no_key_outside_the_contract() -> None:
         names = set(contract_like.findall(path.read_text(encoding="utf-8"))) - seams
         allowed = CONTRACT_KEYS | OPTIONAL_KEYS | PASSTHROUGH_KEYS | MODE_KEYS | STORAGE_INIT_KEYS | COMMAND_ENVIRONMENT_KEYS
         assert names <= allowed, (path.name, names - allowed)
+        assert not names & EMPTY_DEFAULT_KEYS, "the profile's own scripts never read it: only the Gateway does, under the name compose.yaml gives it"
 
 
 def test_gateway_entrypoint_drops_to_uid_1000_with_the_socket_group_and_runs_one_worker() -> None:

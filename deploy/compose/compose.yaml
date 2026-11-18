@@ -157,6 +157,14 @@ services:
       # Seeded once from extensions_config.json; the Gateway edits it at runtime.
       DEER_FLOW_EXTENSIONS_CONFIG_PATH: ${HARTMESH_DATA_DIR}/home/extensions_config.json
       DEER_FLOW_TENANT_ID: ${HARTMESH_TENANT:?HARTMESH_TENANT is a required .env key}
+      # Connections in this profile are written by tenants: MCP connections
+      # made in the product are sent as typed and may only use public HTTP(S)
+      # addresses. A fixed value, so the tenant .env cannot change it. The
+      # second line hands over the provider's optional list of private
+      # endpoints that are allowed all the same, as exact host:port pairs
+      # (README: "MCP connections").
+      DEER_FLOW_TENANT_WRITTEN_ENDPOINTS: "on"
+      DEER_FLOW_PRIVATE_ENDPOINTS: ${HARTMESH_PRIVATE_ENDPOINTS:-}
       # Session-signing secret from the contract, so sessions survive a home
       # restored from backup instead of depending on a generated file there.
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?AUTH_JWT_SECRET is a required .env key}

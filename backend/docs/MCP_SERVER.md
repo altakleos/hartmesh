@@ -835,6 +835,55 @@ material already retained by those systems. Restarting or upgrading DeerFlow doe
 not rotate credentials or perform historical cleanup; operators must complete
 both actions explicitly.
 
+## Deployments Whose Connections Are Written by Tenants
+
+Where the people who administer a deployment are tenants rather than its
+operator, set this in the Gateway's process environment:
+
+```bash
+DEER_FLOW_TENANT_WRITTEN_ENDPOINTS=on
+```
+
+Only the exact value `on` counts; absent or anything else keeps the behaviour
+described in the rest of this document. With it:
+
+- **Values are used as typed.** `extensions_config.json` is loaded without
+  `$NAME` substitution, for every field. A value that begins with `$` is that
+  text. The MCP write routes refuse to store such a value in a deployment
+  connection (HTTP 400, "Values that begin with `$` are not accepted for MCP
+  connections on this deployment.").
+- **Remote connections use public addresses.** Every HTTP/SSE connection and
+  every OAuth token request goes through the public-endpoint client: the
+  address must be a public HTTP(S) one, it is checked at each request and the
+  request is sent to the address that was checked, redirects to another origin
+  are not followed, and proxy and certificate-authority settings from the
+  environment are not read. The write routes refuse a connection address or
+  token address that is not public (HTTP 400, "MCP connections on this
+  deployment must use a public HTTP(S) address."), for deployment connections
+  and for personal ones, an administrator's included.
+
+The write checks apply to a definition that a request creates, changes or
+switches on, in the form it would be stored in. Switching off and deleting are
+always allowed, and a definition a request leaves as stored is not checked.
+
+A provider can allow named private endpoints with a comma-separated list of
+exact `host:port` pairs:
+
+```bash
+DEER_FLOW_PRIVATE_ENDPOINTS=mcp.internal.example:8443,10.0.4.7:9000
+```
+
+Hosts are compared exactly and without regard to case; there is no wildcard
+and the port is always written (an IPv6 address goes in square brackets). A
+listed pair passes the write check and is reached by ordinary name lookup,
+still without redirects. The list is read only when
+`DEER_FLOW_TENANT_WRITTEN_ENDPOINTS=on`, and it does not apply to a personal
+connection of someone who is not an administrator. An entry that is not of this
+form is ignored and logged; it allows nothing and never prevents a start.
+
+Both values are read from the process environment at the moment of use.
+`config.yaml` keeps its own `$NAME` substitution and is not affected.
+
 ## Tool Discovery Cache
 
 MCP tool discovery is cached per server. The cache is keyed by server name and
