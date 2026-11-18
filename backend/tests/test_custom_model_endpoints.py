@@ -618,6 +618,24 @@ def test_a_custom_model_request_carries_no_setting_of_the_environment(reached, l
     assert [value for value in library_environment.values() if value in received] == []
 
 
+def test_a_custom_model_without_a_key_takes_none_from_the_environment(library_environment, deployment, client, stubs, monkeypatch):
+    service = stubs()
+    _tenant_written(monkeypatch, service)
+    profile = {"model": MODEL_ID, "base_url": service.base_url()}
+
+    assert client.post("/api/managed-models/test", json={"config": profile}).json() == {"ok": True, "message": "success"}
+    assert client.post("/api/managed-models/discover", json={"provider": "openai-compatible", "base_url": service.base_url()}).status_code == 200
+    assert client.put("/api/managed-models", json={"config": {**profile, "name": "records-model"}}).status_code == 200
+    model = _model()
+    for call in [*_calls(model), *_streamed_calls(model)]:
+        assert call()
+
+    # A model call carries the product's fixed placeholder, the catalog request no key at all.
+    assert [(request.method, request.headers.get("authorization")) for request in service.requests] == [("POST", "Bearer not-required"), ("GET", None), *[("POST", "Bearer not-required")] * 4]
+    received = service.received_text()
+    assert [value for value in library_environment.values() if value in received] == []
+
+
 @pytest.mark.parametrize("deployment_kind", ["without-the-setting", "provider-model-with-the-setting"])
 def test_other_models_keep_the_settings_the_library_reads(deployment_kind, library_environment, deployment, client, stubs, monkeypatch):
     service = stubs()
