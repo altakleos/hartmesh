@@ -1,4 +1,11 @@
-"""Public-network policy for non-operator personal HTTP MCP connections."""
+"""Public-network policy for HTTP MCP connections that must use public endpoints.
+
+Used by non-operator personal connections everywhere and, on deployments whose
+connections are written by tenants (``community/endpoint_policy.py``), by every
+remote connection and OAuth token request. A provider-listed private endpoint
+is the one exception: it is reached by ordinary name lookup, with the same
+client settings otherwise.
+"""
 
 import asyncio
 import ipaddress
@@ -6,6 +13,7 @@ import ssl
 
 import httpx
 
+from deerflow.community.endpoint_policy import is_private_endpoint
 from deerflow.community.url_safety import resolve_host_addresses, validate_public_http_url
 
 
@@ -18,7 +26,7 @@ def _public_addresses(url: httpx.URL) -> list[str]:
         return candidates
 
     if validate_public_http_url(str(url), action="connect to", resolver=resolve):
-        raise ValueError("Personal MCP connections require a public HTTP(S) endpoint")
+        raise ValueError("MCP connections require a public HTTP(S) endpoint")
     # Literal IP URLs are validated without calling the resolver.
     return list(dict.fromkeys(addresses)) if addresses else [str(ipaddress.ip_address(url.host))]
 
@@ -30,7 +38,10 @@ class _PersonalTransport(httpx.AsyncBaseTransport):
         self._transports: dict[tuple[bytes, bytes, int | None], httpx.AsyncHTTPTransport] = {}
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        addresses = await asyncio.to_thread(_public_addresses, request.url)
+        # A provider-listed private endpoint skips the public-address check and
+        # the pinning that depends on it; every other request is vetted again.
+        listed = is_private_endpoint(request.url.scheme, request.url.host, request.url.port)
+        addresses = [] if listed else await asyncio.to_thread(_public_addresses, request.url)
         # The synchronous client factory can run on the event loop. Load TLS
         # trust lazily off-loop, sharing one context across concurrent requests.
         if self._ssl_context is None:
@@ -43,6 +54,8 @@ class _PersonalTransport(httpx.AsyncBaseTransport):
         if origin not in self._transports:
             self._transports[origin] = httpx.AsyncHTTPTransport(verify=self._ssl_context, trust_env=False)
         transport = self._transports[origin]
+        if listed:
+            return await transport.handle_async_request(request)
         for index, address in enumerate(addresses):
             pinned = httpx.Request(
                 request.method,

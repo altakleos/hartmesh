@@ -83,10 +83,12 @@ async def test_all_connection_requests_use_the_supplied_client(transport, stubs,
     # A refusal that points at an authorization document on another origin.
     listed.unauthorized_once = unlisted.url("/.well-known/oauth-protected-resource")
     assert await _discover() == []
+    assert listed.unauthorized_once is None, "the refusal was served"
     if transport == "sse":
         # A session that names another origin as the place to post messages.
         listed.sse_post_endpoint_once = unlisted.url("/messages?session_id=elsewhere")
         assert await _discover() == []
+        assert listed.sse_post_endpoint_once is None, "the other origin was announced"
     tools = await _discover()
     assert [tool.name for tool in tools] == ["records_echo"]
     assert "echo:hello" in str(await tools[0].ainvoke({"text": "hello"}))
@@ -111,3 +113,62 @@ async def test_values_are_sent_as_typed(stubs, company_file, monkeypatch):
     assert set(service.header_values("X-Records-Key")) == {"$HM_TEST_VALUE"}
     assert len(service.header_values("X-Records-Key")) == len(service.calls())
     assert MARKER not in service.received_text()
+
+
+@pytest.mark.asyncio
+async def test_only_public_addresses_are_contacted(stubs, company_file, monkeypatch):
+    service, token = stubs(), stubs()
+    _tenant_written(monkeypatch)
+    company_file({"records": {"type": "http", "url": service.url("/mcp")}, "feed": {"type": "sse", "url": service.url("/sse")}})
+
+    assert await _discover() == []
+    assert service.connections == 0
+
+    # A token address is held to the same rule as the connection's own.
+    _tenant_written(monkeypatch, service)
+    company_file({"records": {"type": "http", "url": service.url("/mcp"), "oauth": {"token_url": token.url("/token"), "client_id": "records-client", "client_secret": "typed-value"}}})
+    await _discover()
+    assert token.connections == 0
+
+
+@pytest.mark.asyncio
+async def test_a_name_is_checked_again_when_it_is_connected(stubs, company_file, monkeypatch):
+    import socket
+
+    from deerflow.community.endpoint_policy import address_problem
+
+    service = stubs()
+    _tenant_written(monkeypatch)
+    lookups: list[str] = []
+    system_lookup = socket.getaddrinfo
+
+    def lookup(host, port, *args, **kwargs):
+        if host != "records.example.test":
+            return system_lookup(host, port, *args, **kwargs)
+        # A public address the first time it is asked, the loopback stub afterwards.
+        lookups.append("8.8.8.8" if not lookups else "127.0.0.1")
+        return system_lookup(lookups[-1], port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", lookup)
+    url = service.url("/mcp", host="records.example.test")
+    assert address_problem(url) is None
+    company_file({"records": {"type": "http", "url": url}})
+
+    assert await _discover() == []
+    assert lookups[:2] == ["8.8.8.8", "127.0.0.1"]
+    assert service.connections == 0
+
+
+@pytest.mark.asyncio
+async def test_a_listed_private_endpoint_is_exact(stubs, company_file, monkeypatch):
+    listed, other_port = stubs(), stubs()
+    company_file({"records": {"type": "http", "url": listed.url("/mcp")}, "ledger": {"type": "http", "url": other_port.url("/mcp")}})
+
+    _tenant_written(monkeypatch, listed)
+    assert [tool.name for tool in await _discover()] == ["records_echo"]
+    assert other_port.connections == 0
+
+    _tenant_written(monkeypatch)
+    before = listed.connections
+    assert await _discover() == []
+    assert (listed.connections, other_port.connections) == (before, 0)

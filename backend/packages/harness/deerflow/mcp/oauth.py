@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from deerflow.community.endpoint_policy import tenant_written
 from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig
 from deerflow.mcp import oauth_store
 from deerflow.mcp.headers import apply_header_overrides, header_spellings, illegal_header_value_reason
@@ -468,7 +469,15 @@ class OAuthTokenManager:
         else:
             raise ValueError(f"Unsupported OAuth grant type: {oauth.grant_type}")
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        if tenant_written():
+            # The token address is held to the same rule as the connection's
+            # own: public or provider-listed, checked at every request.
+            from deerflow.mcp.personal_network import personal_httpx_client_factory
+
+            token_client = personal_httpx_client_factory(timeout=15.0)
+        else:
+            token_client = httpx.AsyncClient(timeout=15.0)
+        async with token_client as client:
             response = await client.post(oauth.token_url, data=data)
             if oauth.grant_type == "refresh_token" and _is_invalid_grant(response):
                 try:

@@ -3,6 +3,7 @@
 import logging
 from typing import Any
 
+from deerflow.community.endpoint_policy import tenant_written
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.mcp.headers import illegal_header_value_reason
 
@@ -36,7 +37,9 @@ def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, 
         if not config.url:
             raise ValueError(f"MCP server '{server_name}' with {transport_type} transport requires 'url' field")
         params["url"] = config.url
-        if (config.model_extra or {}).get("personal_public_network") is True:
+        # Where connections are written by tenants, every remote connection
+        # uses the public-endpoint client, whatever its definition says.
+        if (config.model_extra or {}).get("personal_public_network") is True or tenant_written():
             from deerflow.mcp.personal_network import personal_httpx_client_factory
 
             params["httpx_client_factory"] = personal_httpx_client_factory
