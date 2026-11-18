@@ -42,6 +42,7 @@ from deerflow.mcp.cache import (
 )
 from deerflow.mcp.lifecycle import LIFECYCLE_KEY, plan_mcp_lifecycle
 from deerflow.mcp.tasks.runtime import McpTaskConfigurationError, validate_mcp_task_config_snapshot
+from deerflow.mcp.tenant_written import TenantWrittenDefinitionRefused, require_tenant_written_definition
 from deerflow.runtime.customer_administration import CustomerManagementDenied, require_customer_management, require_mcp_management_transition
 from deerflow.utils.file_io import await_drained
 
@@ -58,15 +59,26 @@ def _require_mcp_mutation_policy(policy) -> None:
         raise HTTPException(403, str(exc)) from None
 
 
-def _admit_mcp_definition(policy, definition: dict, *, resolve_environment: bool = True) -> None:
-    _admit_mcp_transition(policy, None, definition, resolve_environment=resolve_environment)
+def _admit_mcp_definition(policy, definition: dict, *, resolve_environment: bool = True, server_name: str | None = None) -> None:
+    _admit_mcp_transition(policy, None, definition, resolve_environment=resolve_environment, server_name=server_name)
 
 
-def _admit_mcp_transition(policy, previous, candidate, *, resolve_environment: bool = True) -> None:
+def _admit_mcp_transition(policy, previous, candidate, *, resolve_environment: bool = True, server_name: str | None = None) -> None:
+    """Admit one definition's change; runs inside the caller's mutation lock.
+
+    The tenant-written check can look a host name up there, like the personal
+    route's own address check. ``server_name`` is given by a write that takes
+    several definitions, so its refusal says which one.
+    """
     try:
         require_mcp_management_transition(policy, previous, candidate, resolve_environment=resolve_environment)
     except CustomerManagementDenied as exc:
         raise HTTPException(403, str(exc)) from None
+    try:
+        require_tenant_written_definition(previous, candidate, deployment_connection=resolve_environment, server_name=server_name)
+    except TenantWrittenDefinitionRefused as exc:
+        # Plain text: the Tools screen shows a detail only when it is text.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
 
 
 _MCP_STDIO_COMMAND_ALLOWLIST_ENV = "DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST"
@@ -1358,8 +1370,9 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest, *, policy=None) -> di
         config_data["skills"] = raw_skills
 
         _validate_extensions_config_candidate(config_data)
-        for name in raw_servers.keys() | config_data["mcpServers"].keys():
-            _admit_mcp_transition(policy, raw_servers.get(name), config_data["mcpServers"].get(name))
+        # In name order, so the same request is always refused for the same definition.
+        for name in sorted(raw_servers.keys() | config_data["mcpServers"].keys()):
+            _admit_mcp_transition(policy, raw_servers.get(name), config_data["mcpServers"].get(name), server_name=name)
         pending = _commit_mcp_config_write(config_path, config_data, previous_raw=copy.deepcopy(raw_data))
 
     try:
@@ -1501,7 +1514,7 @@ def _apply_mcp_servers_create(body: McpConfigUpdateRequest, *, policy=None) -> d
 
         for name, incoming in body.mcp_servers.items():
             _ensure_no_masked_secrets(incoming)
-            _admit_mcp_definition(policy, incoming.model_dump())
+            _admit_mcp_definition(policy, incoming.model_dump(), server_name=name)
             raw_servers[name] = incoming.model_dump()
         raw_data["mcpServers"] = raw_servers
         _ensure_skills_key(raw_data)

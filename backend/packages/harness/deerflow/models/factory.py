@@ -5,7 +5,9 @@ import os
 from langchain.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import BaseChatOpenAI
+from pydantic import ValidationError
 
+from deerflow.community.endpoint_policy import tenant_written
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.config.managed_model_providers import OPENAI_GPT6_MODELS, get_managed_model_provider
@@ -42,6 +44,9 @@ _MODEL_METADATA_FIELDS: frozenset[str] = frozenset(
         # forward unknown kwargs into the completion request payload.
         "pricing",
         "request_admission",
+        # Selects the HTTP clients on a tenant-written deployment (see
+        # ``_use_public_endpoint_clients``); never a provider kwarg.
+        "endpoint_policy",
     }
 )
 
@@ -346,6 +351,35 @@ def _normalize_openai_base_url(model_class: type, model_settings_from_config: di
         return
     model_settings_from_config["base_url"] = model_settings_from_config.pop("api_base")
     logger.debug("Normalized model config key 'api_base' -> 'base_url' for OpenAI-compatible client.")
+
+
+def _use_public_endpoint_clients(model_class, effective_model_settings: dict) -> None:
+    """Give a model with the public endpoint policy the deployment's public-endpoint HTTP clients.
+
+    Applied after the profile's and the caller's settings were merged: the two
+    HTTP clients are replaced, ready-made SDK clients among the settings are
+    dropped, and the class's own proxy setting is set to none. A class that
+    does not take the two HTTP clients is not built on a tenant-written
+    deployment. The error names no address.
+    """
+    known = getattr(model_class, "model_fields", None) or {}
+    if not {"http_client", "http_async_client"} <= set(known):
+        raise ValueError("This model cannot use the deployment's HTTP clients, so it is not available on this deployment")
+    from deerflow.mcp.personal_network import public_endpoint_model_clients
+
+    for ready_made in ("client", "async_client", "root_client", "root_async_client"):
+        effective_model_settings.pop(ready_made, None)
+    if "openai_proxy" in known:
+        effective_model_settings["openai_proxy"] = None
+    effective_model_settings["http_client"], effective_model_settings["http_async_client"] = public_endpoint_model_clients()
+
+
+def _build_error_summary(exc: Exception) -> str:
+    """The kind of a build error and, for a validation error, the fields that failed; never what a field held."""
+    if not isinstance(exc, ValidationError):
+        return type(exc).__name__
+    fields = sorted({".".join(str(part) for part in error["loc"]) or "(model)" for error in exc.errors(include_url=False, include_context=False, include_input=False)})
+    return f"{type(exc).__name__}: {', '.join(fields)}"
 
 
 def _warn_unknown_model_settings(model_class, model_name: str, model_settings_from_config: dict) -> None:
@@ -729,7 +763,18 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         # The locked SDK only applies these sampling restrictions to GPT-5.
         for key in ("temperature", "top_p", "top_logprobs"):
             effective_model_settings.pop(key, None)
-    model_instance = model_class(**effective_model_settings)
+    tenant_written_deployment = tenant_written()
+    if tenant_written_deployment and model_config.endpoint_policy == "public":
+        _use_public_endpoint_clients(model_class, effective_model_settings)
+    try:
+        model_instance = model_class(**effective_model_settings)
+    except Exception as exc:
+        if not tenant_written_deployment:
+            raise
+        # On a tenant-written deployment the build error of any model is a
+        # fixed sentence that quotes no setting; the log says what failed.
+        logger.error("Model '%s' could not be built (%s)", name, _build_error_summary(exc))
+        raise ValueError("This model could not be built") from None
 
     if translate_context_window:
         # Applied *after* construction and merged into the provider's inferred

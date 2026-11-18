@@ -3,6 +3,7 @@
 import logging
 from typing import Any
 
+from deerflow.community.endpoint_policy import tenant_written
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.mcp.headers import illegal_header_value_reason
 
@@ -40,6 +41,13 @@ def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, 
             from deerflow.mcp.personal_network import personal_httpx_client_factory
 
             params["httpx_client_factory"] = personal_httpx_client_factory
+        elif tenant_written():
+            # Where connections are written by tenants, every other remote
+            # connection uses a public-endpoint client too, whatever its
+            # definition says; this one also admits provider-listed endpoints.
+            from deerflow.mcp.personal_network import tenant_written_httpx_client_factory
+
+            params["httpx_client_factory"] = tenant_written_httpx_client_factory
         # Add headers if present
         if config.headers:
             # A statically configured value the transport would refuse gets the

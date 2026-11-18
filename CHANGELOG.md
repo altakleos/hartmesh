@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- On deployments whose connections are written by tenants
+  (`DEER_FLOW_TENANT_WRITTEN_ENDPOINTS=on`, which the Compose bundle sets), MCP
+  connections are sent as typed, and MCP connections and their OAuth token
+  endpoints may only use public HTTP(S) addresses. The MCP write routes refuse
+  other addresses, and values that begin with `$` in a deployment connection,
+  with a plain-text reason. A provider can allow named private endpoints as
+  exact `host:port` pairs (`DEER_FLOW_PRIVATE_ENDPOINTS`, the bundle's
+  `HARTMESH_PRIVATE_ENDPOINTS`). ACP agents receive only program-type
+  connections there. Deployments that do not set the value are unchanged. See
+  the Compose bundle guide, "MCP connections", for what a stored connection
+  does after an upgrade.
+- On the same deployments, the address of a custom OpenAI-compatible model must
+  be a public HTTP(S) address or a provider-listed private endpoint. Saving a
+  model switched on, testing, discovering and importing refuse another address
+  (`endpoint_not_public`); a model can still be saved switched off. Every
+  request of a custom model uses HTTP clients that check the address again,
+  follow no redirect and open a connection of their own. A model of any kind
+  that cannot be built reports a fixed sentence, and the Gateway log names the
+  error's type and, for a validation error, the fields that failed. Models of
+  the operator's own configuration and of the fixed provider catalog are
+  otherwise unchanged unless their profile sets `endpoint_policy: public`, and
+  nothing stored is changed. See the Compose bundle guide, "Custom model
+  addresses", for what an earlier custom model does after an upgrade.
+
 ## [2.2.0+hartmesh.60] - 2026-11-17
 
 ### Upstream adoption

@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+from deerflow.community.endpoint_policy import tenant_written
 from deerflow.config._boolean_guards import reject_boolean
 from deerflow.config.file_signature import ConfigSignature, get_config_signature, read_config_with_signature
 from deerflow.config.runtime_paths import existing_project_file, project_root
@@ -585,12 +586,24 @@ class ExtensionsConfig(BaseModel):
 
         Environment variables are resolved using the `os.getenv` function. Example: $OPENAI_API_KEY
 
+        Where connections are written by tenants
+        (``deerflow.community.endpoint_policy.tenant_written``) nothing is
+        resolved: every value is used as typed and *config* is returned as it
+        was given. This is the one place that decides it, for every caller and
+        every field.
+
         Args:
             config: The config to resolve environment variables in.
 
         Returns:
             The config with environment variables resolved.
         """
+        if tenant_written():
+            return config
+        return cls._resolve_env_variables(config)
+
+    @classmethod
+    def _resolve_env_variables(cls, config: Any) -> Any:
         if isinstance(config, str):
             if not config.startswith("$"):
                 return config
@@ -603,13 +616,13 @@ class ExtensionsConfig(BaseModel):
             return env_value
 
         if isinstance(config, dict):
-            return {key: cls.resolve_env_variables(value) for key, value in config.items()}
+            return {key: cls._resolve_env_variables(value) for key, value in config.items()}
 
         if isinstance(config, list):
-            return [cls.resolve_env_variables(item) for item in config]
+            return [cls._resolve_env_variables(item) for item in config]
 
         if isinstance(config, tuple):
-            return tuple(cls.resolve_env_variables(item) for item in config)
+            return tuple(cls._resolve_env_variables(item) for item in config)
 
         return config
 

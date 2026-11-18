@@ -889,3 +889,106 @@ def test_personal_config_save_survives_an_unavailable_token_store(personal_clien
         set_mcp_oauth_token_store(previous)
     assert "github" in read_user_mcp_config("alice")["mcpServers"]
     store.forget_unconfigured.assert_called_once()
+
+
+# ── Deployments whose connections are written by tenants ─────────────────────
+
+_ADDRESS_NOT_PUBLIC = "MCP connections on this deployment must use a public HTTP(S) address."
+
+
+@pytest.fixture
+def tenant_written(monkeypatch):
+    """Declare the deployment tenant-written; returns a function that lists private endpoints."""
+    monkeypatch.setenv("DEER_FLOW_TENANT_WRITTEN_ENDPOINTS", "on")
+    monkeypatch.delenv("DEER_FLOW_PRIVATE_ENDPOINTS", raising=False)
+    # An ordinary client reads proxy settings; loopback stubs must stay direct,
+    # or "the stub received nothing" would hold for the wrong reason.
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    # These tests never leave the loopback interface, whatever the code under test does.
+    from support import loopback_only
+
+    guard = loopback_only.install(monkeypatch)
+    yield lambda *stubs: monkeypatch.setenv("DEER_FLOW_PRIVATE_ENDPOINTS", ",".join(stub.host_port for stub in stubs))
+    guard.assert_nothing_blocked()
+
+
+def _plant_personal(user, servers):
+    """Write definitions straight into a person's file, as an earlier save would have left them."""
+    path = user_mcp_config_path(user)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+
+
+async def _discover_personal(user):
+    from deerflow.mcp.user_tools import _load
+
+    identity = set_current_user(SimpleNamespace(id=user))
+    try:
+        return await _load(user, load_user_mcp_config(user))
+    finally:
+        reset_current_user(identity)
+
+
+@pytest.mark.asyncio
+async def test_an_administrators_own_connection_must_use_public_addresses(personal_client, tenant_written, monkeypatch, tmp_path):
+    from support.mcp_endpoint_stubs import EndpointStub
+
+    from app.gateway.deps import get_config
+    from app.gateway.routers import capabilities
+
+    personal_client.app.include_router(capabilities.router)
+    personal_client.app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    platform = tmp_path / "deployment.json"
+    platform.write_text(json.dumps({"mcpServers": {}}))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(platform))
+    administrator = {"test-user": "alice"}
+
+    def refused(response, *, added: bool = False):
+        # A route that takes several definitions at once says which one it refused.
+        return response.status_code == 400 and response.json()["detail"] == (f"MCP server 'records': {_ADDRESS_NOT_PUBLIC}" if added else _ADDRESS_NOT_PUBLIC)
+
+    with EndpointStub() as service, EndpointStub() as token:
+        private = {"type": "http", "url": service.url("/mcp")}
+        private_token = {"type": "http", "url": "https://8.8.8.8/mcp", "oauth": {"token_url": token.url("/token"), "client_id": "records-client", "client_secret": "typed-value"}}
+        for definition in (private, private_token):
+            assert refused(personal_client.post("/api/mcp/personal/config/servers", headers=administrator, json={"mcp_servers": {"records": definition}}), added=True)
+            # Installing a capability for oneself stores through the same check.
+            assert refused(personal_client.post("/api/capabilities/installations", headers=administrator, json={"plugin_id": "github", "name": "records", "scope": "user", "configuration": definition}), added=True)
+        assert read_user_mcp_config("alice")["mcpServers"] == {}
+
+        # A definition already in the file is neither contacted nor switched on, and can be removed.
+        _plant_personal("alice", {"records": private, "resting": {**private, "enabled": False}})
+        assert await _discover_personal("alice") == []
+        assert service.connections == 0
+        assert refused(personal_client.patch("/api/mcp/personal/config", headers=administrator, json={"server_name": "resting", "enabled": True}))
+        assert refused(personal_client.put("/api/mcp/personal/config/server", headers=administrator, json={"server_name": "records", "server": {**private, "description": "Records"}}))
+        assert personal_client.delete("/api/mcp/personal/config/servers/resting", headers=administrator).status_code == 200
+
+        # Its token address is held to the same rule as the connection's own.
+        tenant_written(service)
+        _plant_personal("alice", {"records": {**private_token, "url": service.url("/mcp")}})
+        await _discover_personal("alice")
+        assert token.connections == 0
+
+
+@pytest.mark.asyncio
+async def test_listed_private_endpoints_do_not_apply_to_ordinary_personal_connections(personal_client, tenant_written):
+    from support.mcp_endpoint_stubs import EndpointStub
+
+    with EndpointStub() as service:
+        tenant_written(service)
+        definition = {"type": "http", "url": service.url("/mcp")}
+        person = {"test-user": "bob", "test-role": "user"}
+        response = personal_client.post("/api/mcp/personal/config/servers", headers=person, json={"mcp_servers": {"records": definition}})
+        assert response.status_code == 400
+        assert read_user_mcp_config("bob")["mcpServers"] == {}
+
+        _plant_personal("bob", {"records": {**definition, "personal_public_network": True}})
+        assert await _discover_personal("bob") == []
+        assert service.connections == 0
+
+        # The same endpoint is open to an administrator's own connection.
+        response = personal_client.post("/api/mcp/personal/config/servers", headers={"test-user": "alice"}, json={"mcp_servers": {"records": definition}})
+        assert response.status_code == 200, response.text
+        assert [tool.name.endswith("_echo") for tool in await _discover_personal("alice")] == [True]

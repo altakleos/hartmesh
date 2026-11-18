@@ -191,6 +191,11 @@ Agent/profile and deployment/personal MCP mutation 500s plus the
 scheduled-task `invalid_assistant` 422 use fixed text. Log exceptions
 server-side; they can carry host paths.
 
+Every deployment and personal MCP write and capability installation passes
+`mcp._admit_mcp_transition`, which also applies `deerflow.mcp.tenant_written`
+(HTTP 400, plain-text `detail`). Keep new writers on it. Tests:
+`tests/blocking_io/test_mcp_router_tenant_written.py`.
+
 Committed MCP reconciliation failures are logged once by
 `fail_mcp_reconciliation`, with only the underlying exception type.
 `_run_drained_mcp_apply` passes `_McpCommittedReconciliationError` as an expected
@@ -245,7 +250,9 @@ and requests identity encoding, rejecting compressed bodies before decoding.
 Import probes each new profile, saves through the drained writer, and atomically
 deduplicates retries without changing existing disabled profiles. Saved-key reuse
 requires matching connection and revision, checked again under the write lock
-after probing (409 on change); provider errors remain redacted.
+after probing (409 on change); provider errors remain redacted. On a
+tenant-written deployment save (unless switched off), test, discover and import
+pass `_require_allowed_endpoint` for a custom address (422 `endpoint_not_public`).
 
 Agent-scoped memory routes take `agent_name` and validate it with
 `AGENT_NAME_PATTERN`; the backend must also declare

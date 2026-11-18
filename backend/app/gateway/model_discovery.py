@@ -5,6 +5,7 @@ import json
 
 import httpx
 
+from deerflow.community.endpoint_policy import tenant_written
 from deerflow.config.managed_model_providers import get_managed_model_provider
 from deerflow.config.managed_models import ManagedModel
 
@@ -29,8 +30,15 @@ async def fetch_model_catalog(profile: ManagedModel) -> tuple[list[str], bool]:
         headers.update({"x-api-key": key or "", "anthropic-version": "2023-06-01"})
     elif key:
         headers["Authorization"] = f"Bearer {key}"
-    # HTTPX constructs TLS trust synchronously; keep that work off the event loop.
-    client = await asyncio.to_thread(httpx.AsyncClient, timeout=15, follow_redirects=False)
+    if provider.endpoint is None and tenant_written():
+        # The caller's own address on a tenant-written deployment: the request
+        # is checked again and goes to the address that was checked.
+        from deerflow.mcp.personal_network import public_endpoint_model_async_client
+
+        client = public_endpoint_model_async_client(timeout=15)
+    else:
+        # HTTPX constructs TLS trust synchronously; keep that work off the event loop.
+        client = await asyncio.to_thread(httpx.AsyncClient, timeout=15, follow_redirects=False)
     names: set[str] = set()
     cursor = None
     size = 0

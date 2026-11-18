@@ -112,6 +112,12 @@ class ManagedModel(BaseModel):
             if not api_key:
                 raise ValueError("This provider requires an API key")
             settings = resolve_preset_model(self.provider, self.model, api_key)
+        if get_managed_model_provider(self.provider).endpoint is None:
+            # A kind with no fixed address of its own: a tenant chose it. The
+            # address itself is never checked in this model's validators:
+            # stored models are read back through them, and an earlier one
+            # must stay readable.
+            settings["endpoint_policy"] = "public"
         if self.reasoning is not None:
             # Remove derived legacy fields/templates when an admin supplies a
             # contract. Protocol dialect is still interpreted by the factory.

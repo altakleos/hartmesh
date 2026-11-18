@@ -103,6 +103,7 @@ get explicit `environment:` entries and never see a provider key.
 | `HARTMESH_MODELS_FILE` | The path of the operator's own model file, read by `gateway/render_config.py` at every Gateway start. Absent -- which is what every existing tenant `.env` is -- the rendered `models:` section comes from the bundled provider catalog exactly as before. Set, that one file is the whole model list (§ "Operator-managed models"). |
 | `HARTMESH_PROVIDER_KEYS_SECRET` | The wrapping key for provider keys an administrator sets in the product and for the tokens of Telegram bots people connect, at least 32 characters (`openssl rand -base64 32`). Absent -- which is what every existing tenant `.env` is -- nothing changes and the product refuses to store a key, saying why, and no Telegram bot can be added or polled (§ "Telegram bots"). Best supplied from the environment of the `docker compose` command rather than this file, which shares a disk with the database it protects (§ "Provider keys in the product"). |
 | `HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS` | Only while rotating that key: the old value, so keys wrapped under it are read and rewrapped under the new one at the next start (§ "Provider keys in the product"). |
+| `HARTMESH_PRIVATE_ENDPOINTS` | Private endpoints that an MCP connection or a custom model made in the product may use although they are not public: exact `host:port` pairs separated by commas, for example `mcp.internal.example:8443,10.0.4.7:9000`. No wildcard, and the port is always written. Absent -- which is what every existing tenant `.env` is -- none. An entry that is not a `host:port` pair is ignored and logged; it allows nothing and never stops a start. Read at Gateway start (§ "MCP connections"). |
 | `SANDBOX_READY_TIMEOUT` | The cold-start readiness budget, `sandbox.ready_timeout` in the rendered `config.yaml`: whole seconds from 60 to 600. Absent -- which is what every existing tenant `.env` is -- the template's 120 applies. Anything else (zero, a negative or fractional number, text, a value outside the range) refuses to render and the Gateway does not start, so no value can turn the deadline off (§ "Sandbox readiness budget"). |
 | `SANDBOX_CAPACITY_WAIT_TIMEOUT` | How long an acquisition waits for one of the two sandbox slots when both are in active use and nothing is parked to evict, `sandbox.capacity_wait_timeout` in the rendered `config.yaml`: whole seconds from 0 to 60, where 0 refuses at once. Absent, the template's 5 applies. Anything else refuses to render, so no value makes the wait unbounded (§ "Memory budget"). |
 | `HARTMESH_SIGN_ON_ADMINS` | Sign-on only. Comma-separated email addresses that become the provider's `admin_emails`: an address on it is created as `admin` at its first sign-in, every other address as `user`. Absent, the deployment has **no administrator** (§ "Sign-in"). |
@@ -142,6 +143,9 @@ interpolation, so validation reads the file Docker will bind into the sandbox.
 come from the environment of the `docker compose` command itself: the shell's
 value wins over the `--env-file` one, and absent from both they are simply
 unset.
+`HARTMESH_PRIVATE_ENDPOINTS` is interpolated by `compose.yaml` once, with an
+empty default, into the Gateway's `DEER_FLOW_PRIVATE_ENDPOINTS`, so an
+existing `.env` without it still renders and lists nothing.
 The four Telegram keys are not interpolated by `compose.yaml`: they reach the
 Gateway through `env_file` and are read by `gateway/render_config.py`.
 
@@ -4164,6 +4168,129 @@ Telegram is a service of its own, and some of what it does no setting of this pr
 - Files larger than 20 MB coming in and 50 MB going out are Telegram's limits for bots; the bot hands the person over to the web app for them.
 - The other channels of this profile have no words for a person whose access is turned off (§ "Sign-in").
 - On a deployment with local passwords no command turns one person's access off, so that person's bots are stopped only by removing them (§ "Removing the bots of a person who left").
+
+## MCP connections
+
+In this profile the people who administer a deployment are tenants, not its
+operator. `compose.yaml` says so to the Gateway with
+`DEER_FLOW_TENANT_WRITTEN_ENDPOINTS: "on"`. It is a fixed value in the
+Gateway's `environment:` block, so a line of the same name in the tenant
+`.env` does not change it; only the exact value `on` counts.
+
+With it, MCP connections made in the product follow two rules. They cover a
+deployment connection on the Tools screen, a capability installed for the
+deployment, and an administrator's own personal connection.
+
+- **Values are sent as typed.** A value that begins with `$` is that text,
+  not a reference: the `$NAME` substitution of `extensions_config.json` does
+  not apply in this profile, for any field. Saving a deployment connection
+  with such a value is refused: "Values that begin with `$` are not accepted
+  for MCP connections on this deployment."
+- **Addresses are public.** A connection's address, and the token address of
+  its OAuth setup, must be a public HTTP(S) address, whether it is written as
+  numbers or as a name. Saving another one is refused: "MCP connections on
+  this deployment must use a public HTTP(S) address." The rule also holds
+  each time a connection is used, whatever is stored: the address is checked
+  again at every request and the request goes to the address that was
+  checked, a redirect to another origin is not followed (one that stays on
+  the connection's own origin still is), and the proxy and
+  certificate-authority settings of the Gateway's environment are not read.
+
+The checks at saving apply to a connection that a request creates, changes or
+switches on. Switching a connection off and deleting it are always allowed,
+and a connection that a request leaves exactly as stored is not checked, so
+one earlier entry never blocks saving the others. A request that can carry
+several connections (adding, installing a capability, the whole-file route)
+begins its refusal with the connection it refused: `MCP server '<name>': `.
+
+A person's own connection saved by someone who is not an administrator
+already followed both rules and is unchanged.
+
+**Allowing a service of your own.** `HARTMESH_PRIVATE_ENDPOINTS` in the
+tenant `.env` lists private endpoints that are allowed all the same, as
+exact `host:port` pairs separated by commas:
+
+```dotenv
+HARTMESH_PRIVATE_ENDPOINTS=mcp.internal.example:8443,10.0.4.7:9000
+```
+
+A host is a name or an address written as numbers (an IPv6 address in square
+brackets), compared exactly and without regard to case. A name outside ASCII
+is listed in its encoded form (`xn--…`). There is no wildcard
+and the port is always written. A connection whose address has exactly that
+host and port (the port `https` or `http` implies when the address writes
+none) can be saved and is reached by ordinary name lookup; any other port on
+the same host is refused. The same holds for an OAuth token address. Values
+are still sent as typed and a redirect to another origin is still not
+followed. A listed `https` endpoint needs a certificate from a publicly
+trusted authority: certificate-authority settings of the Gateway's
+environment are not read for listed endpoints either. The list
+applies to deployment connections and to an administrator's own; a personal
+connection of someone who is not an administrator cannot use a private
+address at all. An entry that is not of this form is ignored, with the log
+line `Ignoring entry <n> of DEER_FLOW_PRIVATE_ENDPOINTS: expected host:port`;
+it allows nothing and never stops a start. The list is read at Gateway start
+(§ "Applying a `.env` re-render").
+
+**Upgrading a tenant that already has connections.** Nothing stored is
+changed. A stored connection keeps working unless it relies on what the rules
+exclude:
+
+| A stored connection that | After the upgrade |
+| --- | --- |
+| has a value beginning with `$` | That text is sent as it is, which the service will most likely refuse. Edit the connection and type the value. |
+| has an address, or an OAuth token address, that is not public | It no longer connects and shows no tools. List its `host:port` in `HARTMESH_PRIVATE_ENDPOINTS` before the upgrade to keep it. |
+| is reached only through a proxy, or trusted only through a certificate authority, named in the Gateway's environment | It no longer connects. |
+| starts a program and takes a value of its environment from a `$` name | The program is started with that text. |
+
+Such a connection stays in the list, switched on and without tools, like any
+connection that fails. Read `${HARTMESH_DATA_DIR}/home/extensions_config.json`
+before upgrading to see which ones a tenant has.
+
+Rolling back to a release without the rule restores the earlier behaviour for
+every stored connection; the two lines are ignored by an older Gateway.
+
+### Custom model addresses
+
+The same line governs the address of a custom OpenAI-compatible model, which
+an administrator adds through the managed-model API (`PUT
+/api/managed-models`; this profile's web app has no form for it). Its address
+must be a public HTTP(S) address or a pair listed in
+`HARTMESH_PRIVATE_ENDPOINTS`, which is reached by ordinary name lookup:
+
+- Saving a model switched on, testing, discovering and importing refuse
+  another address: "Custom model endpoints on this deployment must use a
+  public HTTP(S) address." A model can still be saved switched off.
+- Every request to such a model is checked again and goes to the address that
+  was checked. No redirect is followed, and the proxy and
+  certificate-authority settings of the Gateway's environment, `OPENAI_PROXY`
+  included, are not used, so a listed `https` endpoint needs a certificate
+  from a publicly trusted authority.
+- Each request opens a connection of its own, so a custom model pays a name
+  lookup, a TCP connection and, over `https`, a TLS handshake on every
+  request.
+
+The models this profile renders from `config.yaml` and `providers/`, an
+operator's own models file (§ "Operator-managed models") and the models of
+the fixed provider list are not affected, whatever their address, unless a
+profile sets `endpoint_policy: public` (see `backend/docs/CONFIGURATION.md`).
+One thing is the same for every model: one that cannot be built shows "This
+model could not be built", and the Gateway log line `Model '<name>' could not
+be built (<error type>)` says what failed; for a validation error it also
+names the fields, `(<error type>: <fields>)`.
+
+**Upgrading a tenant that already has custom models.** Nothing stored is
+changed: a custom model saved earlier at a private address stays in the list
+with its address and key. Every chat that uses it fails as when a model
+cannot be reached, and if it is the tenant's only or default model nobody in
+that company can chat, until an administrator gives it a public address or
+its `host:port` is listed for that tenant. An administrator can still open
+the list, edit such a model or switch it off; saving it switched on at the
+same address is refused. A custom model reached only through a proxy, a
+certificate authority of the Gateway's environment or a redirect fails the
+same way. Before upgrading, read each tenant's models as an administrator
+(`GET /api/managed-models`) and write the `host:port` of every private
+address you mean to keep into that tenant's `HARTMESH_PRIVATE_ENDPOINTS`.
 
 ## Durability
 

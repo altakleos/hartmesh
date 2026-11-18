@@ -232,7 +232,14 @@ file permissions; complete read/modify/write transactions hold the process lock 
 cross-process sidecar lock. Missing keys and invalid catalogs fail closed. Backups
 and shared deployments must include both files. SQL storage does not replicate this
 catalog. Admin-supplied endpoints can address local providers; only trusted admins
-may create or probe them.
+may create or probe them. On a tenant-written deployment
+(`community/endpoint_policy.py`) a custom model carries `endpoint_policy: public`
+(set in `runtime_config()`, never checked in a field validator: stored models
+are read back through those) and `create_chat_model` hands it
+`mcp/personal_network.py::public_endpoint_model_clients`, or refuses to build
+it; an operator profile that sets the field is treated the same. There the
+build error of any model is a fixed sentence, with type and failing fields
+logged. Tests: `tests/test_custom_model_endpoints.py`.
 
 `get_app_config()` and `reload_app_config()` merge enabled managed models after YAML
 profiles, with YAML names winning conflicts. A cached effective snapshot uses the

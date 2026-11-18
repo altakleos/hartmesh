@@ -442,6 +442,43 @@ for routing, authentication, streaming, tool choice and token limits, plus
 positive and negative capability-rule cases. The frontend discovers the new
 entry from `/providers`; it should not gain a routing map.
 
+On a deployment whose connections are written by tenants
+(`DEER_FLOW_TENANT_WRITTEN_ENDPOINTS=on`; see
+[MCP Server Configuration](MCP_SERVER.md#deployments-whose-connections-are-written-by-tenants)),
+the address of a custom OpenAI-compatible model must be a public HTTP(S)
+address, or an exact `host:port` pair listed in `DEER_FLOW_PRIVATE_ENDPOINTS`:
+
+- Save, test, discover and import refuse another address with HTTP 422
+  `{"code": "endpoint_not_public", "message": "Custom model endpoints on this
+  deployment must use a public HTTP(S) address."}`. Saving a model switched
+  off is not checked, so an earlier model can always be switched off.
+- Every request of a custom model, and discovery, uses the deployment's
+  public-endpoint HTTP clients: the address is checked again and the request
+  goes to the address that was checked, no redirect is followed, and proxy and
+  certificate-authority settings from the environment, `OPENAI_PROXY`
+  included, are not used (a listed HTTPS endpoint needs a publicly trusted
+  certificate). A custom model's requests carry no `OpenAI-Organization` or
+  `OpenAI-Project` header. A listed endpoint is reached by ordinary name lookup. Each
+  request opens a connection of its own, so a custom model pays a name lookup,
+  a TCP connection and, over HTTPS, a TLS handshake on every request. A custom
+  model whose provider class cannot take those clients is not built.
+- Nothing stored is changed. A custom model saved earlier at another address
+  stays in the list with its key and can be edited or switched off; chats that
+  use it fail until its address is public or listed.
+- A model of any kind that cannot be built reports the fixed sentence "This
+  model could not be built", which quotes no setting. The Gateway log has the
+  error's type and, for a validation error, the names of the fields that
+  failed, never what they held.
+
+Models in `config.yaml`, in an operator's models file and of the fixed
+provider catalog are otherwise not affected, whatever their address, unless
+their profile sets `endpoint_policy: public`. A profile with that field is
+built like a custom model on such a deployment: it gets the public-endpoint
+HTTP clients, its class's proxy field is set to none, ready-made SDK clients
+among its settings are dropped, and its requests carry no organization or
+project header. Such a profile must give its own address (`base_url`) and key
+(`api_key`). Without `DEER_FLOW_TENANT_WRITTEN_ENDPOINTS=on` nothing changes.
+
 `PUT /api/managed-models` and `POST /api/managed-models/test` keep their existing
 `{config, expected_revision}` envelope. A preset create needs only
 `config.provider`, `config.model` and `config.api_key`; omitted `name` and

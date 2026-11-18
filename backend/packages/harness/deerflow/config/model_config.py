@@ -175,6 +175,15 @@ class ModelConfig(BaseModel):
         description="Extra settings to be passed to the model when thinking is disabled",
     )
     supports_vision: bool = Field(default_factory=lambda: False, description="Whether the model supports vision/image inputs")
+    endpoint_policy: Literal["public"] | None = Field(
+        default=None,
+        description=(
+            "Set to 'public' for a model whose address a tenant chose (a custom managed model sets it itself). "
+            "An operator's profile may set it too and must then give its own address and key. "
+            "On a tenant-written deployment such a model is given the deployment's public-endpoint HTTP clients; "
+            "never a provider kwarg. A declared field, so it survives re-validation of a profile."
+        ),
+    )
     context_window: int | None = Field(
         default=None,
         gt=0,
