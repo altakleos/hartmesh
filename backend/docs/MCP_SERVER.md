@@ -892,6 +892,8 @@ DEER_FLOW_PRIVATE_ENDPOINTS=mcp.internal.example:8443,10.0.4.7:9000
 
 Hosts are compared exactly and without regard to case; there is no wildcard
 and the port is always written (an IPv6 address goes in square brackets). A
+name outside ASCII is listed in its encoded form (`xn--…`); a connection may
+write it either way. A
 listed pair passes the write check and is reached by ordinary name lookup; a
 redirect to another origin is still not followed, and a listed HTTPS endpoint
 needs a publicly trusted certificate, because certificate-authority settings

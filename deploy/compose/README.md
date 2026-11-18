@@ -4199,7 +4199,9 @@ deployment, and an administrator's own personal connection.
 The checks at saving apply to a connection that a request creates, changes or
 switches on. Switching a connection off and deleting it are always allowed,
 and a connection that a request leaves exactly as stored is not checked, so
-one earlier entry never blocks saving the others.
+one earlier entry never blocks saving the others. A request that can carry
+several connections (adding, installing a capability, the whole-file route)
+begins its refusal with the connection it refused: `MCP server '<name>': `.
 
 A person's own connection saved by someone who is not an administrator
 already followed both rules and is unchanged.
@@ -4213,7 +4215,8 @@ HARTMESH_PRIVATE_ENDPOINTS=mcp.internal.example:8443,10.0.4.7:9000
 ```
 
 A host is a name or an address written as numbers (an IPv6 address in square
-brackets), compared exactly and without regard to case. There is no wildcard
+brackets), compared exactly and without regard to case. A name outside ASCII
+is listed in its encoded form (`xn--…`). There is no wildcard
 and the port is always written. A connection whose address has exactly that
 host and port (the port `https` or `http` implies when the address writes
 none) can be saved and is reached by ordinary name lookup; any other port on
