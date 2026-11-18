@@ -12,8 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 
 from app.gateway.deps import require_admin_user
 from app.gateway.persistent_writes import run_drained_write
+from deerflow.community.endpoint_policy import address_problem, tenant_written
 from deerflow.config.app_config import AppConfig, get_app_config
-from deerflow.config.managed_model_providers import PROVIDERS
+from deerflow.config.managed_model_providers import PROVIDERS, get_managed_model_provider
 from deerflow.config.managed_models import ManagedModel, ManagedModelInputError, ManagedModelStore, retained_api_key
 from deerflow.models.factory import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract
@@ -80,7 +81,21 @@ async def list_managed_models(request: Request):
         raise HTTPException(503, "Managed model storage is unavailable; check the catalog and encryption key") from None
 
 
+def _require_allowed_endpoint(profile: ManagedModel) -> None:
+    """Refuse a custom model address that a tenant-written deployment may not use.
+
+    Applies to the one kind whose address the caller chooses. Can look a host
+    name up, so every caller runs it off the event loop.
+    """
+    if tenant_written() and get_managed_model_provider(profile.provider).endpoint is None and address_problem(profile.base_url):
+        raise HTTPException(422, {"code": "endpoint_not_public", "message": "Custom model endpoints on this deployment must use a public HTTP(S) address."})
+
+
 def _save(body: SaveModelRequest):
+    # Only a switched-on model is ever used, and an earlier one must stay
+    # possible to switch off without first finding it another address.
+    if body.config.enabled:
+        _require_allowed_endpoint(body.config)
     config = get_app_config()
     if any(item.name == body.config.name and item.name not in config._managed_model_names for item in config.models):
         raise HTTPException(409, "This model name is reserved by config.yaml")
@@ -119,6 +134,7 @@ async def save_model(request: Request, body: SaveModelRequest):
 
 def _probe_config(body: SaveModelRequest):
     profile = body.config
+    _require_allowed_endpoint(profile)
     previous = None
     if body.expected_revision is not None:
         previous = next((item for item in ManagedModelStore().list() if item.name == profile.name), None)
@@ -220,6 +236,7 @@ def _connection_profile(body: ModelConnection, model: str = "catalog-check") -> 
         if previous is None or previous.revision != body.expected_revision:
             raise HTTPException(409, "Connection changed; reload before continuing")
     profile = ManagedModel(provider=body.provider, base_url=body.base_url, api_key=body.api_key, model=model)
+    _require_allowed_endpoint(profile)
     profile = profile.model_copy(update={"api_key": retained_api_key(profile, previous)})
     if profile.provider != "openai-compatible" and not (profile.api_key and profile.api_key.get_secret_value()):
         raise HTTPException(422, {"code": "missing_api_key", "message": "Enter the connection API key"})
