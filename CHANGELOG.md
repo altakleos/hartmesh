@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.61] - 2026-11-18
+
 ### Changed
 
 - On deployments whose connections are written by tenants
@@ -32,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   otherwise unchanged unless their profile sets `endpoint_policy: public`, and
   nothing stored is changed. See the Compose bundle guide, "Custom model
   addresses", for what an earlier custom model does after an upgrade.
+
+### Schema changes
+
+- No database schema changes since v2.2.0+hartmesh.60. The Compose bundle
+  adds one fixed Gateway environment line and one optional tenant environment
+  key, `HARTMESH_PRIVATE_ENDPOINTS`; nothing stored is changed.
 
 ## [2.2.0+hartmesh.60] - 2026-11-17
 
