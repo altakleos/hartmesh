@@ -901,6 +901,10 @@ def tenant_written(monkeypatch):
     """Declare the deployment tenant-written; returns a function that lists private endpoints."""
     monkeypatch.setenv("DEER_FLOW_TENANT_WRITTEN_ENDPOINTS", "on")
     monkeypatch.delenv("DEER_FLOW_PRIVATE_ENDPOINTS", raising=False)
+    # An ordinary client reads proxy settings; loopback stubs must stay direct,
+    # or "the stub received nothing" would hold for the wrong reason.
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     return lambda *stubs: monkeypatch.setenv("DEER_FLOW_PRIVATE_ENDPOINTS", ",".join(stub.host_port for stub in stubs))
 
 

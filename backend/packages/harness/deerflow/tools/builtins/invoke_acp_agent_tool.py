@@ -71,15 +71,23 @@ def _build_acp_mcp_servers() -> list[dict[str, Any]]:
     The ACP client expects a list of server objects, while DeerFlow's MCP helper
     returns a name -> config mapping for the LangChain MCP adapter. This helper
     converts the enabled servers into the ACP wire format.
+
+    Where connections are written by tenants, remote (``http``/``sse``)
+    connections are left out: the agent would open them with a client of its
+    own, outside the public-endpoint client every other use goes through.
     """
+    from deerflow.community.endpoint_policy import tenant_written
     from deerflow.config.extensions_config import ExtensionsConfig
 
     extensions_config = ExtensionsConfig.from_file()
     enabled_servers = extensions_config.get_enabled_mcp_servers()
+    local_only = tenant_written()
 
     mcp_servers: list[dict[str, Any]] = []
     for name, server_config in enabled_servers.items():
         transport_type = server_config.type or "stdio"
+        if local_only and transport_type != "stdio":
+            continue
         payload: dict[str, Any] = {"name": name, "type": transport_type}
 
         if transport_type == "stdio":

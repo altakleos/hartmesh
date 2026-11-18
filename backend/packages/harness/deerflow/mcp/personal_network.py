@@ -6,8 +6,11 @@ only. ``tenant_written_httpx_client_factory`` is for every other remote
 connection and OAuth token request on a deployment whose connections are
 written by tenants (``community/endpoint_policy.py``): the same rule, except
 that a provider-listed private endpoint is reached by ordinary name lookup.
-Neither follows a redirect or reads proxy and trust settings from the
-environment.
+Both clients have redirect following off and read no proxy or trust settings
+from the environment, so a listed HTTPS endpoint needs a publicly trusted
+certificate. The MCP transports follow a redirect that stays on the endpoint's
+origin themselves, through this same transport; a redirect to another origin
+is not followed.
 """
 
 import asyncio
@@ -20,7 +23,7 @@ from deerflow.community.endpoint_policy import is_private_endpoint
 from deerflow.community.url_safety import resolve_host_addresses, validate_public_http_url
 
 
-def _public_addresses(url: httpx.URL) -> list[str]:
+def _public_addresses(url: httpx.URL, refusal: str) -> list[str]:
     addresses = []
 
     def resolve(host):
@@ -29,7 +32,7 @@ def _public_addresses(url: httpx.URL) -> list[str]:
         return candidates
 
     if validate_public_http_url(str(url), action="connect to", resolver=resolve):
-        raise ValueError("MCP connections require a public HTTP(S) endpoint")
+        raise ValueError(refusal)
     # Literal IP URLs are validated without calling the resolver.
     return list(dict.fromkeys(addresses)) if addresses else [str(ipaddress.ip_address(url.host))]
 
@@ -37,6 +40,8 @@ def _public_addresses(url: httpx.URL) -> list[str]:
 class _PersonalTransport(httpx.AsyncBaseTransport):
     def __init__(self, *, allow_listed_private_endpoints: bool = False):
         self._allow_listed_private_endpoints = allow_listed_private_endpoints
+        # A personal connection keeps the text it always had, on every deployment.
+        self._refusal = "MCP connections require a public HTTP(S) endpoint" if allow_listed_private_endpoints else "Personal MCP connections require a public HTTP(S) endpoint"
         self._ssl_context: ssl.SSLContext | None = None
         self._ssl_context_lock = asyncio.Lock()
         self._transports: dict[tuple[bytes, bytes, int | None], httpx.AsyncHTTPTransport] = {}
@@ -45,7 +50,7 @@ class _PersonalTransport(httpx.AsyncBaseTransport):
         # A provider-listed private endpoint skips the public-address check and
         # the pinning that depends on it; every other request is vetted again.
         listed = self._allow_listed_private_endpoints and is_private_endpoint(request.url.scheme, request.url.host, request.url.port)
-        addresses = [] if listed else await asyncio.to_thread(_public_addresses, request.url)
+        addresses = [] if listed else await asyncio.to_thread(_public_addresses, request.url, self._refusal)
         # The synchronous client factory can run on the event loop. Load TLS
         # trust lazily off-loop, sharing one context across concurrent requests.
         if self._ssl_context is None:

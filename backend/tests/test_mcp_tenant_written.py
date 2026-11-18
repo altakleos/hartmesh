@@ -297,14 +297,11 @@ async def test_only_public_addresses_are_contacted(stubs, company_file, monkeypa
     assert token.connections == 0
 
 
-@pytest.mark.asyncio
-async def test_a_name_is_checked_again_when_it_is_connected(stubs, company_file, monkeypatch):
+@pytest.fixture
+def changing_name(monkeypatch):
+    """Answer ``records.example.test`` with a public address first and the loopback address afterwards."""
     import socket
 
-    from deerflow.community.endpoint_policy import address_problem
-
-    service = stubs()
-    _tenant_written(monkeypatch)
     lookups: list[str] = []
     system_lookup = socket.getaddrinfo
 
@@ -312,18 +309,117 @@ async def test_a_name_is_checked_again_when_it_is_connected(stubs, company_file,
         # An HTTP client may hand the name over already encoded.
         if (host.decode("ascii") if isinstance(host, bytes) else host) != "records.example.test":
             return system_lookup(host, port, *args, **kwargs)
-        # A public address the first time it is asked, the loopback stub afterwards.
         lookups.append("8.8.8.8" if not lookups else "127.0.0.1")
         return system_lookup(lookups[-1], port, *args, **kwargs)
 
     monkeypatch.setattr(socket, "getaddrinfo", lookup)
+    return lookups
+
+
+@pytest.mark.asyncio
+async def test_a_name_that_stops_being_public_after_saving_is_not_contacted(stubs, company_file, changing_name, monkeypatch):
+    from deerflow.community.endpoint_policy import address_problem
+
+    service = stubs()
+    _tenant_written(monkeypatch)
     url = service.url("/mcp", host="records.example.test")
     assert address_problem(url) is None
     company_file({"records": {"type": "http", "url": url}})
 
     assert await _discover() == []
-    assert lookups[:2] == ["8.8.8.8", "127.0.0.1"]
+    assert changing_name[:2] == ["8.8.8.8", "127.0.0.1"]
     assert service.connections == 0
+
+
+@pytest.mark.asyncio
+async def test_a_connection_goes_to_the_address_that_was_checked(stubs, company_file, changing_name, monkeypatch):
+    """One lookup per request: the answer that passed the check is the address connected to."""
+    import httpcore
+    from httpcore._backends.anyio import AnyIOBackend
+
+    service = stubs()
+    _tenant_written(monkeypatch)
+    connects: list[tuple[str, int]] = []
+
+    async def connect(self, host, port, **kwargs):
+        # A public address cannot be contacted from a test; record where the client was going.
+        connects.append((host.decode("ascii") if isinstance(host, bytes) else host, port))
+        raise httpcore.ConnectError("unreachable from tests")
+
+    monkeypatch.setattr(AnyIOBackend, "connect_tcp", connect)
+    company_file({"records": {"type": "http", "url": service.url("/mcp", host="records.example.test"), "session_init_timeout": 2}})
+
+    assert await _discover() == []
+    # A second lookup of the name would have answered with the stub's address.
+    assert connects == [("8.8.8.8", service.port)]
+    assert changing_name == ["8.8.8.8"]
+    assert service.connections == 0
+
+
+@pytest.mark.asyncio
+async def test_a_marked_deployment_connection_keeps_the_public_only_client(stubs, company_file, monkeypatch):
+    listed = stubs()
+    _tenant_written(monkeypatch, listed)
+    company_file({"records": {"type": "http", "url": listed.url("/mcp"), "personal_public_network": True}, "ledger": {"type": "http", "url": listed.url("/mcp")}})
+
+    assert [tool.name for tool in await _discover()] == ["ledger_echo"]
+
+
+@pytest.mark.asyncio
+async def test_each_client_names_its_own_rule(monkeypatch):
+    from deerflow.mcp.personal_network import personal_httpx_client_factory, tenant_written_httpx_client_factory
+
+    _tenant_written(monkeypatch)
+    async with personal_httpx_client_factory() as client:
+        with pytest.raises(ValueError, match=r"^Personal MCP connections require a public HTTP\(S\) endpoint$"):
+            await client.get("http://127.0.0.1:9/mcp")
+    async with tenant_written_httpx_client_factory() as client:
+        with pytest.raises(ValueError, match=r"^MCP connections require a public HTTP\(S\) endpoint$"):
+            await client.get("http://127.0.0.1:9/mcp")
+
+
+def test_remote_connections_are_not_handed_to_acp_agents(company_file, monkeypatch):
+    """An ACP agent connects with a client of its own, so it is given no remote connection."""
+    from deerflow.tools.builtins.invoke_acp_agent_tool import _build_acp_mcp_servers
+
+    company_file(
+        {
+            "files": {"type": "stdio", "command": "npx", "args": ["example-server@1.0.0"]},
+            "records": {"type": "http", "url": "https://8.8.8.8/mcp", "headers": {"X-Records-Key": "typed-value"}},
+            "feed": {"type": "sse", "url": "https://8.8.8.8/sse"},
+        }
+    )
+
+    assert [server["name"] for server in _build_acp_mcp_servers()] == ["files", "records", "feed"]
+    monkeypatch.setenv(LINE, "on")
+    assert _build_acp_mcp_servers() == [{"name": "files", "type": "stdio", "command": "npx", "args": ["example-server@1.0.0"], "env": []}]
+
+
+def test_the_embedded_client_writer_follows_the_same_rules(company_file, tmp_path, monkeypatch):
+    from deerflow.client import DeerFlowClient
+    from deerflow.mcp.cache import reset_mcp_tools_cache
+
+    monkeypatch.setenv(LINE, "on")
+    stored = {"records": {"type": "http", "url": "https://8.8.8.8/mcp", "headers": {"X-Records-Key": "$HM_TEST_VALUE"}}}
+    company_file(stored)
+    path = tmp_path / "extensions_config.json"
+    before = path.read_bytes()
+    client = DeerFlowClient.__new__(DeerFlowClient)
+    monkeypatch.setattr(client, "_customer_management_actor_allowed", lambda: True)
+
+    with pytest.raises(ValueError, match=r"Values that begin with `\$` are not accepted"):
+        client.update_mcp_config({"records": {**stored["records"], "url": "https://8.8.4.4/mcp"}})
+    with pytest.raises(ValueError, match=r"must use a public HTTP\(S\) address"):
+        client.update_mcp_config({**stored, "ledger": {"type": "http", "url": "http://127.0.0.1:9/mcp"}})
+    assert path.read_bytes() == before
+
+    try:
+        # The stored definition as it is, beside one new connection, is accepted.
+        saved = client.update_mcp_config({**stored, "ledger": {"type": "http", "url": "https://8.8.4.4/mcp"}})
+    finally:
+        reset_mcp_tools_cache()
+    assert set(saved["mcp_servers"]) == {"records", "ledger"}
+    assert json.loads(path.read_text(encoding="utf-8"))["mcpServers"]["records"] == stored["records"]
 
 
 @pytest.mark.asyncio
