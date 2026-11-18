@@ -96,9 +96,10 @@ def private_name(monkeypatch):
     monkeypatch.setattr(_socket, "getaddrinfo", getaddrinfo)
 
 
-def _refused(response, detail: str) -> bool:
+def _refused(response, detail: str, *, route: str | None = None) -> bool:
     assert response.status_code == 400, response.text
-    assert response.json()["detail"] == detail
+    # The route that takes every definition at once says which one it refused.
+    assert response.json()["detail"] == (f"MCP server 'records': {detail}" if route == "whole_file" else detail)
     return True
 
 
@@ -132,7 +133,7 @@ def test_a_stored_value_cannot_be_carried_into_a_changed_definition(gateway, rou
     assert gateway.client.get("/api/mcp/config").json()["mcp_servers"]["records"]["headers"] == {"X-Records-Key": "***"}
 
     changed = {"type": "http", "url": OTHER_PUBLIC, "headers": {"X-Records-Key": "***"}}
-    assert _refused(_write(gateway.client, route, "records", changed), ENVIRONMENT_REFERENCE)
+    assert _refused(_write(gateway.client, route, "records", changed), ENVIRONMENT_REFERENCE, route=route)
 
     assert gateway.path.read_bytes() == before
 
@@ -184,7 +185,7 @@ def test_addresses_that_are_not_public_are_refused(gateway, private_name, route,
     stored = {} if route == "add" else {"records": {**definition, "enabled": False}} if route == "switch_on" else {"records": {"type": "http", "url": PUBLIC}}
     before = gateway.plant(stored)
 
-    assert _refused(_write(gateway.client, route, "records", definition), ADDRESS_NOT_PUBLIC)
+    assert _refused(_write(gateway.client, route, "records", definition), ADDRESS_NOT_PUBLIC, route=route)
 
     assert gateway.path.read_bytes() == before
 
@@ -206,8 +207,22 @@ def test_refused_save_reports_values_as_typed(gateway):
 
     response = gateway.client.put("/api/mcp/config", json={"mcp_servers": {"records": {"type": "http", "url": PUBLIC, "task_toolsets": [toolset]}}})
 
-    assert response.status_code in (400, 409), response.text
+    assert _refused(response, ENVIRONMENT_REFERENCE, route="whole_file")
     assert MARKER not in response.text
+    assert gateway.path.read_bytes() == before
+
+
+def test_a_switched_off_oauth_setup_is_not_checked(gateway):
+    """A token address is used only while its OAuth setup is switched on."""
+    unused = {"type": "http", "url": PUBLIC, "oauth": {"enabled": False, "token_url": ""}}
+    resting = {"type": "http", "url": PUBLIC, "oauth": {"enabled": False, "token_url": "http://127.0.0.1:9/token", "client_id": "records-client", "client_secret": "typed-value"}}
+    response = gateway.client.post("/api/mcp/config/servers", json={"mcp_servers": {"records": unused, "ledger": resting}})
+    assert response.status_code == 200, response.text
+    before = gateway.path.read_bytes()
+
+    # Switching the setup on is a change, and is checked.
+    switched_on = {**resting, "oauth": {**resting["oauth"], "enabled": True}}
+    assert _refused(gateway.client.put("/api/mcp/config/server", json={"server_name": "ledger", "server": switched_on}), ADDRESS_NOT_PUBLIC)
     assert gateway.path.read_bytes() == before
 
 
