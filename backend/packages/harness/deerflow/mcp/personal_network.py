@@ -128,9 +128,12 @@ _MODEL_REFUSAL = "Custom model endpoints require a public HTTP(S) endpoint"
 def _supported_model_socket_options() -> tuple[tuple[int, int, int], ...]:
     """The keepalive profile the model library gives the clients it builds itself, less what this system refuses.
 
-    It notices a silent peer within about two minutes. The library's own
-    helpers for it are private, so the options are probed here, once: one this
-    system does not know is dropped rather than failing every connection.
+    It notices a silent peer within about two minutes. The values are fixed:
+    the library's tuning variables are not read, only its switch
+    (:func:`_model_socket_options`). The library's own helpers are private, so
+    the options are probed here, once: one this system does not know is
+    dropped rather than failing every connection. A probe socket that cannot
+    be made raises, and an error is not kept, so the next call probes again.
     """
     wanted = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
     for name, value in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3), ("TCP_USER_TIMEOUT", 120_000)):
@@ -138,11 +141,7 @@ def _supported_model_socket_options() -> tuple[tuple[int, int, int], ...]:
         if option is not None:
             wanted.append((socket.IPPROTO_TCP, option, value))
     supported: list[tuple[int, int, int]] = []
-    try:
-        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    except OSError:
-        return ()
-    with probe:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         for option in wanted:
             try:
                 probe.setsockopt(*option)
@@ -156,7 +155,11 @@ def _model_socket_options() -> list[tuple[int, int, int]] | None:
     """The options for one model connection; the model library's own switch turns them off here too."""
     if os.environ.get("LANGCHAIN_OPENAI_TCP_KEEPALIVE", "1") == "0":
         return None
-    return list(_supported_model_socket_options()) or None
+    try:
+        return list(_supported_model_socket_options()) or None
+    except Exception:  # noqa: BLE001 - as the library does: a system can refuse the probe socket with any error
+        # This connection goes without the options; the next one probes again.
+        return None
 
 
 _model_trust_lock = threading.Lock()

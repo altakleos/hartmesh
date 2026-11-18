@@ -314,6 +314,36 @@ def test_connection_options_follow_the_library_switch_and_what_the_system_suppor
     assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) not in socket_settings.options
 
 
+@pytest.mark.parametrize("refusal", [OSError("no socket for the probe"), RuntimeError("no socket for the probe")], ids=["system-error", "another-error"])
+def test_a_probe_that_could_not_run_is_run_again(refusal, deployment, stubs, socket_settings, monkeypatch):
+    service = stubs()
+    _store(deployment, service.base_url())
+    _tenant_written(monkeypatch, service)
+    refusals = [refusal]
+
+    class OneRefusal:
+        """The socket module as the clients see it, refusing one socket and then none."""
+
+        def __getattr__(self, name):
+            return getattr(socket, name)
+
+        def socket(self, *args, **kwargs):
+            if refusals:
+                raise refusals.pop()
+            return socket.socket(*args, **kwargs)
+
+    monkeypatch.setattr(personal_network, "socket", OneRefusal())
+    model = _model()
+    # Building a model makes the library try the options on a socket of its own.
+    socket_settings.options.clear()
+
+    # The request whose probe could not run goes out without the options; the next one has them.
+    assert model.invoke("hello").content == ANSWER
+    assert refusals == [] and (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) not in socket_settings.options
+    assert model.invoke("hello").content == ANSWER
+    assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in socket_settings.options
+
+
 def test_proxy_settings_of_the_environment_are_not_used(deployment, stubs, monkeypatch):
     service, proxy = stubs(), stubs()
     _store(deployment, service.base_url())
