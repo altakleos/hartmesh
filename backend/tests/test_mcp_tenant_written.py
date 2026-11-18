@@ -149,6 +149,41 @@ async def test_token_request_values_are_sent_as_typed(stubs, company_file, monke
     assert MARKER not in token.received_text() + service.received_text()
 
 
+def test_program_environment_values_are_used_as_typed(company_file, monkeypatch):
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.client import build_servers_config
+
+    monkeypatch.setenv("HM_TEST_VALUE", MARKER)
+    company_file({"files": {"type": "stdio", "command": "npx", "args": ["example-server@1.0.0", "$HM_TEST_VALUE"], "env": {"RECORDS_KEY": "$HM_TEST_VALUE"}}})
+
+    monkeypatch.setenv(LINE, "on")
+    typed = build_servers_config(ExtensionsConfig.from_file())["files"]
+    assert (typed["args"], typed["env"]) == (["example-server@1.0.0", "$HM_TEST_VALUE"], {"RECORDS_KEY": "$HM_TEST_VALUE"})
+
+    monkeypatch.delenv(LINE)
+    filled = build_servers_config(ExtensionsConfig.from_file())["files"]
+    assert (filled["args"], filled["env"]) == (["example-server@1.0.0", MARKER], {"RECORDS_KEY": MARKER})
+
+
+@pytest.mark.asyncio
+async def test_proxy_settings_of_the_environment_are_not_read(stubs, company_file, monkeypatch):
+    service, proxy = stubs(), stubs()
+    company_file({"records": {"type": "http", "url": service.url("/mcp"), "session_init_timeout": 2}})
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name)
+    for name in ("HTTP_PROXY", "http_proxy"):
+        monkeypatch.setenv(name, proxy.url(""))
+
+    # Without the setting the ordinary client hands every request to the proxy.
+    await _discover()
+    assert (service.connections, proxy.connections > 0) == (0, True)
+
+    _tenant_written(monkeypatch, service)
+    handed_to_proxy = proxy.connections
+    assert [tool.name for tool in await _discover()] == ["records_echo"]
+    assert (service.connections > 0, proxy.connections) == (True, handed_to_proxy)
+
+
 @pytest.mark.asyncio
 async def test_routing_keywords_are_used_as_typed(stubs, company_file, monkeypatch):
     from deerflow.tools.builtins.tool_search import get_mcp_routing_hints_prompt_section
