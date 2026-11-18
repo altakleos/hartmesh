@@ -865,15 +865,18 @@ described in the rest of this document. With it:
   an OAuth setup that is switched on (HTTP 400, "MCP connections on this
   deployment must use a public HTTP(S) address."), for deployment connections
   and for personal ones, an administrator's included.
-- **ACP agents receive no remote connection.** `invoke_acp_agent` hands an
-  agent the enabled program-type connections only, because the agent would
-  open a remote one with a client of its own.
+- **ACP agents receive no remote connection.** Remote connections are not
+  handed to an ACP agent on a tenant-written deployment: `invoke_acp_agent`
+  gives it the enabled program-type connections only.
 
 The write checks apply to a definition that a write creates, changes or
 switches on, in the form it would be stored in. Switching off and deleting are
 always allowed, and a definition a write leaves as stored is not checked. The
-Gateway routes and `DeerFlowClient.update_mcp_config` apply the same checks;
-the route that takes every definition at once names the one it refused.
+Gateway routes and `DeerFlowClient.update_mcp_config` apply the same checks.
+A write that takes several definitions (adding, the whole-file route, the
+embedded client) prefixes its refusal with `MCP server '<name>': `, and where
+it compares against what is stored it checks in name order, so the same
+request is always refused for the same definition.
 
 An operator-approved program launch (`approved_local_mcp_definitions`) is
 matched against the definition as typed. An approval written with `$NAME`

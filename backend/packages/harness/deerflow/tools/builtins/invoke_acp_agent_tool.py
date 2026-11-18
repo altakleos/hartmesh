@@ -72,9 +72,8 @@ def _build_acp_mcp_servers() -> list[dict[str, Any]]:
     returns a name -> config mapping for the LangChain MCP adapter. This helper
     converts the enabled servers into the ACP wire format.
 
-    Where connections are written by tenants, remote (``http``/``sse``)
-    connections are left out: the agent would open them with a client of its
-    own, outside the public-endpoint client every other use goes through.
+    Remote (``http``/``sse``) connections are not handed to an ACP agent on a
+    tenant-written deployment; it receives the program-type connections only.
     """
     from deerflow.community.endpoint_policy import tenant_written
     from deerflow.config.extensions_config import ExtensionsConfig
