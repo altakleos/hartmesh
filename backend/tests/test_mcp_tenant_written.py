@@ -116,6 +116,94 @@ async def test_values_are_sent_as_typed(stubs, company_file, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_token_request_values_are_sent_as_typed(stubs, company_file, monkeypatch):
+    from urllib.parse import parse_qs
+
+    service, token = stubs(), stubs()
+    _tenant_written(monkeypatch, service, token)
+    monkeypatch.setenv("HM_TEST_VALUE", MARKER)
+    company_file(
+        {
+            "records": {
+                "type": "http",
+                "url": service.url("/mcp"),
+                "headers": {"X-Records-Key": "typed-value"},
+                "oauth": {"token_url": token.url("/token"), "client_id": "records-client", "client_secret": "$HM_TEST_VALUE", "extra_token_params": {"resource": "$HM_TEST_VALUE"}},
+            },
+            "ledger": {"type": "http", "url": service.url("/mcp"), "oauth": {"token_url": token.url("/token"), "grant_type": "refresh_token", "refresh_token": "$HM_TEST_VALUE"}},
+        }
+    )
+
+    tools = await _discover()
+    assert sorted(tool.name for tool in tools) == ["ledger_echo", "records_echo"]
+    for tool in tools:
+        assert "echo:hello" in str(await tool.ainvoke({"text": "hello"}))
+
+    forms = [parse_qs(body.decode("ascii")) for body in token.bodies("/token")]
+    client_credentials = next(form for form in forms if form["grant_type"] == ["client_credentials"])
+    refresh = next(form for form in forms if form["grant_type"] == ["refresh_token"])
+    assert (client_credentials["client_secret"], client_credentials["resource"], refresh["refresh_token"]) == (["$HM_TEST_VALUE"], ["$HM_TEST_VALUE"], ["$HM_TEST_VALUE"])
+    # The fetched token and the connection's fixed header travel together.
+    assert set(service.header_values("Authorization")) == {"Bearer stub-access-token"}
+    assert "typed-value" in service.header_values("X-Records-Key")
+    assert MARKER not in token.received_text() + service.received_text()
+
+
+@pytest.mark.asyncio
+async def test_routing_keywords_are_used_as_typed(stubs, company_file, monkeypatch):
+    from deerflow.tools.builtins.tool_search import get_mcp_routing_hints_prompt_section
+
+    service = stubs()
+    _tenant_written(monkeypatch, service)
+    monkeypatch.setenv("HM_TEST_VALUE", MARKER)
+    company_file({"records": {"type": "http", "url": service.url("/mcp"), "routing": {"mode": "prefer", "keywords": ["$HM_TEST_VALUE"]}}})
+
+    tools = await _discover()
+    assert [tool.name for tool in tools] == ["records_echo"]
+    hints = get_mcp_routing_hints_prompt_section(tools)
+    assert "$HM_TEST_VALUE" in hints
+    assert MARKER not in hints
+
+
+@pytest.mark.asyncio
+async def test_deployments_without_the_setting_are_unchanged(stubs, company_file, monkeypatch):
+    from deerflow.tools.builtins.tool_search import get_mcp_routing_hints_prompt_section
+
+    service = stubs()
+    monkeypatch.setenv("HM_TEST_VALUE", MARKER)
+    # Listed or not makes no difference: the list is read only with the setting.
+    monkeypatch.setenv(PRIVATE_ENDPOINTS, "")
+    company_file({"records": {"type": "http", "url": service.url("/mcp"), "headers": {"X-Records-Key": "$HM_TEST_VALUE"}, "routing": {"mode": "prefer", "keywords": ["$HM_TEST_VALUE"]}}})
+
+    for value in (None, "On", "true", "1", "off", ""):
+        monkeypatch.delenv(LINE, raising=False) if value is None else monkeypatch.setenv(LINE, value)
+        received = len(service.calls())
+        tools = await _discover()
+        assert [tool.name for tool in tools] == ["records_echo"], value
+        assert "echo:hello" in str(await tools[0].ainvoke({"text": "hello"}))
+        assert set(service.header_values("X-Records-Key")[received:]) == {MARKER}, value
+        assert MARKER in get_mcp_routing_hints_prompt_section(tools)
+
+
+@pytest.mark.asyncio
+async def test_redirects_are_not_followed(stubs, company_file, monkeypatch):
+    service, token, elsewhere = stubs(), stubs(), stubs()
+    # Every endpoint is listed, so only the redirect rule can keep a request away.
+    _tenant_written(monkeypatch, service, token, elsewhere)
+    token.redirect_to = elsewhere.url("/token")
+    company_file({"records": {"type": "http", "url": service.url("/mcp"), "oauth": {"token_url": token.url("/token"), "client_id": "records-client", "client_secret": "typed-value"}}})
+    await _discover()
+    assert token.calls() == [("POST", "/token")]
+    assert elsewhere.connections == 0
+
+    service.redirect_to = elsewhere.url("/mcp")
+    company_file({"records": {"type": "http", "url": service.url("/mcp")}, "feed": {"type": "sse", "url": service.url("/sse")}})
+    assert await _discover() == []
+    assert {("POST", "/mcp"), ("GET", "/sse")} <= set(service.calls())
+    assert elsewhere.connections == 0
+
+
+@pytest.mark.asyncio
 async def test_only_public_addresses_are_contacted(stubs, company_file, monkeypatch):
     service, token = stubs(), stubs()
     _tenant_written(monkeypatch)
