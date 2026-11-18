@@ -4,15 +4,16 @@ Each stub runs on its own threads and binds ``127.0.0.1:0`` only. It speaks
 just enough of the streamable HTTP and SSE transports for a real MCP client to
 initialize, list one tool and call it, and it answers an OAuth token request.
 
-- ``POST /mcp`` is the streamable HTTP endpoint (JSON responses, no session).
+- ``POST /mcp`` (or ``/mcp/``) is the streamable HTTP endpoint (JSON responses, no session).
 - ``GET /sse`` opens an SSE session whose messages are posted to ``/messages``.
 - ``POST /token`` returns a fixed access token.
 
-Three scripted departures let a test observe what a client does with them:
+Scripted departures let a test observe what a client does with them:
 ``unauthorized_once`` answers the next MCP request with 401 and a pointer to an
 authorization document, ``sse_post_endpoint_once`` makes the next SSE session
-announce that address as the place to post messages, and ``redirect_to`` answers
-every request with a 307 to that address.
+announce that address as the place to post messages, ``redirect_to`` answers
+every request with a 307 to that address, and ``redirects`` does so for single
+paths.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ class EndpointStub:
         self.unauthorized_once: str | None = None
         self.sse_post_endpoint_once: str | None = None
         self.redirect_to: str | None = None
+        self.redirects: dict[str, str] = {}
         self._lock = threading.Lock()
         self._sessions: dict[str, queue.Queue[dict[str, Any]]] = {}
         self._closing = threading.Event()
@@ -145,8 +147,9 @@ class EndpointStub:
                 self.wfile.write(data)
 
             def _scripted(self, *, mcp_request: bool) -> bool:
-                if stub.redirect_to is not None:
-                    self._send(307, headers={"Location": stub.redirect_to})
+                location = stub.redirect_to or stub.redirects.get(urlsplit(self.path).path)
+                if location is not None:
+                    self._send(307, headers={"Location": location})
                     return True
                 if mcp_request and (document := stub._take("unauthorized_once")) is not None:
                     self._send(401, headers={"WWW-Authenticate": f'Bearer resource_metadata="{document}"'})
@@ -156,11 +159,11 @@ class EndpointStub:
             def do_POST(self) -> None:  # noqa: N802 - http.server naming
                 body = self._record()
                 target = urlsplit(self.path)
-                if self._scripted(mcp_request=target.path == "/mcp"):
+                if self._scripted(mcp_request=target.path in {"/mcp", "/mcp/"}):
                     return
                 if target.path == "/token":
                     self._send(200, {"access_token": ACCESS_TOKEN, "token_type": "Bearer", "expires_in": 3600})
-                elif target.path == "/mcp":
+                elif target.path in {"/mcp", "/mcp/"}:
                     answer = stub._answer(json.loads(body or b"null"))
                     self._send(202) if answer is None else self._send(200, answer)
                 elif target.path == "/messages":

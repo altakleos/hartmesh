@@ -186,10 +186,13 @@ async def test_deployments_without_the_setting_are_unchanged(stubs, company_file
 
 
 @pytest.mark.asyncio
-async def test_redirects_are_not_followed(stubs, company_file, monkeypatch):
+@pytest.mark.parametrize("setting", ["on", None])
+async def test_redirects_are_not_followed(setting, stubs, company_file, monkeypatch):
+    """A redirect to another origin is not followed, with the setting and without it."""
     service, token, elsewhere = stubs(), stubs(), stubs()
-    # Every endpoint is listed, so only the redirect rule can keep a request away.
-    _tenant_written(monkeypatch, service, token, elsewhere)
+    if setting:
+        # Every endpoint is listed, so only the redirect rule can keep a request away.
+        _tenant_written(monkeypatch, service, token, elsewhere)
     token.redirect_to = elsewhere.url("/token")
     company_file({"records": {"type": "http", "url": service.url("/mcp"), "oauth": {"token_url": token.url("/token"), "client_id": "records-client", "client_secret": "typed-value"}}})
     await _discover()
@@ -201,6 +204,22 @@ async def test_redirects_are_not_followed(stubs, company_file, monkeypatch):
     assert await _discover() == []
     assert {("POST", "/mcp"), ("GET", "/sse")} <= set(service.calls())
     assert elsewhere.connections == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("setting", ["on", None])
+async def test_a_redirect_within_the_endpoint_origin_is_followed(setting, stubs, company_file, monkeypatch):
+    """The MCP transport itself follows a redirect that stays on the endpoint's origin; that is unchanged."""
+    service = stubs()
+    if setting:
+        _tenant_written(monkeypatch, service)
+    service.redirects["/mcp"] = service.url("/mcp/")
+    company_file({"records": {"type": "http", "url": service.url("/mcp")}})
+
+    tools = await _discover()
+
+    assert [tool.name for tool in tools] == ["records_echo"]
+    assert {("POST", "/mcp"), ("POST", "/mcp/")} <= set(service.calls())
 
 
 @pytest.mark.asyncio
@@ -231,7 +250,8 @@ async def test_a_name_is_checked_again_when_it_is_connected(stubs, company_file,
     system_lookup = socket.getaddrinfo
 
     def lookup(host, port, *args, **kwargs):
-        if host != "records.example.test":
+        # An HTTP client may hand the name over already encoded.
+        if (host.decode("ascii") if isinstance(host, bytes) else host) != "records.example.test":
             return system_lookup(host, port, *args, **kwargs)
         # A public address the first time it is asked, the loopback stub afterwards.
         lookups.append("8.8.8.8" if not lookups else "127.0.0.1")
