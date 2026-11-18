@@ -455,10 +455,13 @@ address, or an exact `host:port` pair listed in `DEER_FLOW_PRIVATE_ENDPOINTS`:
 - Every request of a custom model, and discovery, uses the deployment's
   public-endpoint HTTP clients: the address is checked again and the request
   goes to the address that was checked, no redirect is followed, and proxy and
-  certificate-authority settings from the environment are not read (a listed
-  HTTPS endpoint needs a publicly trusted certificate). Each request uses a
-  connection of its own. A custom model whose provider class cannot take
-  those clients is not built.
+  certificate-authority settings from the environment, `OPENAI_PROXY`
+  included, are not used (a listed HTTPS endpoint needs a publicly trusted
+  certificate). A listed endpoint is reached by ordinary name lookup. Each
+  request opens a connection of its own, so a custom model pays a name lookup,
+  a TCP connection and, over HTTPS, a TLS handshake on every request. A custom
+  model whose provider class cannot take those clients is not built, and a
+  build error on this path is a fixed sentence that quotes no setting.
 - Nothing stored is changed. A custom model saved earlier at another address
   stays in the list with its key and can be edited or switched off; chats that
   use it fail until its address is public or listed.

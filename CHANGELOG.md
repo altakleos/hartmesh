@@ -21,10 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the Compose bundle guide, "MCP connections", for what a stored connection
   does after an upgrade.
 - On the same deployments, the address of a custom OpenAI-compatible model must
-  be a public HTTP(S) address or a provider-listed private endpoint. Saving,
-  testing, discovering and importing refuse another address
-  (`endpoint_not_public`), and every request of a custom model uses HTTP
-  clients that check the address again and follow no redirect. Models of the
+  be a public HTTP(S) address or a provider-listed private endpoint. Saving a
+  model switched on, testing, discovering and importing refuse another address
+  (`endpoint_not_public`); a model can still be saved switched off. Every
+  request of a custom model uses HTTP clients that check the address again,
+  follow no redirect and open a connection of their own. Models of the
   operator's own configuration and of the fixed provider catalog are
   unchanged, and nothing stored is changed. See the Compose bundle guide,
   "Custom model addresses", for what an earlier custom model does after an

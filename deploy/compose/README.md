@@ -4252,17 +4252,23 @@ every stored connection; the two lines are ignored by an older Gateway.
 
 ### Custom model addresses
 
-The same line governs the address of a model an administrator adds as
-**Custom OpenAI-compatible** (§ "Models and tools"). Its address must be a
-public HTTP(S) address or a pair listed in `HARTMESH_PRIVATE_ENDPOINTS`:
+The same line governs the address of a custom OpenAI-compatible model, which
+an administrator adds through the managed-model API (`PUT
+/api/managed-models`; this profile's web app has no form for it). Its address
+must be a public HTTP(S) address or a pair listed in
+`HARTMESH_PRIVATE_ENDPOINTS`, which is reached by ordinary name lookup:
 
-- Saving, testing, discovering and importing refuse another address: "Custom
-  model endpoints on this deployment must use a public HTTP(S) address."
+- Saving a model switched on, testing, discovering and importing refuse
+  another address: "Custom model endpoints on this deployment must use a
+  public HTTP(S) address." A model can still be saved switched off.
 - Every request to such a model is checked again and goes to the address that
   was checked. No redirect is followed, and the proxy and
-  certificate-authority settings of the Gateway's environment are not read,
-  so a listed `https` endpoint needs a certificate from a publicly trusted
-  authority.
+  certificate-authority settings of the Gateway's environment, `OPENAI_PROXY`
+  included, are not used, so a listed `https` endpoint needs a certificate
+  from a publicly trusted authority.
+- Each request opens a connection of its own, so a custom model pays a name
+  lookup, a TCP connection and, over `https`, a TLS handshake on every
+  request.
 
 The models this profile renders from `config.yaml` and `providers/`, an
 operator's own models file (§ "Operator-managed models") and the models of
