@@ -107,16 +107,33 @@ def replace_reply(reply, **values):
 
 @pytest.mark.asyncio
 async def test_live_gateway_finishes_operator_prepared_journal_without_restart(storage, fixture):
+    from app.gateway.agent_operator_contract import CommandRefused
+    from app.gateway.agent_operator_rollback import _check_host
+    from deerflow.utils.file_io import run_file_io
+
     factory, saved, _captured, objects, calls, gateway = await operator_scope(storage, fixture)
+    files, _, _, attachments, adapter = storage
+
+    async def check_host():
+        claims = await attachments.retained_claims()
+        await run_file_io(_check_host, files, adapter, fixture[0].pool, claims, {}, {}, ())
+
     try:
         assert await storage[3].contain_host(saved.attachment_id, "operator")
         assert not objects and fixture[2].residents.records() == (saved,)
+        with pytest.raises(CommandRefused) as refused:
+            await check_host()
+        assert refused.value.fields == {
+            "workspace_mismatch_count": 1,
+            "workspace_mismatches": [{"attachment_id": saved.attachment_id, "in_docker": False, "in_native_journal": True, "in_retained_sql": False}],
+        }
         storage[4]._operator_only = False
         storage[4]._containment_scope = gateway
         calls.clear()
         assert await storage[3].contain_host(saved.attachment_id, "operator")
         assert fixture[2].residents.records() == ()
         assert fixture[0].snapshot().residents == ()
+        await check_host()
         assert not any(command[1] in {"run", "create", "start", "stop", "rm"} for command in calls)
     finally:
         factory.evidence.close()

@@ -244,7 +244,7 @@ class HostBoundStorage:
             operation_id=operation_id,
             request=request,
             controller_admission=guard,
-            call=lambda volumes: files._io(volumes[space_id], lambda fs: fs.write_atomic(path, content, expected_sha256=expected_sha256, create=create)),
+            call=lambda volumes: files._direct_io(volumes[space_id], "write", lambda fs: fs.write_atomic(path, content, expected_sha256=expected_sha256, create=create)),
         )
 
     async def mediated_remove(self, *, space_id, generation, operation_id, path):
@@ -259,7 +259,7 @@ class HostBoundStorage:
             operation_id=operation_id,
             request=request,
             controller_admission=guard,
-            call=lambda volumes: files._io(volumes[space_id], lambda fs: fs.remove(path)),
+            call=lambda volumes: files._direct_io(volumes[space_id], "remove", lambda fs: fs.remove(path)),
         )
 
     async def mediated_mkdir(self, *, space_id, generation, operation_id, path):
@@ -274,7 +274,7 @@ class HostBoundStorage:
             operation_id=operation_id,
             request=request,
             controller_admission=guard,
-            call=lambda volumes: files._io(volumes[space_id], lambda fs: fs.mkdir(path)),
+            call=lambda volumes: files._direct_io(volumes[space_id], "mkdir", lambda fs: fs.mkdir(path)),
         )
 
     async def mediated_rename(self, *, space_id, generation, operation_id, path, destination):
@@ -290,7 +290,7 @@ class HostBoundStorage:
             operation_id=operation_id,
             request=request,
             controller_admission=guard,
-            call=lambda volumes: files._io(volumes[space_id], lambda fs: fs.rename(path, destination)),
+            call=lambda volumes: files._direct_io(volumes[space_id], "rename", lambda fs: fs.rename(path, destination)),
         )
 
     async def mediated_copy(self, *, source, destination, source_generation, destination_generation, operation_id, acknowledge_disclosure=False):
@@ -315,8 +315,8 @@ class HostBoundStorage:
         }
 
         def transfer(volumes):
-            content = files._io(volumes[source.space_id], lambda fs: fs.read_bytes(source.path, max_bytes=MAX_TRANSFER_BYTES))
-            return files._io(volumes[destination.space_id], lambda fs: fs.write_atomic(destination.path, content, expected_sha256=None, create=True))
+            content = files._direct_io(volumes[source.space_id], "copy", lambda fs: fs.read_bytes(source.path, max_bytes=MAX_TRANSFER_BYTES))
+            return files._direct_io(volumes[destination.space_id], "copy", lambda fs: fs.write_atomic(destination.path, content, expected_sha256=None, create=True))
 
         return await files._mutate(
             actor=self._reference,

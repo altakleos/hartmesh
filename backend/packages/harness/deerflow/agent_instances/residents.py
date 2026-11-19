@@ -245,7 +245,7 @@ class ResidentRegistry:
         if touching and (len(touching) != 1 or self._associated.get(instance.home_id) != touching[0] or self.retained[touching[0]].phase != "active"):
             raise ResidentStartingElsewhere(instance.name)
 
-    def associate(self, instance, claim, *, generation, attempt_id=None):
+    def associate(self, instance, claim, *, generation, attempt_id=None, preserve_idle=False):
         self._owning_loop()
         entry = self.entry(instance)
         if not entry.lock.locked():
@@ -267,7 +267,9 @@ class ResidentRegistry:
             raise ValueError("Resident Home has ambiguous retained attachments")
 
         def associate():
-            entry.attachment_id, entry.last_release = claim.id, self.clock()
+            if not preserve_idle or entry.attachment_id != claim.id:
+                entry.last_release = self.clock()
+            entry.attachment_id = claim.id
             self._associated[instance.home_id] = claim.id
             self.slots.add(instance.home_id)
             self._touch_retained(claim.id, claim)
@@ -519,7 +521,8 @@ class ResidentRegistry:
             self._forget_attempt(instance_id, attempt_id)
             entry = self.homes.get(home_id)
             if entry is not None and entry.instance_id == instance_id:
-                entry.last_release = self.clock()
+                if attachment_id is not None and entry.attachment_id == attachment_id:
+                    entry.last_release = self.clock()
                 if recycle and attachment_id is not None and not await self._contain_if_gone(entry, attachment_id):
                     await self.request_recycle(instance_id, home_id, attachment_id, "outcome-uncertain")
             if recycle:

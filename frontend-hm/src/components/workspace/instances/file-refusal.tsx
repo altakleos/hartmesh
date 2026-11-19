@@ -82,7 +82,14 @@ export function AgentFileRefusal({
       message = t.agentInstances.filesBusy(instance.name);
       break;
     case "file-write-failed":
-      message = action ? copy.actionFailed : copy.refused(file ?? "");
+      message =
+        refusal.extra.file_outcome === "unconfirmed"
+          ? place === "conversation"
+            ? copy.unconfirmedUpload(file ?? "", instance.name)
+            : copy.unconfirmedChange
+          : action
+            ? copy.actionFailed
+            : copy.refused(file ?? "");
       break;
     case "invalid-name":
       message = copy.invalidName;

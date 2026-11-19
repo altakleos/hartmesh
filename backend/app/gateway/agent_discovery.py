@@ -10,6 +10,7 @@ from sqlalchemy.orm import aliased
 
 from deerflow.agent_instances.contract import AgentPermission
 from deerflow.persistence.agent_instances.model import AgentConversationRow, AgentInstanceGrantRow, AgentInstanceRow
+from deerflow.persistence.spaces.model import SpaceRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
 THREAD_BINDING_HEADER_NAME = "X-DeerFlow-Require-Thread-Binding"
@@ -72,9 +73,13 @@ async def _home(service, instance, actor):
 async def detail(app, service, instance, *, actor):
     query = _conversations(instance.id)
     readable = query.where(await app.state.agent_conversations.clause(actor.subject_id)).subquery()
+    home = await _home(service, instance, actor)
     async with service._sf() as session:
         last_active = (await session.execute(query.with_only_columns(func.max(ThreadMetaRow.updated_at)))).scalar_one()
         count = (await session.execute(select(func.count()).select_from(readable))).scalar_one()
+        home_generation = None
+        if instance.status == "active" and (home is not None or instance.permissions & AgentPermission.USE):
+            home_generation = await session.scalar(select(SpaceRow.generation).where(SpaceRow.id == instance.home_id, SpaceRow.status == "active"))
     registry = service.residents
     run_ids = registry.in_flight(instance.id) if registry is not None else ()
     running = []
@@ -99,8 +104,9 @@ async def detail(app, service, instance, *, actor):
         state = await execution_state(app, instance.id)
     return {
         **jsonable_encoder(asdict(instance)),
+        "home_generation": home_generation,
         "activity": {"running_runs": len(run_ids), "running": running, "last_active_at": _date(last_active), "open_conversations": count},
-        "home": await _home(service, instance, actor),
+        "home": home,
         "execution": {"execution": state.execution, "reason": state.reason},
     }
 

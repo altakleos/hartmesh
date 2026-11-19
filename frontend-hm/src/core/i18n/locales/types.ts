@@ -515,6 +515,15 @@ export interface Translations {
       notActive: (name: string) => string;
       notFound: string;
       actionFailed: string;
+      checkAgain: string;
+      checkingChange: (file: string) => string;
+      pendingChange: string;
+      missingChange: string;
+      unavailableCheck: string;
+      deniedCheck: string;
+      unconfirmedChange: string;
+      unconfirmedUpload: (file: string, name: string) => string;
+      completedChange: string;
     };
     memoryNotice: (name: string) => string;
     confirmMemory: (name: string) => string;

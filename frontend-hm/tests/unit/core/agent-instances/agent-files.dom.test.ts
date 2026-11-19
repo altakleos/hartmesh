@@ -76,7 +76,7 @@ test("attaches one multipart file directly, preserving progress and the caller's
   const xhr = Transfer.all[0]!;
   expect(xhr.method).toBe("POST");
   expect(xhr.url).toBe(
-    `/backend/api/agent-instances/${instance}/conversations/thread%2Fwith%20space/files?operation_id=${operation}`,
+    `/backend/api/agent-instances/${instance}/conversations/thread%2Fwith%20space/files/operations?operation_id=${operation}`,
   );
   expect(xhr.timeout).toBe(49_000);
   expect(xhr.withCredentials).toBe(true);
@@ -128,7 +128,9 @@ test("sends exactly the strict file action body and uses the longer deadline", a
   };
   const pending = changeAgentFile(instance, body);
   const xhr = Transfer.all[0]!;
-  expect(xhr.url).toBe(`/backend/api/agent-instances/${instance}/home/files`);
+  expect(xhr.url).toBe(
+    `/backend/api/agent-instances/${instance}/home/operations`,
+  );
   expect(JSON.parse(xhr.body as string)).toEqual(body);
   expect(xhr.headers["Content-Type"]).toBe("application/json");
   expect(xhr.timeout).toBeGreaterThanOrEqual(45_000);

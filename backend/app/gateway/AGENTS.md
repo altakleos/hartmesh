@@ -5,6 +5,9 @@ resident exact-replay probes too. An existing runless promise may still launch;
 its original consent must pass the final borrowed Work transaction.
 
 Storage and operator CLI: [guide](../../../docs/STORAGE_SPACES.md).
+Startup and periodic storage maintenance may repair a bound Home directory
+under lifecycle exclusion. Keep operator inspection read-only. Resident
+confirmation and idle accounting are covered in [the registry guide](../../docs/RESIDENT_REGISTRY.md).
 Compose startup uses stdlib-only `app.storage_init`; keep its 600s process-group
 owner canonical. Inventory fallback loads only after confirmed containment;
 memory diagnostics never change the child document or exit semantics.

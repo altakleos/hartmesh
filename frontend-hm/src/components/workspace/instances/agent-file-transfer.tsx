@@ -4,6 +4,7 @@ import type { AgentInstance } from "@/core/agent-instances/api";
 import type { AgentTransfer } from "@/core/agent-instances/file-transfers";
 import { useI18n } from "@/core/i18n/hooks";
 
+import { FileOperationNotice } from "./file-operation-notice";
 import { AgentFileRefusal } from "./file-refusal";
 
 export function AgentTransferRow({
@@ -53,13 +54,22 @@ export function AgentTransferRow({
         </>
       ) : (
         <>
-          <AgentFileRefusal
-            instance={instance}
-            error={row.error}
-            file={row.file.name}
-            manager={manager}
-            place={conversation ? "conversation" : "files"}
-          />
+          {row.check ? (
+            <FileOperationNotice
+              state={row.check}
+              file={row.file.name}
+              conversation={conversation ? instance.name : undefined}
+              check={retry}
+            />
+          ) : (
+            <AgentFileRefusal
+              instance={instance}
+              error={row.error}
+              file={row.file.name}
+              manager={manager}
+              place={conversation ? "conversation" : "files"}
+            />
+          )}
           <div className="flex gap-2">
             {row.retryable && (
               <Button type="button" disabled={disabled} onClick={retry}>

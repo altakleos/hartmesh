@@ -206,19 +206,39 @@ test("legacy missing Space access produces the named access-save guidance", asyn
   );
   expect(screen.queryByText("private diagnostic")).toBeNull();
 });
-test("uploads directly while the workspace is starting and preserves the operation on retry", async () => {
+test("an interrupted upload is checked without publishing the bytes again", async () => {
   rs.mocked(transfers.putAgentFile).mockRejectedValueOnce(
     new TypeError("offline"),
   );
+  rs.mocked(fetcher)
+    .mockResolvedValueOnce(Response.json({ status: "unknown" }))
+    .mockResolvedValueOnce(
+      Response.json({
+        status: "complete",
+        file: {
+          path: "note.txt",
+          size: 5,
+          sha256: "hash",
+          deduplicated: false,
+        },
+      }),
+    );
   show({ home: { state: "available", workspace: "starting" } });
   await choose();
-  await screen.findByText("note.txt could not be saved. Try again.");
-  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  await screen.findByText("No result is recorded yet.");
+  fireEvent.click(screen.getByRole("button", { name: "Check again" }));
   await screen.findByText("Saved in Researcher's files");
   const calls = rs.mocked(transfers.putAgentFile).mock.calls;
   expect(calls[0]![0]).toBe(id);
   expect(calls[0]![1]).toBe("note.txt");
-  expect(calls[0]![3]).toBe(calls[1]![3]);
+  expect(calls).toHaveLength(1);
+  for (const [url, options] of rs.mocked(fetcher).mock.calls) {
+    expect(url).toEqual(
+      expect.stringContaining(`/home/operations/${calls[0]![3]}`),
+    );
+    expect(options?.body).toBeUndefined();
+    expect(options?.method ?? "GET").toBe("GET");
+  }
   expect(calls[0]![3]).toMatch(/^[0-9a-f]{32}$/);
 });
 test("shows progress and cancel retires an individual transfer", async () => {
@@ -236,6 +256,19 @@ test("shows progress and cancel retires an individual transfer", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   expect(options?.signal?.aborted).toBe(true);
   expect(screen.queryByText("Uploading… 25%")).toBeNull();
+});
+test("a proxy's plain-text access denial retires the poll without exposing a repeat write", async () => {
+  rs.mocked(transfers.putAgentFile).mockRejectedValue(
+    new Error("disconnected"),
+  );
+  rs.mocked(fetcher).mockResolvedValue(new Response("denied", { status: 403 }));
+  show();
+  await choose();
+  await screen.findByText("You no longer have access to check this change.");
+  expect(screen.queryByRole("button", { name: "Check again" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(transfers.putAgentFile).toHaveBeenCalledTimes(1);
 });
 test("refuses a file over sixty-four MiB before any write", async () => {
   const oversized = new File(["x"], "large.dat");
@@ -284,6 +317,54 @@ test("directory rename and deletion use only audited agent routes", async () => 
     ),
   );
 });
+test.each(["edit", "rename"])(
+  "a busy %s keeps its original ID across manual checks and never resends the change",
+  async (action) => {
+    rs.mocked(spaces.listSpaceFiles).mockResolvedValue({
+      files: [file],
+      truncated: false,
+    });
+    const busy = new InstanceApiError(409, "busy", "storage-busy");
+    rs.mocked(transfers.putAgentFile).mockRejectedValue(busy);
+    rs.mocked(transfers.changeAgentFile).mockRejectedValue(busy);
+    rs.mocked(fetcher)
+      .mockResolvedValueOnce(Response.json({ status: "pending" }))
+      .mockResolvedValueOnce(Response.json({ status: "unknown" }));
+    show();
+    if (action === "edit") {
+      fireEvent.click(await screen.findByRole("button", { name: "note.txt" }));
+      fireEvent.change(await screen.findByLabelText("File contents"), {
+        target: { value: "draft retained" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    } else {
+      fireEvent.click(await screen.findByRole("button", { name: "Rename" }));
+      fireEvent.change(screen.getByLabelText("New name"), {
+        target: { value: "renamed.txt" },
+      });
+      fireEvent.click(
+        within(screen.getByRole("dialog")).getByRole("button", {
+          name: "Rename",
+        }),
+      );
+    }
+    await screen.findByText("This change is still being checked.");
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    await screen.findByText("No result is recorded yet.");
+    const edits = rs.mocked(transfers.putAgentFile).mock.calls;
+    const actions = rs.mocked(transfers.changeAgentFile).mock.calls;
+    expect(edits.length + actions.length).toBe(1);
+    const handle = edits[0]?.[3] ?? actions[0]?.[1].operation_id;
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    for (const [url, options] of rs.mocked(fetcher).mock.calls) {
+      expect(url).toEqual(
+        expect.stringContaining(`/home/operations/${handle}`),
+      );
+      expect(options?.method ?? "GET").toBe("GET");
+      expect(options?.body).toBeUndefined();
+    }
+  },
+);
 test("text editing sends the loaded revision and keeps the draft on a changed-file refusal", async () => {
   rs.mocked(spaces.listSpaceFiles).mockResolvedValue({
     files: [file],

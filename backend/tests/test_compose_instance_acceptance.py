@@ -15,6 +15,8 @@ import subprocess
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
@@ -28,16 +30,6 @@ if os.environ.get("HARTMESH_REQUIRE_BUNDLE_INSTANCES") != "1":
 pytestmark = pytest.mark.live
 MARKER = b"UPLOAD-ACCEPTANCE-726"
 ARTIFACT = b"Synthetic acceptance artifact.\nUploaded text: UPLOAD-ACCEPTANCE-726\n"
-CLEANUP_BOOTSTRAP = r"""set -eu
-SOCKET=/var/run/docker.sock
-test -S "$SOCKET"
-test "$(id -u)" = 0
-docker_gid="$(stat -c %g "$SOCKET")"
-test "$docker_gid" != 0
-cd /app/backend
-export PYTHONPATH=.
-exec setpriv --reuid=1000 --regid=1000 --groups="$docker_gid" --inh-caps=-all --no-new-privs "$@"
-"""
 
 
 def required(name):
@@ -119,9 +111,7 @@ class Bundle:
                 "--entrypoint",
                 "sh",
                 "gateway",
-                "-c",
-                CLEANUP_BOOTSTRAP,
-                "cleanup-bootstrap",
+                "/opt/hartmesh/gateway/as-user.sh",
                 "/app/backend/.venv/bin/python",
                 "-c",
                 ISOLATED_RELEASE,
@@ -183,8 +173,9 @@ class Bundle:
 class AllocationBarrier:
     """Hold the production allocation lock on a separate test-owned PG session."""
 
-    def __init__(self, bundle):
+    def __init__(self, bundle, *, lock_key=None):
         self.bundle = bundle
+        self.lock_sql = "SELECT pg_advisory_lock(hashtext('hartmesh-space-assignment'))" if lock_key is None else "SELECT pg_advisory_lock(hashtext(" + sql(lock_key) + "))"
         self.process = None
         self.application_name = "hartmesh-acceptance-barrier-" + uuid.uuid4().hex
         self.identity = None
@@ -216,8 +207,7 @@ class AllocationBarrier:
         )
         try:
             self.process.stdin.write(
-                b"SELECT json_build_object('pid', pid, 'started', backend_start::text)::text FROM pg_stat_activity WHERE pid=pg_backend_pid(); "
-                b"SELECT pg_advisory_lock(hashtext('hartmesh-space-assignment')); SELECT 'allocation-barrier-held';\n"
+                b"SELECT json_build_object('pid', pid, 'started', backend_start::text)::text FROM pg_stat_activity WHERE pid=pg_backend_pid(); " + self.lock_sql.encode("ascii") + b"; SELECT 'allocation-barrier-held';\n"
             )
             self.process.stdin.flush()
             deadline = time.monotonic() + 20
@@ -1103,8 +1093,64 @@ def test_bundle_runs_an_agent_and_its_space_survives_gateway_restart_and_workspa
     for slot in (employee["slot"], shared["slot"]):
         assert labels["hartmesh.storage.space." + slot] == "1"
     assert compose.invoke(["docker", "exec", entry["Id"], "cat", "/mnt/user-data/outputs/acceptance.txt"]).stdout.encode() == ARTIFACT
-    compose.run("restart", "gateway", timeout=180)
+    # Exercise the bundle's ordinary maintenance loop and the separate startup
+    # path. Only the owner mode of this test's already-verified Home is changed.
+    inspect_mode = "import os, stat, sys; assert os.geteuid() == 1000; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))"
+    sandbox = ["docker", "exec", entry["Id"]]
+    assert compose.invoke([*sandbox, "id", "-u"]).stdout.strip() == "1000"
+    compose.invoke([*sandbox, "sh", "-ec", "echo workspace > /mnt/spaces/home/outputs/workspace-edit.txt && chmod 500 /mnt/spaces/home"])
+    eventually(lambda: compose.gateway("python", "-c", inspect_mode, employee["root"]) == "0o770", timeout=100)
+    session.request(
+        "PUT",
+        f"/api/agent-instances/{employee['instance']['id']}/home/content",
+        params={"operation_id": uuid.uuid4().hex, "path": "outputs/workspace-edit.txt", "expected_sha256": hashlib.sha256(b"workspace\n").hexdigest()},
+        content=b"updated",
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert compose.invoke([*sandbox, "cat", "/mnt/spaces/home/outputs/workspace-edit.txt"]).stdout == "updated"
+    # Keep the Gateway's group access. Ownership must be proved even when
+    # the ordinary confined open still succeeds against this test volume.
+    root = employee["root"]
+    inspect_owner = "import os, sys; s = os.stat(sys.argv[1], follow_symlinks=False); print(s.st_uid, s.st_gid)"
+    assert compose.gateway("python", "-c", inspect_owner, root) == "1000 1000"
+    compose.invoke(["sudo", "chown", "1001:1000", "--", root])
+    try:
+        affected = next(row for row in compose.ai("list")["instances"] if row["id"] == employee["instance"]["id"])
+        assert affected["space"]["verified"] is False
+        eventually(lambda: session.request("GET", "/api/features").json()["agent_instances"]["reason"] == "storage-unavailable", timeout=100)
+        assert compose.gateway("python", "-c", inspect_owner, root) == "1001 1000"
+    finally:
+        compose.invoke(["sudo", "chown", "1000:1000", "--", root])
+    compose.run("stop", "gateway", timeout=180)
+    compose.invoke([*sandbox, "chmod", "000", "/mnt/spaces/home"])
+    check_reserve = """import asyncio, os, stat, sys
+from pathlib import Path
+from types import SimpleNamespace
+from app.gateway.agent_home_maintenance import repair_home_directories
+from app.gateway.agent_operator_services import operator_services
+from deerflow.config import get_app_config
+from deerflow.persistence.engine import init_engine_from_config, get_session_factory, close_engine
+
+async def check(slot, root):
+    assert os.geteuid() == 1000 and stat.S_IMODE(root.stat().st_mode) == 0
+    config = get_app_config()
+    await init_engine_from_config(config.database)
+    try:
+        async with operator_services(config, command="pending", session_factory=get_session_factory()) as service:
+            # Only this one-off observer sees the simulated reserve shortfall.
+            service.files.catalog.reserve_bytes = 2**62
+            status = SimpleNamespace(unverified={slot: "reserve unavailable"})
+            state = SimpleNamespace(storage_spaces=service.files, agent_execution=status)
+            await repair_home_directories(SimpleNamespace(state=state))
+            assert stat.S_IMODE(root.stat().st_mode) == 0o770 and slot in status.unverified
+    finally:
+        await close_engine()
+asyncio.run(check(sys.argv[1], Path(sys.argv[2])))
+"""
+    compose.run("run", "--rm", "--no-deps", "-T", "--entrypoint", "sh", "gateway", "/opt/hartmesh/gateway/as-user.sh", "/app/backend/.venv/bin/python", "-c", check_reserve, employee["slot"], root)
+    compose.invoke([*sandbox, "chmod", "000", "/mnt/spaces/home"])
     compose.run("up", "-d", "--wait", timeout=240)
+    assert compose.gateway("python", "-c", inspect_mode, employee["root"]) == "0o770"
     artifact(session, thread_id)
     session.run(thread_id)
     second, _entry = workspace(compose, employee)
@@ -1214,10 +1260,96 @@ def test_graceful_gateway_restart_leaves_no_unresolved_attempt(compose, session,
     assert unresolved == "0"
 
 
-def test_killed_gateway_settles_the_attempt_failed_with_an_attempt_contained_event(compose, session, employee):
+@pytest.fixture
+def attachment_browser(compose, session, employee):
+    image = os.environ.get("HARTMESH_BROWSER_FRONTEND")
+    if not image:
+        yield None
+        return
+    from _compose_attachment_browser import open_attachment_browser
+
+    with open_attachment_browser(compose, session, new_conversation(session, employee), image, required("EVIDENCE")) as browser:
+        yield browser
+
+
+@contextmanager
+def attachment_awaiting_commit(compose, session, employee, workspace_id, browser):
+    """Hold exactly the synthetic attachment's acknowledgement after its bytes land."""
+    operation = uuid.uuid4().hex
+    name = "interrupted-" + operation + ".txt"
+    content = b"synthetic attachment " + operation.encode("ascii")
+    space = employee["instance"]["home_id"]
+    path = "uploads/" + name
+    thread = browser.thread if browser else employee["thread_id"]
+    endpoint = f"/api/agent-instances/{employee['instance']['id']}/conversations/{thread}/files/operations"
+    predicate = f"space_id={sql(space)} AND request->>'path'={sql(path)}"
+    trigger = "acceptance_file_" + operation
+    compose.psql(
+        f"CREATE FUNCTION {trigger}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(hashtext({sql(trigger)})); RETURN NEW; END $$; "
+        f"CREATE TRIGGER {trigger} BEFORE UPDATE OF phase ON storage_space_file_operations FOR EACH ROW "
+        f"WHEN (OLD.space_id={sql(space)} AND OLD.request->>'path'={sql(path)} AND OLD.phase='pending' AND NEW.phase='complete' AND NEW.result->>'resolution' IS NULL) EXECUTE FUNCTION {trigger}();"
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=1) as client:
+            with AllocationBarrier(compose, lock_key=trigger) as barrier:
+                if browser:
+                    operation = browser.submit(endpoint, name, content)
+                    upload = None
+                else:
+                    upload = client.submit(session.request, "POST", endpoint, params={"operation_id": operation}, files={"file": (name, content, "text/plain")}, expected=502, timeout=60)
+
+                def waiting():
+                    if upload and upload.done():
+                        pytest.fail(f"upload completed before the commit barrier: {upload.result()}")
+                    return compose.psql(f"SELECT count(*) FROM pg_stat_activity WHERE {barrier.identity['pid']}=ANY(pg_blocking_pids(pid)) AND wait_event='advisory' AND query ILIKE '%UPDATE storage_space_file_operations%'") == "1"
+
+                eventually(waiting, timeout=25, interval=0.25)
+                row_id, phase = compose.psql(f"SELECT operation_id,phase FROM storage_space_file_operations WHERE {predicate}").split("|")
+                assert phase == "pending"
+                assert compose.invoke(["docker", "exec", workspace_id, "cat", "/mnt/user-data/" + path]).stdout.encode() == content
+                outcome = dict(operation=operation, row_id=row_id, name=name, path=path, endpoint=endpoint, sha256=hashlib.sha256(content).hexdigest(), predicate=predicate)
+                yield outcome
+                if browser:
+                    outcome["proxy_status"] = browser.observe_interruption()
+                else:
+                    lost = upload.result(timeout=20)
+                    assert lost.status_code == 502 and lost.headers["server"].startswith("nginx")
+                    outcome["proxy_status"] = lost.status_code
+            assert barrier.drained
+    finally:
+        compose.psql(f"DROP TRIGGER {trigger} ON storage_space_file_operations; DROP FUNCTION {trigger}()")
+
+
+def check_recovered_attachment(compose, session, employee, outcome):
+    endpoint = outcome["endpoint"] + "/" + outcome["operation"]
+
+    def inspect():
+        return session.request("GET", endpoint, params={"filename": outcome["name"]}).json()
+
+    first = eventually(lambda: body if (body := inspect())["status"] == "complete" else None, timeout=130, interval=3)
+    assert first["file"]["path"] == outcome["path"] and first["file"]["sha256"] == outcome["sha256"]
+    assert inspect() == first
+    rows = compose.psql("SELECT operation_id,phase,result->>'resolution' FROM storage_space_file_operations WHERE " + outcome["predicate"]).splitlines()
+    assert rows == [outcome["row_id"] + "|complete|host-settled"]
+    files = json.loads(
+        compose.gateway(
+            "python",
+            "-c",
+            "import hashlib,json,sys; from pathlib import Path; print(json.dumps({p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in Path(sys.argv[1],'uploads').glob(sys.argv[2]+'*')}))",
+            employee["root"],
+            outcome["name"].removesuffix(".txt"),
+        )
+    )
+    assert files == {outcome["name"]: outcome["sha256"]}
+    evidence = Path(required("EVIDENCE")) / "interrupted-conversation-upload.json"
+    evidence.write_text(json.dumps({"proxy_status": outcome["proxy_status"], "operation_id": outcome["operation"], "receipt": rows, "status": first, "files": files}), encoding="utf-8")
+
+
+def test_killed_gateway_settles_the_attempt_failed_with_an_attempt_contained_event(compose, session, employee, attachment_browser):
     held, identity = held_attempt(compose, session, employee)
     startup = compose.logs().count("agents: ready (")
-    compose.run("kill", "-s", "KILL", "gateway")
+    with attachment_awaiting_commit(compose, session, employee, identity["container_id"], attachment_browser) as upload:
+        compose.run("kill", "-s", "KILL", "gateway")
     compose.run("up", "-d", "--wait", timeout=240)
     settled = await_attempt(session, employee, held["id"], {"failed"})
     assert settled["attempt"]["id"] == held["attempt"]["id"] and settled["attempt"]["contained"]["reason"] == "run-orphaned"
@@ -1235,6 +1367,9 @@ def test_killed_gateway_settles_the_attempt_failed_with_an_attempt_contained_eve
         return len(lines) > startup and "1 attachment fenced at start; 1 work attempt settled" in lines[-1]
 
     assert eventually(startup_settled)
+    check_recovered_attachment(compose, session, employee, upload)
+    if attachment_browser:
+        attachment_browser.confirm(upload)
     compose.state["contained_work"] = settled
 
 

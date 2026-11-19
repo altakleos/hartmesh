@@ -20,8 +20,11 @@ limits/quota and commit after final admission. Drain all stages on failure/cance
 including project attachments. `ChatFilesFull` uses the central refusal handler.
 Ordinary upload/list/delete/edit refuses instance conversations. `agent_home.py`
 owns conversation upload and `/home/content`, `/home/files`: direct writes recheck
-human rights under mutation SQL and drain spool workers. Retain access-denied
-responses. Declare `GET /roles` before `GET /{instance_id}`.
+human rights under mutation SQL and drain spool workers. Operation-status GETs
+read attributed receipts with current rights and no workspace admission. The
+operations routes derive private IDs from the persisted signing key, requester,
+Home and conversation incarnation. Key rotation makes prior lookups unknown.
+Declare `GET /roles` before `GET /{instance_id}`.
 
 `chat_cleanup.py` admits purpose-bound deletion, including unsupported credentials,
 without general User scope. Durable deletion and the owner/thread gate fence

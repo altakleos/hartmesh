@@ -582,10 +582,11 @@ class FilePuts:
                     except (AgentFileRefusal, ResidentFilesBusy) as exc:
                         reason = exc.reason
                         rename = reason == "invalid-name" and "rename" not in row.continuation["labels"]
-                        transient = reason == "file-write-failed" and self._time() + self.config.retry_seconds <= deadline
+                        outcome = exc.extra.get("file_outcome")
+                        transient = reason == "file-write-failed" and outcome is None and self._time() + self.config.retry_seconds <= deadline
                         workflow = reason == "storage-busy" and exc.extra.get("cause") == "workflow" and not repeated_workflow
                         if not (rename or transient or workflow):
-                            return await self._transition(link, row, access, state="uncertain" if reason == "file-write-failed" else "refused", reason=reason)
+                            return await self._transition(link, row, access, state="uncertain" if reason == "file-write-failed" and outcome != "nothing-changed" else "refused", reason=reason)
                         row = await self._transition(link, row, access, state="waiting", reason=reason, rename=rename)
                         if transient and not waiting:
                             await progress("file.waiting")

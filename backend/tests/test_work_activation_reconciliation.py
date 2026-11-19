@@ -17,7 +17,7 @@ from app.gateway.work_execution import activate_work_run
 from deerflow.agent_instances.contract import AgentDenied, AgentPermission, ResidentRestarting
 from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
 from deerflow.sandbox.admission import ProviderAdmission
-from deerflow.spaces.attachments import AttachmentState, ResourceMount, RetainedAttachment
+from deerflow.spaces.attachments import Attachment, AttachmentState, ResourceMount, RetainedAttachment
 
 
 async def environment(execution, registry, monkeypatch):
@@ -49,7 +49,7 @@ async def environment(execution, registry, monkeypatch):
         retained_claims=AsyncMock(return_value=(claim,)),
         inspect_preparation=inspect,
         container_state=AsyncMock(return_value="running"),
-        resume=AsyncMock(return_value=claim),
+        confirm_resident=AsyncMock(return_value=(Attachment(claim.id, claim.incarnation, claim.host_id, claim.container_id), False)),
         retained_attachment=AsyncMock(return_value=claim),
         contain_host=AsyncMock(return_value=True),
         uncontained={},
@@ -206,7 +206,12 @@ async def test_waiting_activation_rechecks_changed_facts_without_an_attempt(exec
                 grant = await session.get(AgentInstanceGrantRow, (e.admitted.instance.id, e.admitted.requester.subject_id))
                 grant.permissions = int(AgentPermission.INSPECT)
         e.release.set()
-        await e.maintenance
+        pending = await e.maintenance
+        if changed == "recycle":
+            # Recycling affects new work after this existing workspace has been
+            # confirmed. A failed confirmation exercises a different refusal.
+            assert pending == [] and e.entry.attachment_id == e.claim.id
+            e.attachments.confirm_resident.assert_awaited_once_with(actor=e.admitted.instance.principal, home=e.claim.resources[0], incarnation=e.claim.incarnation)
         with pytest.raises(AgentDenied if changed == "authority" else ResidentRestarting):
             await task
         saved = await e.service.work.get(actor=e.admitted.requester, instance_id=e.admitted.instance.id, work_id=e.row["id"])

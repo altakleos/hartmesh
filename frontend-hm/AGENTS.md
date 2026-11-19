@@ -359,6 +359,8 @@ Keep session recovery and the index's pure route control outside private admissi
 Uncertain SSR auth keeps the provider path; new SSR scope conflicts retire it
 until a full reload, including when later SSR responses become uncertain again.
 Files tabs derive from `useSearchParams`, including same-page/history navigation.
+Keep the original handle for interrupted Home writes and check by GET. A clean
+retry keeps the chip and takes a new handle.
 
 One rule governs what happens while the answer is unknown: a control someone
 might need stays offered, and copy the deployment authors waits. So the screens

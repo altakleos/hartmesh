@@ -7,6 +7,7 @@ preserve uncertain outcomes across restart. Lifecycle effects require fencing.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import re
@@ -26,7 +27,7 @@ from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperatio
 from deerflow.persistence.spaces.model import SpaceGrantRow, SpaceRow
 from deerflow.spaces.backings import BackingUnavailable, PreparedVolumeCatalog
 from deerflow.spaces.contract import Custody, FeatureBinding, InvalidPrincipal, MutationMode, Permission, PrincipalRef, Space, SpaceConflict, SpaceDenied
-from deerflow.spaces.filesystem import FileConflict, UnsafeSpacePath, _path
+from deerflow.spaces.filesystem import FileConflict, FileTooLarge, UnsafeSpacePath, _path
 from deerflow.spaces.incarnations import prepare_marker, verify_bound
 from deerflow.spaces.provision import LAYOUT
 from deerflow.spaces.registry import SpaceRegistry, _stored_permissions
@@ -47,6 +48,18 @@ class SpaceOperationPending(StorageOperationPending, SpaceConflict):
     def __init__(self, detail, *, cause="workflow"):
         super().__init__(detail)
         self.cause = cause
+
+
+class _FileStepRefused(FileConflict):
+    nothing_changed = True
+
+
+class _BeforePublication(Exception):
+    """Transport a proven primitive refusal across the file worker boundary."""
+
+    def __init__(self, refusal):
+        self.refusal = refusal
+        super().__init__(str(refusal))
 
 
 @dataclass(frozen=True, eq=False)
@@ -70,9 +83,10 @@ class SpaceFiles:
         registry.operation_guard = self._guard
         registry.files = self
         self.attachment_guard = None
+        self.home_lookup = None
         self.workflow_settlers = {}
 
-    async def _guard(self, session, admitted, requests, operation_id):
+    async def _guard(self, session, admitted, requests, operation_id, *, confirmation_pending=None):
         from deerflow.spaces.workflows import _owner, probe
 
         owner = _owner.get()
@@ -89,6 +103,11 @@ class SpaceFiles:
                     await run_file_io(probe, volume)
         pending = (await session.execute(select(SpaceFileOperationRow).where(SpaceFileOperationRow.space_id.in_(admitted), SpaceFileOperationRow.phase == "pending"))).scalars().all()
         for operation in pending:
+            if confirmation_pending is not None:
+                # Inspect an existing attachment without using its writable view.
+                # Identity, grant, generation and attachment checks still run.
+                confirmation_pending.add(operation.space_id)
+                continue
             if operation.space_id in unverified_admin or (operation.space_id, operation.operation_id) == operation_id:
                 continue
             action = operation.request.get("action") if isinstance(operation.request, dict) else None
@@ -285,6 +304,7 @@ class SpaceFiles:
         errors = {}
         async with self.registry._sf() as session:
             bindings = (await session.execute(select(SpaceBackingRow))).scalars().all()
+            managed_homes = await self._untyped_homes(session, bindings)
         proven = {}
         for binding in bindings:
             expected = self._binding_claim(claims, binding.slot_id)
@@ -294,7 +314,7 @@ class SpaceFiles:
                 self._binding_spec(binding)
                 volume = await run_file_io(self.catalog.verify, binding.slot_id, previous=self._verified.get(binding.slot_id))
                 self._check_incarnation(binding, volume)
-                await run_file_io(verify_bound, volume, binding.backing_handle)
+                await run_file_io(verify_bound, volume, binding.backing_handle, managed_home=binding.space_id in managed_homes)
                 proven[binding.backing_handle] = volume
             except (BackingUnavailable, OSError) as exc:
                 if self._claim(binding.slot_id) is expected:
@@ -379,10 +399,17 @@ class SpaceFiles:
         spec = self._binding_spec(binding)
         volume = await run_file_io(self.catalog.verify, binding.slot_id, previous=self._verified.get(binding.slot_id))
         self._check_incarnation(binding, volume)
-        bound = await run_file_io(verify_bound, volume, binding.backing_handle)
+        managed_homes = await self._untyped_homes(session, [binding])
+        bound = await run_file_io(verify_bound, volume, binding.backing_handle, managed_home=row.id in managed_homes)
         binding.max_bytes, binding.max_inodes = spec.max_bytes, spec.max_inodes
         self._cache_bound(binding.slot_id, self._binding_claim(claims, binding.slot_id), binding.backing_handle, volume)
         return bound
+
+    async def _untyped_homes(self, session, bindings):
+        if self.home_lookup is None:
+            return set()
+        ids = [binding.space_id for binding in bindings if getattr(self.catalog.volumes.get(binding.slot_id), "kind", None) is None]
+        return await self.home_lookup(session, ids) if ids else set()
 
     def _binding_spec(self, binding):
         spec = self.catalog.volumes.get(binding.slot_id)
@@ -411,11 +438,12 @@ class SpaceFiles:
             binding = await session.get(SpaceBackingRow, row.backing_handle) if row is not None else None
             if binding is None or binding.space_id != space_id:
                 return False
+            managed_homes = await self._untyped_homes(session, [binding])
         try:
             self._binding_spec(binding)
             volume = await run_file_io(self.catalog.verify, binding.slot_id, previous=self._verified.get(binding.slot_id))
             self._check_incarnation(binding, volume)
-            await run_file_io(verify_bound, volume, binding.backing_handle)
+            await run_file_io(verify_bound, volume, binding.backing_handle, managed_home=space_id in managed_homes)
         except (BackingUnavailable, OSError):
             return False
         return True
@@ -424,6 +452,27 @@ class SpaceFiles:
     def _io(volume, call: Callable):
         with volume.filesystem() as filesystem:
             return call(filesystem)
+
+    @staticmethod
+    def _direct_io(volume, action, call):
+        # Opening and closing the bound volume are host operations. Only errors
+        # inside the admitted file step qualify as an effect-free refusal.
+        with volume.filesystem() as filesystem:
+            try:
+                return call(filesystem)
+            except (OSError, FileConflict, UnsafeSpacePath, FileTooLarge) as exc:
+                published = filesystem.published_action
+                if published is not None and not (published == "mkdir" and action == "put"):
+                    raise
+                if isinstance(exc, PermissionError) and exc.errno in (errno.EACCES, errno.EPERM) and action != "mkdir":
+                    refusal = _FileStepRefused("The file step was refused; nothing was changed")
+                elif isinstance(exc, FileTooLarge) and action in {"write", "copy"}:
+                    refusal = _FileStepRefused("File differs from the loaded revision" if action == "write" else "The file is larger than 64 MiB")
+                elif isinstance(exc, (FileConflict, FileNotFoundError, UnsafeSpacePath)):
+                    refusal = exc
+                else:
+                    raise
+                raise _BeforePublication(refusal) from exc
 
     async def _read(self, *, actor, space_id, permission, call, controller_admission=None):
         async def perform():
@@ -533,13 +582,20 @@ class SpaceFiles:
                     operation.phase = "complete"
                     operation.result = {"value": result}
                 return result
-            except (FileConflict, FileNotFoundError, UnsafeSpacePath):
-                # These primitive failures occur before publishing a mutation.
-                # Keep the failed ID immutable, but allow a corrected new request.
-                async with self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id)) as (session, _rows):
-                    operation = await session.get(SpaceFileOperationRow, (destination_id, operation_id))
-                    operation.phase = "failed"
-                raise
+            except _BeforePublication as failure:
+                # The effect transaction rolled back, including changes made by
+                # its admission callback. Keep host ownership until the exact
+                # failed row is committed, before reporting a clean refusal.
+                try:
+                    async with self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id)) as (session, _):
+                        operation = await session.get(SpaceFileOperationRow, (destination_id, operation_id))
+                        self._same_operation(operation, actor, generation, request)
+                        if operation.phase != "pending":
+                            raise SpaceConflict("The operation was settled before its refusal was recorded")
+                        operation.phase = "failed"
+                except Exception as exc:
+                    raise SpaceOperationPending("File refusal could not be confirmed; inspect recovery status") from exc
+                raise failure.refusal from failure.__cause__
             except Exception as exc:
                 # Filesystem publication and database commit cannot be one atomic
                 # transaction. Never erase an intent or automatically replay it
@@ -757,7 +813,7 @@ class SpaceFiles:
             destination_id=space_id,
             operation_id=operation_id,
             request=request,
-            call=lambda volumes: self._io(volumes[space_id], lambda fs: fs.write_atomic(path, content, expected_sha256=expected_sha256, create=create)),
+            call=lambda volumes: self._direct_io(volumes[space_id], "write", lambda fs: fs.write_atomic(path, content, expected_sha256=expected_sha256, create=create)),
             controller_admission=controller_admission,
         )
 
@@ -791,7 +847,10 @@ class SpaceFiles:
                 descriptor = None
                 try:
                     if stat.S_ISREG(os.fstat(observed_path).st_mode):
-                        descriptor = os.open(f"/proc/self/fd/{observed_path}", os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOCTTY)
+                        try:
+                            descriptor = os.open(f"/proc/self/fd/{observed_path}", os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOCTTY)
+                        except PermissionError:
+                            pass  # Occupied but unreadable; try the next available name.
                 finally:
                     os.close(observed_path)
                 if descriptor is not None:
@@ -827,7 +886,7 @@ class SpaceFiles:
             destination_id=space_id,
             operation_id=operation_id,
             request=request,
-            call=lambda volumes: self._io(volumes[space_id], publish),
+            call=lambda volumes: self._direct_io(volumes[space_id], "put", publish),
             controller_admission=controller_admission,
         )
 
@@ -868,7 +927,7 @@ class SpaceFiles:
             destination_id=space_id,
             operation_id=operation_id,
             request=self._provenance({"action": "mkdir", "path": path}, on_behalf_of),
-            call=lambda volumes: self._io(volumes[space_id], lambda fs: fs.mkdir(path)),
+            call=lambda volumes: self._direct_io(volumes[space_id], "mkdir", lambda fs: fs.mkdir(path)),
             controller_admission=controller_admission,
         )
 
@@ -881,7 +940,7 @@ class SpaceFiles:
             destination_id=space_id,
             operation_id=operation_id,
             request=self._provenance({"action": "rename", "path": path, "destination": destination}, on_behalf_of),
-            call=lambda volumes: self._io(volumes[space_id], lambda fs: fs.rename(path, destination)),
+            call=lambda volumes: self._direct_io(volumes[space_id], "rename", lambda fs: fs.rename(path, destination)),
             controller_admission=controller_admission,
         )
 
@@ -893,7 +952,7 @@ class SpaceFiles:
             destination_id=space_id,
             operation_id=operation_id,
             request=self._provenance({"action": "remove", "path": path}, on_behalf_of),
-            call=lambda volumes: self._io(volumes[space_id], lambda fs: fs.remove(path)),
+            call=lambda volumes: self._direct_io(volumes[space_id], "remove", lambda fs: fs.remove(path)),
             controller_admission=controller_admission,
         )
 
@@ -926,8 +985,8 @@ class SpaceFiles:
         }
 
         def transfer(volumes):
-            content = self._io(volumes[source_id], lambda fs: fs.read_bytes(source_path, max_bytes=MAX_TRANSFER_BYTES))
-            return self._io(volumes[destination_id], lambda fs: fs.write_atomic(destination_path, content, expected_sha256=None, create=True))
+            content = self._direct_io(volumes[source_id], "copy", lambda fs: fs.read_bytes(source_path, max_bytes=MAX_TRANSFER_BYTES))
+            return self._direct_io(volumes[destination_id], "copy", lambda fs: fs.write_atomic(destination_path, content, expected_sha256=None, create=True))
 
         return await self._mutate(
             actor=actor,

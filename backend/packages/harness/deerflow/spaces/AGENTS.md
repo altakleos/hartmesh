@@ -266,10 +266,10 @@ File intents commit before filesystem work; uncertain file/feature-workflow
 outcomes block WRITE/OPERATE/ADMIN, while other pending actions block all access.
 Busy refusals carry workflow/lifecycle cause. Completed IDs bind exact actor,
 generation and request. Drain the entire owned mutation before cancellation.
-`put_unique` deduplicates or selects a free numbered name inside one file intent;
-it rechecks the named regular inode after hashing. Collisions, including occupied
-nonregular leaves and overlong suffixes, never overwrite. Mutation parents reject
-symlinks; read link policy stays separate. Trusted controller admission borrows
+`put_unique` deduplicates after rechecking the named inode or takes a free numbered
+name, including when the occupied file cannot be read. Direct workers record the
+publishing syscall before flushing. Only proven pre-publication file refusals
+commit a failed intent. Mutation parents reject symlinks. Trusted controller admission borrows
 the mutation transaction before its intent and effect. Human-attributed requests
 retain the canonical six fields; callers drain spool and metadata workers too.
 `export_file` may borrow a trusted controller admission before and after its
@@ -369,7 +369,8 @@ and receipt cleanup belong to the caller after confirmed commit. Drain workers
 before cancellation releases the host transaction. `maintenance.py` owns actorless
 settlement: qualify outside SQL, retain nonblocking locks before `host_locked`,
 compare exact intent/binding snapshots and require fenced attachments. Pin roots
-and receipts; failed inspections stay pending. Generic domain callbacks register
+and receipts. An inaccessible direct target settles as `host-unconfirmed`.
+Invalid intent, changing bytes and host faults stay pending. Domain callbacks register
 after storage starts. Historical intent generation can differ from current grants.
 Cleanup follows confirmed commit; unknown pending intents preserve generic stages.
 Startup/60-second repair counts committed assignments/grants and drains owned tasks.

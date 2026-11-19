@@ -40,20 +40,41 @@ STORAGE_TESTS = (
 )
 
 
-def test_cleanup_bootstrap_preserves_helper_argv_and_drops_privileges():
-    tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
-    assignment = next(node for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "CLEANUP_BOOTSTRAP" for target in node.targets))
-    bootstrap = ast.literal_eval(assignment.value)
+def test_shipped_gateway_launcher_preserves_helper_argv_and_drops_privileges():
+    launcher = ROOT / "deploy/compose/gateway/as-user.sh"
+    bootstrap = launcher.read_text(encoding="utf-8")
+    assert 'test -S "$SOCKET"' in bootstrap and 'test "$(id -u)" = 0' in bootstrap and 'test "$docker_gid" != 0' in bootstrap
     assert 'stat -c %g "$SOCKET"' in bootstrap
-    assert '--reuid=1000 --regid=1000 --groups="$docker_gid"' in bootstrap
+    assert '--reuid=1000 --regid=1000 --groups="$docker_gid" --inh-caps=-all --no-new-privs' in bootstrap
     assert "cd /app/backend" in bootstrap and "export PYTHONPATH=." in bootstrap
-    assert "exec setpriv" in bootstrap and '"$@"' in bootstrap
-    assert subprocess.run(["sh", "-n"], input=bootstrap, text=True, capture_output=True).returncode == 0
+    assert "export HOME=/tmp/gateway-home" in bootstrap and 'export DOCKER_CONFIG="$HOME/.docker"' in bootstrap
+    assert bootstrap.index("exec setpriv") < bootstrap.index('mkdir -p -m 0700 "$HOME"') < bootstrap.index('exec "$@"')
+    assert subprocess.run(["sh", "-n", str(launcher)], capture_output=True).returncode == 0
+
+
+def test_documented_offline_check_and_hosted_helpers_use_the_shipped_gateway_launcher():
+    tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
     bundle = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Bundle")
     cleanup = next(node for node in bundle.body if isinstance(node, ast.FunctionDef) and node.name == "cleanup_orphan")
     constants = {node.value for node in ast.walk(cleanup) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
-    assert {"--entrypoint", "sh", "--name", "--label", "/app/backend/.venv/bin/python", "com.docker.compose.oneoff", "hartmesh.acceptance.cleanup"} <= constants
+    assert {"--name", "--label", "com.docker.compose.oneoff", "hartmesh.acceptance.cleanup"} <= constants
     assert any(isinstance(node, ast.Try) and node.finalbody for node in ast.walk(cleanup))
+    home = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == STORAGE_TESTS[10])
+    rollback = ast.parse((ROOT / "backend/tests/test_compose_home_rollback.py").read_text(encoding="utf-8"))
+    offline = next(node for node in rollback.body if isinstance(node, ast.FunctionDef) and node.name == "offline_check")
+    launcher = "/opt/hartmesh/gateway/as-user.sh"
+    prefix = ["--entrypoint", "sh", "gateway", launcher, "/app/backend/.venv/bin/python"]
+    docs = (ROOT / "deploy/compose/README.md").read_text(encoding="utf-8").replace("\\\n", " ")
+    command = next(line for line in docs.splitlines() if "hm run" in line and "check-rollback" in line)
+    for helper in (cleanup, home, offline):
+        (call,) = (node for node in ast.walk(helper) if isinstance(node, ast.Call) and any(isinstance(arg, ast.Constant) and arg.value == launcher for arg in node.args))
+        args = [arg.value if isinstance(arg, ast.Constant) else None for arg in call.args]
+        start = args.index("--entrypoint")
+        assert args[start : start + len(prefix)] == prefix
+        if helper is offline:
+            assert shlex.split(command) == ["hm", *args]
+    compose = yaml.safe_load((ROOT / "deploy/compose/compose.yaml").read_text(encoding="utf-8"))
+    assert "./gateway:/opt/hartmesh/gateway:ro" in compose["services"]["gateway"]["volumes"]
 
 
 def test_helpers_use_the_image_environment_and_fault_case_has_an_assignment_barrier():
@@ -164,6 +185,19 @@ def test_synthetic_run_evidence_precedes_terminal_success_assertions():
     assert "response.headers)" not in source and "self.client.cookies)" not in source
 
 
+def test_bundle_interrupts_an_admitted_upload_and_checks_it_without_resubmission():
+    tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    killed = functions[STORAGE_TESTS[15]]
+    held = next(node for node in ast.walk(killed) if isinstance(node, ast.With) and "attachment_awaiting_commit" in ast.unparse(node.items[0].context_expr))
+    assert "'kill', '-s', 'KILL', 'gateway'" in ast.unparse(held)
+    barrier = ast.unparse(functions["attachment_awaiting_commit"])
+    assert "BEFORE UPDATE OF phase" in barrier and "pg_blocking_pids" in barrier and "expected=502" in barrier
+    verify = ast.unparse(functions["check_recovered_attachment"])
+    assert "'GET'" in verify and "'POST'" not in verify and "'PUT'" not in verify
+    assert "|complete|host-settled" in verify and "interrupted-conversation-upload.json" in verify
+
+
 def test_maintenance_proof_waits_for_logs_after_sql_commit():
     tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
     for name in (STORAGE_TESTS[3], STORAGE_TESTS[6], STORAGE_TESTS[7]):
@@ -218,6 +252,54 @@ def test_bundle_gate_requires_disk_backed_fixtures_and_exact_named_cases():
     shutdown = steps["14 Check that the stack stops cleanly"]
     assert shutdown.index("compose-before-down.log") < shutdown.index("$C down")
     assert "storage-init quiesce" in shutdown
+
+
+def test_manual_home_rollback_gate_checks_both_immutable_older_bundles():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/compose-instances.yml").read_text(encoding="utf-8"))
+    gate = next(step for step in workflow["jobs"]["bundle-instances"]["steps"] if "test_compose_home_rollback.py" in step.get("run", ""))
+    assert gate["if"] == "github.event_name == 'workflow_dispatch' && inputs.verify_home_rollback"
+    assert "git rev-parse" in gate["run"] and 'git archive "$commit:deploy/compose"' in gate["run"]
+    for version in (61, 60):
+        assert f"test_reuse_checked_home_data_on_older_build[{version}]" in gate["run"]
+    assert "rollback.xml" in gate["run"]
+    assert '["skipped", "failure", "error"]' in gate["run"]
+
+
+def test_rollback_reloads_the_shipped_nginx_master_and_checks_the_public_route():
+    compose = yaml.safe_load((ROOT / "deploy/compose/compose.yaml").read_text(encoding="utf-8"))
+    assert compose["services"]["nginx"]["command"] == ["sh", "/opt/hartmesh/nginx/render.sh"]
+    render = (ROOT / "deploy/compose/nginx/render.sh").read_text(encoding="utf-8")
+    assert 'TARGET="${HARTMESH_NGINX_TARGET:-/tmp/nginx.conf}"' in render and 'exec nginx -c "$TARGET"' in render
+    config = (ROOT / "deploy/compose/nginx/nginx.conf").read_text(encoding="utf-8")
+    assert "pid /tmp/nginx.pid;" in config and "location /health {" in config
+    tree = ast.parse((ROOT / "backend/tests/test_compose_home_rollback.py").read_text(encoding="utf-8"))
+    start = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "start_gateway")
+    commands = [tuple(ast.literal_eval(arg) for arg in call.args) for call in ast.walk(start) if isinstance(call, ast.Call) and ast.unparse(call.func) == "bundle.run"]
+    assert commands[:2] == [("up", "-d", "--wait", "--no-deps", "gateway"), ("exec", "-T", "nginx", "nginx", "-c", "/tmp/nginx.conf", "-s", "reload")]
+    assert "'GET', '/health/ready'" in ast.unparse(start)
+    assert "eventually(through_proxy" in ast.unparse(start)
+
+
+def test_rollback_finishes_operator_closure_on_the_current_gateway_before_the_final_check():
+    source = (ROOT / "backend/tests/test_compose_home_rollback.py").read_text(encoding="utf-8")
+    final_steps = source.split("assert writer.drained", 1)[1].split("entry = start_gateway(older", 1)[0]
+    steps = ["start_gateway(compose, session)", "await_execution_ready(session)", "stop_gateway(compose)", "offline_check(compose, expected=0)"]
+    positions = [final_steps.index(step) for step in steps]
+    assert positions == sorted(positions)
+
+
+def test_candidate_browser_rehearsal_uses_the_built_product_ui_and_real_file_action():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/compose-instances.yml").read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["bundle-instances"]["steps"]
+    build = next(step for step in steps if "frontend-hm/Dockerfile" in step.get("run", ""))
+    gate = next(step for step in steps if "attachment-browser.json" in step.get("run", ""))
+    assert build["if"] == gate["if"] == "github.event_name == 'workflow_dispatch' && inputs.verify_home_rollback"
+    assert 'echo "HARTMESH_BROWSER_FRONTEND=$frontend_ref" >> "$GITHUB_ENV"' in build["run"]
+    assert "uv sync --frozen --group dev --extra browser" in build["run"]
+    assert "attachment-browser-interrupted.png" in gate["run"] and "attachment-browser-recovered.png" in gate["run"]
+    source = (ROOT / "backend/tests/_compose_attachment_browser.py").read_text(encoding="utf-8")
+    assert ".expect_file_chooser()" in source and ".set_files(" in source
+    assert ".route(" not in source and ".fulfill(" not in source
 
 
 def test_operator_helper_uses_the_image_environment_and_actual_socket_group():

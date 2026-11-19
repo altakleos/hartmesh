@@ -11,6 +11,7 @@ database, home directory, storage mounts and Docker socket as its Gateway:
 ```bash
 python -m app.gateway.agent_instances list
 python -m app.gateway.agent_instances status
+python -m app.gateway.agent_instances pending [--after <cursor>]
 python -m app.gateway.agent_instances verify
 python -m app.gateway.agent_instances close-workspace <instance-id>
 python -m app.gateway.agent_instances export <instance-id>
@@ -31,6 +32,14 @@ released. `status` observes the actual running Gateway lifetime through a privat
 process-checked receipt; missing or stale evidence fails the command rather than
 inventing a start time. A daemon outage with valid Gateway evidence remains a
 status response. Only `status` and `verify` use a temporary qualification probe.
+
+`status` includes the first 200 pending operations, the total count and a
+truncation flag. `pending` returns stable (Space, operation) pages with every
+durable workspace association. The offline `check-rollback` command owns the
+managed pool lock, excludes current writer and operator admissions and verifies
+the entire scan against the native journal and live Docker inventory. Keep
+external writers and automatic restarts disabled through the older build's
+startup. See the [downgrade procedure](../deploy/compose/README.md#rolling-back).
 
 Workspace closure, export, supervision recovery and deletion accept
 `--end-running-work` and `--wait-seconds` (default 120). Without the first flag,
@@ -68,8 +77,10 @@ resources nor rewrites native evidence. Gateway reconciliation owns subsequent
 absence verification and cleanup.
 
 `settle` inspects and reconciles one exact pending file operation, leaving other
-operations alone. If its evidence cannot establish an outcome, it remains pending
-with exit 2. After inspecting the reported request, receipt and files, explicit
+operations alone. A verified direct operation whose file outcome cannot be
+established reports `settled-unconfirmed`. Incomplete host qualification or
+workflow recovery can leave a row pending. An unreadable target folder reports
+`files: null`. After inspecting the reported request, receipt and files, explicit
 `--discard` records only that row as failed with host/operator attribution and
 changes no files. It preserves malformed receipts and abandoned stages for
 inspection. An occupied workflow lock refuses both paths.
@@ -80,9 +91,9 @@ no invented completion time. Recovery and handoff events use the existing Space
 event stream. The Compose bundle enables managed storage and agent counts by default.
 
 The `agent_operator_*` service graph shares pure storage constructors with the
-Gateway. It never enters Gateway startup, acquires provider/runtime ownership or
-starts maintenance. Native evidence readers open lazily and cannot publish or
-prune records. Domain admission callbacks borrow the owning SQL transaction.
+Gateway. Only the offline check acquires the pool runtime lock. Native evidence
+readers open lazily and cannot publish or prune records. Domain admission
+callbacks borrow the owning SQL transaction.
 `gateway_observation.py` publishes a bounded private lifetime receipt with an
 exact held lifetime lock; it grants no native authority and its publication
 failure does not prevent Gateway startup.

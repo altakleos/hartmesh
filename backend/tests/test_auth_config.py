@@ -13,6 +13,22 @@ def test_auth_config_defaults():
     assert config.token_expiry_days == 7
 
 
+def test_read_only_key_lookup_neither_creates_nor_repairs_secret_files(tmp_path, monkeypatch):
+    from deerflow.config.paths import Paths
+
+    monkeypatch.setattr(cfg, "_auth_config", None)
+    monkeypatch.setattr(cfg, "_environment_secret", lambda: None)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    assert cfg.existing_signing_key() is None
+    assert list(tmp_path.iterdir()) == []
+    path = tmp_path / ".jwt_secret"
+    path.write_bytes(b"")
+    assert cfg.existing_signing_key() is None
+    assert path.read_bytes() == b""
+    path.write_bytes(b"only-for-this-test")
+    assert cfg.existing_signing_key() == "only-for-this-test"
+
+
 def test_auth_config_token_expiry_range():
     cfg.AuthConfig(jwt_secret="s", token_expiry_days=1)
     cfg.AuthConfig(jwt_secret="s", token_expiry_days=30)

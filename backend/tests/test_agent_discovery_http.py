@@ -162,6 +162,7 @@ async def test_detail_activity_separates_totals_from_inspect_evidence_and_projec
             ]
             assert activity["running"] == ([] if permission == 1 else expected)
             assert body["home"] == (None if permission == 1 else {"state": "available", "workspace": "absent"})
+            assert body["home_generation"] == (await agents.files.registry.get(actor=agent.principal, space_id=agent.home_id)).generation
             assert body["execution"] == {"execution": "unavailable", "reason": "operator-hold"}
             agents.execution_probe.assert_awaited_once_with(agent.id)
             assert quota.await_count == (0 if permission == 1 else 1)

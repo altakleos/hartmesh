@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { afterEach, beforeEach, expect, test, rs } from "@rstest/core";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 
@@ -34,11 +36,16 @@ function part(name = "input.txt") {
   const file = new File(["hello"], name);
   return { id: name, file, filename: name };
 }
-function show() {
+function show(homeScope?: string) {
   return renderHook(
     (props) => useConversationAttachments({ ...props, changed }),
     {
-      initialProps: { instanceId: id, threadId: "thread", enabled: true },
+      initialProps: {
+        instanceId: id,
+        threadId: "thread",
+        enabled: true,
+        ...(homeScope ? { homeScope } : {}),
+      },
       wrapper: ({ children }) => (
         <FileActionLifetimeProvider>{children}</FileActionLifetimeProvider>
       ),
@@ -52,7 +59,10 @@ beforeEach(() => {
   rs.mocked(api.uploadConversationFile).mockReset().mockResolvedValue(saved);
   rs.mocked(api.putAgentFile).mockReset();
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  rs.unstubAllGlobals();
+});
 test("uploads on attachment once, then sends only the returned saved name and sandbox reference", async () => {
   const view = show();
   await waitFor(() => expect(view.result.current.saved).toHaveLength(1));
@@ -88,6 +98,42 @@ test("a refused chip does not block text and a manual retry keeps its exact oper
   await waitFor(() => expect(view.result.current.saved).toHaveLength(1));
   const second = rs.mocked(api.uploadConversationFile).mock.calls[1]!;
   expect(second.slice(0, 4)).toEqual(first.slice(0, 4));
+});
+test("temporary missing Home detail retains saved files; a new Home generation retires them without another upload", async () => {
+  const view = show("home:3");
+  await waitFor(() => expect(view.result.current.saved).toHaveLength(1));
+  const initial = { instanceId: id, threadId: "thread", enabled: true };
+  view.rerender(initial);
+  expect(view.result.current.capture().files).toHaveLength(1);
+  view.rerender({ ...initial, homeScope: "home:4" });
+  await waitFor(() => expect(view.result.current.rows).toEqual([]));
+  expect(view.result.current.capture().files).toEqual([]);
+  expect(state.remove).toHaveBeenCalledWith("input.txt");
+  expect(api.uploadConversationFile).toHaveBeenCalledTimes(1);
+});
+test("a clean failure takes a fresh operation while retaining the original removable chip", async () => {
+  const contract = JSON.parse(
+    readFileSync("../contracts/agent-file-outcome-v1.json", "utf8"),
+  ) as { field: string; clean: string };
+  rs.mocked(api.uploadConversationFile).mockRejectedValueOnce(
+    new InstanceApiError(503, "refused", "file-write-failed", undefined, {
+      [contract.field]: contract.clean,
+    }),
+  );
+  const view = show();
+  await waitFor(() =>
+    expect(view.result.current.rows[0]).toMatchObject({
+      status: "failed",
+      retryable: true,
+    }),
+  );
+  const chip = view.result.current.rows[0]!.id;
+  act(() => view.result.current.retry(chip));
+  await waitFor(() => expect(view.result.current.saved).toHaveLength(1));
+  const calls = rs.mocked(api.uploadConversationFile).mock.calls;
+  expect(calls[0]![3]).not.toBe(calls[1]![3]);
+  act(() => view.result.current.remove(chip));
+  expect(state.remove).toHaveBeenCalledWith("input.txt");
 });
 test("removing an uploading chip cancels its request and ignores late completion", async () => {
   let finish!: (value: typeof saved) => void;

@@ -1,4 +1,4 @@
-"""Isolated, one-shot operator policy; no Gateway lifespan or runtime owner."""
+"""One-shot operator policy and observation outside the Gateway lifespan."""
 
 import os
 from collections import Counter
@@ -12,6 +12,7 @@ from sqlalchemy.orm import load_only
 
 from app.gateway.agent_operator_actions import OperatorActions
 from app.gateway.agent_operator_contract import CommandRefused
+from app.gateway.agent_operator_pending import pending_count, pending_page
 from app.gateway.agent_operator_settlement import OperatorSettlement
 from app.gateway.agent_operator_supervision import OperatorSupervision
 from app.gateway.auth.mode import account_refusal
@@ -45,7 +46,7 @@ def _hold():
     return {"since": datetime.fromtimestamp(metadata.st_mtime, UTC).isoformat(), "reason": reason}
 
 
-def inspect_operator_volume(files, binding=None, *, slot=None):
+def inspect_operator_volume(files, binding=None, *, slot=None, managed_home=False):
     """Verify without publishing geometry, caches, markers or ownership."""
     if binding is not None:
         files._binding_spec(binding)
@@ -53,7 +54,7 @@ def inspect_operator_volume(files, binding=None, *, slot=None):
     volume = files.catalog.verify(slot, previous=files._verified.get(slot))
     if binding is not None:
         files._check_incarnation(binding, volume)
-        volume = verify_bound(volume, binding.backing_handle)
+        volume = verify_bound(volume, binding.backing_handle, managed_home=managed_home)
     with volume.filesystem() as filesystem:
         usage = os.fstatvfs(filesystem._data_fd)
     empty = files._empty(volume) if binding is None else False
@@ -68,8 +69,14 @@ class OperatorCommands(OperatorActions, OperatorSettlement, OperatorSupervision)
         self.attachments = self._attachment_factory = None
 
     async def run(self, command, **options):
+        from app.gateway.agent_operator_rollback import check_rollback, under_operator_lock
+
+        if command == "check-rollback":
+            return await under_operator_lock(self.home, lambda: check_rollback(self), exclusive=True)
         method = getattr(self, "_" + command.replace("-", "_"))
-        return await method(**options)
+        if command in ("list", "status", "pending", "verify"):
+            return await method(**options)
+        return await under_operator_lock(self.home, lambda: method(**options))
 
     @staticmethod
     def _answer(command, note, *, returncode=0, **fields):
@@ -110,7 +117,9 @@ class OperatorCommands(OperatorActions, OperatorSettlement, OperatorSupervision)
             elif mode == "status":
                 result["replacements"] = list((await session.scalars(select(StorageHostReplacementRow))).all())
                 result["attempts_unresolved"] = await session.scalar(select(func.count()).select_from(AgentWorkAttemptRow).where(AgentWorkAttemptRow.status.in_(UNRESOLVED)))
-                result["file_operations_pending"] = await session.scalar(select(func.count()).select_from(SpaceFileOperationRow).where(SpaceFileOperationRow.phase == "pending"))
+                result["file_operations_pending"] = await pending_count(session)
+                result["pending_operations"], cursor = await pending_page(session)
+                result["pending_operations_truncated"] = cursor is not None
                 result["work_attempts_settled"] = await session.scalar(select(func.count()).select_from(AgentWorkEventRow).where(AgentWorkEventRow.action == "attempt_contained", AgentWorkEventRow.created_at >= since))
                 resolution = SpaceFileOperationRow.result["resolution"].as_string()
                 stamp = SpaceFileOperationRow.result["host_settled_at"].as_string()
@@ -149,7 +158,7 @@ class OperatorCommands(OperatorActions, OperatorSettlement, OperatorSupervision)
                 empty=None,
             )
             try:
-                _proven, entry["used_bytes"], entry["empty"] = await run_file_io(inspect_operator_volume, self.files, binding, slot=slot)
+                _proven, entry["used_bytes"], entry["empty"] = await run_file_io(inspect_operator_volume, self.files, binding, slot=slot, managed_home=agent is not None)
             except Exception as exc:
                 entry.update(state="unverified", reason=str(exc))
             if binding is not None:
@@ -366,11 +375,19 @@ class OperatorCommands(OperatorActions, OperatorSettlement, OperatorSupervision)
             attachments_active=len(active),
             attempts_unresolved=snapshot["attempts_unresolved"],
             file_operations_pending=snapshot["file_operations_pending"],
+            pending_operations=snapshot["pending_operations"],
+            pending_operations_truncated=snapshot["pending_operations_truncated"],
             since_gateway_start={"at": utc_isoformat(observed.started_at), "attachments_fenced": dict(fenced), "work_attempts_settled": settled_work, "file_operations_settled": settled_files},
             host_id=host,
             foreign_hosts=[{"host_id": old, "attachments": count, "adopted": (old, host) in adopted} for old, count in sorted(foreign.items())],
             runtime=os.environ.get("SANDBOX_RUNTIME") or "default",
         )
+
+    async def _pending(self, *, after=None):
+        async with self.files.registry._sf() as session:
+            total = await pending_count(session)
+            operations, cursor = await pending_page(session, after)
+        return self._answer("pending", f"{len(operations)} pending file operations on this page", operations=operations, next_after=cursor, total=total)
 
     async def _adopt_host(self, *, old_host, acknowledge_old_host_gone=False):
         from sqlalchemy.exc import IntegrityError
@@ -449,11 +466,13 @@ async def operator_services(config, *, command, session_factory, discard=False):
     from deerflow.spaces.native_create_evidence import NativeEvidenceReader
     from deerflow.spaces.operator_containment import OperatorResidentContainmentScopes
 
-    catalog, _errors, fit, reason, text = await await_drained(run_file_io(read_storage_pool, config.storage_spaces))
+    catalog, errors, fit, reason, text = await await_drained(run_file_io(read_storage_pool, config.storage_spaces))
+    if command == "check-rollback" and errors:
+        raise CommandRefused(f"The storage inventory has {len(errors)} unverified slots")
     repository = SQLiteUserRepository(session_factory)
     files, agents = build_storage_services(config.storage_spaces, catalog, session_factory, repository)
     adapter = adapter_error = probe_error = None
-    if command != "settle" or discard:
+    if command not in ("pending", "settle") or discard:
         try:
             adapter, probe_error = await await_drained(run_file_io(_operator_adapter, config, probe=command in ("status", "verify")))
         except Exception as exc:
@@ -526,7 +545,17 @@ async def run(command, **options):
                 raise RuntimeError("persistence engine unavailable")
         except Exception as exc:
             raise CommandRefused(f"the database cannot be reached: {exc}") from None
-        async with operator_services(config, command=command, session_factory=session_factory, discard=command == "settle" and options.get("discard", False)) as service:
-            return await service.run(command, **options)
+
+        async def execute():
+            async with operator_services(config, command=command, session_factory=session_factory, discard=command == "settle" and options.get("discard", False)) as service:
+                return await service.run(command, **options)
+
+        if command in ("status", "verify"):
+            # Their short-lived Docker probe starts during service construction.
+            from app.gateway.agent_operator_rollback import under_operator_lock
+            from deerflow.config.paths import get_paths
+
+            return await under_operator_lock(get_paths().base_dir, execute)
+        return await execute()
     finally:
         await await_drained(close_engine())

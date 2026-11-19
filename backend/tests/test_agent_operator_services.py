@@ -41,7 +41,7 @@ async def test_disabled_storage_refuses_before_sql_or_docker_startup(monkeypatch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("command,discard", [("list", False), ("status", False), ("verify", False), ("supervise", False), ("settle", False), ("settle", True)])
+@pytest.mark.parametrize("command,discard", [("list", False), ("status", False), ("verify", False), ("pending", False), ("check-rollback", False), ("supervise", False), ("settle", False), ("settle", True)])
 async def test_operator_factory_is_observational_and_opens_native_evidence_only_on_containment(tmp_path, monkeypatch, command, discard):
     from app.gateway import agent_operator_services as module
 
@@ -70,7 +70,7 @@ async def test_operator_factory_is_observational_and_opens_native_evidence_only_
         if command == "supervise":
             await service._attachment_factory()
             assert service.attachments is service.files.attachments
-    assert calls == ([] if command == "settle" and not discard else [command in ("status", "verify")])
+    assert calls == ([] if command in ("pending", "settle") and not discard else [command in ("status", "verify")])
     assert list(tmp_path.iterdir()) == []
 
 

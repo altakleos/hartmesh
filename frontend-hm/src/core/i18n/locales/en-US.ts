@@ -484,6 +484,17 @@ export function createEnUS(product: string): Translations {
           `${name} is paused or retired, so ${name}'s files cannot be changed.`,
         notFound: "That file or folder is no longer there. Refresh the list.",
         actionFailed: "That did not work. Try again.",
+        checkAgain: "Check again",
+        checkingChange: (file) =>
+          `${product} did not answer. The outcome for ${file} is unknown. Checking again…`,
+        pendingChange: "This change is still being checked.",
+        missingChange: "No result is recorded yet.",
+        unavailableCheck: "The result is currently unavailable.",
+        deniedCheck: "You no longer have access to check this change.",
+        unconfirmedChange: `${product} could not confirm whether this change was made. Look at the file before you try again.`,
+        unconfirmedUpload: (file, name) =>
+          `${product} could not confirm whether ${file} was saved. Ask ${name} whether it has the file before you attach it again.`,
+        completedChange: "The change was completed.",
       },
       memoryTooLarge:
         "That is too large for a memory import. Paste the text of a file made with Export memory.",

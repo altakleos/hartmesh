@@ -297,6 +297,8 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
     except StorageUnavailable as exc:
         raise HTTPException(503, "Resource backing is currently unavailable.") from exc
     except StorageConflict as exc:
+        if getattr(exc, "nothing_changed", False):
+            raise HTTPException(409, "The requested file change was refused before publication.") from exc
         raise HTTPException(409, "Resource state conflicts with this request; inspect recovery if its outcome is pending.") from exc
     except PermissionError as exc:
         raise HTTPException(403, "Current storage authority is required.") from exc

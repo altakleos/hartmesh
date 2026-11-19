@@ -70,17 +70,36 @@ def _load_or_create_secret() -> str:
         raise RuntimeError(f"Failed to read or persist the JWT secret at {secret_file}. Set AUTH_JWT_SECRET explicitly or fix DEER_FLOW_HOME/base directory permissions so DeerFlow can keep a stable auth secret.") from exc
 
 
+def _environment_secret() -> str | None:
+    from dotenv import load_dotenv
+
+    from deerflow.env import load_selected_env_file
+
+    if not load_selected_env_file():
+        load_dotenv()
+    return os.environ.get("AUTH_JWT_SECRET")
+
+
+def existing_signing_key() -> str | None:
+    """Read the deployment key without creating or repairing a secret file."""
+    if _auth_config is not None:
+        return _auth_config.jwt_secret
+    secret = _environment_secret()
+    if secret:
+        return secret
+    from deerflow.config.paths import get_paths
+
+    try:
+        return (get_paths().base_dir / _SECRET_FILE).read_text(encoding="utf-8-sig").strip() or None
+    except FileNotFoundError:
+        return None
+
+
 def get_auth_config() -> AuthConfig:
     """Get the global AuthConfig instance. Parses from env on first call."""
     global _auth_config
     if _auth_config is None:
-        from dotenv import load_dotenv
-
-        from deerflow.env import load_selected_env_file
-
-        if not load_selected_env_file():
-            load_dotenv()
-        jwt_secret = os.environ.get("AUTH_JWT_SECRET")
+        jwt_secret = _environment_secret()
         if not jwt_secret:
             jwt_secret = _load_or_create_secret()
             os.environ["AUTH_JWT_SECRET"] = jwt_secret

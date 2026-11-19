@@ -6,6 +6,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      verify_home_rollback:
+        description: Rehearse in-place Home rollback against the two supported older builds
+        type: boolean
+        default: false
 
 concurrency:
   group: compose-instances-${{ github.event.pull_request.number || github.ref }}
@@ -19,7 +24,7 @@ jobs:
     name: Storage and agents in the Compose bundle (Linux Docker)
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: ${{ inputs.verify_home_rollback && 110 || 60 }}
     env:
       C: docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env
       EVIDENCE: ${{ github.workspace }}/bundle-evidence
@@ -102,6 +107,20 @@ jobs:
           sudo sed -i -E "s#ghcr\.io/altakleos/hartmesh-backend@sha256:[0-9a-f]{64}#${BACKEND_REF}#g" /opt/hartmesh/compose.yaml /opt/hartmesh/images.txt
           test "$(grep -c -F "$BACKEND_REF" /opt/hartmesh/compose.yaml)" = 3
           if grep -q 'ghcr.io/altakleos/hartmesh-backend@' /opt/hartmesh/compose.yaml; then exit 1; fi
+
+      - name: Build the candidate product UI and install its browser rehearsal
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_home_rollback
+        run: |
+          docker build --target prod --tag localhost:80/hartmesh-frontend:ci --file frontend-hm/Dockerfile .
+          docker push localhost:80/hartmesh-frontend:ci
+          frontend_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' localhost:80/hartmesh-frontend:ci)
+          case "$frontend_ref" in localhost:80/hartmesh-frontend@sha256:*) ;; *) exit 1 ;; esac
+          sudo sed -i -E "s#ghcr\.io/altakleos/hartmesh-frontend@sha256:[0-9a-f]{64}#${frontend_ref}#g" /opt/hartmesh/compose.yaml /opt/hartmesh/images.txt
+          test "$(grep -c -F "$frontend_ref" /opt/hartmesh/compose.yaml)" = 1
+          echo "HARTMESH_BROWSER_FRONTEND=$frontend_ref" >> "$GITHUB_ENV"
+          cd backend
+          uv sync --frozen --group dev --extra browser
+          .venv/bin/python -m playwright install --with-deps chromium
 
       - name: 9 Write the data directory, the model file and the .env contract
         run: |
@@ -235,6 +254,50 @@ jobs:
           assert len(names) == len(set(names)) and tuple(names) == expected, "acceptance names differ from the twenty-seven storage and agent cases"
           assert not tree.findall(".//skipped"), "an acceptance case was skipped"
           assert not tree.findall(".//failure") and not tree.findall(".//error")
+          PY
+
+      - name: Qualify in-place Home rollback on both older builds
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_home_rollback
+        env:
+          HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
+          HARTMESH_VERIFY_HOME_ROLLBACK: '1'
+          HARTMESH_BUNDLE_URL: http://localhost:2026
+          HARTMESH_BUNDLE_PROJECT_DIR: /opt/hartmesh
+          HARTMESH_BUNDLE_ENV_FILE: /srv/hartmesh/.env
+          HARTMESH_BUNDLE_ADMIN_EMAIL: admin@example.com
+          HARTMESH_BUNDLE_ADMIN_PASSWORD: 'Acceptance-Admin-2026!'
+          HARTMESH_BUNDLE_RUNTIME: hartmesh-ci
+        run: |
+          test -s "$EVIDENCE/attachment-browser-interrupted.png"
+          test -s "$EVIDENCE/attachment-browser-recovered.png"
+          jq -e --arg image "$HARTMESH_BROWSER_FRONTEND" '.frontend == $image and (.requests | length) >= 2 and .interrupted != .recovered' "$EVIDENCE/attachment-browser.json"
+          for version in 61 60; do
+            tag="v2.2.0+hartmesh.$version"
+            git fetch --no-tags origin "refs/tags/$tag:refs/tags/$tag"
+            case "$version" in
+              61) commit=40aa905acbb4e7d890b0a4840a9915de0a710ea9 ;;
+              60) commit=b2548de9ae0ee664c526fcbad294aec5f1ad75f9 ;;
+            esac
+            test "$(git rev-parse "$tag^{commit}")" = "$commit"
+            directory="/opt/hartmesh-rollback-$version"
+            sudo install -d -m 0755 "$directory"
+            git archive "$commit:deploy/compose" | sudo tar -x -C "$directory"
+            sudo find "$directory" -type d -exec chmod 0755 {} +
+            sudo find "$directory" -type f -exec chmod 0644 {} +
+            while IFS= read -r image; do docker pull "$image"; done < "$directory/images.txt"
+            echo "$tag $commit" >> "$EVIDENCE/rollback-builds.txt"
+          done
+          cd backend
+          PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 .venv/bin/python -m pytest tests/test_compose_home_rollback.py \
+            -q --tb=short --maxfail=1 -p no:randomly --junitxml="$EVIDENCE/rollback.xml"
+          python - "$EVIDENCE/rollback.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          tree = ET.parse(sys.argv[1])
+          assert [case.get("name") for case in tree.findall(".//testcase")] == [
+              "test_reuse_checked_home_data_on_older_build[61]", "test_reuse_checked_home_data_on_older_build[60]"
+          ]
+          assert not any(tree.findall(".//" + outcome) for outcome in ["skipped", "failure", "error"])
           PY
 
       - name: 14 Check that the stack stops cleanly

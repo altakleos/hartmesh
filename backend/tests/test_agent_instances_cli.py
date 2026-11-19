@@ -17,6 +17,8 @@ INSTANCE, SPACE, OPERATION = "a" * 32, "b" * 32, "c" * 32
     [
         (["list", "--all"], {"all": True}),
         (["status"], {}),
+        (["pending", "--after", SPACE + ":" + OPERATION], {"after": SPACE + ":" + OPERATION}),
+        (["check-rollback"], {}),
         (["verify"], {}),
         (["close-workspace", INSTANCE], {"instance_id": INSTANCE, "end_running_work": False, "wait_seconds": 120}),
         (["export", INSTANCE, "--end-running-work", "--wait-seconds", "0"], {"instance_id": INSTANCE, "end_running_work": True, "wait_seconds": 0}),

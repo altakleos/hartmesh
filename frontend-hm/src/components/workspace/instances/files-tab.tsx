@@ -18,6 +18,10 @@ import {
 } from "@/core/agent-instances/agent-files";
 import * as api from "@/core/agent-instances/api";
 import { downloadAgentFile } from "@/core/agent-instances/file-reads";
+import {
+  fileOutcome,
+  unansweredWrite,
+} from "@/core/agent-instances/file-status";
 import { useAgentFileTransfers } from "@/core/agent-instances/file-transfers";
 import {
   agentBlock,
@@ -41,6 +45,10 @@ import { formatUploadSize } from "@/core/uploads/file-validation";
 import { AgentTransferRow } from "./agent-file-transfer";
 import { AgentAvailabilityNotice } from "./agent-header";
 import { AgentTextEditor } from "./agent-text-editor";
+import {
+  FileOperationNotice,
+  PendingFileChange,
+} from "./file-operation-notice";
 import { AgentFileRefusal } from "./file-refusal";
 
 type Props = {
@@ -57,9 +65,12 @@ const validName = (name: string) =>
   !!name.trim() && name !== "." && name !== ".." && !/[\\/\p{Cc}]/u.test(name);
 
 export function FilesTab(props: Props) {
+  const [observed, setObserved] = useState<{
+    home: string;
+    generation: number;
+  }>();
   const { user } = useAuth();
   const { t } = useI18n();
-  const feature = useAgentInstances();
   const supervisor = useSupervisorName(props.instance.supervisor.subject_id);
   if ((props.instance.permissions & INSPECT) === 0)
     return (
@@ -72,10 +83,6 @@ export function FilesTab(props: Props) {
         )}
       </section>
     );
-  if (agentBlock(props.instance, feature)?.busy)
-    return (
-      <p role="status">{t.agentInstances.filesBusy(props.instance.name)}</p>
-    );
   if (!props.instance.home_id)
     return (
       <p role="alert">
@@ -84,9 +91,10 @@ export function FilesTab(props: Props) {
     );
   return (
     <FileBrowser
-      key={`${user?.id}:${user?.system_role}:${user?.permissions?.join(",")}:${props.instance.id}:${props.instance.generation}:${props.instance.permissions}:${props.instance.status}:${props.instance.home_id}:${props.initialFolder}`}
+      key={`${user?.id}:${user?.system_role}:${user?.permissions?.join(",")}:${props.instance.id}:${props.instance.generation}:${props.instance.permissions}:${props.instance.status}:${props.instance.home_id}:${Math.max(props.instance.home_generation ?? 0, observed?.home === props.instance.home_id ? observed.generation : 0)}:${props.initialFolder}`}
       {...props}
       home={props.instance.home_id}
+      onGeneration={setObserved}
     />
   );
 }
@@ -96,11 +104,13 @@ function FileBrowser({
   changed,
   home,
   initialFolder,
+  onGeneration,
 }: {
   instance: api.AgentInstanceDetail;
   changed?: () => void;
   home: string;
   initialFolder?: string;
+  onGeneration: (value: { home: string; generation: number }) => void;
 }) {
   const { user } = useAuth();
   const { t, locale } = useI18n();
@@ -143,6 +153,10 @@ function FileBrowser({
     staleTime: 0,
     refetchInterval: (query) => (isBusy(query.state.error) ? 3000 : false),
   });
+  const generation = space.data?.generation;
+  useEffect(() => {
+    if (generation !== undefined) onGeneration({ home, generation });
+  }, [onGeneration, home, generation]);
   const block = agentBlock(instance, feature);
   const writable =
     !space.isError &&
@@ -203,6 +217,14 @@ function FileBrowser({
     retry: false,
   });
   const [editor, setEditor] = useState<SpaceFile>();
+  const [checks, setChecks] = useState<{ id: string; file: string }[]>([]);
+  const [uncertain, setUncertain] = useState<string>();
+  function observe(id: string, file: string) {
+    setChecks((previous) => [
+      ...previous.filter((item) => item.id !== id),
+      { id, file },
+    ]);
+  }
   const [action, setAction] = useState<
     { kind: "mkdir" } | { kind: "rename" | "remove"; file: SpaceFile }
   >();
@@ -264,10 +286,23 @@ function FileBrowser({
       refresh();
     } catch (failure) {
       if (!signal.aborted) {
+        if (request.current && unansweredWrite(failure)) {
+          observe(request.current.operation_id, request.current.path);
+          request.current = undefined;
+          setAction(undefined);
+          return;
+        }
+        if (fileOutcome(failure) === "unconfirmed") {
+          setUncertain(request.current?.path);
+          request.current = undefined;
+          setAction(undefined);
+          return;
+        }
         setError(failure);
         if (
           failure instanceof api.InstanceApiError &&
-          failure.reason !== "file-write-failed"
+          (failure.reason !== "file-write-failed" ||
+            fileOutcome(failure) === "nothing-changed")
         )
           request.current = undefined;
         if (
@@ -307,25 +342,81 @@ function FileBrowser({
       if (!owner.aborted) setDownloading(undefined);
     }
   }
+  if (lostAccess(space.error) || lostAccess(files.error))
+    return <p role="alert">{copy.accessNotSaved(instance.name)}</p>;
+  const notices = (
+    <>
+      {checks.map(({ id, file }) => (
+        <PendingFileChange
+          key={id}
+          instance={instance.id}
+          operation={id}
+          file={file}
+          changed={refresh}
+          dismiss={() =>
+            setChecks((previous) => previous.filter((item) => item.id !== id))
+          }
+        />
+      ))}
+      {uncertain && (
+        <FileOperationNotice
+          state="unconfirmed"
+          file={uncertain}
+          check={() => undefined}
+        />
+      )}
+      {editor && (
+        <AgentTextEditor
+          key={editor.path}
+          instance={instance}
+          home={home}
+          file={editor}
+          editable={writable}
+          close={() => setEditor(undefined)}
+          changed={refresh}
+          observe={observe}
+        />
+      )}
+    </>
+  );
+  const preserved = (content: React.ReactNode) => (
+    <section className="space-y-4">
+      {notices}
+      {transfers.rows
+        .filter((row) => row.check)
+        .map((row) => (
+          <AgentTransferRow
+            key={row.id}
+            instance={instance}
+            row={row}
+            retry={() => transfers.retry(row.id)}
+            remove={() => transfers.remove(row.id)}
+            disabled
+          />
+        ))}
+      {content}
+    </section>
+  );
   if (
+    block?.busy ||
     isBusy(space.error) ||
     isBusy(files.error) ||
     (writeBusy && !files.isError)
   )
-    return <p role="status">{t.agentInstances.filesBusy(instance.name)}</p>;
-  if (lostAccess(space.error) || lostAccess(files.error))
-    return <p role="alert">{copy.accessNotSaved(instance.name)}</p>;
+    return preserved(
+      <p role="status">{t.agentInstances.filesBusy(instance.name)}</p>,
+    );
   if (space.isError || files.isError)
-    return (
+    return preserved(
       <section className="space-y-2">
         <p role="alert">{copy.listFailed(instance.name)}</p>
         <Button type="button" variant="outline" onClick={refresh}>
           {t.agentInstances.refresh}
         </Button>
-      </section>
+      </section>,
     );
   if (space.isPending || files.isPending)
-    return <p role="status">{t.agentInstances.loading}</p>;
+    return preserved(<p role="status">{t.agentInstances.loading}</p>);
   const rowTransfers = transfers.rows.filter((row) => row.folder === path);
   return (
     <section
@@ -341,6 +432,7 @@ function FileBrowser({
         if (writable) transfers.add(Array.from(event.dataTransfer.files));
       }}
     >
+      {notices}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <nav
           aria-label={copy.root(instance.name)}
@@ -629,17 +721,6 @@ function FileBrowser({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      {editor && (
-        <AgentTextEditor
-          key={editor.path}
-          instance={instance}
-          home={home}
-          file={editor}
-          editable={writable}
-          close={() => setEditor(undefined)}
-          changed={refresh}
-        />
-      )}
     </section>
   );
 }

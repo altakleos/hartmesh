@@ -7,17 +7,18 @@ from app.gateway.agent_operator_contract import CommandRefused
 from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
 from deerflow.persistence.spaces.model import SpaceRow
 from deerflow.spaces.backings import BackingUnavailable
+from deerflow.spaces.filesystem import UnsafeSpacePath
 from deerflow.spaces.service import SpaceOperationPending
 from deerflow.utils.file_io import await_drained, run_file_io
 
 
-def _describe(files, candidate, binding):
+def _describe(files, candidate, binding, *, managed_home):
     from app.gateway.agent_operator_services import inspect_operator_volume
     from deerflow.config.paths import SHARED_VIRTUAL_PREFIX, USER_FILES_VIRTUAL_PREFIX
     from deerflow.spaces.snapshots import MAX_ARCHIVE_ENTRIES
     from deerflow.spaces.workflows import WorkflowReceipt, probe
 
-    volume, _used, _empty = inspect_operator_volume(files, binding)
+    volume, _used, _empty = inspect_operator_volume(files, binding, managed_home=managed_home)
     probe(volume)
     request = candidate.request
     if not isinstance(request, dict):
@@ -49,19 +50,21 @@ def _describe(files, candidate, binding):
         names = []
         try:
             descriptor = filesystem._open(folder, os.O_RDONLY | os.O_DIRECTORY, allow_root=True, follow_symlinks=False)
-        except FileNotFoundError:
-            descriptor = None
-        try:
-            if descriptor is not None:
+            try:
                 with os.scandir(descriptor) as entries:
                     for entry in entries:
                         if len(names) >= MAX_ARCHIVE_ENTRIES:
-                            raise ValueError("Target folder exceeds the supported entry count")
+                            names = None
+                            break
                         names.append(entry.name)
-        finally:
-            if descriptor is not None:
+            finally:
                 os.close(descriptor)
-    return receipt, sorted(names), getattr(volume.spec, "kind", None)
+        except FileNotFoundError:
+            names = []
+        except (PermissionError, UnsafeSpacePath):
+            # This optional directory listing is not evidence for settlement.
+            names = None
+    return receipt, sorted(names) if names is not None else None, getattr(volume.spec, "kind", None)
 
 
 def _settlers(files):
@@ -89,13 +92,18 @@ class OperatorSettlement:
             if candidate is None:
                 raise CommandRefused(f"no file operation {operation_id} on space {space_id}")
             if candidate.phase != "pending":
-                raise CommandRefused(f"file operation {operation_id} is already {candidate.phase}")
+                resolution = candidate.result.get("resolution") if isinstance(candidate.result, dict) else None
+                note = f"file operation {operation_id} is already {candidate.phase}"
+                if resolution is not None and resolution not in ("host-settled", "host-reconciled", "host-discarded"):
+                    raise CommandRefused(f"{note}; its file outcome was not confirmed ({resolution})", verdict="settled-unconfirmed", resolution=resolution, note="Inspect the target before starting another operation")
+                raise CommandRefused(note)
             space = await session.get(SpaceRow, space_id)
             binding = await session.get(SpaceBackingRow, space.backing_handle) if space else None
+            managed_home = binding is not None and space_id in await self.files._untyped_homes(session, [binding])
         try:
             if binding is None or binding.space_id != space_id:
                 raise BackingUnavailable("The resource has no qualified filesystem binding")
-            receipt, names, kind = await run_file_io(_describe, self.files, candidate, binding)
+            receipt, names, kind = await run_file_io(_describe, self.files, candidate, binding, managed_home=managed_home)
         except SpaceOperationPending:
             raise CommandRefused(f"another workflow holds the lock of space {space_id}; run the command again in a moment") from None
         except BackingUnavailable as exc:
@@ -121,11 +129,20 @@ class OperatorSettlement:
             async with self.files.registry._sf() as session:
                 current = await session.get(SpaceFileOperationRow, (space_id, operation_id))
             if current is None or current.phase == "pending":
-                return self._answer(
-                    "settle", f"publication {operation_id} cannot be settled: {detail}; inspect receipt and files, then run with --discard to record it as failed", returncode=2, verdict="unsettled", resolution=None, **fields
-                )
+                note = f"publication {operation_id} cannot be settled: {detail}; inspect receipt and files, then run with --discard to record it as failed"
+                if names is None:
+                    note += "; the target folder could not be listed"
+                return self._answer("settle", note, returncode=2, verdict="unsettled", resolution=None, **fields)
             resolution = current.result.get("resolution") if isinstance(current.result, dict) else None
-            verdict = "discarded" if resolution == "host-discarded" else "settled-complete" if current.phase == "complete" else "settled-failed"
-            return self._answer("settle", f"file operation {operation_id} on the {kind} Space {verdict} ({resolution})", verdict=verdict, resolution=resolution, **fields)
+            if resolution == "host-discarded":
+                verdict = "discarded"
+            elif resolution in ("host-settled", "host-reconciled"):
+                verdict = "settled-complete" if current.phase == "complete" else "settled-failed"
+            else:
+                verdict = "settled-unconfirmed"
+            note = f"file operation {operation_id} on the {kind} Space {verdict} ({resolution})"
+            if names is None:
+                note += "; the target folder could not be listed"
+            return self._answer("settle", note, verdict=verdict, resolution=resolution, **fields)
 
         return await await_drained(perform())
