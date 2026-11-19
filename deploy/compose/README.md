@@ -1216,7 +1216,7 @@ the guest must still reach, and that is a property of the surroundings, not of
 this profile.
 
 The profile shipped `172.30.10.0/24` until 2026-09-09. On the operator whose
-tenants run this profile, kosmos allocates pod addresses from `172.30.0.0/16`
+tenants run this profile, its Kubernetes cluster allocates pod addresses from `172.30.0.0/16`
 and service addresses from `172.31.0.0/16`, and on that date a production
 control-plane node's assigned pod subnet was exactly `172.30.10.0/24`. Public
 ingress to the tenant kept working throughout, which proves nothing: the
@@ -1229,7 +1229,7 @@ The default is now `10.201.26.0/24`, chosen to clear:
 
 | Range | What it is |
 | --- | --- |
-| `172.30.0.0/16`, `172.31.0.0/16` | kosmos pods and services |
+| `172.30.0.0/16`, `172.31.0.0/16` | the operator's Kubernetes pods and services |
 | `10.17.0.0/16`, `10.18.10.0/24`, `10.199.199.248/29` | the operator's own networks |
 | `172.16.220.0/22`, `172.16.224.0/24` | the operator's own networks |
 | `192.168.1.0/24`, `192.168.200.0/24` | the operator's own networks |
@@ -1436,7 +1436,7 @@ lines and raises `DEER_FLOW_SANDBOX_PIDS_LIMIT` to the full profile's `"384"`;
 the slot count, memory and Gateway limit are the full profile's already
 (§ "Memory budget" keeps that history).
 
-**Measured on a development host, not the tenant class.** Proxmox host,
+**Measured on a development host, not the tenant class.** Virtualized host,
 Intel Xeon Gold 6138 at 2.0 GHz, eight vCPUs, `runsc` (systrap), the pinned
 tenant image, the profile's hardening, no network, readiness polled from
 inside the container against `/v1/sandbox`, memory and processes read five
@@ -1703,7 +1703,7 @@ send and read timeouts; the adoption probe `discover()` runs on a
 warm container and keeps its 5 s; `idle_timeout`, the tool command timeouts
 and the shutdown phases are unaffected.
 
-**What 120 is and is not.** It is the initial candidate the estate evaluates,
+**What 120 is and is not.** It is the initial candidate under evaluation,
 chosen as roughly a third above the slower of the two observed one-CPU starts.
 One 91-second success on one VM does not establish a fleet-wide bound.
 Acceptance needs repeated cold starts on representative Intel and AMD VM
@@ -1877,7 +1877,7 @@ asserts the equality, not just the bound.
 `replicas` is a **hard budget** with **LRU eviction of warm sandboxes** in
 front of it: a third acquisition first evicts the least-recently-used sandbox
 that no thread is using, which is what keeps the count at two while at least
-one slot is idle and is what every saturation event in estate qualification
+one slot is idle and is what every saturation event in operator qualification
 has taken so far. With both slots in active use there is nothing to evict,
 and the acquisition then waits up to `SANDBOX_CAPACITY_WAIT_TIMEOUT` seconds
 (default 5, the overlap at the edges of two turns) and is otherwise refused

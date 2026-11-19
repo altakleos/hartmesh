@@ -691,7 +691,7 @@ def _app_subnet_defaults() -> list[str]:
 
 def test_the_app_subnet_default_clears_every_recorded_external_range() -> None:
     """The defect this pins: until 2026-09-08 the app bridge was 172.30.10.0/24,
-    which is inside the operator's kosmos pod range, and a bridge is a
+    which is inside the operator's Kubernetes pod range, and a bridge is a
     connected route in the guest. A public GET still working does not disprove
     the overlap -- the Kubernetes worker was SNAT'ing the request onto another
     leg -- so the check has to be on the address space, not on reachability."""

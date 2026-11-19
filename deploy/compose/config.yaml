@@ -139,7 +139,7 @@ sandbox:
   # 60 destroyed every cold start; the slim profile measured about 15 s there
   # at one CPU and boots at two since 2026-09-17 (README: "Sandbox readiness
   # budget"). 120 is the initial
-  # candidate the estate is evaluating, not a qualified fleet-wide bound; the
+  # candidate under evaluation, not a qualified fleet-wide bound; the
   # optional .env key SANDBOX_READY_TIMEOUT overrides it (60 to 600).
   ready_timeout: 120
   # How long an acquisition waits for one of the two slots when both are in
