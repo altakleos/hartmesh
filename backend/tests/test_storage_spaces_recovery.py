@@ -2,6 +2,7 @@
 
 import hashlib
 import sqlite3
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -10,7 +11,7 @@ from sqlalchemy import select
 
 from deerflow.persistence.spaces.files import SpaceFileOperationRow
 from deerflow.persistence.spaces.model import SpaceRow
-from deerflow.spaces.contract import Permission, SpaceConflict, SpaceNotFound
+from deerflow.spaces.contract import Permission, SpaceConflict, SpaceDenied, SpaceNotFound
 from deerflow.spaces.recovery import SpaceRecovery
 
 
@@ -92,6 +93,115 @@ async def test_archive_is_readonly_and_delete_keeps_tombstone_and_backups(storag
     assert all(r.backing_handle != space.backing_handle for r in remaining)
     with pytest.raises(SpaceConflict):
         await home(files)
+
+
+@pytest.mark.asyncio
+async def test_exact_recovery_status_survives_listing_limit_and_requires_admin(storage):
+    files, sf, _, recovery = storage
+    space = await home(files)
+    await files.registry.set_grant(actor=ALICE, space_id=space.id, expected_generation=1, subject=BOB, permissions=Permission.READ, acknowledge_existing_data=True)
+    ids = [operation() for _ in range(202)]
+    start = datetime.now(UTC) - timedelta(days=1)
+    async with sf.begin() as session:
+        for i, identifier in enumerate(ids):
+            session.add(SpaceFileOperationRow(space_id=space.id, operation_id=identifier, actor_kind=ALICE.kind, actor_id=ALICE.subject_id, generation=2, phase="failed", request={"action": "copy"}, created_at=start + timedelta(seconds=i)))
+    listing = await recovery.status(actor=ALICE, space_id=space.id)
+    assert len(listing["operations"]) == 200 and ids[0] not in {item["operation_id"] for item in listing["operations"]}
+    assert datetime.fromisoformat(listing["operations"][0]["created_at"]) == start + timedelta(seconds=201)
+    args = {"space_id": space.id, "expected_generation": 2, "operation_id": ids[0]}
+    record = await recovery.operation(actor=ALICE, **args)
+    assert record["operation_id"] == ids[0] and record["generation"] == 2 and record["phase"] == "failed"
+    with pytest.raises(SpaceNotFound):
+        await recovery.operation(actor=ALICE, **{**args, "operation_id": operation()})
+    with pytest.raises(SpaceConflict):
+        await recovery.operation(actor=ALICE, **{**args, "expected_generation": 1})
+    with pytest.raises(SpaceDenied):
+        await recovery.operation(actor=BOB, **args)
+    with pytest.raises(SpaceDenied):
+        await recovery.status(actor=BOB, space_id=space.id)
+    with pytest.raises(SpaceDenied):
+        await recovery.accept_current_state(actor=BOB, **args, acknowledge_uncertain_outcome=True, file_change_only=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("action", "row_generation", "allowed"), [("copy", 1, True), ("write", 1, True), ("restore", 1, False), ("write", 2, False)])
+async def test_file_acceptance_checks_exact_pending_row_before_quiescing(storage, action, row_generation, allowed):
+    files, sf, _, recovery = storage
+    space = await home(files)
+    op = operation()
+    async with sf.begin() as session:
+        session.add(
+            SpaceFileOperationRow(space_id=space.id, operation_id=op, actor_kind=BOB.kind, actor_id=BOB.subject_id, generation=row_generation, phase="pending", request={"action": action, "path": "uploads/sample", "sha256": "damaged"})
+        )
+    args = dict(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=op, acknowledge_uncertain_outcome=True, file_change_only=True)
+    if allowed:
+        await recovery.accept_current_state(**args)
+    else:
+        with pytest.raises(SpaceConflict):
+            await recovery.accept_current_state(**args)
+    async with sf() as session:
+        row = await session.get(SpaceFileOperationRow, (space.id, op))
+        assert row.phase == ("failed" if allowed else "pending")
+        if allowed:
+            assert row.result == {"resolution": "owner-accepted-current-state", "actor_kind": "human", "actor_id": ALICE.subject_id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exact", [False, True])
+async def test_recovery_metadata_rechecks_authority_before_return(storage, monkeypatch, exact):
+    from deerflow.persistence.spaces.model import SpaceGrantRow
+
+    files, sf, _, recovery = storage
+    space = await home(files)
+    identifier = operation()
+    async with sf.begin() as session:
+        session.add(SpaceFileOperationRow(space_id=space.id, operation_id=identifier, actor_kind="human", actor_id=ALICE.subject_id, generation=1, phase="pending", request={"action": "copy"}))
+    get = files.registry.get
+
+    async def revoke_after_first_check(**kwargs):
+        view = await get(**kwargs)
+        async with sf.begin() as session:
+            grant = await session.get(SpaceGrantRow, (space.id, ALICE.kind, ALICE.subject_id))
+            grant.permissions = int(Permission.READ)
+        return view
+
+    monkeypatch.setattr(files.registry, "get", revoke_after_first_check)
+    with pytest.raises(SpaceDenied):
+        if exact:
+            await recovery.operation(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=identifier)
+        else:
+            await recovery.status(actor=ALICE, space_id=space.id)
+
+
+@pytest.mark.asyncio
+async def test_manager_file_acceptance_excludes_writers_through_quiescence(storage, monkeypatch):
+    from deerflow.spaces.service import SpaceOperationPending
+    from deerflow.spaces.workflows import acquire, close
+
+    files, sf, _, recovery = storage
+    space = await home(files)
+    op = operation()
+    async with sf.begin() as session:
+        volume = await files._volume(session, await session.get(SpaceRow, space.id))
+        session.add(SpaceFileOperationRow(space_id=space.id, operation_id=op, actor_kind=ALICE.kind, actor_id=ALICE.subject_id, generation=1, phase="pending", request={"action": "copy"}))
+    args = dict(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=op, acknowledge_uncertain_outcome=True, file_change_only=True)
+    writer = acquire({space.id: volume})
+    try:
+        with pytest.raises(SpaceOperationPending):
+            await recovery.accept_current_state(**args)
+    finally:
+        close(writer)
+    checked = []
+
+    async def check_quiescence(*_args):
+        with pytest.raises(SpaceOperationPending):
+            acquire({space.id: volume})
+        checked.append(True)
+
+    monkeypatch.setattr(recovery, "_quiesce", check_quiescence)
+    await recovery.accept_current_state(**args)
+    assert checked == [True]
+    close(acquire({space.id: volume}))
 
 
 @pytest.mark.asyncio

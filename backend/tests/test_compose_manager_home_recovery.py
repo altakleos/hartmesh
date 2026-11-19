@@ -133,6 +133,7 @@ def test_manager_accepts_files_with_a_retained_workspace(compose, session, workl
                     "generation": generation,
                     "operation_id": operation,
                     "acknowledge_uncertain_outcome": True,
+                    "file_change_only": True,
                 },
             )
             predicate = f"space_id={sql(home)} AND operation_id={sql(operation)} AND generation={generation}"

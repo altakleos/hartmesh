@@ -180,6 +180,18 @@ def test_chat_texts_use_no_internal_term():
         assert not re.search(r"\bruns?\b", verbs_removed)
 
 
+@pytest.mark.parametrize(
+    ("key", "en", "zh"),
+    [
+        ("interrupted.reason.storage-recovery", "{name}'s workspace closed during this assignment. Check the files before continuing.", "{name}的工作区在这项任务期间关闭了。继续前请检查文件。"),
+        ("refused.interrupted_recovery", "{name}'s workspace closed during this reply. Your message is kept. Check the files before continuing.", "{name}的工作区在这次回复期间关闭了。你的消息已保留。继续前请检查文件。"),
+    ],
+)
+def test_file_recovery_reports_the_observed_interruption(key, en, zh):
+    assert catalog("en")[key] == en
+    assert catalog("zh-CN")[key] == zh
+
+
 def test_localized_templates_keep_the_same_placeholders_and_current_commands():
     def placeholders(text):
         return {name for _, name, _, _ in Formatter().parse(text) if name}

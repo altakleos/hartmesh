@@ -52,6 +52,40 @@ async def storage(tmp_path, request):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("changed", [True, False])
+async def test_only_the_confirmed_pending_file_change_can_retire_its_attachment(storage, monkeypatch, changed):
+    from deerflow.persistence.spaces.files import SpaceFileOperationRow
+    from deerflow.spaces.recovery import SpaceRecovery
+
+    files, sf, _catalog, mounts, provider = storage
+    space = await home(files)
+    attached = await mounts.attach(actor=ALICE, incarnation=operation(), resources=[ResourceMount(space.id, 1, "home", writable=True)])
+    identifier = operation()
+    async with sf.begin() as session:
+        session.add(SpaceFileOperationRow(space_id=space.id, operation_id=identifier, actor_kind="human", actor_id=ALICE.subject_id, generation=1, phase="pending", request={"action": "copy", "destination_path": "uploads/a"}))
+    retire = mounts.retire
+    if changed:
+
+        async def change_before_admission(**kwargs):
+            async with sf.begin() as session:
+                row = await session.get(SpaceFileOperationRow, (space.id, identifier))
+                row.request = {"action": "copy", "destination_path": "uploads/b"}
+            await retire(**kwargs)
+
+        monkeypatch.setattr(mounts, "retire", change_before_admission)
+    acceptance = SpaceRecovery(files, attachments=mounts).accept_current_state(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=identifier, acknowledge_uncertain_outcome=True, file_change_only=True)
+    if changed:
+        with pytest.raises(SpaceConflict):
+            await acceptance
+    else:
+        await acceptance
+    async with sf() as session:
+        assert (await session.get(SpaceAttachmentRow, attached.id)).phase == ("active" if changed else "fenced")
+        assert (await session.get(SpaceFileOperationRow, (space.id, identifier))).phase == ("pending" if changed else "failed")
+    assert (attached.container_id in provider.containers) == changed
+
+
+@pytest.mark.asyncio
 async def test_fresh_attachment_service_retains_then_clears_failed_host_containment(storage):
     files, _sf, _catalog, mounts, provider = storage
     space = await home(files)
