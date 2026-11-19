@@ -1,5 +1,6 @@
 """Neutral extension capability bound to host identity, never a claimed owner."""
 
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -142,7 +143,12 @@ async def test_mediated_facade_requires_bound_current_controller_and_operate_gra
         with pytest.raises(SpaceDenied):
             await facade.write(space_id=space.id, generation=1, operation_id=operation(), path="publication", content=b"raw", create=True)
         await facade.mediated_write(space_id=space.id, generation=1, operation_id=operation(), path="publication", content=b"admitted", create=True)
-        await facade.mediated_mkdir(space_id=space.id, generation=1, operation_id=operation(), path="folder")
+        creation = dict(space_id=space.id, generation=1, operation_id=operation(), path="folder")
+        await facade.mediated_mkdir(**creation)
+        await facade.mediated_mkdir(**creation)
+        (receipt,) = [row for row in (await facade.recovery_status(space_id=space.id))["operations"] if row["operation_id"] == creation["operation_id"]]
+        assert receipt["phase"] == "complete" and receipt["result"] == {"value": None}
+        assert receipt["request"] == {"action": "mkdir", "path": "folder", "controller_namespace": "storage.shared", "controller": "publication"}
         await facade.mediated_rename(space_id=space.id, generation=1, operation_id=operation(), path="publication", destination="folder/publication")
         assert await facade.read(space_id=space.id, path="folder/publication", max_bytes=100) == b"admitted"
         enabled = False
@@ -156,10 +162,11 @@ async def test_mediated_facade_requires_bound_current_controller_and_operate_gra
 
 
 @pytest.mark.asyncio
-async def test_controller_loss_between_admissions_retains_intent_and_performs_no_write(storage):
+@pytest.mark.parametrize("action", ["write", "mkdir"])
+async def test_controller_loss_between_admissions_retains_intent_and_performs_no_write(storage, action):
     from deerflow_extension_api import StorageController, StorageOperationPending
 
-    files, _, _ = storage
+    files, _, catalog = storage
     checks = 0
 
     async def enabled():
@@ -171,10 +178,61 @@ async def test_controller_loss_between_admissions_retains_intent_and_performs_no
     with storage_actor_scope(ALICE):
         facade = await provider.current()
         space = await facade.provision(name="Shared", custody="company", mode="mediated")
+        args = dict(space_id=space.id, generation=1, operation_id=operation(), path="page")
         with pytest.raises(StorageOperationPending):
-            await facade.mediated_write(space_id=space.id, generation=1, operation_id=operation(), path="page", content=b"not-published", create=True)
+            if action == "write":
+                await facade.mediated_write(**args, content=b"not-published", create=True)
+            else:
+                await facade.mediated_mkdir(**args)
         status = await facade.recovery_status(space_id=space.id)
-        assert status["operations"][0]["phase"] == "pending"
+        (receipt,) = status["operations"]
+        assert (receipt["operation_id"], receipt["phase"], receipt["result"]) == (args["operation_id"], "pending", None)
+        assert not any((volume.data_path / "page").exists() for volume in catalog.verified.values())
+
+
+@pytest.mark.asyncio
+async def test_mediated_file_refusal_rechecks_operate_before_recording_failure(storage, monkeypatch):
+    from deerflow_extension_api import StorageController, StorageOperationPending
+
+    from deerflow.persistence.spaces.model import SpaceGrantRow
+
+    files, sf, _ = storage
+
+    async def enabled():
+        return True
+
+    provider = HostStorageProvider(lambda: files, namespace="storage.shared", controller=StorageController("publication"), controller_admitted=enabled)
+    with storage_actor_scope(ALICE):
+        facade = await provider.current()
+        space = await facade.provision(name="Shared", custody="company", mode="mediated")
+        await facade.mediated_write(space_id=space.id, generation=1, operation_id=operation(), path="note", content=b"original", create=True)
+        key = operation()
+        admitted = files.registry.admitted
+        admissions = 0
+
+        @asynccontextmanager
+        async def lose_operate_after_effect(**kwargs):
+            nonlocal admissions
+            admissions += 1
+            try:
+                async with admitted(**kwargs) as value:
+                    yield value
+            finally:
+                if admissions == 2:
+                    # The create collided with the existing file. Withdraw
+                    # OPERATE after rollback, before the receipt transaction.
+                    async with sf.begin() as writer:
+                        grant = await writer.get(SpaceGrantRow, (space.id, ALICE.kind, ALICE.subject_id))
+                        grant.permissions &= ~int(Permission.OPERATE)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(files.registry, "admitted", lose_operate_after_effect)
+            with pytest.raises(StorageOperationPending) as refused:
+                await facade.mediated_write(space_id=space.id, generation=1, operation_id=key, path="note", content=b"replacement", create=True)
+        assert admissions == 3 and isinstance(refused.value.__cause__, SpaceDenied)
+        receipt = next(row for row in (await facade.recovery_status(space_id=space.id))["operations"] if row["operation_id"] == key)
+        assert (receipt["phase"], receipt["result"]) == ("pending", None)
+        assert await facade.read(space_id=space.id, path="note", max_bytes=100) == b"original"
 
 
 @pytest.mark.asyncio

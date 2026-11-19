@@ -268,8 +268,9 @@ Busy refusals carry workflow/lifecycle cause. Completed IDs bind exact actor,
 generation and request. Drain the entire owned mutation before cancellation.
 `put_unique` deduplicates after rechecking the named inode or takes a free numbered
 name, including when the occupied file cannot be read. Direct workers record the
-publishing syscall before flushing. Record pre-effect refusals under writer
-ownership even after a grant is revoked. Direct mkdir pins its private stage
+publishing syscall before flushing. Native writes record pre-effect refusals under
+writer ownership even after a grant is revoked. Mediated writes retain the intent
+for their controller if its admission lapses. Native mkdir pins its private stage
 before publication. Recovery rechecks its inode generation and flushes the
 same directory and parent. Older readers settle from the visible name. Mutation
 parents reject symlinks. Trusted controller admission borrows

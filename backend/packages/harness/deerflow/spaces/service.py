@@ -548,11 +548,16 @@ class SpaceFiles:
             descriptors = await run_file_io(acquire, volumes)
             token = _owner.set((self, frozenset(volumes)))
 
-        async def record_refusal():
+        async def record_refusal(*, native):
             # The effect transaction has rolled back. The file-writer lock is
-            # still ours, including when the actor just lost their grant.
+            # still ours. Mediated receipts also require the current grants
+            # for every source and destination the controller was using.
             try:
-                async with self.registry.host_locked([destination_id]) as (session, _):
+                if native:
+                    admission = self.registry.host_locked([destination_id])
+                else:
+                    admission = self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id))
+                async with admission as (session, _):
                     operation = await session.get(SpaceFileOperationRow, (destination_id, operation_id))
                     self._same_operation(operation, actor, generation, request)
                     if operation.phase != "pending":
@@ -577,10 +582,14 @@ class SpaceFiles:
                 await own(volumes)
                 if request["action"] == "copy":
                     await self._transfer_audience(session, rows, actor, request)
+                # Only native resources use host settlement. A mediated
+                # resource keeps its controller's recovery and file protocol.
+                native = rows[destination_id][0].mode == MutationMode.NATIVE
+                staged_directory = native and request["action"] == "mkdir"
                 intent = SpaceFileOperationRow(space_id=destination_id, operation_id=operation_id, actor_kind=actor.kind, actor_id=actor.subject_id, generation=generation, phase="pending", request=request)
                 session.add(intent)
                 preparation_refusal = None
-                if request["action"] == "mkdir":
+                if staged_directory:
                     try:
                         intent.result = await run_file_io(self._direct_io, volumes[destination_id], "mkdir", directory_creation.prepare)
                     except _BeforePublication as failure:
@@ -603,8 +612,10 @@ class SpaceFiles:
                         if request["action"] == "copy":
                             await self._transfer_audience(session, rows, actor, request)
                     except Exception as exc:
+                        if not native:
+                            raise
                         raise _BeforePublication(exc) from exc
-                    if request["action"] == "mkdir":
+                    if staged_directory:
                         result = await run_file_io(call, volumes, operation.result)
                     else:
                         result = await run_file_io(call, volumes)
@@ -613,13 +624,13 @@ class SpaceFiles:
                     committing = True
                 return result
             except _BeforePublication as failure:
-                await record_refusal()
+                await record_refusal(native=native)
                 raise failure.refusal from None
             except Exception as exc:
-                if not admitted_effect and isinstance(exc, (SpaceDenied, InvalidPrincipal, SpaceConflict)):
-                    await record_refusal()
+                if native and not admitted_effect and isinstance(exc, (SpaceDenied, InvalidPrincipal, SpaceConflict)):
+                    await record_refusal(native=True)
                     raise
-                if committing and request["action"] == "mkdir":
+                if committing and staged_directory:
                     # The effect is durable. A fresh receipt may resolve a lost
                     # commit acknowledgement without repeating the creation.
                     try:
