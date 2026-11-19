@@ -135,7 +135,7 @@ export function uploadConversationFile(
   const query = new URLSearchParams({ operation_id: operationId });
   return transfer<SavedAgentFile & { sandbox_path: string }>(
     "POST",
-    `${instanceBaseURL(instanceId)}/conversations/${encodeURIComponent(threadId)}/files?${query}`,
+    `${instanceBaseURL(instanceId)}/conversations/${encodeURIComponent(threadId)}/files/operations?${query}`,
     body,
     file.size,
     options,
@@ -154,7 +154,7 @@ export function putAgentFile(
     query.set("expected_sha256", options.expectedSha256);
   return transfer<SavedAgentFile>(
     "PUT",
-    `${instanceBaseURL(instanceId)}/home/content?${query}`,
+    `${instanceBaseURL(instanceId)}/home/operations/content?${query}`,
     bytes,
     bytes.size,
     options,
@@ -169,7 +169,7 @@ export function changeAgentFile(
   const body = JSON.stringify(action);
   return transfer<{ complete: true; path: string }>(
     "POST",
-    `${instanceBaseURL(instanceId)}/home/files`,
+    `${instanceBaseURL(instanceId)}/home/operations`,
     body,
     new TextEncoder().encode(body).byteLength,
     options,

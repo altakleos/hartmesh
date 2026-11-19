@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -118,8 +119,130 @@ async def test_unique_active_workspace_is_qualified_before_association(execution
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["put", "copy", "backup"])
+async def test_pending_home_is_confirmed_without_granting_a_run_write_access(execution, fixture, monkeypatch, action):
+    from deerflow.persistence.spaces.files import SpaceFileOperationRow
+    from deerflow.spaces.service import SpaceOperationPending
+
+    module, app, host, attachments, adapter, claim = await build(execution, fixture, monkeypatch)
+    _, admitted, _, sessions = execution
+    instance = admitted.instance
+    mounts = (ResourceMount(instance.home_id, admitted.home_generation, "home", True),)
+    async with sessions.begin() as session:
+        session.add(SpaceFileOperationRow(space_id=instance.home_id, operation_id=operation(), generation=admitted.home_generation, actor_kind="human", actor_id="alice", phase="pending", request={"action": action}))
+    clock = iter((100.0, 110.0, 120.0, 130.0, 140.0, 150.0))
+    host.registry.clock = lambda: next(clock)
+    assert await module.reconcile_residents(app, deadline=time.monotonic() + 10) == []
+    entry = host.registry.homes[instance.home_id]
+    last_used = entry.last_release
+    assert entry.attachment_id == claim.id and claim.container_id in adapter.containers
+    with pytest.raises(SpaceOperationPending):
+        await attachments.resume(actor=instance.principal, resources=mounts, incarnation=claim.incarnation)
+    assert await module.reconcile_residents(app, deadline=time.monotonic() + 10) == []
+    assert entry.last_release == last_used
+    # An idle workspace recovered after a restart remains a real capacity
+    # candidate, even though ordinary attachment admission is held.
+    assert await asyncio.to_thread(host.registry.evict_external)
+    assert claim.container_id not in adapter.containers and host.registry.external_slots() == 0
+
+
+@pytest.mark.asyncio
+async def test_only_the_confirming_call_can_pass_a_pending_home(execution, fixture, monkeypatch):
+    from deerflow.persistence.spaces.files import SpaceFileOperationRow
+    from deerflow.spaces.service import SpaceOperationPending
+
+    _, _, _, attachments, adapter, claim = await build(execution, fixture, monkeypatch)
+    _, admitted, _, sessions = execution
+    instance = admitted.instance
+    mount = ResourceMount(instance.home_id, admitted.home_generation, "home", True)
+    async with sessions.begin() as session:
+        session.add(SpaceFileOperationRow(space_id=mount.space_id, generation=mount.generation, operation_id=operation(), actor_kind="human", actor_id="alice", phase="pending", request={"action": "copy"}))
+    competing, entered = [], []
+    admit = attachments.registry.admitted
+
+    @asynccontextmanager
+    async def overlap(**kwargs):
+        if kwargs.get("confirmation_pending") is None:
+            entered.append(True)
+            if len(entered) == 2:
+                callers_ready.set()
+        async with admit(**kwargs) as result:
+            if kwargs.get("confirmation_pending") is not None and not competing:
+                competing.extend(
+                    (
+                        asyncio.create_task(attachments.resume(actor=instance.principal, resources=(mount,), incarnation=claim.incarnation)),
+                        asyncio.create_task(attachments.attach(actor=instance.principal, resources=(mount,), incarnation=operation())),
+                    )
+                )
+                await asyncio.wait_for(callers_ready.wait(), 10)
+            yield result
+
+    callers_ready = asyncio.Event()
+    monkeypatch.setattr(attachments.registry, "admitted", overlap)
+    try:
+        confirmed, pending = await attachments.confirm_resident(actor=instance.principal, home=mount, incarnation=claim.incarnation)
+        assert confirmed.id == claim.id and pending
+    finally:
+        outcomes = await asyncio.gather(*competing, return_exceptions=True)
+    assert len(outcomes) == 2 and all(isinstance(exc, SpaceOperationPending) for exc in outcomes)
+    assert len(adapter.started) == 1
+    absent, pending = await attachments.confirm_resident(actor=instance.principal, home=mount, incarnation=operation())
+    assert absent is None and pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["backup", "restore", "delete"])
+async def test_confirmation_can_overlap_a_home_lifecycle_operation(execution, fixture, monkeypatch, action):
+    from _storage_spaces_test_support import ALICE
+
+    from deerflow.persistence.spaces.files import SpaceFileOperationRow
+    from deerflow.spaces.recovery import SpaceRecovery
+
+    service, admitted, _, sessions = execution
+    files = service.agents.files
+    options = dict(actor=ALICE, space_id=admitted.instance.home_id, expected_generation=admitted.home_generation)
+    if action == "restore":
+        backup = await SpaceRecovery(files).backup(**options, operation_id=operation())
+        options["backup_id"] = backup.id
+    module, app, _, mounts, adapter, claim = await build(execution, fixture, monkeypatch)
+    recovery = SpaceRecovery(files, attachments=mounts)
+    quiesce, confirm = recovery._quiesce, mounts.confirm_resident
+
+    async def pass_once():
+        return await module.reconcile_residents(app, deadline=time.monotonic() + 10)
+
+    async def observe_retirement(*args, **kwargs):
+        assert await pass_once() == []
+        entered, resume = asyncio.Event(), asyncio.Event()
+
+        async def concurrent_confirmation(**options):
+            entered.set()
+            await resume.wait()
+            return await confirm(**options)
+
+        with monkeypatch.context() as context:
+            context.setattr(mounts, "confirm_resident", concurrent_confirmation)
+            check = asyncio.create_task(pass_once())
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                await quiesce(*args, **kwargs)
+            finally:
+                resume.set()
+                await check
+        assert claim.container_id not in adapter.containers
+        assert await pass_once() == []
+
+    monkeypatch.setattr(recovery, "_quiesce", observe_retirement)
+    key = operation()
+    await getattr(recovery, action)(**options, operation_id=key)
+    async with sessions() as session:
+        assert (await session.get(SpaceFileOperationRow, (admitted.instance.home_id, key))).phase == "complete"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["settings-changed", "settings-changed-but-busy", "unexplained-refusal"])
-async def test_a_running_workspace_started_with_older_settings_is_closed_at_start_not_left_pending(execution, fixture, monkeypatch, caplog, case):
+@pytest.mark.parametrize("pending_write", [False, True])
+async def test_a_running_workspace_started_with_older_settings_is_closed_at_start_not_left_pending(execution, fixture, monkeypatch, caplog, case, pending_write):
     """An upgrade leaves an AI employee's workspace running with the previous release's settings.
 
     Resume refuses it, as it must. Left pending, that refusal kept every AI agent
@@ -133,6 +256,21 @@ async def test_a_running_workspace_started_with_older_settings_is_closed_at_star
 
     _service, admitted, _row, sf = execution
     module, app, host, _attachments, adapter, claim = await build(execution, fixture, monkeypatch)
+    if pending_write:
+        from deerflow.persistence.spaces.files import SpaceFileOperationRow
+
+        async with sf.begin() as session:
+            session.add(
+                SpaceFileOperationRow(
+                    space_id=admitted.instance.home_id,
+                    operation_id=operation(),
+                    generation=admitted.home_generation,
+                    actor_kind="human",
+                    actor_id="alice",
+                    phase="pending",
+                    request={"action": "remove", "path": "note"},
+                )
+            )
     refusal = StorageHostUnqualified("Resident activation lacks its exact prepared original graph") if case == "unexplained-refusal" else ResidentSettingsChanged(("network policy",))
 
     def verify_active(_container, _plan):

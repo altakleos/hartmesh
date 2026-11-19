@@ -293,7 +293,10 @@ export async function setupAgents(
       url = new URL(request.url()),
       path = url.pathname,
       post = request.method() === "POST";
-    if (/\/(files|content)$/.test(path) && request.method() !== "GET") {
+    if (
+      /\/(files|content|home\/operations|files\/operations)$/.test(path) &&
+      request.method() !== "GET"
+    ) {
       state.writes.push({
         path,
         method: request.method(),

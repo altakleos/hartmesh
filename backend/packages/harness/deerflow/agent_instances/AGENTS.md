@@ -183,6 +183,8 @@ unavailable roots cannot prove an empty inventory. This evidence grants no expor
 
 `agent_files.py` owns direct host Home mutations through existing `SpaceFiles`:
 resident actor, human provenance, bounded bytes and immutable operation receipts.
+Read file outcomes only for the current Home generation and original requester.
+Unknown outcomes retain uncertainty through the web and Telegram refusals.
 Borrow current human/conversation admission before receipts and inside each mutation;
 `context_admission_in_session` shares the admitted Home transaction, never a checkout.
 No workspace acquisition or containment is needed. Upload context stats regular,

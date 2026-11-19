@@ -252,12 +252,20 @@ class PreparedVolumeCatalog:
             raise BackingUnavailable("The provider data disk cannot preserve its platform reserve")
 
     def verify(self, slot_id: str, *, previous: VerifiedVolume | None = None) -> VerifiedVolume:
+        return self._verify(slot_id, previous=previous)
+
+    def repair_bound_home(self, slot_id, *, previous, backing_handle, inodes):
+        """Qualify the physical mount before repairing its exact bound directory."""
+        return self._verify(slot_id, previous=previous, home_binding=(backing_handle, inodes))
+
+    def _verify(self, slot_id, *, previous, home_binding=None):
         if sys.platform != "linux":
             raise BackingUnavailable("Fixed filesystem backings require qualified Linux")
         spec = self.volumes.get(slot_id)
         if spec is None:
             raise BackingUnavailable("The provider backing is unavailable")
-        self.verify_reserve()
+        if home_binding is None:
+            self.verify_reserve()
         root_fd = image_fd = data_fd = control_fd = disk_fd = None
         try:
             disk_fd = os.open(self.data_disk, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -293,7 +301,8 @@ class PreparedVolumeCatalog:
             from deerflow.spaces.loop_reservation import verify_loop_reservation
 
             verify_loop_reservation(device)
-            data_fd = os.open("data", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
+            data_access = os.O_PATH if home_binding is not None else os.O_RDONLY
+            data_fd = os.open("data", data_access | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
             control_fd = os.open("control", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
             data, control = os.fstat(data_fd), os.fstat(control_fd)
             if data.st_dev != root.st_dev or control.st_dev != root.st_dev or control.st_mode & 0o077 or (os.geteuid() != 0 and control.st_uid != os.geteuid()):
@@ -309,6 +318,13 @@ class PreparedVolumeCatalog:
                 != (previous.mount_id, previous.device, previous.root_inode, previous.control_inode, previous.image_device, previous.image_inode)
             ):
                 raise BackingUnavailable("Backing mount/root incarnation changed; provider containment and recovery are required")
+            if home_binding is not None:
+                from deerflow.spaces.incarnations import repair_home_mode
+
+                repair_home_mode(result, root_fd, data_fd, control_fd, *home_binding)
+                # A shortage on the hosting disk must still withhold readiness,
+                # but it does not invalidate the identity of this mounted Home.
+                self.verify_reserve()
             # Probe actual link-confinement support before claiming file capability.
             with result.filesystem():
                 pass

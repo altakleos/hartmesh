@@ -2568,7 +2568,7 @@ missing slots and does not cure a Gateway helper failure.
 | `storage: company space created (<slot>)` | The exact company role was committed. |
 | `storage: user space of <account id> assigned (<slot>)` | That account's User role was committed. |
 | `storage: company grant written for <account id>` | That member's READ/EXPORT grant was committed. |
-| `storage: file operations settled <n>` | Confirmed interrupted intents settled; unknown outcomes remain pending. |
+| `storage: file operations settled <n>` | Interrupted file intents given a terminal outcome. An unconfirmed direct write requires inspection of the target. |
 | `storage: user space reclaimed (<slot>)` | Verified cleanup freed a released account's binding. |
 | `agents: none (…)` | Both rendered agent counts are zero. |
 | `agents: ready (<n> attachments fenced at start; <n> work attempts settled)` | Resident restoration and containment completed. |
@@ -2657,6 +2657,50 @@ Gateway readiness instead of promising a fixed outage.
 
 ### Rolling back
 
+Before reusing current data on release 60 or 61, check for interrupted operations
+on Homes that still have retained workspaces. An older Gateway can hold up
+unrelated employees when it encounters that combination during start-up.
+
+1. Take and verify a restorable pre-upgrade snapshot of the data disk and retain
+   the matching bundle and environment. Enter a maintenance window. Pause public
+   ingress, Telegram deliveries, scheduled submissions, integrations, and any
+   external workers or operator jobs that could write or start a workspace.
+   Inhibit automatic service restarts and deployment automation through the swap.
+   The agent hold alone still permits file operations.
+2. On the current build, read `ai status`, then `ai pending`. Pass each non-null
+   `next_after` to `ai pending --after "$cursor"` until it returns null.
+   For a pending Home with a retained attachment, wait for admitted runs to finish,
+   then use `ai close-workspace <instance_id>` and confirm closure.
+   `ai settle --space SPACE --operation OPERATION` can also resolve an individual
+   row. Inspect the files before any deliberate discard. Multiple pages of a
+   changing online inventory are a guide for repairs.
+3. Finish all one-shot commands and gracefully stop **every** Gateway and other
+   writer sharing this database or pool. Confirm normal shutdown and process
+   exit. A deadline, forced kill or missing shutdown evidence leaves drainage
+   uncertain. Keep PostgreSQL, Docker and the pool mounts available. From the
+   **current** bundle run the offline check with the same mounts and identity:
+
+   ```bash
+   hm stop -t 120 gateway
+   hm logs --tail=50 gateway
+   hm run --rm --no-deps -T --entrypoint sh gateway -c \
+     'cd /app/backend && exec setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" --inh-caps=-all --no-new-privs env HOME=/tmp/gateway-home DOCKER_CONFIG=/tmp/gateway-home/.docker PYTHONPATH=. /app/backend/.venv/bin/python -m app.gateway.agent_instances check-rollback'
+   ```
+
+   The check excludes current Gateway starts, operator mutations and database
+   writers while it verifies workflow locks and scans every pending operation.
+   It correlates SQL attachments, native records and the Docker census by exact
+   workspace and mounted Space. Exit 0 requires a complete inventory with zero
+   pending Homes attached. Exit 2 names confirmed blockers. Exit 1 means the
+   check could not prove drainage or inventory. Keep the maintenance window in
+   force while resolving either outcome. If the current build must restart for
+   a repair, repeat shutdown and the complete offline check afterward.
+4. Keep writers and automatic restarts disabled after the check exits. Start
+   the selected older bundle with the same environment and data, read its
+   readiness, then complete an unrelated employee turn before reopening access.
+   If the required exclusion, inventory or old-build check cannot be established,
+   use the verified pre-upgrade snapshot and matching bundle to roll back.
+
 Returning to release 45 requires restoring the data-disk snapshot taken before
 the upgrade. Replacing only the bundle cannot roll back revision 0041.
 Stop the stack and any containers holding pool filesystems, use `si quiesce`,
@@ -2744,6 +2788,8 @@ matched by this release operation, including interrupted creations.
 | --- | --- |
 | `ai list [--all]` | Current identities, custody, files, workspaces and unresolved work; `--all` includes deleted/released agents. |
 | `ai status` | Pool plan, execution, hold and actual Gateway-lifetime counts. |
+| `ai pending [--after CURSOR]` | List up to 200 pending operations of every kind and their durable workspace associations. Follow `next_after` to the end. |
+| `check-rollback` (offline invocation above) | Check all pending operations and retained workspaces before starting an older Gateway. |
 | `ai close-workspace <id> [--end-running-work] [--wait-seconds 120]` | Close exact workspaces and wait for captured run/attempt outcomes. |
 | `ai verify` | Verify catalogue slots and report their kind, use and unclaimed/surplus state. |
 | `ai export <id> [--end-running-work] [--wait-seconds 120]` | Quiesced tar export under `home/agent-exports`; operator retains/deletes it. |
@@ -2901,6 +2947,8 @@ A Docker daemon that does not answer from inside the container is not a refusal 
 | `attachments_active` | integer | Workspace records that are not closed. |
 | `attempts_unresolved` | integer | Assignment attempts neither finished nor settled. |
 | `file_operations_pending` | integer | File operations and publications on Spaces of every kind with no recorded outcome. |
+| `pending_operations` | array | First 200 pending operations, sorted by Space and operation ID. Each names the Space, operation, generation, action, owning instance (null for non-Homes), and all current attachment IDs with their mount generation, incarnation, Docker host, container and phase. |
+| `pending_operations_truncated` | boolean | True when more rows exist. Use `ai pending` for the full paginated inventory. Each page returns `total`, `operations` and `next_after`. |
 | `since_gateway_start` | object | `at` (string, ISO 8601: when the running Gateway started), `attachments_fenced` (object: fence reason to count, for records that the Gateway or an operator command closed since then), `work_attempts_settled` (integer), `file_operations_settled` (integer). |
 | `host_id` | string or null | This VM's Docker engine ID; null when the daemon did not answer. |
 | `foreign_hosts` | array of objects | Other Docker hosts named by workspace records that are not closed: `host_id` (string), `attachments` (integer), `adopted` (boolean: whether `adopt-host` has recorded that host as replaced by this one). Empty when `host_id` is null. |
@@ -2909,7 +2957,7 @@ A Docker daemon that does not answer from inside the container is not a refusal 
 Example:
 
 ```json
-{"attachments_active": 1, "attempts_unresolved": 0, "command": "status", "data_disk": {"free_bytes": 13314398617, "free_inodes": 3041203, "size_bytes": 52721533747}, "execution": "ready", "file_operations_pending": 0, "foreign_hosts": [], "headroom_bytes": 5272153374, "hold": null, "host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "instances": {"assistant": {"active": 4, "archived": 0, "deleted": 1, "provisioning": 0, "suspended": 0}, "employee": {"active": 3, "archived": 0, "deleted": 2, "provisioning": 0, "suspended": 0}}, "note": "storage ready: users 7 of 10 seats, AI assistants 4 of 10, AI employees 3 of 10, company 1 of 1; 31 spaces prepared, 31 verified; agents ready; 1 workspace running of 2 sandbox slots; 1 run in flight", "per_user": 1, "reason": null, "reason_text": null, "releases": {"pending": 1}, "required_bytes": 33285996544, "reserved_bytes": 33285996544, "returncode": 0, "runs_in_flight": 1, "runtime": "runsc", "sandbox_slots": {"chat_sandboxes_running": 0, "limit": 2, "workspaces_running": 1}, "shortfall": null, "since_gateway_start": {"at": "2026-11-03T08:00:11+00:00", "attachments_fenced": {"container-absent": 1, "idle": 1, "run-orphaned": 1}, "file_operations_settled": 0, "work_attempts_settled": 1}, "spaces": {"assistant": {"allowed": 10, "allowed_key": 10, "capacity_bytes": 1073741824, "free": 6, "in_use": 4, "prepared": 10, "unverified": 0}, "company": {"allowed": 1, "allowed_key": 1, "capacity_bytes": 1073741824, "free": 0, "in_use": 1, "prepared": 1, "unverified": 0}, "employee": {"allowed": 10, "allowed_key": 10, "capacity_bytes": 1073741824, "free": 7, "in_use": 3, "prepared": 10, "unverified": 0}, "user": {"allowed": 10, "allowed_key": 10, "capacity_bytes": 1073741824, "free": 3, "in_use": 7, "prepared": 10, "unverified": 0}}, "storage": "ready", "storage_reason": null, "surplus": {"assistant": 0, "company": 0, "employee": 0, "user": 0}, "unclaimed": {"assistant": 0, "company": 0, "employee": 0, "user": 0}}
+{"attachments_active": 1, "attempts_unresolved": 0, "command": "status", "data_disk": {"free_bytes": 13314398617, "free_inodes": 3041203, "size_bytes": 52721533747}, "execution": "ready", "file_operations_pending": 0, "foreign_hosts": [], "headroom_bytes": 5272153374, "hold": null, "host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "instances": {"assistant": {"active": 4, "archived": 0, "deleted": 1, "provisioning": 0, "suspended": 0}, "employee": {"active": 3, "archived": 0, "deleted": 2, "provisioning": 0, "suspended": 0}}, "note": "storage ready: users 7 of 10 seats, AI assistants 4 of 10, AI employees 3 of 10, company 1 of 1; 31 spaces prepared, 31 verified; agents ready; 1 workspace running of 2 sandbox slots; 1 run in flight", "pending_operations": [], "pending_operations_truncated": false, "per_user": 1, "reason": null, "reason_text": null, "releases": {"pending": 1}, "required_bytes": 33285996544, "reserved_bytes": 33285996544, "returncode": 0, "runs_in_flight": 1, "runtime": "runsc", "sandbox_slots": {"chat_sandboxes_running": 0, "limit": 2, "workspaces_running": 1}, "shortfall": null, "since_gateway_start": {"at": "2026-11-03T08:00:11+00:00", "attachments_fenced": {"container-absent": 1, "idle": 1, "run-orphaned": 1}, "file_operations_settled": 0, "work_attempts_settled": 1}, "spaces": {"assistant": {"allowed": 10, "allowed_key": 10, "capacity_bytes": 1073741824, "free": 6, "in_use": 4, "prepared": 10, "unverified": 0}, "company": {"allowed": 1, "allowed_key": 1, "capacity_bytes": 1073741824, "free": 0, "in_use": 1, "prepared": 1, "unverified": 0}, "employee": {"allowed": 10, "allowed_key": 10, "capacity_bytes": 1073741824, "free": 7, "in_use": 3, "prepared": 10, "unverified": 0}, "user": {"allowed": 10, "allowed_key": 10, "capacity_bytes": 1073741824, "free": 3, "in_use": 7, "prepared": 10, "unverified": 0}}, "storage": "ready", "storage_reason": null, "surplus": {"assistant": 0, "company": 0, "employee": 0, "user": 0}, "unclaimed": {"assistant": 0, "company": 0, "employee": 0, "user": 0}}
 ```
 
 Refusals, exit 1: the common ones only.
@@ -3250,7 +3298,7 @@ Every write the Gateway makes to a Space, a file given to an agent, a Keep into 
 
 1. It finds the row by Space and operation id and requires the phase `pending`.
 2. It prints the row's facts under `request`, the receipt under `receipt` when one exists, and what the folder holds under `files`, so that the operator can read them before acting; with neither flag it stops here when the settlement would raise, verdict `unsettled`, exit 2.
-3. Without `--discard` it runs the Gateway's own settlement for the row's kind, by host authority under the host workflow lock, and records the outcome: `complete` with the resolution `host-settled` or `host-reconciled`, or `failed` when the replay says the write never landed.
+3. Without `--discard` it runs the Gateway's own settlement for the row's kind under the host workflow lock. For an interrupted direct write whose effect cannot be established, it records `failed` with resolution `host-unconfirmed`. Inspect the target before starting a new operation. The original write may have landed.
 4. With `--discard`, after the operator has inspected the receipt and the files, it marks the row `failed` with the resolution `host-discarded` and changes no file. What the operation had already written stays where it is; a publication that half-landed is then a file in `shared/` with no record, which the Shared tab lists as a file nobody published and an administrator can remove.
 
 | Field | Type | Meaning |
@@ -3262,9 +3310,9 @@ Every write the Gateway makes to a Space, a file given to an agent, a Keep into 
 | `on_behalf_of` | string or null | The person on whose behalf the host wrote, for a host-written row. |
 | `request` | object | The row's request as stored. |
 | `receipt` | object or null | The receipt's content, or null when none exists. |
-| `files` | array of strings | The names under the folder the operation targets that the receipt or the request names. |
-| `verdict` | string | `settled-complete`, `settled-failed`, `discarded` or `unsettled`. |
-| `resolution` | string or null | `host-settled`, `host-reconciled`, `host-discarded`, or null with `unsettled`. |
+| `files` | array of strings or null | Names under the target folder. An empty array means missing or empty. Null means the folder could not be listed safely. |
+| `verdict` | string | `settled-complete`, `settled-failed`, `settled-unconfirmed`, `discarded` or `unsettled`. |
+| `resolution` | string or null | The recorded resolution, including `host-settled`, `host-reconciled`, `host-unconfirmed` and `host-discarded`. Unrecognized resolutions retain their original value and report `settled-unconfirmed`. Null with `unsettled`. |
 
 Example:
 
@@ -3275,7 +3323,7 @@ Example:
 Refusals, exit 1, beside the common ones:
 
 - `no file operation 6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80 on space 9c4d1e6f8a0b4c2d9e7f5a3b1c8d6e40`
-- `file operation 6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80 is already complete`, or `already failed`
+- `file operation 6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80 is already complete`, or `already failed`. For a terminal `host-unconfirmed` or unfamiliar resolution the refusal also returns `settled-unconfirmed` and the recorded resolution.
 - `space 9c4d1e6f8a0b4c2d9e7f5a3b1c8d6e40 is unverified: <text>; see storage-init verify`
 - `another workflow holds the lock of space 9c4d1e6f8a0b4c2d9e7f5a3b1c8d6e40; run the command again in a moment`
 

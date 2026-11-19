@@ -9,8 +9,8 @@ import sys
 
 from app.gateway.agent_operator_contract import CommandFailed, CommandRefused
 
-COMMANDS = ("list", "status", "verify", "close-workspace", "export", "supervise", "delete", "adopt-host", "settle")
-_VALUED = frozenset(("--issuer", "--subject", "--email", "--wait-seconds", "--from", "--space", "--operation"))
+COMMANDS = ("list", "status", "pending", "check-rollback", "verify", "close-workspace", "export", "supervise", "delete", "adopt-host", "settle")
+_VALUED = frozenset(("--issuer", "--subject", "--email", "--wait-seconds", "--from", "--space", "--operation", "--after"))
 
 
 class _Parser(argparse.ArgumentParser):
@@ -41,6 +41,8 @@ def _parser():
         verb = verbs.add_parser(command, add_help=False)
         if command == "list":
             verb.add_argument("--all", action="store_true")
+        elif command == "pending":
+            verb.add_argument("--after")
         elif command in ("close-workspace", "export", "supervise", "delete"):
             verb.add_argument("instance_id", type=_identifier)
             verb.add_argument("--end-running-work", action="store_true")

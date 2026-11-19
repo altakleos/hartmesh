@@ -1,5 +1,6 @@
 """Host recovery of exact abandoned intents, independent of domain workflows."""
 
+import errno
 import hashlib
 import logging
 import os
@@ -12,7 +13,7 @@ from sqlalchemy import select
 from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
 from deerflow.persistence.spaces.model import SpaceRow
 from deerflow.spaces.attachments import SpaceAttachments
-from deerflow.spaces.filesystem import FileConflict, _path
+from deerflow.spaces.filesystem import FileConflict, UnsafeSpacePath, _path
 from deerflow.spaces.incarnations import BoundVolume, validate_marker
 from deerflow.spaces.settlement import host_settlement_result
 from deerflow.spaces.workflows import WorkflowLockMissing, WorkflowReceipt, _owner, _read_only, _receipt, acquire, close
@@ -28,10 +29,10 @@ def _facts(row, attributes):
     return tuple(deepcopy(getattr(row, name)) for name in attributes)
 
 
-def _owned(volume, binding):
+def _owned(volume, binding, *, managed_home=False):
     filesystem, descriptors = None, []
     try:
-        filesystem = BoundVolume(volume, binding.backing_handle).filesystem()
+        filesystem = BoundVolume(volume, binding.backing_handle, managed_home=managed_home).filesystem()
         if (os.fstat(filesystem._data_fd).st_ino, os.fstat(filesystem._control_fd).st_ino) != (binding.root_inode, binding.control_inode):
             raise OSError("Durable binding root changed before ownership")
         try:
@@ -48,12 +49,20 @@ def _owned(volume, binding):
         raise
 
 
+class _NameUnconfirmed(Exception):
+    """The bounded proof could not inspect the operation's named entry."""
+
+
 def _metadata(filesystem, path):
     _path(path)
     try:
         fd = filesystem._open(path, os.O_PATH | os.O_NOFOLLOW, follow_symlinks=False)
     except FileNotFoundError:
         return None
+    except (PermissionError, UnsafeSpacePath) as exc:
+        if isinstance(exc, PermissionError) and exc.errno not in (errno.EACCES, errno.EPERM):
+            raise
+        raise _NameUnconfirmed from exc
     try:
         return os.fstat(fd)
     finally:
@@ -71,36 +80,65 @@ def _revision(metadata):
     return metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns
 
 
+def _require_same_entry(filesystem, path, observed):
+    try:
+        current = _metadata(filesystem, path)
+    except _NameUnconfirmed as exc:
+        raise FileConflict("File changed during settlement") from exc
+    if current is None or _revision(current) != _revision(observed):
+        raise FileConflict("File changed during settlement")
+
+
 def _direct(filesystem, request):
     path, action = _path(request["path"]), request["action"]
+    # Malformed intents cannot be interpreted as a refusal to inspect a name.
+    if action in ("write", "put") and (not isinstance(request["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", request["sha256"]) is None):
+        raise ValueError("The intended digest is invalid")
+    if action == "rename":
+        _path(request["destination"])
+    try:
+        return _observed_direct(filesystem, request, action, path)
+    except _NameUnconfirmed:
+        return "failed", {"resolution": "host-unconfirmed"}
+
+
+def _observed_direct(filesystem, request, action, path):
     metadata = _metadata(filesystem, path)
     value = None
     if action in ("write", "put"):
         expected = request["sha256"]
-        if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
-            raise ValueError("The intended digest is invalid")
         complete = False
         if metadata is not None and stat.S_ISREG(metadata.st_mode):
-            fd = filesystem.open_regular(path, follow_symlinks=False)
+            try:
+                fd = filesystem.open_regular(path, follow_symlinks=False)
+            except (PermissionError, UnsafeSpacePath) as exc:
+                if isinstance(exc, PermissionError) and exc.errno not in (errno.EACCES, errno.EPERM):
+                    raise
+                _require_same_entry(filesystem, path, metadata)
+                raise _NameUnconfirmed from exc
             try:
                 before = os.fstat(fd)
+                if _revision(before) != _revision(metadata):
+                    raise FileConflict("File changed during settlement")
                 if before.st_size > 64 * 1024 * 1024:
-                    raise ValueError("File exceeds bounded settlement proof")
+                    _require_same_entry(filesystem, path, before)
+                    raise _NameUnconfirmed
                 digest, size = hashlib.sha256(), 0
                 while chunk := os.read(fd, 64 * 1024):
                     size += len(chunk)
-                    if size > 64 * 1024 * 1024:
-                        raise ValueError("File exceeds bounded settlement proof")
+                    if size > before.st_size:
+                        raise FileConflict("File grew during settlement")
                     digest.update(chunk)
-                after, current = os.fstat(fd), _metadata(filesystem, path)
-                if current is None or _revision(before) != _revision(after) or _revision(after) != _revision(current) or size != after.st_size:
+                after = os.fstat(fd)
+                if _revision(before) != _revision(after) or size != after.st_size:
                     raise FileConflict("File changed during settlement")
+                _require_same_entry(filesystem, path, after)
                 complete = digest.hexdigest() == expected
                 value = expected if action == "write" else {"path": path, "size": size, "sha256": expected, "deduplicated": False}
             finally:
                 os.close(fd)
         elif metadata is not None and stat.S_ISLNK(metadata.st_mode):
-            raise ValueError("Digest proof cannot follow a link")
+            raise _NameUnconfirmed
     elif action == "mkdir":
         complete = metadata is not None and stat.S_ISDIR(metadata.st_mode)
     elif action == "rename":
@@ -134,6 +172,7 @@ async def _settle(files, candidate, *, discard=False, raise_errors=False, operat
         if binding is None or binding.space_id != candidate.space_id or (not discard and row.status != "active") or row.mode != "native":
             return False
         binding_facts = _facts(binding, _BINDING)
+        managed_homes = await files._untyped_homes(session, [binding])
         row_facts = _facts(row, ("backing_handle", "generation", "status", "mode"))
     try:
         files._operation_id(candidate.operation_id)
@@ -141,7 +180,7 @@ async def _settle(files, candidate, *, discard=False, raise_errors=False, operat
         volume = await run_file_io(files.catalog.verify, binding.slot_id, previous=files._verified.get(binding.slot_id))
         files._check_incarnation(binding, volume)
         # Ownership is acquired before the SQL writer and retained through commit.
-        filesystem, descriptors = await run_file_io(_owned, volume, binding)
+        filesystem, descriptors = await run_file_io(_owned, volume, binding, managed_home=binding.space_id in managed_homes)
         await run_file_io(_current_roots, filesystem, volume)
         async with files.registry.host_locked([candidate.space_id]) as (session, rows):
             row = rows.get(candidate.space_id)
@@ -194,7 +233,7 @@ async def _settle(files, candidate, *, discard=False, raise_errors=False, operat
             await run_file_io(_cleanup, filesystem)
     except Exception as exc:
         label = "publication" if candidate.request.get("action") == "feature-workflow" else "file operation"
-        log.warning("storage: %s %s not settled: %s", label, candidate.operation_id, exc)
+        log.warning("storage: %s %s in space %s not settled: %s", label, candidate.operation_id, candidate.space_id, exc)
         if raise_errors:
             raise
     finally:
@@ -241,5 +280,5 @@ async def settle_interrupted(files, *, space_id=None, operation_id=None):
             try:
                 count += await _settle(files, candidate)
             except Exception as exc:
-                log.warning("storage: file operation %s not settled: %s", candidate.operation_id, exc)
+                log.warning("storage: file operation %s in space %s not settled: %s", candidate.operation_id, candidate.space_id, exc)
     return count

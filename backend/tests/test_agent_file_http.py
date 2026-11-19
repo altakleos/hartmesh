@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from _storage_spaces_test_support import ALICE, BOB, operation
+from sqlalchemy import select
 from test_agent_conversation_http import app_for
 from test_agent_conversations import conversations
 from test_agent_instances import create
@@ -18,12 +19,12 @@ from deerflow.spaces.contract import SpaceConflict, SpaceDenied
 from deerflow.spaces.filesystem import FilesystemUnavailable
 
 
-async def file_app(instances, monkeypatch, *, actor=ALICE, permissions=None):
+async def file_app(instances, monkeypatch, *, actor=ALICE, permissions=None, creation_id=None):
     from app.gateway.refusals import refusal_handler
     from app.gateway.routers.agent_home import router
 
     agents, authority, threads, sf = await conversations(instances)
-    agent = await create(agents)
+    agent = await create(agents, creation_id=creation_id)
     agents.execution_probe = AsyncMock(return_value=SimpleNamespace(execution="ready", reason=None))
     monkeypatch.setattr(agents.files, "quota", AsyncMock(return_value={"available_bytes": 128 << 20, "available_inodes": 100}))
     app = app_for(agents, authority, threads, monkeypatch, actor=actor, permissions=permissions)
@@ -157,6 +158,97 @@ async def test_a_different_request_under_an_upload_id_returns_a_fixed_conflict(i
         conflict = await client.put(f"/api/agent-instances/{agent.id}/home/content", params=query, content=b"other")
     assert conflict.status_code == 409
     assert conflict.json() == {"detail": "This file request conflicts with the current state."}
+
+
+@pytest.mark.asyncio
+async def test_checking_an_unrecorded_operation_never_changes_the_current_file(instances, monkeypatch):
+    app, _, agent, _, sf = await file_app(instances, monkeypatch)
+    prefix = f"/api/agent-instances/{agent.id}/home"
+    missing = operation()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", cookies={"access_token": "fixture"}) as client:
+        known = operation()
+        saved = await client.put(prefix + "/operations/content", params={"path": "note", "operation_id": known}, content=b"current")
+        assert saved.status_code == 200, saved.text
+        for _ in range(2):
+            status = await client.get(f"{prefix}/operations/{missing}")
+            assert status.status_code == 200 and status.json() == {"status": "unknown"}
+        status = await client.get(f"{prefix}/operations/{known}")
+        assert status.json() == {"status": "complete", "file": saved.json()}
+        async with sf() as session:
+            rows = list(await session.scalars(select(SpaceFileOperationRow).where(SpaceFileOperationRow.space_id == agent.home_id)))
+            assert len(rows) == 1 and rows[0].operation_id not in (missing, known)
+        edited = await client.put(prefix + "/content", params={"path": "note", "operation_id": operation(), "expected_sha256": saved.json()["sha256"]}, content=b"updated")
+        assert edited.status_code == 200, edited.text
+
+
+@pytest.mark.asyncio
+async def test_conversation_operation_lookup_is_confined_to_its_upload_and_current_authority(instances, monkeypatch):
+    app, agents, agent, authority, sf = await file_app(instances, monkeypatch)
+    chat = (await authority.create(actor=ALICE, instance_id=agent.id, creation_id=operation()))["thread_id"]
+    other = (await authority.create(actor=ALICE, instance_id=agent.id, creation_id=operation()))["thread_id"]
+    key = operation()
+    prefix = f"/api/agent-instances/{agent.id}/conversations"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", cookies={"access_token": "fixture"}) as client:
+        lookup = f"{prefix}/{chat}/files/operations/{key}"
+        options = {"params": {"filename": "sample.txt"}}
+        # All writers choose exactly the public handle the target chat will use.
+        for route in (f"{prefix}/{other}/files", f"{prefix}/{other}/files/operations"):
+            saved = await client.post(route, params={"operation_id": key}, files={"file": ("sample.txt", b"content")})
+            assert saved.status_code == 201, saved.text
+            assert (await client.get(lookup, **options)).json() == {"status": "unknown"}
+        home = f"/api/agent-instances/{agent.id}/home"
+        saved = await client.put(home + "/operations/content", params={"operation_id": key, "path": "uploads/sample.txt"}, content=b"content")
+        assert saved.status_code == 200
+        assert (await client.get(lookup, **options)).json() == {"status": "unknown"}
+        saved = await client.post(f"{prefix}/{chat}/files/operations", params={"operation_id": key}, files={"file": ("sample.txt", b"recorded in this conversation")})
+        assert saved.status_code == 201, saved.text
+        assert saved.json()["path"] == "uploads/sample (2).txt"
+        assert (await client.get(lookup, **options)).json() == {"status": "complete", "file": saved.json()}
+        assert (await client.get(f"{prefix}/{other}/files/operations/{key}", **options)).json()["file"]["path"] == "uploads/sample.txt"
+        assert (await client.get(lookup, params={"filename": "different"})).json() == {"status": "unknown"}
+        second = await create(agents, name="Second")
+        second_chat = (await authority.create(actor=ALICE, instance_id=second.id, creation_id=operation()))["thread_id"]
+        assert (await client.get(f"/api/agent-instances/{second.id}/conversations/{second_chat}/files/operations/{key}", **options)).json() == {"status": "unknown"}
+        from app.gateway import deps
+        from app.gateway.routers import agent_home
+
+        async with sf() as session, session.begin():
+            session.add(AgentInstanceGrantRow(instance_id=agent.id, user_id=BOB.subject_id, permissions=int(AgentPermission.USE | AgentPermission.INSPECT)))
+        with monkeypatch.context() as alternate:
+            alternate.setattr(deps, "get_current_user_from_request", AsyncMock(return_value=SimpleNamespace(id=BOB.subject_id, system_role="user")))
+            assert (await client.get(lookup, **options)).json() == {"status": "unknown"}
+        with monkeypatch.context() as rotated:
+            rotated.setattr(agent_home, "existing_signing_key", lambda: "rotated-only-for-this-test")
+            assert (await client.get(lookup, **options)).json() == {"status": "unknown"}
+        async with sf() as session, session.begin():
+            rows = list(await session.scalars(select(SpaceFileOperationRow).where(SpaceFileOperationRow.space_id == agent.home_id)))
+            (row,) = (row for row in rows if row.result["value"]["path"] == "uploads/sample (2).txt")
+            op = row.operation_id
+            assert op != key and op not in saved.text
+            row.phase, row.result = "pending", None
+        agents.execution_probe = AsyncMock(side_effect=AssertionError("A status read cannot depend on executable storage"))
+        assert (await client.get(lookup, **options)).json() == {"status": "pending"}
+        for result in [None, {"resolution": "host-settled"}, {"resolution": "unknown-version"}]:
+            async with sf() as session, session.begin():
+                row = await session.get(SpaceFileOperationRow, (agent.home_id, op))
+                row.phase, row.result = "failed", result
+            assert (await client.get(lookup, **options)).json() == {"status": "nothing-changed" if result is None else "unconfirmed"}
+        async with sf() as session, session.begin():
+            row = await session.get(SpaceFileOperationRow, (agent.home_id, op))
+            original = dict(row.request)
+        for altered in ({"on_behalf_of": "another"}, {"action": "write"}, {"path": "private-manager-file"}):
+            async with sf() as session, session.begin():
+                row = await session.get(SpaceFileOperationRow, (agent.home_id, op))
+                row.request = {**original, **altered}
+            assert (await client.get(lookup, **options)).json() == {"status": "unknown"}
+        async with sf() as session, session.begin():
+            row = await session.get(SpaceFileOperationRow, (agent.home_id, op))
+            row.request = original
+            row.generation += 1
+        assert (await client.get(lookup, **options)).json() == {"status": "unknown"}
+        async with sf() as session, session.begin():
+            await session.delete(await session.get(AgentInstanceGrantRow, (agent.id, ALICE.subject_id)))
+        assert (await client.get(lookup, **options)).status_code == 404
 
 
 @pytest.mark.asyncio

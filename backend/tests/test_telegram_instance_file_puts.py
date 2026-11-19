@@ -14,6 +14,7 @@ from test_telegram_instance_publication import publication as publication
 from app.channels.inbound_leases import InboundFileLease
 from deerflow.agent_instances.agent_files import AgentFileRefusal
 from deerflow.agent_instances.contract import ResidentFilesBusy
+from deerflow.persistence.spaces.files import SpaceFileOperationRow
 from deerflow.persistence.telegram_bots.model import TelegramActRow
 
 pytestmark = pytest.mark.asyncio
@@ -113,6 +114,46 @@ async def test_only_three_closed_refusals_repeat(file_admission, monkeypatch, re
         assert set(operations) == {result.id}
     assert sleeps == ([3] * (expected_calls - 1) if reason != "invalid-name" else [])
     assert ("file.waiting" in hints) == (reason == "file-write-failed")
+
+
+@pytest.mark.parametrize("resolution", [None, "host-settled", "host-unconfirmed", "host-discarded", "owner-accepted-current-state", "future-resolution"])
+async def test_recorded_file_outcome_is_reported_on_the_first_attempt(file_admission, monkeypatch, resolution):
+    import json
+    from pathlib import Path
+
+    from app.telegram_bots.file_puts import file_act_id
+
+    e = file_admission
+    service, origin, file, args, sleeps, hints, _, calls = await runner(e, monkeypatch)
+    op = file_act_id(e.link, file)
+    request = {"action": "put", "path": "uploads/input.txt", "size": 4, "sha256": hashlib.sha256(b"data").hexdigest(), "destination": None, "on_behalf_of": e.actor.subject_id}
+    contract = json.loads((Path(__file__).resolve().parents[2] / "contracts" / "agent-file-outcome-v1.json").read_text(encoding="utf-8"))
+    async with e.db.sessions.begin() as writer:
+        writer.add(
+            SpaceFileOperationRow(
+                space_id=e.home.id,
+                operation_id=op,
+                generation=e.home.generation,
+                actor_kind="nonhuman",
+                actor_id="agent:" + e.link.agent_ref,
+                phase="failed",
+                request=request,
+                result=None if resolution is None else {"resolution": resolution},
+            )
+        )
+    apply = e.file_service.agent_files.apply
+
+    async def observed(**kwargs):
+        with pytest.raises(AgentFileRefusal) as refusal:
+            await apply(**kwargs)
+        assert refusal.value.extra[contract["field"]] == contract["clean" if resolution is None else "uncertain"]
+        raise refusal.value
+
+    monkeypatch.setattr(e.file_service.agent_files, "apply", observed)
+    result = await service.put(e.link, origin, file, **args)
+    assert result.reason == "file-write-failed" and result.attempts == 1
+    assert result.state == ("refused" if resolution is None else "uncertain")
+    assert len(calls) == 1 and sleeps == [] and "file.waiting" not in hints
 
 
 async def test_transient_write_recovers_under_same_id_to_actual_home(file_admission, monkeypatch):

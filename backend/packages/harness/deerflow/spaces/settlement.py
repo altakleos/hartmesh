@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-HOST_RESOLUTIONS = frozenset(("host-settled", "host-reconciled", "host-discarded"))
+HOST_RESOLUTIONS = frozenset(("host-settled", "host-unconfirmed", "host-reconciled", "host-discarded"))
 
 
 def host_settlement_time(result):

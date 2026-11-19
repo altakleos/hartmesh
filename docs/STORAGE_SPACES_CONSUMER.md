@@ -1,7 +1,7 @@
 # Storage Spaces consumer handoff
 
 The consumer contract is extension storage API **1**, shipped by
-`deerflow-extension-api` **0.2.7**. Persistent resource IDs, current typed
+`deerflow-extension-api` **0.2.12**. Persistent resource IDs, current typed
 principals and explicit grants are independent of chats and optional feature
 plugins. Execution consumers use this storage contract; it does not define agent
 creation, memory, scheduling or service hosting.
@@ -93,6 +93,7 @@ select memory/context that is compatible with the entire mounted audience.
 | `StorageIdentityRequired` | Establish a currently validated host binding |
 | `StorageAccessDenied` | Current grants, custody or required controller deny access |
 | `StorageConflict` | Resolve stale generation/revision or conflicting resource state |
+| `StorageConflict` with `getattr(error, "nothing_changed", False)` true | The host proved the requested file change was refused before publication. Let the caller correct the cause before submitting a new operation. |
 | `StorageOperationPending` | Inspect recovery; retain the exact intent and avoid a new automatic mutation |
 | `StorageUnavailable` | Provider cannot establish backing facts; preserve uncertainty |
 | `StorageUnsupported` | Capability or qualified adapter is absent |

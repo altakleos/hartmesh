@@ -13,12 +13,12 @@ from deerflow.agent_instances.contract import AgentConflict, AgentDenied, AgentP
 from deerflow.agent_instances.directory import InstanceDirectory
 from deerflow.agent_instances.service import AgentInstances
 from deerflow.persistence.agent_instances.model import AgentDefinitionRevisionRow, AgentInstanceGrantRow, AgentInstanceRow, AgentLifecycleRow
+from deerflow.persistence.base import Base
 from deerflow.spaces.contract import InvalidPrincipal, Permission, PrincipalRef, SpaceConflict, SpaceDenied
 from deerflow.spaces.principals import HostPrincipalResolver
 
 
-@pytest_asyncio.fixture(params=["sqlite", "postgres"])
-async def instances(tmp_path, request, monkeypatch):
+async def make_instances(tmp_path, request, monkeypatch):
     from deerflow.config import agents_api_config
 
     # Identity/storage tests exercise multiple independent instances. Creation
@@ -26,14 +26,14 @@ async def instances(tmp_path, request, monkeypatch):
     monkeypatch.setattr(agents_api_config, "_agents_api_config", agents_api_config.get_agents_api_config().model_copy(update={"ai_assistants_per_user": 10}))
     async for files, sf, catalog in make_storage_fixture(tmp_path, request):
         async with sf.kw["bind"].begin() as connection:
-            await connection.run_sync(lambda c: AgentDefinitionRevisionRow.__table__.create(c))
-            await connection.run_sync(lambda c: AgentInstanceRow.__table__.create(c))
-            await connection.run_sync(lambda c: AgentInstanceGrantRow.__table__.create(c))
-            await connection.run_sync(lambda c: AgentLifecycleRow.__table__.create(c))
+            await connection.run_sync(Base.metadata.create_all, tables=[row.__table__ for row in (AgentDefinitionRevisionRow, AgentInstanceRow, AgentInstanceGrantRow, AgentLifecycleRow)])
         human = files.registry._resolver._human
         directory = InstanceDirectory(sf, human=human)
         files.registry._resolver = HostPrincipalResolver(human=human, nonhuman=directory.lookup, nonhuman_in_session=directory.lookup_in_session)
         yield AgentInstances(files, directory), files, sf, catalog
+
+
+instances = pytest_asyncio.fixture(name="instances", params=["sqlite", "postgres"])(make_instances)
 
 
 def definition(owner="alice", name="analyst", soul="Help with analysis."):

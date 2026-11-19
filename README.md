@@ -1022,12 +1022,20 @@ files. While an image fails verification, `/health` reads `incomplete` rather th
 
 With managed storage enabled, the backend also provides
 `python -m app.gateway.agent_instances` for operator inspection and recovery.
-Its nine commands list AI assistants and AI employees, report storage/execution
+Its commands list AI assistants and AI employees, report storage/execution
 status, verify slots, close a workspace, export files, recover an orphaned AI
 employee's supervisor, delete an orphaned AI agent, acknowledge a replaced Docker
 host, and settle one interrupted file operation. Every response is one JSON line;
 exit 2 means recovery or Gateway settlement remains unfinished. See
 [the command guide](docs/STORAGE_SPACES.md#ai-agent-operator-commands) before recovery.
+
+When a Home file change is interrupted, other employees can keep working while
+the service checks the affected workspace. A retained workspace can hold up
+settlement until its idle timeout. The service restores access to a Home root
+only after verifying its current employee, mounted volume, and private binding.
+If an upload, edit, rename, or delete loses its response, **Check again** reads
+the original operation's status. An unknown outcome calls for inspecting the
+current files before submitting a new change.
 
 Preparation also publishes a private `.native-creates` directory outside storage
 views and temporary probes. Managed native chats now record each container request

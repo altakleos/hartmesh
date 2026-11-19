@@ -42,12 +42,18 @@ class AgentInstances:
         self.files = files
         self.directory = directory
         self._sf = directory.session_factory
+        if files is not None:
+            files.home_lookup = self._bound_home_ids
         self.execution_probe = None
         self.allowance_of = None
         self.residents = None
         from deerflow.agent_instances.agent_files import AgentFiles
 
         self.agent_files = AgentFiles(self)
+
+    @staticmethod
+    async def _bound_home_ids(session, space_ids):
+        return set(await session.scalars(select(AgentInstanceRow.home_id).where(AgentInstanceRow.home_id.in_(space_ids))))
 
     async def _human(self, actor, *, session=None):
         if not isinstance(actor, PrincipalRef) or actor.kind != "human":

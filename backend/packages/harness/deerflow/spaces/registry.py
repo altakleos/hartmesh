@@ -68,7 +68,7 @@ class SpaceRegistry:
         return await session.get(SpaceGrantRow, (row.id, actor.kind, actor.subject_id))
 
     @asynccontextmanager
-    async def admitted(self, *, actor: PrincipalRef, requests: dict[str, tuple[Permission, int | None]], operation_id: tuple[str, str] | None = None):
+    async def admitted(self, *, actor: PrincipalRef, requests: dict[str, tuple[Permission, int | None]], operation_id: tuple[str, str] | None = None, confirmation_pending: set[str] | None = None):
         """Serialize current authority across resources in deterministic order.
 
         Keep this transaction open through owned I/O and drain cancellation
@@ -87,10 +87,10 @@ class SpaceRegistry:
             async with session.begin():
                 if session.bind.dialect.name == "sqlite":
                     await session.execute(text("BEGIN IMMEDIATE"))
-                admitted = await self.admit_in_session(session, actor=actor, requests=requests, operation_id=operation_id)
+                admitted = await self.admit_in_session(session, actor=actor, requests=requests, operation_id=operation_id, confirmation_pending=confirmation_pending)
                 yield session, admitted
 
-    async def admit_in_session(self, session, *, actor, requests, operation_id=None):
+    async def admit_in_session(self, session, *, actor, requests, operation_id=None, confirmation_pending=None):
         """Borrow an active host transaction without starting or committing SQL.
 
         The owner supplies its writer transaction and drains its file effect
@@ -120,7 +120,10 @@ class SpaceRegistry:
             admitted[space_id] = (row, grant)
         await self._actor(actor, session=session)
         if self.operation_guard is not None:
-            await self.operation_guard(session, admitted, requests, operation_id)
+            if confirmation_pending is None:
+                await self.operation_guard(session, admitted, requests, operation_id)
+            else:
+                await self.operation_guard(session, admitted, requests, operation_id, confirmation_pending=confirmation_pending)
         return admitted
 
     @asynccontextmanager

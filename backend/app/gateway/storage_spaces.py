@@ -529,12 +529,15 @@ async def _adapter_step(app, *, timeout=ADAPTER_LIMIT_SECONDS):
 
 
 async def _load_metadata(app):
+    from app.gateway.agent_home_maintenance import repair_home_directories
+
     files = app.state.storage_spaces
     await files.load_bound_slots()
     errors = {}
     status = app.state.agent_execution
     if status.mount_pending or status.mount_reverify:
         raise BackingUnavailable("Initial mount verification is still pending")
+    await repair_home_directories(app)
     if not status.marker_backfill_started:
         status.marker_backfill_started = True
         status.marker_backfill_task = asyncio.create_task(files.backfill_binding_markers())
@@ -1000,6 +1003,12 @@ async def _maintenance_step(app, *, timeout: float) -> bool:
         return False
 
     async def perform():
+        from app.gateway.agent_home_maintenance import repair_home_directories
+
+        try:
+            await repair_home_directories(app)
+        except Exception:
+            logger.exception("storage: Home directory repair scan remains pending")
         try:
             await _resident_step(app, timeout=0)
         except Exception:

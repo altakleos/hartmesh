@@ -164,6 +164,19 @@ def test_synthetic_run_evidence_precedes_terminal_success_assertions():
     assert "response.headers)" not in source and "self.client.cookies)" not in source
 
 
+def test_bundle_interrupts_an_admitted_upload_and_checks_it_without_resubmission():
+    tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    killed = functions[STORAGE_TESTS[15]]
+    held = next(node for node in ast.walk(killed) if isinstance(node, ast.With) and "attachment_awaiting_commit" in ast.unparse(node.items[0].context_expr))
+    assert "'kill', '-s', 'KILL', 'gateway'" in ast.unparse(held)
+    barrier = ast.unparse(functions["attachment_awaiting_commit"])
+    assert "BEFORE UPDATE OF phase" in barrier and "pg_blocking_pids" in barrier and "expected=502" in barrier
+    verify = ast.unparse(functions["check_recovered_attachment"])
+    assert "'GET'" in verify and "'POST'" not in verify and "'PUT'" not in verify
+    assert "|complete|host-settled" in verify and "interrupted-conversation-upload.json" in verify
+
+
 def test_maintenance_proof_waits_for_logs_after_sql_commit():
     tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
     for name in (STORAGE_TESTS[3], STORAGE_TESTS[6], STORAGE_TESTS[7]):
@@ -218,6 +231,17 @@ def test_bundle_gate_requires_disk_backed_fixtures_and_exact_named_cases():
     shutdown = steps["14 Check that the stack stops cleanly"]
     assert shutdown.index("compose-before-down.log") < shutdown.index("$C down")
     assert "storage-init quiesce" in shutdown
+
+
+def test_manual_home_rollback_gate_checks_both_immutable_older_bundles():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/compose-instances.yml").read_text(encoding="utf-8"))
+    gate = next(step for step in workflow["jobs"]["bundle-instances"]["steps"] if "test_compose_home_rollback.py" in step.get("run", ""))
+    assert gate["if"] == "github.event_name == 'workflow_dispatch' && inputs.verify_home_rollback"
+    assert "git rev-parse" in gate["run"] and 'git archive "$commit:deploy/compose"' in gate["run"]
+    for version in (61, 60):
+        assert f"test_reuse_checked_home_data_on_older_build[{version}]" in gate["run"]
+    assert "rollback.xml" in gate["run"]
+    assert '["skipped", "failure", "error"]' in gate["run"]
 
 
 def test_operator_helper_uses_the_image_environment_and_actual_socket_group():

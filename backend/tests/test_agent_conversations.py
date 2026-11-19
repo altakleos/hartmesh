@@ -10,6 +10,7 @@ from test_agent_instances import instances as instances
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied, AgentPermission
 from deerflow.agent_instances.conversations import AgentConversations
 from deerflow.persistence.agent_instances.model import AgentConversationRow, AgentInstanceGrantRow, AgentInstanceRow, AgentProtectedContextRow
+from deerflow.persistence.base import Base
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
 
@@ -17,9 +18,7 @@ from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
 async def conversations(instances):
     agents, files, sf, catalog = instances
     async with sf.kw["bind"].begin() as connection:
-        await connection.run_sync(lambda c: ThreadMetaRow.__table__.create(c))
-        await connection.run_sync(lambda c: AgentConversationRow.__table__.create(c))
-        await connection.run_sync(lambda c: AgentProtectedContextRow.__table__.create(c))
+        await connection.run_sync(Base.metadata.create_all, tables=[row.__table__ for row in (ThreadMetaRow, AgentConversationRow, AgentProtectedContextRow)])
     authority = AgentConversations(agents)
     threads = ThreadMetaRepository(sf, instance_authority=authority)
     return agents, authority, threads, sf

@@ -565,12 +565,12 @@ content is refused before hashes/inbox/task payloads; disposable tasks retain
 safe identities only and drain before SDK teardown. Text/photos/documents use the
 managed turn controller; voice notes use `VoiceNotes`.
 
-`files.py`: byte budgets and pending files. File handling: [turn guide](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-file-writes).
-Reserve whole batches before reads, shrink only, and retain each charge until
-native writes and transport cleanup finish. `capped_download.py` reuses the
-normal bot request's HTTPX client with raw bounded streaming and no redirects;
-failed response closes retain their actual stream and capacity release for
-shutdown retry. No download URL, token, Update or file bytes enter persisted input.
+`files.py` owns budgets and pending files. Clean Home refusals and uncertain
+outcomes are terminal. Transient failures retry. [File writes](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-file-writes).
+Reserve batches before reads and only shrink charges through writes and cleanup.
+`capped_download.py` streams bounded raw bytes on the bot's HTTPX client with
+redirects disabled. Failed closes keep the stream and charge for shutdown retry.
+Never persist download URLs, tokens, Updates or bytes.
 Pending add/take uses real admitted rows and the same guarded writer: original
 input plus even an empty take is saved, so replay never adopts later attachments.
 Source-bound file notices are auxiliary to the actual publication. File Retry

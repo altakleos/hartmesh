@@ -99,6 +99,9 @@ class ConfinedFilesystem:
     def __init__(self, data_root: Path, control_root: Path, *, expected_data: tuple[int, int] | None = None, expected_control: tuple[int, int] | None = None) -> None:
         self._data_fd: int | None = None
         self._control_fd: int | None = None
+        # A direct worker owns this adapter for one call. Keep the syscall's
+        # outcome available even when its subsequent flush or cleanup fails.
+        self.published_action: str | None = None
         if sys.platform != "linux":
             raise FilesystemUnavailable("This filesystem adapter requires Linux")
         data, control = Path(data_root).resolve(), Path(control_root).resolve()
@@ -269,6 +272,7 @@ class ConfinedFilesystem:
                     raise FileConflict("File changed before replacement")
                 os.replace(stage, name, src_dir_fd=self._control_fd, dst_dir_fd=parent)
             published = True
+            self.published_action = "write"
             os.fsync(parent)
             os.fsync(self._control_fd)
             return hashlib.sha256(content).hexdigest()
@@ -307,6 +311,7 @@ class ConfinedFilesystem:
         try:
             try:
                 os.mkdir(name, mode=0o700, dir_fd=parent)
+                self.published_action = "mkdir"
             except FileExistsError:
                 raise FileConflict("Destination already exists") from None
             except OSError as exc:
@@ -325,6 +330,7 @@ class ConfinedFilesystem:
         try:
             destination_fd, new_name = self._parent(destination)
             self._rename_no_replace(source_fd, name, destination_fd, new_name)
+            self.published_action = "rename"
             os.fsync(source_fd)
             os.fsync(destination_fd)
         finally:
@@ -345,6 +351,7 @@ class ConfinedFilesystem:
                     raise
             else:
                 os.unlink(name, dir_fd=parent)
+            self.published_action = "remove"
             os.fsync(parent)
         finally:
             os.close(parent)

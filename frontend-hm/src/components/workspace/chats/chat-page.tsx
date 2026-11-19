@@ -286,6 +286,9 @@ export default function ChatPage() {
   const agentDisabled = !legacyCapabilities && sendBlock !== null;
   const attachedFiles = useConversationAttachments({
     instanceId: binding?.id ?? null,
+    homeScope: instance?.home_id
+      ? `${instance.home_id}:${instance.home_generation ?? instance.generation}`
+      : undefined,
     threadId,
     enabled: !!binding && !agentDisabled,
     changed: () => {

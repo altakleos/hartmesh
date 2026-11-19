@@ -33,24 +33,30 @@ function savedReference(
 /** Upload parts once on attachment; only saved references cross the send boundary. */
 export function useConversationAttachments({
   instanceId,
+  homeScope,
   threadId,
   enabled,
   changed,
 }: {
   instanceId: string | null;
+  homeScope?: string;
   threadId: string;
   enabled: boolean;
   changed: () => void;
 }) {
   const { attachments } = usePromptInputController();
+  const resource = useRef({ instanceId, home: homeScope });
+  if (resource.current.instanceId !== instanceId || homeScope !== undefined)
+    resource.current = { instanceId, home: homeScope };
+  const scope = `${instanceId}:${threadId}:${resource.current.home ?? ""}`;
   const transfers = useAgentFileTransfers({
     instanceId: instanceId ?? "",
     threadId,
+    scope,
     folder: "uploads",
     enabled: enabled && !!instanceId,
     changed,
   });
-  const scope = `${instanceId}:${threadId}`;
   const mapping = useRef<{ scope: string; parts: Map<string, string> }>({
     scope,
     parts: new Map(),
@@ -68,8 +74,18 @@ export function useConversationAttachments({
   });
   current.current = { scope, attachments, transfers, enabled, instanceId };
   useEffect(() => {
-    if (mapping.current.scope !== scope)
+    if (mapping.current.scope !== scope) {
+      const retired = mapping.current.parts;
       mapping.current = { scope, parts: new Map() };
+      for (const part of attachments.files) {
+        if (retired.has(part.id)) {
+          // A parent render can still carry the previous Home's file. Do not
+          // stage it again while the composer is removing its old chip.
+          mapping.current.parts.set(part.id, "");
+          attachments.remove(part.id);
+        }
+      }
+    }
     const owned = mapping.current.parts;
     const present = new Set(attachments.files.map((part) => part.id));
     for (const [part, operation] of owned) {
@@ -84,7 +100,7 @@ export function useConversationAttachments({
       const [id] = transfers.add([part.file]);
       if (id) owned.set(part.id, id);
     }
-  }, [scope, enabled, instanceId, attachments.files, transfers]);
+  }, [scope, enabled, instanceId, attachments, transfers]);
   const liveFiles = transfers.rows.flatMap((row) => {
     const reference =
       row.status === "saved"

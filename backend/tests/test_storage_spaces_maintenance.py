@@ -309,8 +309,8 @@ async def test_replaced_root_after_lock_preserves_all_evidence(space_file_storag
     original_path = getattr(volume, root)
     displaced = original_path.with_name("retained-" + root)
 
-    def replace(*args):
-        owned = original(*args)
+    def replace(*args, **kwargs):
+        owned = original(*args, **kwargs)
         original_path.rename(displaced)
         original_path.mkdir(mode=0o700)
         (original_path / "foreign-evidence").write_bytes(b"keep")

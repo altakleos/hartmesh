@@ -177,6 +177,12 @@ Workspace readiness is current host state, separate from the cached initial
 capacity result. Maintenance retries qualification on the same registry. Failed
 inventory closes admission before requalification; an unfinished initializer must
 be consumed before invalidation. Cached attachments/adapters never change on retry.
+Maintenance verifies a retained Home's exact attachment and backing even while
+a file intent is pending. A confirming pass preserves the idle timestamp of an
+already-associated pending Home. Restoring an association initializes that clock
+once, and a refused run without a workspace leaves it alone. Run preparation
+and new attachments still require ordinary storage admission. A live SQLite
+writer can delay other turns while it owns the database transaction.
 Reconciliation waits for a CID-less preparation under its Home lock and inherited
 deadline, then re-reads exact durable correlation. Only pending-to-active completion
 with its preparation cleared can supply the original CID; normal owner, run and

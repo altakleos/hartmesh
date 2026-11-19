@@ -2,10 +2,14 @@
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import BinaryIO, Literal
 
+from sqlalchemy import select
+
+from deerflow.persistence.agent_instances.model import AgentInstanceRow
 from deerflow.persistence.spaces.files import SpaceFileOperationRow
+from deerflow.persistence.spaces.model import SpaceGrantRow, SpaceRow
 from deerflow.spaces.backings import BackingUnavailable
 from deerflow.spaces.contract import Permission, SpaceConflict
 from deerflow.spaces.filesystem import FileConflict, SpaceFull, UnsafeSpacePath, _path
@@ -32,6 +36,8 @@ AGENT_FILE_REFUSALS = {
 class AgentFileRefusal(Refusal):
     def __init__(self, reason: str, *, name: str = "", **extra):
         status, template = AGENT_FILE_REFUSALS[reason]
+        if reason == "file-write-failed" and extra.get("file_outcome") == "unconfirmed":
+            template = "The service could not confirm whether this file change was made."
         super().__init__(template.format(name=name), status=status, reason=reason, **extra)
 
 
@@ -78,6 +84,64 @@ class AgentFiles:
         if action == "put":
             return AgentFileResult(**value)
         return AgentFileResult(request["destination"] if action == "rename" else request["path"], request["size"], value if action == "write" else None, False)
+
+    async def status(self, *, instance, requester, generation, operation_id, upload_name=None, conversation=None):
+        """Read this writer's durable outcome without admitting a file operation."""
+        self.agents.files._operation_id(operation_id)
+        principal = instance.principal if conversation is not None else requester
+        required = Permission.READ | Permission.WRITE if conversation is not None else Permission.WRITE
+        async with self.agents._sf() as session, session.begin():
+            await self.agents.files.registry._actor(principal, session=session)
+            if conversation is not None:
+                await conversation.authority.context_admission_in_session(session, conversation)
+            statement = (
+                select(SpaceFileOperationRow)
+                .join(SpaceRow, SpaceRow.id == SpaceFileOperationRow.space_id)
+                .join(AgentInstanceRow, AgentInstanceRow.home_id == SpaceRow.id)
+                .join(SpaceGrantRow, SpaceGrantRow.space_id == SpaceRow.id)
+                .where(
+                    SpaceFileOperationRow.space_id == instance.home_id,
+                    SpaceFileOperationRow.operation_id == operation_id,
+                    SpaceRow.status == "active",
+                    SpaceRow.generation == generation,
+                    AgentInstanceRow.id == instance.id,
+                    AgentInstanceRow.generation == instance.generation,
+                    AgentInstanceRow.status == "active",
+                    SpaceGrantRow.principal_kind == principal.kind,
+                    SpaceGrantRow.subject_id == principal.subject_id,
+                    SpaceGrantRow.permissions.op("&")(int(required)) == int(required),
+                )
+            )
+            row = await session.scalar(statement)
+        if row is None or (row.actor_kind, row.actor_id, row.generation) != (instance.principal.kind, instance.principal.subject_id, generation):
+            return {"status": "unknown"}
+        request = row.request
+        if not isinstance(request, dict) or request.get("on_behalf_of") != requester.subject_id or request.get("action") not in ("put", "write", "mkdir", "rename", "remove"):
+            return {"status": "unknown"}
+        if upload_name is not None and (request["action"] != "put" or request.get("path") != "uploads/" + upload_name):
+            return {"status": "unknown"}
+        if row.phase == "pending":
+            return {"status": "pending"}
+        if row.phase == "failed":
+            return {"status": "nothing-changed" if row.result is None else "unconfirmed"}
+        if row.phase != "complete" or not isinstance(row.result, dict) or "value" not in row.result:
+            return {"status": "unconfirmed"}
+        try:
+            value = self._result(request["action"], request, row.result["value"])
+            _path(value.path)
+        except (KeyError, TypeError, UnsafeSpacePath):
+            return {"status": "unconfirmed"}
+        result = asdict(value)
+        if upload_name is not None:
+            stem, dot, extension = upload_name.rpartition(".")
+            stem, extension = (stem, dot + extension) if dot and stem else (upload_name, "")
+            numbered = rf"uploads/{re.escape(stem)} \(([2-9]|[1-9][0-9]+)\){re.escape(extension)}"
+            if value.path != request["path"] and not re.fullmatch(numbered, value.path):
+                return {"status": "unconfirmed"}
+            if value.size != request.get("size") or value.sha256 != request.get("sha256") or type(value.deduplicated) is not bool:
+                return {"status": "unconfirmed"}
+            result["sandbox_path"] = "/mnt/user-data/" + value.path
+        return {"status": "complete", "file": result}
 
     async def apply(
         self,
@@ -137,7 +201,7 @@ class AgentFiles:
                         return self._result(recorded_action, request, row.result["value"])
                     if row.phase == "failed":
                         reason = row.result.get("reason") if isinstance(row.result, dict) else None
-                        raise AgentFileRefusal(reason if reason in AGENT_FILE_REFUSALS else "file-write-failed", name=instance.name)
+                        raise AgentFileRefusal(reason if reason in AGENT_FILE_REFUSALS else "file-write-failed", name=instance.name, file_outcome="nothing-changed" if row.result is None else "unconfirmed")
                     raise ResidentFilesBusy(instance.name, cause="workflow")
             home = await files.registry.get(actor=instance.principal, space_id=instance.home_id)
             if action in ("put", "mkdir"):
@@ -164,7 +228,8 @@ class AgentFiles:
             raise AgentFileRefusal("invalid-name") from None
         except FileConflict as exc:
             reasons = {"Destination already exists": "name-collision", "File differs from the loaded revision": "file-changed", "File changed before replacement": "file-changed", "Directory is not empty": "directory-not-empty"}
-            raise AgentFileRefusal(reasons.get(str(exc), "file-write-failed")) from None
+            extra = {"file_outcome": "nothing-changed"} if getattr(exc, "nothing_changed", False) else {}
+            raise AgentFileRefusal(reasons.get(str(exc), "file-write-failed"), **extra) from None
         except SpaceOperationPending as exc:
             raise ResidentFilesBusy(instance.name, cause=exc.cause) from None
         except BackingUnavailable:

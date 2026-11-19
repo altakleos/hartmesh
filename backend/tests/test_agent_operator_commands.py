@@ -660,6 +660,220 @@ async def test_settle_acts_only_on_the_exact_pending_pair_and_reports_the_files(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("discard", [False, True])
+async def test_settle_under_unreadable_parent_keeps_listing_distinct_from_empty(operator, discard):
+    import os
+
+    assert os.geteuid() != 0, "A non-root process must encounter the actual directory permissions"
+    agent = await create(operator)
+    identifier = operation()
+    async with operator.fixture.sf.begin() as session:
+        binding = (await session.scalars(select(SpaceBackingRow))).one()
+        session.add(SpaceFileOperationRow(space_id=agent.home_id, operation_id=identifier, actor_kind="human", actor_id=str(operator.fixture.owner.id), generation=1, phase="pending", request={"action": "remove", "path": "outputs/item"}))
+    folder = operator.fixture.catalog.verified[binding.slot_id].data_path / "outputs"
+    (folder / "item").write_bytes(b"original")
+    prior = folder.stat().st_mode
+    try:
+        folder.chmod(0)
+        with pytest.raises(PermissionError):
+            list(folder.iterdir())
+        answer = await operator.run("settle", space_id=agent.home_id, operation_id=identifier, discard=discard)
+        assert answer["returncode"] == 0
+        assert answer["files"] is None and "could not be listed" in answer["note"]
+        assert answer["verdict"] == ("discarded" if discard else "settled-unconfirmed")
+        assert answer["resolution"] == ("host-discarded" if discard else "host-unconfirmed")
+    finally:
+        folder.chmod(prior)
+    assert (folder / "item").read_bytes() == b"original"
+
+
+@pytest.mark.asyncio
+async def test_settle_preserves_unknown_terminal_resolution(operator, monkeypatch):
+    from app.gateway.agent_operator_contract import CommandRefused
+    from deerflow.spaces import maintenance
+
+    agent = await create(operator)
+    identifier = operation()
+    async with operator.fixture.sf.begin() as session:
+        session.add(SpaceFileOperationRow(space_id=agent.home_id, operation_id=identifier, actor_kind="human", actor_id=str(operator.fixture.owner.id), generation=1, phase="pending", request={"action": "remove", "path": "outputs/item"}))
+
+    async def settle_from_another_build(_files, candidate, **_options):
+        async with operator.fixture.sf.begin() as session:
+            row = await session.get(SpaceFileOperationRow, (candidate.space_id, candidate.operation_id))
+            row.phase, row.result = "failed", {"resolution": "future-resolution"}
+
+    monkeypatch.setattr(maintenance, "settle_file_operation", settle_from_another_build)
+    document = await operator.run("settle", space_id=agent.home_id, operation_id=identifier)
+    assert document["verdict"] == "settled-unconfirmed" and document["resolution"] == "future-resolution"
+    with pytest.raises(CommandRefused, match="file outcome was not confirmed") as terminal:
+        await operator.run("settle", space_id=agent.home_id, operation_id=identifier)
+    assert terminal.value.fields == {"verdict": "settled-unconfirmed", "resolution": "future-resolution", "note": "Inspect the target before starting another operation"}
+
+
+@pytest.mark.asyncio
+async def test_pending_pages_include_the_retained_home_after_the_summary_limit(operator):
+    from app.gateway.gateway_observation import publish
+
+    homes = sorted([await create(operator), await create(operator, custody="company")], key=lambda instance: instance.home_id)
+    first, last = homes
+    claim, incarnation = operation(), operation()
+    async with operator.fixture.sf.begin() as session:
+        for number in range(201):
+            session.add(SpaceFileOperationRow(space_id=first.home_id, operation_id=f"{number:032x}", actor_kind="human", actor_id=str(operator.fixture.owner.id), generation=1, phase="pending", request={"action": "remove"}))
+        session.add(SpaceFileOperationRow(space_id=last.home_id, operation_id=operation(), actor_kind="human", actor_id=str(operator.fixture.owner.id), generation=1, phase="pending", request={"action": "copy"}))
+        session.add(SpaceAttachmentRow(id=claim, incarnation=incarnation, actor_kind="nonhuman", actor_id=last.principal.subject_id, host_id=operator.adapter.host_id, container_id="a" * 64, phase="active"))
+        await session.flush()
+        session.add(SpaceMountRow(attachment_id=claim, space_id=last.home_id, generation=1, alias="home", writable=1))
+    lifetime = publish(operator.fixture.path, started_at=datetime.now(UTC))
+    try:
+        summary = await operator.run("status")
+    finally:
+        lifetime.close()
+    assert summary["file_operations_pending"] == 202
+    assert len(summary["pending_operations"]) == 200 and summary["pending_operations_truncated"]
+    page = await operator.run("pending")
+    assert page["total"] == 202 and page["operations"] == summary["pending_operations"]
+    tail = await operator.run("pending", after=page["next_after"])
+    assert tail["total"] == 202 and tail["next_after"] is None and len(tail["operations"]) == 2
+    row = tail["operations"][-1]
+    assert (row["space_id"], row["instance_id"], row["generation"], row["action"]) == (last.home_id, last.id, 1, "copy")
+    assert row["attachments"] == [{"attachment_id": claim, "incarnation": incarnation, "host_id": operator.adapter.host_id, "container_id": "a" * 64, "generation": 1, "phase": "active"}]
+
+
+@pytest.mark.asyncio
+async def test_untyped_home_owner_is_verified_before_operator_settlement_and_rollback(operator, monkeypatch):
+    import os
+
+    from app.gateway.agent_operator_contract import CommandRefused
+    from deerflow.spaces import incarnations
+    from deerflow.spaces.runtime_owner import RUNTIME_LOCK
+
+    agent = await create(operator)
+    identifier = operation()
+    async with operator.fixture.sf.begin() as session:
+        binding = (await session.scalars(select(SpaceBackingRow))).one()
+        session.add(SpaceFileOperationRow(space_id=agent.home_id, operation_id=identifier, actor_kind="human", actor_id=str(operator.fixture.owner.id), generation=1, phase="pending", request={"action": "remove", "path": "outputs/item"}))
+    volume = operator.fixture.catalog.verified[binding.slot_id]
+    volume.spec.kind = None
+    volume.data_path.chmod(0o770)
+    target = volume.data_path.stat()
+
+    class ObservedHost:
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        def fstat(self, fd):
+            observed = os.fstat(fd)
+            if (observed.st_dev, observed.st_ino) != (target.st_dev, target.st_ino):
+                return observed
+            fields = list(observed)
+            fields[4] = target.st_uid + 1
+            return os.stat_result(fields)
+
+    # The fixture process cannot chown a directory. Substitute only the UID
+    # read from the actual Home descriptor; paths, bindings and SQL stay real.
+    monkeypatch.setattr(incarnations, "os", ObservedHost())
+    (operator.fixture.path / RUNTIME_LOCK).touch(mode=0o600)
+    for command, arguments in (("settle", {"space_id": agent.home_id, "operation_id": identifier}), ("check-rollback", {})):
+        with pytest.raises(CommandRefused, match="unqualified owner"):
+            await operator.run(command, **arguments)
+    async with operator.fixture.sf() as session:
+        assert (await session.get(SpaceFileOperationRow, (agent.home_id, identifier))).phase == "pending"
+
+
+@pytest.mark.asyncio
+async def test_rollback_requires_original_readonly_inode_and_unique_agent_owner(operator):
+    from dataclasses import replace
+
+    from app.gateway.agent_operator_contract import CommandRefused
+    from app.gateway.agent_operator_rollback import _check_roots
+    from app.gateway.agent_operator_services import inspect_operator_volume
+    from deerflow.spaces.attachments import ResourceMount, RetainedAttachment
+    from deerflow.spaces.native_resident_evidence import NativeResidentRoot
+    from deerflow.spaces.readonly_roots import ReadOnlyRoot
+
+    agent = await create(operator)
+    other = await create(operator, custody="company")
+    async with operator.fixture.sf() as session:
+        bindings = {binding.space_id: inspect_operator_volume(operator.files, binding)[0] for binding in (await session.scalars(select(SpaceBackingRow))).all()}
+    home = ResourceMount(agent.home_id, 1, "home", True)
+    claim = RetainedAttachment(operation(), operation(), agent.principal, operator.adapter.host_id, (home,), "active", "a" * 64)
+    shared = bindings[other.home_id]
+    (shared.data_path / "shared").mkdir()
+    projection = ReadOnlyRoot.capture(shared, "shared", "/mnt/user-data/shared")
+    record = SimpleNamespace(roots=(NativeResidentRoot.from_view(home, bindings[agent.home_id]), NativeResidentRoot.from_readonly(projection)))
+    bound = {agent.home_id: (1, bindings[agent.home_id])}
+    owners = {agent.home_id: agent.principal.subject_id}
+    seen = set()
+    _check_roots(claim, record, bound, owners, seen, (projection,))
+    with pytest.raises(CommandRefused, match="one active Home and owner"):
+        _check_roots(replace(claim, id=operation()), record, bound, owners, seen, (projection,))
+    with pytest.raises(CommandRefused, match="one active Home and owner"):
+        _check_roots(replace(claim, actor=other.principal), record, bound, owners, set(), (projection,))
+    (shared.data_path / "shared").rename(shared.data_path / "original")
+    (shared.data_path / "shared").mkdir()
+    current = ReadOnlyRoot.capture(shared, "shared", "/mnt/user-data/shared")
+    assert current.source == projection.source and current.identity != projection.identity
+    with pytest.raises(CommandRefused, match="current storage roots"):
+        _check_roots(claim, record, bound, owners, set(), (current,))
+
+
+@pytest.mark.asyncio
+async def test_offline_rollback_refuses_active_pool_or_home_writer_and_checks_every_page(operator, monkeypatch):
+    from app.gateway import agent_operator_rollback
+    from app.gateway.agent_operator_contract import CommandRefused
+    from deerflow.spaces.runtime_owner import RUNTIME_LOCK, PoolRuntimeOwner
+    from deerflow.spaces.workflows import acquire, close
+
+    agent = await create(operator)
+    path = operator.fixture.path
+    (path / RUNTIME_LOCK).touch(mode=0o600)
+    (path / ".native-creates").mkdir(mode=0o700)
+    monkeypatch.setattr(operator.adapter, "bootstrap_residents", lambda **kwargs: (), raising=False)
+    async with operator.fixture.sf.begin() as session:
+        binding = (await session.scalars(select(SpaceBackingRow))).one()
+        for number in range(201):
+            session.add(SpaceFileOperationRow(space_id=agent.home_id, operation_id=f"{number:032x}", actor_kind="human", actor_id=str(operator.fixture.owner.id), generation=1, phase="pending", request={"action": "copy"}))
+    owner = PoolRuntimeOwner(path)
+    owner.acquire()
+    try:
+        with pytest.raises(CommandRefused, match="pool"):
+            await operator.run("check-rollback")
+    finally:
+        owner.close()
+    locked = acquire({agent.home_id: operator.fixture.catalog.verified[binding.slot_id]})
+    try:
+        with pytest.raises(CommandRefused, match="workflow"):
+            await operator.run("check-rollback")
+    finally:
+        close(locked)
+    async with agent_operator_rollback.operator_exclusion(operator.home, exclusive=False):
+        with pytest.raises(CommandRefused, match="operator command"):
+            await operator.run("check-rollback")
+    async with agent_operator_rollback.operator_exclusion(operator.home, exclusive=True):
+        with pytest.raises(CommandRefused, match="rollback check"):
+            await operator.run("close-workspace", instance_id=agent.id)
+    document = await operator.run("check-rollback")
+    assert document["returncode"] == 0 and document["checked"] == document["total"] == 201
+    assert document["pages"] == 2
+    page = agent_operator_rollback.pending_page
+
+    async def missing_tail(session, after=None):
+        if after:
+            return [], None
+        return await page(session, after)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(agent_operator_rollback, "pending_page", missing_tail)
+        with pytest.raises(CommandRefused, match="page is missing"):
+            await operator.run("check-rollback")
+    async with operator.fixture.sf.begin() as session:
+        session.add(SpaceAttachmentRow(id=operation(), incarnation=operation(), host_id=operator.adapter.host_id, phase="pending", actor_kind="nonhuman", actor_id=agent.principal.subject_id))
+    with pytest.raises(CommandRefused):
+        await operator.run("check-rollback")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("prior_status", ["active", "suspended", "archived"])
 async def test_supervise_uses_product_lifecycle_and_preserves_status_and_attribution(operator, prior_status):
     agent = await create(operator, custody="company")

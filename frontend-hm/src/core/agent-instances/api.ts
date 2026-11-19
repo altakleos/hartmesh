@@ -30,6 +30,7 @@ export interface AgentInstanceSummary {
 }
 
 export interface AgentInstanceDetail extends AgentInstance {
+  home_generation?: number | null;
   activity: {
     running_runs: number;
     running: {
@@ -181,7 +182,13 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
     },
   );
   if (response.status === 204) return undefined as T;
-  const payload: unknown = await awaitAbortable(response.json(), signal);
+  const body: Promise<unknown> = response.json();
+  // A proxy may deny a request without JSON. Preserve its HTTP status so a
+  // file-status poll can retire when the current caller loses access.
+  const payload = await awaitAbortable(
+    response.ok ? body : body.catch(() => undefined),
+    signal,
+  );
   if (!response.ok)
     throw InstanceApiError.fromResponse(response.status, payload);
   return payload as T;

@@ -1,18 +1,21 @@
 """Direct, attributed host writes for composer uploads and agent Home files."""
 
+import hmac
+import json
 import tempfile
 import unicodedata
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 from fastapi.routing import APIRoute
 from pydantic import Field, model_validator
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from app.gateway.agent_conversations import execution_for_run
+from app.gateway.auth.config import existing_signing_key, get_auth_config
 from app.gateway.authz import require_permission
 from app.gateway.routers.agent_instances import _service
 from app.gateway.routers.spaces import StrictRequest, _actor
@@ -55,6 +58,21 @@ class AgentHomeRoute(APIRoute):
 
 
 router = APIRouter(prefix="/api/agent-instances", tags=["agent-instances"], route_class=AgentHomeRoute)
+
+
+async def _receipt_id(instance, actor, nonce, *, conversation=None, read_only=False):
+    # The public handle must never be a raw storage ID: a legacy writer can
+    # choose its own ID. Bind the original authenticated write to its surface.
+    scope = ["agent-file-operation-v1", instance.id, instance.home_id, actor.subject_id, nonce]
+    if conversation is not None:
+        scope.extend(["conversation", conversation.thread_id, conversation.thread_incarnation])
+    else:
+        scope.append("home")
+    secret = await run_file_io(existing_signing_key) if read_only else (await run_file_io(get_auth_config)).jwt_secret
+    if not secret:
+        return None
+    message = json.dumps(scope, separators=(",", ":")).encode()
+    return hmac.digest(secret.encode(), message, "sha256").hex()[:32]
 
 
 def _filename(value):
@@ -197,6 +215,7 @@ def _conversation_admission(execution, operation_id):
     return admit
 
 
+@router.post("/{instance_id}/conversations/{thread_id}/files/operations", status_code=201, name="scoped_conversation_file")
 @router.post("/{instance_id}/conversations/{thread_id}/files", status_code=201)
 @require_permission("threads", "write")
 @require_permission("agents", "read")
@@ -206,12 +225,50 @@ async def conversation_file(instance_id: str, thread_id: ThreadId, request: Requ
     await _conversation(request, instance_id, thread_id)
     async with _body(request, multipart=True) as (content, size, name):
         execution = await _conversation(request, instance_id, thread_id)
+        if request.scope["route"].name == "scoped_conversation_file":
+            operation_id = await _receipt_id(execution.instance, execution.requester, operation_id, conversation=execution)
         result = await service.agent_files.apply(
             instance=execution.instance, requester=execution.requester, operation_id=operation_id, action="put", path="uploads/" + name, content=content, size=size, admission=_conversation_admission(execution, operation_id)
         )
         return {**asdict(result), "sandbox_path": "/mnt/user-data/" + result.path}
 
 
+@router.get("/{instance_id}/home/operations/{operation_id}")
+@require_permission("agents", "write")
+@require_permission("agents", "read")
+async def home_operation(instance_id: str, request: Request, response: Response, operation_id: str = Path(pattern=r"^[0-9a-f]{32}$")):
+    response.headers["Cache-Control"] = "private, no-store"
+    service = await _service(request)
+    instance, actor, generation = await _home(request, service, instance_id)
+    receipt_id = await _receipt_id(instance, actor, operation_id, read_only=True)
+    if receipt_id is None:
+        return {"status": "unknown"}
+    return await service.agent_files.status(instance=instance, requester=actor, generation=generation, operation_id=receipt_id)
+
+
+@router.get("/{instance_id}/conversations/{thread_id}/files/operations/{operation_id}")
+@require_permission("threads", "write")
+@require_permission("agents", "read")
+async def conversation_file_operation(instance_id: str, thread_id: ThreadId, filename: str, request: Request, response: Response, operation_id: str = Path(pattern=r"^[0-9a-f]{32}$")):
+    response.headers["Cache-Control"] = "private, no-store"
+    service = await _service(request)
+    actor = await _actor(request)
+    authority = getattr(request.app.state, "agent_conversations", None)
+    if authority is None or await authority.binding(thread_id) != instance_id:
+        raise HTTPException(404, "Agent conversation is unavailable")
+    conversation = await authority.inspection(actor=actor, thread_id=thread_id)
+    instance = conversation.instance
+    if instance.id != instance_id:
+        raise HTTPException(404, "Agent conversation is unavailable")
+    if instance.status != "active" or _filename(filename) != filename:
+        return {"status": "unknown"}
+    receipt_id = await _receipt_id(instance, actor, operation_id, conversation=conversation, read_only=True)
+    if receipt_id is None:
+        return {"status": "unknown"}
+    return await service.agent_files.status(instance=instance, requester=actor, generation=conversation.home_generation, operation_id=receipt_id, upload_name=filename, conversation=conversation)
+
+
+@router.put("/{instance_id}/home/operations/content", name="scoped_home_content")
 @router.put("/{instance_id}/home/content")
 @require_permission("agents", "write")
 @require_permission("agents", "read")
@@ -221,6 +278,8 @@ async def home_content(instance_id: str, request: Request, path: str, operation_
     await _home(request, service, instance_id)
     async with _body(request) as (content, size, _name):
         instance, actor, generation = await _home(request, service, instance_id)
+        if request.scope["route"].name == "scoped_home_content":
+            operation_id = await _receipt_id(instance, actor, operation_id)
         return asdict(
             await service.agent_files.apply(
                 instance=instance,
@@ -249,6 +308,7 @@ class FileAction(StrictRequest):
         return self
 
 
+@router.post("/{instance_id}/home/operations", name="scoped_home_files")
 @router.post("/{instance_id}/home/files")
 @require_permission("agents", "write")
 @require_permission("agents", "read")
@@ -256,5 +316,6 @@ async def home_files(instance_id: str, body: FileAction, request: Request):
     await require_execution(request.app, instance_id)
     service = await _service(request)
     instance, actor, generation = await _home(request, service, instance_id)
-    result = await service.agent_files.apply(instance=instance, requester=actor, admission=_human_admission(service, instance, actor, generation, body.operation_id), **body.model_dump())
+    operation_id = await _receipt_id(instance, actor, body.operation_id) if request.scope["route"].name == "scoped_home_files" else body.operation_id
+    result = await service.agent_files.apply(instance=instance, requester=actor, admission=_human_admission(service, instance, actor, generation, operation_id), operation_id=operation_id, **body.model_dump(exclude={"operation_id"}))
     return {"complete": True, "path": result.path}

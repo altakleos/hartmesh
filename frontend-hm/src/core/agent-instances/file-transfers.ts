@@ -9,6 +9,13 @@ import {
   type SavedAgentFile,
 } from "./agent-files";
 import { InstanceApiError, operationID } from "./api";
+import {
+  checkFileOperation,
+  fileOutcome,
+  unansweredWrite,
+  type CheckState,
+  type FileLookup,
+} from "./file-status";
 
 export const MAX_AGENT_FILE_BYTES = 64 * 1024 * 1024;
 export interface AgentTransfer {
@@ -21,6 +28,9 @@ export interface AgentTransfer {
   error?: unknown;
   result?: SavedAgentFile & { sandbox_path?: string };
   controller?: AbortController;
+  lookup?: FileLookup;
+  check?: CheckState;
+  checkController?: AbortController;
 }
 
 /** Both file tabs and conversation attachments own their exact write identity. */
@@ -28,27 +38,29 @@ export function useAgentFileTransfers({
   instanceId,
   threadId,
   folder,
+  scope = `${instanceId}:${threadId ?? "files"}`,
   enabled,
   changed,
 }: {
   instanceId: string;
   threadId?: string;
   folder: string;
+  scope?: string;
   enabled: boolean;
   changed: () => void;
 }) {
-  const captureSignal = useSpaceActionSignal(
-    `${instanceId}:${threadId ?? "files"}`,
-  );
+  const captureSignal = useSpaceActionSignal(scope);
   const requests = useRef(new Map<string, AgentTransfer>());
   const [rows, setRows] = useState<AgentTransfer[]>([]);
-  const scope = `${instanceId}:${threadId ?? "files"}`;
   const owner = useRef(scope);
   const currentRows = owner.current === scope ? rows : [];
   useEffect(() => {
     if (owner.current === scope) return;
     owner.current = scope;
-    for (const row of requests.current.values()) row.controller?.abort();
+    for (const row of requests.current.values()) {
+      row.controller?.abort();
+      row.checkController?.abort();
+    }
     requests.current.clear();
     setRows([]);
   }, [scope]);
@@ -60,22 +72,99 @@ export function useAgentFileTransfers({
     const row = requests.current.get(id);
     requests.current.delete(id);
     row?.controller?.abort();
+    row?.checkController?.abort();
     publish();
+  }
+  async function check(id: string, automatic: boolean) {
+    const row = requests.current.get(id);
+    if (!row?.lookup) return;
+    row.checkController?.abort();
+    const controller = new AbortController();
+    const signal = AbortSignal.any([captureSignal(), controller.signal]);
+    publish({
+      ...row,
+      check: "checking",
+      checkController: controller,
+      retryable: false,
+    });
+    await checkFileOperation(
+      instanceId,
+      row.lookup,
+      signal,
+      automatic,
+      (state, result) => {
+        const current = requests.current.get(id);
+        if (signal.aborted || current?.checkController !== controller) return;
+        if (state === "complete" && result) {
+          publish({
+            ...current,
+            status: "saved",
+            result,
+            check: undefined,
+            percentage: 100,
+            checkController: undefined,
+          });
+          changed();
+        } else if (state === "nothing-changed") {
+          publish({
+            ...current,
+            status: "failed",
+            retryable: true,
+            lookup: undefined,
+            check: undefined,
+            checkController: undefined,
+            error: new InstanceApiError(
+              503,
+              "Write refused",
+              "file-write-failed",
+              undefined,
+              { file_outcome: state },
+            ),
+          });
+        } else {
+          publish({
+            ...current,
+            status: "failed",
+            check: state,
+            retryable: false,
+          });
+        }
+      },
+    );
   }
   async function send(id: string) {
     const row = requests.current.get(id);
-    if (!enabled || !row || row.controller || row.status === "saved") return;
+    if (
+      !enabled ||
+      !row ||
+      row.controller ||
+      row.check ||
+      row.status === "saved"
+    )
+      return;
     const controller = new AbortController();
     const owner = captureSignal();
     const signal = AbortSignal.any([owner, controller.signal]);
-    publish({
-      ...row,
-      status: "uploading",
-      percentage: 0,
-      error: undefined,
-      controller,
-    });
     try {
+      const key =
+        fileOutcome(row.error) === "nothing-changed" ? operationID() : id;
+      const lookup =
+        row.lookup ??
+        (threadId
+          ? {
+              id: key,
+              thread: { id: threadId, filename: row.file.name },
+            }
+          : { id: key });
+      signal.throwIfAborted();
+      publish({
+        ...row,
+        lookup,
+        status: "uploading",
+        percentage: 0,
+        error: undefined,
+        controller,
+      });
       const options = {
         signal,
         onProgress: (percentage: number) => {
@@ -86,12 +175,18 @@ export function useAgentFileTransfers({
       };
       const result = await awaitAbortable(
         threadId
-          ? uploadConversationFile(instanceId, threadId, row.file, id, options)
+          ? uploadConversationFile(
+              instanceId,
+              threadId,
+              row.file,
+              lookup.id,
+              options,
+            )
           : putAgentFile(
               instanceId,
               `${row.folder ? `${row.folder}/` : ""}${row.file.name}`,
               row.file,
-              id,
+              lookup.id,
               options,
             ),
         signal,
@@ -109,15 +204,27 @@ export function useAgentFileTransfers({
     } catch (error) {
       if (signal.aborted || requests.current.get(id)?.controller !== controller)
         return;
+      const current = requests.current.get(id)!;
+      const outcome = fileOutcome(error);
+      const unanswered = unansweredWrite(error) && !!current.lookup;
       publish({
-        ...row,
+        ...current,
         status: "failed",
         error,
+        lookup: outcome === "nothing-changed" ? undefined : current.lookup,
+        check: unanswered
+          ? "checking"
+          : outcome === "unconfirmed"
+            ? "unconfirmed"
+            : undefined,
         retryable:
-          !(error instanceof InstanceApiError) ||
+          !unanswered &&
+          outcome !== "unconfirmed" &&
+          error instanceof InstanceApiError &&
           error.reason === "file-write-failed",
         controller: undefined,
       });
+      if (unanswered) void check(id, true);
       if (error instanceof InstanceApiError && error.reason === "storage-busy")
         changed();
     }
@@ -159,6 +266,8 @@ export function useAgentFileTransfers({
     }
     return added;
   }
+  const observeInterrupted = useRef(check);
+  observeInterrupted.current = check;
   useEffect(() => {
     if (enabled) return;
     for (const row of requests.current.values())
@@ -169,15 +278,22 @@ export function useAgentFileTransfers({
           status: "failed",
           controller: undefined,
           error: new DOMException("Transfer interrupted", "AbortError"),
-          retryable: true,
+          check: row.lookup ? "checking" : undefined,
+          retryable: !row.lookup,
         });
+        if (row.lookup) void observeInterrupted.current(row.id, true);
       }
     setRows([...requests.current.values()]);
   }, [enabled]);
   return {
     rows: currentRows,
     add,
-    retry: (id: string) => void send(id),
+    retry: (id: string) => {
+      const row = requests.current.get(id);
+      if (row?.check && !["unconfirmed", "denied"].includes(row.check))
+        void check(id, false);
+      else if (row?.retryable) void send(id);
+    },
     remove,
     hasUnfinished: currentRows.some((row) => row.status !== "saved"),
   };

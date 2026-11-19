@@ -459,6 +459,17 @@ export function createZhCN(product: string): Translations {
         notActive: (name) => `${name} 已暂停或停用，无法更改 ${name} 的文件。`,
         notFound: "该文件或文件夹已不存在。请刷新列表。",
         actionFailed: "操作未成功。请重试。",
+        checkAgain: "再次检查",
+        checkingChange: (file) =>
+          `${product} 未响应，${file} 的操作结果未知。正在再次检查…`,
+        pendingChange: "仍在检查此更改。",
+        missingChange: "尚未记录结果。",
+        unavailableCheck: "暂时无法获取结果。",
+        deniedCheck: "你已无权检查此更改。",
+        unconfirmedChange: `${product} 无法确认是否已完成更改。再次尝试前请先检查文件。`,
+        unconfirmedUpload: (file, name) =>
+          `${product} 无法确认是否已保存 ${file}。再次附加前，请向 ${name} 确认是否已有该文件。`,
+        completedChange: "更改已完成。",
       },
       memoryTooLarge:
         "内容过大，无法导入记忆。请粘贴使用“导出记忆”生成的文件内容。",

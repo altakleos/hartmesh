@@ -13,11 +13,16 @@ import { Textarea } from "@/components/ui/textarea";
 import { putAgentFile } from "@/core/agent-instances/agent-files";
 import * as api from "@/core/agent-instances/api";
 import { readAgentText } from "@/core/agent-instances/file-reads";
+import {
+  fileOutcome,
+  unansweredWrite,
+} from "@/core/agent-instances/file-status";
 import { awaitAbortable } from "@/core/api/abort";
 import { useI18n } from "@/core/i18n/hooks";
 import { StorageRequestError, type SpaceFile } from "@/core/spaces/api";
 import { useSpaceActionSignal } from "@/core/spaces/lifetime";
 
+import { PendingFileChange } from "./file-operation-notice";
 import { AgentFileRefusal } from "./file-refusal";
 
 export function AgentTextEditor({
@@ -27,6 +32,7 @@ export function AgentTextEditor({
   editable,
   close,
   changed,
+  observe,
 }: {
   instance: api.AgentInstance;
   home: string;
@@ -34,6 +40,7 @@ export function AgentTextEditor({
   editable: boolean;
   close: () => void;
   changed: () => void;
+  observe: (id: string, path: string) => void;
 }) {
   const { t } = useI18n();
   const copy = t.storageSpaces;
@@ -43,6 +50,7 @@ export function AgentTextEditor({
   const [revision, setRevision] = useState<string>();
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState<string>();
   const busyRef = useRef(false);
   const pending = useRef<
     | {
@@ -111,10 +119,14 @@ export function AgentTextEditor({
       close();
     } catch (failure) {
       if (!signal.aborted) {
+        if (unansweredWrite(failure)) {
+          setChecking(captured.operation);
+          return;
+        }
         setError(failure);
         if (
           failure instanceof api.InstanceApiError &&
-          failure.reason !== "file-write-failed"
+          (failure.reason !== "file-write-failed" || fileOutcome(failure))
         )
           pending.current = undefined;
       }
@@ -125,11 +137,15 @@ export function AgentTextEditor({
       }
     }
   }
+  function dismiss() {
+    if (checking) observe(checking, file.path);
+    close();
+  }
   return (
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open && !busy) close();
+        if (!open && !busy) dismiss();
       }}
     >
       <DialogContent className="sm:max-w-3xl" showCloseButton={!busy}>
@@ -145,7 +161,7 @@ export function AgentTextEditor({
               className="min-h-80 font-mono"
               value={text}
               readOnly={!editable}
-              disabled={busy || reading}
+              disabled={busy || reading || !!checking}
               onChange={(event) => {
                 dirty.current = true;
                 pending.current = undefined;
@@ -157,6 +173,30 @@ export function AgentTextEditor({
           !error && <p role="status">{t.common.loading}</p>
         )}
         <p className="text-muted-foreground text-sm">{copy.utf8Notice}</p>
+        {checking && (
+          <PendingFileChange
+            instance={instance.id}
+            operation={checking}
+            file={file.name}
+            changed={() => {
+              changed();
+              close();
+            }}
+            cleanFailure={() => {
+              pending.current = undefined;
+              setChecking(undefined);
+              setError(
+                new api.InstanceApiError(
+                  503,
+                  "Write refused",
+                  "file-write-failed",
+                  undefined,
+                  { file_outcome: "nothing-changed" },
+                ),
+              );
+            }}
+          />
+        )}
         {error instanceof StorageRequestError && error.status === 415 ? (
           <p role="status">{copy.noEditor}</p>
         ) : (
@@ -173,7 +213,7 @@ export function AgentTextEditor({
           <Button
             type="button"
             variant="outline"
-            disabled={busy || reading}
+            disabled={busy || reading || !!checking}
             onClick={() => void load(true)}
           >
             {t.agentInstances.refresh}
@@ -182,11 +222,11 @@ export function AgentTextEditor({
             type="button"
             variant="outline"
             disabled={busy}
-            onClick={close}
+            onClick={dismiss}
           >
             {t.common.cancel}
           </Button>
-          {editable && (
+          {editable && !checking && fileOutcome(error) !== "unconfirmed" && (
             <Button
               type="button"
               disabled={busy || reading || revision === undefined}

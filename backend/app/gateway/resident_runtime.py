@@ -728,7 +728,7 @@ class ResidentRuntime:
                         reason = "container-absent"
                     else:
                         try:
-                            resumed = await self.attachments.resume(actor=identity.principal, resources=expected, incarnation=claim.incarnation)
+                            resumed, home_pending = await self.attachments.confirm_resident(actor=identity.principal, home=expected[0], incarnation=claim.incarnation)
                         except Exception as exc:
                             from deerflow.community.aio_sandbox.native_creation import _NativeAccountingStale
                             from deerflow.spaces.docker import ResidentSettingsChanged
@@ -759,7 +759,7 @@ class ResidentRuntime:
                             if resumed is None or resumed.id != claim.id or resumed.container_id != claim.container_id or fresh is None:
                                 raise StorageRuntimeUnavailable("Workspace resume lost its exact retained identity")
                             self.registry.retain(fresh)
-                            self.registry.associate(identity, self.registry.retained[claim.id], generation=generation)
+                            self.registry.associate(identity, self.registry.retained[claim.id], generation=generation, preserve_idle=home_pending)
                             return True
                 else:
                     reason = "container-absent"

@@ -555,7 +555,18 @@ class SpaceAttachments:
             if destination_readers - audiences[key] and (not grant.permissions & Permission.ADMIN or acknowledgement is not True):
                 raise SpaceDenied("Joint mount audience requires source disclosure authority and acknowledgement")
 
+    async def confirm_resident(self, *, actor, home, incarnation):
+        """Inspect one retained writable Home. This cannot start or attach a workspace."""
+        if home.alias != "home" or not home.writable or incarnation is None:
+            raise ValueError("Resident confirmation needs the exact active Home mount")
+        pending = set()
+        attachment = await self._resume(actor=actor, resources=(home,), incarnation=incarnation, confirmation_pending=pending)
+        return attachment, home.space_id in pending
+
     async def resume(self, *, actor, resources, incarnation=None):
+        return await self._resume(actor=actor, resources=resources, incarnation=incarnation, confirmation_pending=None)
+
+    async def _resume(self, *, actor, resources, incarnation, confirmation_pending):
         """Revalidate an exact durable active view without preparing or starting.
 
         Absence returns None. Pending containment never means absence. A host
@@ -582,7 +593,7 @@ class SpaceAttachments:
         if not candidates:
             # Still authenticate/read the requested resources before returning
             # absence, so a foreign caller cannot use this as a discovery API.
-            async with self.registry.admitted(actor=actor, requests={r.space_id: (Permission.READ, r.generation) for r in resources}):
+            async with self.registry.admitted(actor=actor, requests={r.space_id: (Permission.READ, r.generation) for r in resources}, confirmation_pending=confirmation_pending):
                 return None
         if len(candidates) != 1:
             raise SpaceConflict("The requested resources do not identify one attachment")
@@ -590,7 +601,7 @@ class SpaceAttachments:
         token = _operation.set(("attach", candidate.id))
         try:
             requests = {r.space_id: (Permission.READ | (Permission.WRITE if r.writable else Permission(0)), r.generation) for r in resources}
-            async with self.registry.admitted(actor=actor, requests=requests) as (session, rows):
+            async with self.registry.admitted(actor=actor, requests=requests, confirmation_pending=confirmation_pending) as (session, rows):
                 record = (await session.execute(select(SpaceAttachmentRow).where(SpaceAttachmentRow.id == candidate.id).with_for_update())).scalar_one()
                 if record.phase != "active" or record.host_id != self.provider.host_id or record.container_id is None:
                     raise AttachmentPending("The recorded environment is not a confirmed active attachment")
