@@ -2666,11 +2666,23 @@ unrelated employees when it encounters that combination during start-up.
    ingress, Telegram deliveries, scheduled submissions, integrations, and any
    external workers or operator jobs that could write or start a workspace.
    Inhibit automatic service restarts and deployment automation through the swap.
-   The agent hold alone still permits file operations.
+   The agent hold alone still permits file operations. Once admitted work has
+   drained and these producer fences are in force, lift any supplemental agent
+   hold before checking execution readiness. Keep every producer fence in place
+   through verification on the older build.
 2. On the current build, read `ai status`, then `ai pending`. Pass each non-null
    `next_after` to `ai pending --after "$cursor"` until it returns null.
    For a pending Home with a retained attachment, wait for admitted runs to finish,
-   then use `ai close-workspace <instance_id>` and confirm closure.
+   then use `ai close-workspace <instance_id>` and confirm closure. The command
+   removes the workspace and fences its database record. The current Gateway
+   retires the matching native journal entry. If you closed any workspaces,
+   keep producers paused, finish draining the admitted work, gracefully stop
+   the current Gateway and start it again on the **current** bundle. Through
+   the maintenance connection, wait for its authenticated `GET /api/features`
+   to report `agent_instances.execution` as `ready` before the final shutdown
+   in step 3.
+   This lets the Gateway reconcile closures even if its maintenance pass had
+   not yet run when it stopped.
    `ai settle --space SPACE --operation OPERATION` can also resolve an individual
    row. Inspect the files before any deliberate discard. Multiple pages of a
    changing online inventory are a guide for repairs.
@@ -2683,8 +2695,8 @@ unrelated employees when it encounters that combination during start-up.
    ```bash
    hm stop -t 120 gateway
    hm logs --tail=50 gateway
-   hm run --rm --no-deps -T --entrypoint sh gateway -c \
-     'cd /app/backend && exec setpriv --reuid=1000 --regid=1000 --groups="$(stat -c %g /var/run/docker.sock)" --inh-caps=-all --no-new-privs env HOME=/tmp/gateway-home DOCKER_CONFIG=/tmp/gateway-home/.docker PYTHONPATH=. /app/backend/.venv/bin/python -m app.gateway.agent_instances check-rollback'
+   hm run --rm --no-deps -T --entrypoint sh gateway /opt/hartmesh/gateway/as-user.sh \
+     /app/backend/.venv/bin/python -m app.gateway.agent_instances check-rollback
    ```
 
    The check excludes current Gateway starts, operator mutations and database

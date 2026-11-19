@@ -92,8 +92,16 @@ def _check_host(files, adapter, pool, claims, bindings, owners, readonly):
             raise CommandRefused("The native journal still has unconfirmed workspace starts")
         actuals = {item.attachment_id: item for item in adapter.bootstrap_residents(known_slots=tuple(files.catalog.volumes))}
         records = {record.attachment_id: record for record in snapshot.residents}
-        if len(records) != len(snapshot.residents) or set(actuals) != set(records) or set(actuals) != {claim.id for claim in claims}:
-            raise CommandRefused("Docker, the native journal and the database disagree on the retained workspaces")
+        if len(records) != len(snapshot.residents):
+            raise CommandRefused("The native journal repeats a workspace attachment ID")
+        retained = {claim.id for claim in claims}
+        mismatches = sorted((actuals.keys() | records.keys() | retained) - (actuals.keys() & records.keys() & retained))
+        if mismatches:
+            raise CommandRefused(
+                "Docker, the native journal and the database disagree on the retained workspaces. Keep writers paused and reconcile on the current Gateway before repeating the offline check.",
+                workspace_mismatch_count=len(mismatches),
+                workspace_mismatches=[{"attachment_id": key, "in_docker": key in actuals, "in_native_journal": key in records, "in_retained_sql": key in retained} for key in mismatches[:PAGE_SIZE]],
+            )
         seen_homes = set()
         for claim in claims:
             actual, record = actuals[claim.id], records[claim.id]

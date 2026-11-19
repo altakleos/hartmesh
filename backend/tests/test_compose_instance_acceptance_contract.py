@@ -40,29 +40,46 @@ STORAGE_TESTS = (
 )
 
 
-def test_cleanup_bootstrap_preserves_helper_argv_and_drops_privileges():
-    tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
-    assignment = next(node for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "CLEANUP_BOOTSTRAP" for target in node.targets))
-    bootstrap = ast.literal_eval(assignment.value)
+def test_shipped_gateway_launcher_preserves_helper_argv_and_drops_privileges():
+    launcher = ROOT / "deploy/compose/gateway/as-user.sh"
+    bootstrap = launcher.read_text(encoding="utf-8")
+    assert 'test -S "$SOCKET"' in bootstrap and 'test "$(id -u)" = 0' in bootstrap and 'test "$docker_gid" != 0' in bootstrap
     assert 'stat -c %g "$SOCKET"' in bootstrap
-    assert '--reuid=1000 --regid=1000 --groups="$docker_gid"' in bootstrap
+    assert '--reuid=1000 --regid=1000 --groups="$docker_gid" --inh-caps=-all --no-new-privs' in bootstrap
     assert "cd /app/backend" in bootstrap and "export PYTHONPATH=." in bootstrap
-    assert "exec setpriv" in bootstrap and '"$@"' in bootstrap
-    assert subprocess.run(["sh", "-n"], input=bootstrap, text=True, capture_output=True).returncode == 0
+    assert "export HOME=/tmp/gateway-home" in bootstrap and 'export DOCKER_CONFIG="$HOME/.docker"' in bootstrap
+    assert bootstrap.index("exec setpriv") < bootstrap.index('mkdir -p -m 0700 "$HOME"') < bootstrap.index('exec "$@"')
+    assert subprocess.run(["sh", "-n", str(launcher)], capture_output=True).returncode == 0
+
+
+def test_documented_offline_check_and_hosted_helpers_use_the_shipped_gateway_launcher():
+    tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
     bundle = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Bundle")
     cleanup = next(node for node in bundle.body if isinstance(node, ast.FunctionDef) and node.name == "cleanup_orphan")
     constants = {node.value for node in ast.walk(cleanup) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
-    assert {"--entrypoint", "sh", "--name", "--label", "/app/backend/.venv/bin/python", "com.docker.compose.oneoff", "hartmesh.acceptance.cleanup"} <= constants
+    assert {"--name", "--label", "com.docker.compose.oneoff", "hartmesh.acceptance.cleanup"} <= constants
     assert any(isinstance(node, ast.Try) and node.finalbody for node in ast.walk(cleanup))
+    home = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == STORAGE_TESTS[10])
+    rollback = ast.parse((ROOT / "backend/tests/test_compose_home_rollback.py").read_text(encoding="utf-8"))
+    offline = next(node for node in rollback.body if isinstance(node, ast.FunctionDef) and node.name == "offline_check")
+    launcher = "/opt/hartmesh/gateway/as-user.sh"
+    prefix = ["--entrypoint", "sh", "gateway", launcher, "/app/backend/.venv/bin/python"]
+    docs = (ROOT / "deploy/compose/README.md").read_text(encoding="utf-8").replace("\\\n", " ")
+    command = next(line for line in docs.splitlines() if "hm run" in line and "check-rollback" in line)
+    for helper in (cleanup, home, offline):
+        (call,) = (node for node in ast.walk(helper) if isinstance(node, ast.Call) and any(isinstance(arg, ast.Constant) and arg.value == launcher for arg in node.args))
+        args = [arg.value if isinstance(arg, ast.Constant) else None for arg in call.args]
+        start = args.index("--entrypoint")
+        assert args[start : start + len(prefix)] == prefix
+        if helper is offline:
+            assert shlex.split(command) == ["hm", *args]
+    compose = yaml.safe_load((ROOT / "deploy/compose/compose.yaml").read_text(encoding="utf-8"))
+    assert "./gateway:/opt/hartmesh/gateway:ro" in compose["services"]["gateway"]["volumes"]
 
 
 def test_helpers_use_the_image_environment_and_fault_case_has_an_assignment_barrier():
     source = (ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
-    bootstrap = next(node.value.value for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "CLEANUP_BOOTSTRAP" for target in node.targets))
-    assert "export HOME=/tmp/gateway-home" in bootstrap
-    assert 'export DOCKER_CONFIG="$HOME/.docker"' in bootstrap
-    assert bootstrap.index("setpriv --reuid=1000") < bootstrap.index('mkdir -p -m 0700 "$HOME"') < bootstrap.index('exec "$@"')
     bundle = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Bundle")
     for name in ("gateway", "accounts"):
         helper = next(node for node in bundle.body if isinstance(node, ast.FunctionDef) and node.name == name)
@@ -261,6 +278,14 @@ def test_rollback_reloads_the_shipped_nginx_master_and_checks_the_public_route()
     assert commands[:2] == [("up", "-d", "--wait", "--no-deps", "gateway"), ("exec", "-T", "nginx", "nginx", "-c", "/tmp/nginx.conf", "-s", "reload")]
     assert "'GET', '/health/ready'" in ast.unparse(start)
     assert "eventually(through_proxy" in ast.unparse(start)
+
+
+def test_rollback_finishes_operator_closure_on_the_current_gateway_before_the_final_check():
+    source = (ROOT / "backend/tests/test_compose_home_rollback.py").read_text(encoding="utf-8")
+    final_steps = source.split("assert writer.drained", 1)[1].split("entry = start_gateway(older", 1)[0]
+    steps = ["start_gateway(compose, session)", "await_execution_ready(session)", "stop_gateway(compose)", "offline_check(compose, expected=0)"]
+    positions = [final_steps.index(step) for step in steps]
+    assert positions == sorted(positions)
 
 
 def test_candidate_browser_rehearsal_uses_the_built_product_ui_and_real_file_action():

@@ -11,7 +11,7 @@ import pytest
 if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("HARTMESH_VERIFY_HOME_ROLLBACK") != "1":
     pytest.skip("requires the hosted rollback rehearsal", allow_module_level=True)
 
-from test_compose_instance_acceptance import CLEANUP_BOOTSTRAP, MARKER, AllocationBarrier, Bundle, artifact, await_execution_ready, eventually, required, sql
+from test_compose_instance_acceptance import MARKER, AllocationBarrier, Bundle, artifact, await_execution_ready, eventually, required, sql
 from test_compose_instance_acceptance import compose as compose
 from test_compose_instance_acceptance import session as session
 
@@ -57,9 +57,7 @@ def offline_check(bundle, *, expected):
         "--entrypoint",
         "sh",
         "gateway",
-        "-c",
-        CLEANUP_BOOTSTRAP,
-        "rollback-verifier",
+        "/opt/hartmesh/gateway/as-user.sh",
         "/app/backend/.venv/bin/python",
         "-m",
         "app.gateway.agent_instances",
@@ -112,11 +110,15 @@ def test_reuse_checked_home_data_on_older_build(compose, session, version):
     shared = compose.psql("SELECT space_id FROM hm_storage_feature_links WHERE namespace='hm.company-space' AND key='company'")
     batch = uuid.uuid4().hex[:24]
     evidence = Path(required("EVIDENCE")) / f"rollback-{version}.json"
+    initial_closures = [compose.ai("close-workspace", agent["id"])["verdict"] for agent in (quiet, unaffected)]
+    assert set(initial_closures) <= {"closed", "already_closed"}
+    if "closed" in initial_closures:
+        stop_gateway(compose)
+        start_gateway(compose, session)
+        await_execution_ready(session)
     give_marker(session, affected)
     give_marker(session, unaffected)
     session.run(conversation(session, affected))
-    assert compose.ai("close-workspace", quiet["id"])["verdict"] in {"closed", "already_closed"}
-    assert compose.ai("close-workspace", unaffected["id"])["verdict"] in {"closed", "already_closed"}
     stop_gateway(compose)
     add_pending(compose, quiet["home_id"], shared, session.user["id"], batch, 200)
     add_pending(compose, affected["home_id"], shared, session.user["id"], batch, 1)
@@ -162,6 +164,13 @@ def test_reuse_checked_home_data_on_older_build(compose, session, version):
         writer.process.stdin.flush()
     assert writer.drained
     count += 1
+    # Operator closure fences SQL and removes the container. The current
+    # Gateway owns journal retirement. Recover it while producers stay fenced,
+    # then take the final offline inventory on the state the older build gets.
+    current = start_gateway(compose, session)
+    assert current["Config"]["Image"] == required("BACKEND_REF")
+    current_readiness = await_execution_ready(session)
+    stop_gateway(compose)
     cleared = offline_check(compose, expected=0)
     assert cleared["checked"] == cleared["total"] == count and cleared["pages"] >= 2 and cleared["blocked"] == 0
 
@@ -182,6 +191,9 @@ def test_reuse_checked_home_data_on_older_build(compose, session, version):
                 "image_id": entry["Image"],
                 "gateway": entry["Id"],
                 "first_check": blocked,
+                "operator_closure": closed,
+                "current_gateway": current["Config"]["Image"],
+                "current_readiness_after_closure": current_readiness,
                 "final_check": cleared,
                 "readiness": readiness,
                 "writer_refusal": refused,

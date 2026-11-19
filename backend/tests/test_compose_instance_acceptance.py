@@ -30,21 +30,6 @@ if os.environ.get("HARTMESH_REQUIRE_BUNDLE_INSTANCES") != "1":
 pytestmark = pytest.mark.live
 MARKER = b"UPLOAD-ACCEPTANCE-726"
 ARTIFACT = b"Synthetic acceptance artifact.\nUploaded text: UPLOAD-ACCEPTANCE-726\n"
-CLEANUP_BOOTSTRAP = r"""set -eu
-SOCKET=/var/run/docker.sock
-test -S "$SOCKET"
-test "$(id -u)" = 0
-docker_gid="$(stat -c %g "$SOCKET")"
-test "$docker_gid" != 0
-cd /app/backend
-export HOME=/tmp/gateway-home
-export DOCKER_CONFIG="$HOME/.docker"
-export PYTHONPATH=.
-exec setpriv --reuid=1000 --regid=1000 --groups="$docker_gid" --inh-caps=-all --no-new-privs sh -ec '
-    mkdir -p -m 0700 "$HOME"
-    exec "$@"
-' gateway-user "$@"
-"""
 
 
 def required(name):
@@ -126,9 +111,7 @@ class Bundle:
                 "--entrypoint",
                 "sh",
                 "gateway",
-                "-c",
-                CLEANUP_BOOTSTRAP,
-                "cleanup-bootstrap",
+                "/opt/hartmesh/gateway/as-user.sh",
                 "/app/backend/.venv/bin/python",
                 "-c",
                 ISOLATED_RELEASE,
@@ -1164,7 +1147,7 @@ async def check(slot, root):
         await close_engine()
 asyncio.run(check(sys.argv[1], Path(sys.argv[2])))
 """
-    compose.run("run", "--rm", "--no-deps", "-T", "--entrypoint", "sh", "gateway", "-c", CLEANUP_BOOTSTRAP, "home-check", "/app/backend/.venv/bin/python", "-c", check_reserve, employee["slot"], root)
+    compose.run("run", "--rm", "--no-deps", "-T", "--entrypoint", "sh", "gateway", "/opt/hartmesh/gateway/as-user.sh", "/app/backend/.venv/bin/python", "-c", check_reserve, employee["slot"], root)
     compose.invoke([*sandbox, "chmod", "000", "/mnt/spaces/home"])
     compose.run("up", "-d", "--wait", timeout=240)
     assert compose.gateway("python", "-c", inspect_mode, employee["root"]) == "0o770"

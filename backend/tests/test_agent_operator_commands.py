@@ -818,6 +818,21 @@ async def test_rollback_requires_original_readonly_inode_and_unique_agent_owner(
         _check_roots(claim, record, bound, owners, set(), (current,))
 
 
+def test_rollback_reports_bounded_mismatches_in_attachment_order(fixture):
+    from app.gateway.agent_operator_contract import CommandRefused
+    from app.gateway.agent_operator_rollback import _check_host
+
+    journal = fixture[0]
+    keys = [f"{number:032x}" for number in range(201)]
+    files = SimpleNamespace(catalog=SimpleNamespace(volumes={}))
+    adapter = SimpleNamespace(host_id=journal.daemon_id, bootstrap_residents=lambda **kwargs: [SimpleNamespace(attachment_id=key) for key in reversed(keys[1:])])
+    claims = [SimpleNamespace(id=key) for key in keys[:2]]
+    with pytest.raises(CommandRefused) as refused:
+        _check_host(files, adapter, journal.pool, claims, {}, {}, ())
+    assert refused.value.fields["workspace_mismatch_count"] == 201
+    assert refused.value.fields["workspace_mismatches"] == [{"attachment_id": key, "in_docker": number != 0, "in_native_journal": False, "in_retained_sql": number < 2} for number, key in enumerate(keys[:200])]
+
+
 @pytest.mark.asyncio
 async def test_offline_rollback_refuses_active_pool_or_home_writer_and_checks_every_page(operator, monkeypatch):
     from app.gateway import agent_operator_rollback
