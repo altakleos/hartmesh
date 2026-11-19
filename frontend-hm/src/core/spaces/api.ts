@@ -23,6 +23,24 @@ export interface StorageSpace {
   };
 }
 
+export interface SpaceRecoveryOperation {
+  operation_id: string;
+  generation: number;
+  phase: "pending" | "complete" | "failed";
+  created_at?: string;
+  request: {
+    action: string;
+    path?: string;
+    destination?: string;
+    destination_path?: string;
+  };
+  result?: {
+    resolution?: string;
+    actor_kind?: string;
+    actor_id?: string;
+  } | null;
+}
+
 export interface SpaceRecovery {
   backups: {
     id: string;
@@ -30,18 +48,25 @@ export interface SpaceRecovery {
     size_bytes: number;
     consistency: "quiesced-filesystem";
   }[];
-  operations: {
-    operation_id: string;
-    generation: number;
-    phase: "pending" | "complete" | "failed";
-    request: { action: string };
-  }[];
+  operations: SpaceRecoveryOperation[];
   attachments: { id: string; phase: string }[];
   can_fence: boolean;
 }
 
 export function getSpaceRecovery(id: string, signal?: AbortSignal) {
   return request<SpaceRecovery>(`${resourceURL(id)}/recovery`, { signal });
+}
+
+export function getSpaceRecoveryOperation(
+  id: string,
+  generation: number,
+  operationId: string,
+  signal?: AbortSignal,
+) {
+  return request<SpaceRecoveryOperation>(
+    `${resourceURL(id)}/recovery/${encodeURIComponent(operationId)}?generation=${generation}`,
+    { signal },
+  );
 }
 
 export function changeSpaceLifecycle(
@@ -69,6 +94,7 @@ export function acceptSpaceCurrentState(
   generation: number,
   operationId: string,
   signal?: AbortSignal,
+  options: { fileChangeOnly?: boolean } = {},
 ) {
   return request<{ complete: boolean }>(`${resourceURL(id)}/recovery`, {
     method: "POST",
@@ -77,6 +103,7 @@ export function acceptSpaceCurrentState(
       operation_id: operationId,
       generation,
       acknowledge_uncertain_outcome: true,
+      ...(options.fileChangeOnly ? { file_change_only: true } : {}),
     }),
     signal,
   });

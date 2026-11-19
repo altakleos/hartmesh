@@ -349,8 +349,8 @@ export function createEnUS(product: string): Translations {
           `${name} did not finish this, and ${name}'s workspace closed after a period without activity.`,
         lifecycle: (name) =>
           `A manager paused or retired ${name}, or changed ${name}'s access, supervisor or brief, while ${name} was working on this. That closed ${name}'s workspace.`,
-        storageRecovery: (provider, name) =>
-          `${provider} restored or repaired ${name}'s files while ${name} was working on this, which closed ${name}'s workspace. Check the files before you continue.`,
+        storageRecovery: (name) =>
+          `${name}'s workspace closed during this assignment. Check the files before continuing.`,
         operator: (name, provider) =>
           `${name}'s workspace was closed for maintenance by ${provider} while ${name} was working on this.`,
         hostReplaced: (name) =>
@@ -426,8 +426,8 @@ export function createEnUS(product: string): Translations {
         `${name}'s files are full, so ${name} cannot start. Ask ${supervisor} to delete files, or ask ${support} for more room.`,
       interruptedByManager: (name) =>
         `A manager changed ${name}'s settings, which restarted ${name}'s workspace and stopped this reply. Nothing saved in ${name}'s files was lost. Send your message again to continue.`,
-      interruptedByRecovery: (provider, name) =>
-        `${provider} restored or repaired ${name}'s files, which closed ${name}'s workspace and stopped this reply. Send your message again in a few minutes. If files were restored, check the files first.`,
+      interruptedByRecovery: (name) =>
+        `${name}'s workspace closed during this reply. Check the files before continuing.`,
       interrupted: (name) =>
         `${name}'s workspace was restarted, which stopped this reply. Send your message again.`,
       interruptedByService:
@@ -437,6 +437,39 @@ export function createEnUS(product: string): Translations {
       makeEmployeeNotice:
         "This adds a separate AI employee with the same brief. Files and memory are not copied; add the files you want on the new AI employee's Files tab.",
       files: {
+        recovery: {
+          reader: (name, supervisor) =>
+            `${name}'s files are waiting for a change to be settled. If this does not clear, ask ${supervisor}.`,
+          pending: (name) =>
+            `A change to ${name}'s files is still pending. New work that needs these files may have to wait.`,
+          lifecycle: (name, support) =>
+            `A backup or a restore of ${name}'s files did not finish. Ask ${support}.`,
+          save: (path) => `Unfinished: saving ${path}`,
+          folder: (path) => `Unfinished: making the folder ${path}`,
+          rename: (path, destination) =>
+            `Unfinished: renaming ${path} to ${destination}`,
+          remove: (path) => `Unfinished: deleting ${path}`,
+          copy: (path) => `Unfinished: copying a file to ${path}`,
+          accept: "Accept the files as they are",
+          confirm: (name) =>
+            `${product} cannot confirm whether this change happened. Accepting closes ${name}'s workspace and keeps the files as they are. A running program stops and may leave a file unfinished. A reply already in progress may still arrive. For an assignment, check its status before continuing.`,
+          inspect: (folder, file) =>
+            `Look in ${folder} for ${file}. An upload may have a numbered filename.`,
+          acknowledge: "I understand that the file change may be unfinished.",
+          accepted: (folder, file) =>
+            `The current files were accepted. Look in ${folder} for ${file}.`,
+          rootFolder: "the top-level folder",
+          active: "This change is still pending.",
+          settled:
+            "The service settled this file change. Check the files before continuing.",
+          hostUnconfirmed:
+            "The service finished checking this change but could not confirm what happened. Check the files before continuing.",
+          absent: "No result is recorded for this change.",
+          unknown: "The result of this change could not be confirmed.",
+          ready: (name) => `${name} can work again.`,
+          unconfirmed: (name) =>
+            `We could not confirm whether ${name} is ready for new work.`,
+        },
         root: (name) => `${name}'s files`,
         name: "Name",
         size: "Size",

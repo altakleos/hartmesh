@@ -40,6 +40,7 @@ import * as api from "@/core/agent-instances/api";
 import { readWorkRun } from "@/core/agent-instances/work-run";
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 import { I18nProvider } from "@/core/i18n/context";
+import { setLocaleInCookie } from "@/core/i18n/cookies";
 
 import { workInstance, workRecord } from "../../../fixtures/agent-work";
 
@@ -58,12 +59,13 @@ function options(): WorkAttemptBoxProps {
     changed,
   };
 }
-function show(props = options()) {
+function show(props = options(), locale: "en-US" | "zh-CN" = "en-US") {
+  setLocaleInCookie(locale);
   const client = new QueryClient();
   clients.push(client);
   const ui = (value: WorkAttemptBoxProps) => (
     <QueryClientProvider client={client}>
-      <I18nProvider initialLocale="en-US">
+      <I18nProvider initialLocale={locale}>
         <FileActionLifetimeProvider>
           <WorkAttemptBox {...value} />
         </FileActionLifetimeProvider>
@@ -305,3 +307,20 @@ test("a retired conflict read cannot issue a follow-up Stop or update its old vi
   expect(api.commandWork).toHaveBeenCalledTimes(1);
   expect(changed).not.toHaveBeenCalled();
 });
+
+test.each([
+  [
+    "en-US",
+    "Researcher's workspace closed during this assignment. Check the files before continuing.",
+  ],
+  ["zh-CN", "这项任务期间，Researcher 的工作区已关闭。请先检查文件，再继续。"],
+] as const)(
+  "shows the observed workspace closure for an interrupted assignment in %s",
+  (locale, message) => {
+    const props = options();
+    props.record.attempt!.status = "failed";
+    props.record.attempt!.contained = { reason: "storage-recovery", at: "now" };
+    show(props, locale);
+    expect(screen.getByText(message)).toBeDefined();
+  },
+);

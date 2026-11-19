@@ -36,6 +36,12 @@ only, with empty ACP; skip symlinks/upload stages. Confined reads/revisions dete
 changes. Drain exact-owned files/stores rollback on failure/cancel. Historical/NoUser
 copies history only; legacy/AgentHome stays compatible. Unsupported credentials
 never gain general Space access.
+
+Home recovery metadata requires current Space ADMIN access. Use the exact
+generation and operation lookup after an uncertain response. A file-only
+acceptance holds writer exclusion through retirement and outcome recording.
+The action response confirms acceptance. Check current Home and employee
+readiness before telling a manager that new work can start.
 Native adapters prepare `NativeFileSources` before intent: READ/EXPORT sources,
 union destination rights, borrowed SQL guards, fresh pinned-root admission.
 Stages/`NativeDirectoryChanges` remove owned files/empty dirs only. Shared receipts

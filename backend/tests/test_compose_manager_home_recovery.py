@@ -141,6 +141,7 @@ def test_manager_accepts_files_with_a_retained_workspace(compose, session, workl
             assert outcome == "failed|owner-accepted-current-state|human|" + session.user["id"]
             closed = read_workspace_attachment(compose, original["attachment_id"], timeout=10)
             assert closed["phase"] == "fenced" and closed["fence_reason"] == "storage-recovery" and container_absent(compose, original["container_id"])
+            assert (closed["fenced_by_kind"], closed["fenced_by_id"]) == ("human", session.user["id"])
             facts.update(operation=operation, outcome=outcome, attachment=closed["phase"])
         finally:
             armed.unlink(missing_ok=True)
@@ -195,5 +196,6 @@ def test_manager_accepts_files_with_a_retained_workspace(compose, session, workl
     artifact(session, fresh["thread_id"])
     replacement, _ = workspace(compose, fresh)
     assert replacement["attachment_id"] != original["attachment_id"]
+    assert replacement["container_id"] != original["container_id"]
     facts.update(fresh_run=answer["run_id"], fresh_workspace=replacement)
     (directory / f"manager-recovery-{workload}.json").write_text(json.dumps(facts, indent=2), encoding="utf-8")

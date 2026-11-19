@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -95,19 +96,25 @@ const instance: AgentInstanceDetail = {
 function show(change: Partial<AgentInstanceDetail> = {}, initialFolder = "") {
   const client = new QueryClient();
   clients.push(client);
-  return render(
+  const ui = (current: Partial<AgentInstanceDetail>) => (
     <QueryClientProvider client={client}>
       <I18nProvider initialLocale="en-US">
         <FileActionLifetimeProvider>
           <FilesTab
-            instance={{ ...instance, ...change }}
+            instance={{ ...instance, ...current }}
             initialFolder={initialFolder}
             changed={state.changed}
           />
         </FileActionLifetimeProvider>
       </I18nProvider>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const view = render(ui(change));
+  return {
+    ...view,
+    update: (current: Partial<AgentInstanceDetail>) =>
+      view.rerender(ui(current)),
+  };
 }
 async function choose(fileToSend = new File(["hello"], "note.txt")) {
   const input = await screen.findByLabelText("Choose files");
@@ -150,9 +157,292 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   clients.splice(0).forEach((client) => client.clear());
+  rs.useRealTimers();
 });
+
+const recoveryOp = "c".repeat(32);
+const acceptLabel = "Accept the files as they are";
+const pendingHome = {
+  id: home,
+  generation: 3,
+  permissions: 31,
+  mode: "native",
+  status: "active",
+  storage_state: "recovery-pending",
+} as spaces.StorageSpace;
+function unfinished(action = "put", age = 360_000) {
+  return {
+    operation_id: recoveryOp,
+    generation: 3,
+    phase: "pending",
+    created_at: new Date(Date.now() - age).toISOString(),
+    request:
+      action === "copy"
+        ? { action, destination_path: "uploads/example.txt" }
+        : {
+            action,
+            path: "uploads/example.txt",
+            destination: "outputs/moved.txt",
+          },
+    result: null,
+  };
+}
+test.each([
+  ["put", /saving uploads\/example.txt/i],
+  ["write", /saving uploads\/example.txt/i],
+  ["rename", /renaming uploads\/example.txt to outputs\/moved.txt/i],
+  ["mkdir", /making the folder uploads\/example.txt/i],
+  ["remove", /deleting uploads\/example.txt/i],
+  ["copy", /copying a file to uploads\/example.txt/i],
+] as const)(
+  "manager can inspect an aged %s change on a readable Home",
+  async (action, description) => {
+    rs.mocked(spaces.getSpace).mockResolvedValue(pendingHome);
+    rs.mocked(fetcher).mockResolvedValue(
+      Response.json({ operations: [unfinished(action)], can_fence: true }),
+    );
+    show({ home_generation: 3 });
+    await screen.findByText(description);
+    expect(screen.getByRole("button", { name: acceptLabel })).toBeDefined();
+  },
+);
+
+test("a changed recovery listing retires the confirmation for the old path", async () => {
+  const row = unfinished();
+  rs.mocked(spaces.getSpace).mockResolvedValue(pendingHome);
+  rs.mocked(fetcher)
+    .mockResolvedValueOnce(Response.json({ operations: [row] }))
+    .mockResolvedValueOnce(
+      Response.json({
+        operations: [
+          { ...row, request: { ...row.request, path: "outputs/new.txt" } },
+        ],
+      }),
+    );
+  show({ home_generation: 3 });
+  fireEvent.click(await screen.findByRole("button", { name: acceptLabel }));
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("checkbox"));
+  await act(async () => {
+    await clients
+      .at(-1)!
+      .invalidateQueries({ queryKey: ["home-file-recovery"] });
+  });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  fireEvent.click(screen.getByRole("button", { name: acceptLabel }));
+  expect(
+    within(screen.getByRole("dialog"))
+      .getByRole("button", { name: acceptLabel })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+});
+
+test("a manager without current Home administration cannot read recovery rows", async () => {
+  rs.mocked(spaces.getSpace).mockResolvedValue({
+    ...pendingHome,
+    permissions: 19,
+  });
+  show({ home_generation: 3 });
+  await screen.findByRole("navigation");
+  expect(fetcher).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: acceptLabel })).toBeNull();
+});
+
+test("filters fresh rows, stale generations and lifecycle operations", async () => {
+  rs.mocked(spaces.getSpace).mockResolvedValue(pendingHome);
+  rs.mocked(fetcher).mockResolvedValue(
+    Response.json({
+      operations: [
+        unfinished("put", 30_000),
+        { ...unfinished(), generation: 2, operation_id: "d".repeat(32) },
+        { ...unfinished("restore"), operation_id: "e".repeat(32) },
+        { ...unfinished("backup"), operation_id: "f".repeat(32) },
+      ],
+    }),
+  );
+  show({ home_generation: 3 });
+  expect(
+    (await screen.findAllByText(/backup or a restore.*Ask Provider/i)).length,
+  ).toBeGreaterThan(0);
+  expect(screen.queryByRole("button", { name: acceptLabel })).toBeNull();
+});
+
+test("an inspector receives only supervisor guidance after a second pending Home reading a minute later", async () => {
+  rs.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+  rs.mocked(spaces.getSpace).mockResolvedValue(pendingHome);
+  show({ home_generation: 3, permissions: 2 });
+  await screen.findByRole("navigation");
+  expect(screen.queryByText(/waiting for a change to be settled/i)).toBeNull();
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(61_000);
+  });
+  await screen.findByText(/waiting for a change to be settled.*ask a manager/i);
+  expect(rs.mocked(spaces.getSpace).mock.calls.length).toBeGreaterThan(1);
+  expect(fetcher).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: acceptLabel })).toBeNull();
+});
+
+test.each([
+  ["accepted", /current files were accepted/i, true],
+  ["access concealed", null, false],
+  ["manager revoked", null, false],
+  ["host-unconfirmed", /service.*could not confirm what happened/i, false],
+  ["lost", /current files were accepted/i, true],
+  ["closing", /current files were accepted/i, false],
+  ["another pending change", /current files were accepted/i, false],
+  ["unavailable execution", /current files were accepted/i, false],
+  ["failed refresh", /current files were accepted/i, false],
+  ["stale instance", /current files were accepted/i, false],
+  ["unverified home", /current files were accepted/i, false],
+  ["wrong operation", /no result is recorded/i, false],
+  ["changed path", /no result is recorded/i, false],
+  ["changed creation time", /no result is recorded/i, false],
+  ["wrong generation", /no result is recorded/i, false],
+  ["host-settled", /service settled/i, false],
+  ["pending", /change is still pending/i, false],
+  ["absent", /no result is recorded/i, false],
+] as const)(
+  "checks the exact result and fresh availability after %s",
+  async (condition, message, ready) => {
+    const row = unfinished();
+    const posts: unknown[] = [];
+    const generations: (string | null)[] = [];
+    const reads: string[] = [];
+    rs.mocked(spaces.getSpace).mockImplementation(async () => {
+      if (!posts.length) return pendingHome;
+      reads.push("home");
+      if (condition === "failed refresh") throw Error("offline");
+      return {
+        ...pendingHome,
+        storage_state:
+          condition === "another pending change"
+            ? "recovery-pending"
+            : "available",
+      };
+    });
+    rs.mocked(fetcher).mockImplementation(async (url, init) => {
+      const route = new URL(
+        url instanceof Request ? url.url : url,
+        "http://localhost",
+      );
+      if (route.pathname.endsWith("/recovery") && init?.method === "POST") {
+        posts.push(
+          typeof init.body === "string" ? JSON.parse(init.body) : null,
+        );
+        if (condition === "lost") throw new TypeError("connection closed");
+        return Response.json(
+          {},
+          {
+            status: ["host-settled", "pending", "absent"].includes(condition)
+              ? 409
+              : 200,
+          },
+        );
+      }
+      if (route.pathname.endsWith("/recovery"))
+        return Response.json({
+          operations: posts.length ? [] : [row],
+          can_fence: true,
+        });
+      if (route.pathname.endsWith("/recovery/" + recoveryOp)) {
+        generations.push(route.searchParams.get("generation"));
+        reads.push("operation");
+        if (condition === "absent") return Response.json({}, { status: 404 });
+        if (condition === "pending") return Response.json(row);
+        return Response.json({
+          ...row,
+          operation_id:
+            condition === "wrong operation" ? "d".repeat(32) : row.operation_id,
+          generation: condition === "wrong generation" ? 2 : row.generation,
+          request:
+            condition === "changed path"
+              ? { ...row.request, path: "outputs/other.txt" }
+              : row.request,
+          created_at:
+            condition === "changed creation time"
+              ? new Date().toISOString()
+              : row.created_at,
+          phase: condition === "host-settled" ? "complete" : "failed",
+          result:
+            condition === "host-unconfirmed"
+              ? { resolution: "host-unconfirmed" }
+              : condition === "host-settled"
+                ? { resolution: "host-settled" }
+                : {
+                    resolution: "owner-accepted-current-state",
+                    actor_kind: "human",
+                    actor_id: "reader",
+                  },
+        });
+      }
+      if (route.pathname.endsWith("/agent-instances/" + id)) {
+        reads.push("execution");
+        if (condition === "access concealed")
+          return Response.json({}, { status: 404 });
+        return Response.json({
+          ...instance,
+          permissions:
+            condition === "manager revoked" ? 2 : instance.permissions,
+          home_generation: condition === "stale instance" ? 2 : 3,
+          home: {
+            state: condition === "unverified home" ? "unverified" : "available",
+            workspace: condition === "closing" ? "starting" : "absent",
+          },
+          execution: {
+            execution:
+              condition === "unavailable execution" ? "unavailable" : "ready",
+            reason: null,
+          },
+        });
+      }
+      throw new Error("Unexpected route " + route.pathname);
+    });
+    const view = show({ home_generation: 3 });
+    fireEvent.click(await screen.findByRole("button", { name: acceptLabel }));
+    const dialog = await screen.findByRole("dialog");
+    const confirm = within(dialog).getByRole("button", {
+      name: acceptLabel,
+    });
+    expect(confirm.hasAttribute("disabled")).toBe(true);
+    expect(dialog.textContent).toMatch(/numbered|number in its name/i);
+    expect(dialog.textContent).toContain(
+      "A reply already in progress may still arrive.",
+    );
+    expect(dialog.textContent).toContain(
+      "For an assignment, check its status before continuing.",
+    );
+    fireEvent.click(within(dialog).getByRole("checkbox"));
+    fireEvent.click(confirm);
+    if (message) await screen.findByText(message);
+    else {
+      await waitFor(() => expect(reads).toContain("execution"));
+      await waitFor(() =>
+        expect(screen.queryByText(/saving uploads\/example.txt/i)).toBeNull(),
+      );
+      expect(screen.queryByText(/current files were accepted/i)).toBeNull();
+    }
+    expect(posts).toEqual([
+      {
+        generation: 3,
+        operation_id: recoveryOp,
+        file_change_only: true,
+        acknowledge_uncertain_outcome: true,
+      },
+    ]);
+    expect(generations).toEqual(["3"]);
+    expect(new Set(reads)).toEqual(new Set(["home", "execution", "operation"]));
+    expect(!!screen.queryByText(/Researcher can work again/i)).toBe(ready);
+    if (condition === "accepted") {
+      view.update({
+        home_generation: 3,
+        home: { state: "available", workspace: "starting" },
+      });
+      expect(screen.queryByText(/Researcher can work again/i)).toBeNull();
+    }
+  },
+);
 test("without Inspect no Space route is requested and the named guidance is shown", () => {
   show({ permissions: 1 });
+  expect(fetcher).not.toHaveBeenCalled();
   expect(spaces.getSpace).not.toHaveBeenCalled();
   expect(spaces.listSpaceFiles).not.toHaveBeenCalled();
   expect(

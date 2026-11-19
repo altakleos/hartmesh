@@ -20,11 +20,12 @@ is provider-only. The bilingual notice uses only configured provider support lin
 
 ## Project Overview
 
-`/workspace/assistants` and `/workspace/employees` list AI assistants and AI employees;
-`/workspace/instances` owns their detail tabs. Use current grants/provider ceilings,
-account/role caches and retired-action fences. Retry exact intents;202 stays pending.
-Chat identity comes from the thread row. Agent files use Spaces reads and audited
-agent writes; conversation attachments upload immediately and send saved references.
+`/workspace/assistants` and `/workspace/employees` list agents by type.
+`/workspace/instances` owns detail tabs. Apply current grants/provider ceilings,
+account/role caches and retired-action fences. Retry exact intents. A 202 stays pending.
+Thread rows identify chats. Agent files use Spaces reads and audited writes.
+Chat attachments upload immediately and send saved references. After file recovery,
+verify the exact receipt, Home and execution readiness.
 Binding discovery hides ordinary artifacts without clearing restored selections;
 a positive agent binding retires that panel. Detail breadcrumbs use verified custody.
 Only Inspect opens produced files. Browser/sidecar/scheduling remain ordinary-chat
