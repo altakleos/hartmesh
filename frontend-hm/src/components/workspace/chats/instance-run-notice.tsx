@@ -91,7 +91,7 @@ export function InstanceRunNotice({
       sentence = t.agentInstances.interruptedByManager(name);
       break;
     case "agentInstances.interruptedByRecovery":
-      sentence = t.agentInstances.interruptedByRecovery(provider, name);
+      sentence = t.agentInstances.interruptedByRecovery(name);
       break;
     case "agentInstances.interrupted":
       sentence = t.agentInstances.interrupted(name);

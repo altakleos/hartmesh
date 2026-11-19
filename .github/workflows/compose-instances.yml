@@ -82,6 +82,7 @@ jobs:
           mkdir -p "$EVIDENCE"
           # Gateway port checks run in its namespace; keep this host listener
           # outside the shipped sandbox's host-port allocation range.
+          export HARTMESH_MODEL_BARRIER_DIR="$EVIDENCE"
           nohup python3 -c 'from http.server import ThreadingHTTPServer; from runpy import run_path; ThreadingHTTPServer(("0.0.0.0", 18080), run_path("docker/acceptance/provider.py")["Handler"]).serve_forever()' > "$EVIDENCE/provider.log" 2>&1 &
           for attempt in $(seq 1 20); do curl -fsS http://127.0.0.1:18080/health && break; sleep 0.5; done
           curl -fsS -o /dev/null http://127.0.0.1:18080/health
@@ -154,6 +155,7 @@ jobs:
               api_key: $ACCEPTANCE_API_KEY
               base_url: http://host.docker.internal:18080/v1
               max_retries: 0
+              timeout: 200
           YAML
           sudo tee /srv/hartmesh/.env >/dev/null <<'ENV'
           HARTMESH_TENANT=ci
@@ -288,9 +290,10 @@ jobs:
         run: |
           PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 .venv/bin/python -m pytest tests/test_compose_home_settlement.py \
             -q --tb=short --maxfail=1 --junitxml="$EVIDENCE/settlement.xml"
-          for workload in idle assignment restart; do
+          for workload in idle assignment chat restart; do
             jq -e --arg image "$BACKEND_REF" --arg workload "$workload" '.backend == $image and .workload == $workload and .eligible_to_settlement_seconds < 150' "$EVIDENCE/workspace-settlement-$workload.json"
           done
+          jq -e '.active_chat.status == "success" and (.active_chat.run_id | length) > 0 and .active_chat.run_id != .run_id and .closure_reason == "outcome-uncertain"' "$EVIDENCE/workspace-settlement-chat.json"
 
       - name: Qualify in-place Home rollback on both older builds
         if: github.event_name == 'workflow_dispatch' && inputs.verify_home_rollback
@@ -335,6 +338,23 @@ jobs:
           ]
           assert not any(tree.findall(".//" + outcome) for outcome in ["skipped", "failure", "error"])
           PY
+
+      - name: Observe manager acceptance during the last model call
+        working-directory: backend
+        env:
+          HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
+          HARTMESH_BUNDLE_URL: http://localhost:2026
+          HARTMESH_BUNDLE_PROJECT_DIR: /opt/hartmesh
+          HARTMESH_BUNDLE_ENV_FILE: /srv/hartmesh/.env
+          HARTMESH_BUNDLE_ADMIN_EMAIL: admin@example.com
+          HARTMESH_BUNDLE_ADMIN_PASSWORD: 'Acceptance-Admin-2026!'
+          HARTMESH_BUNDLE_RUNTIME: hartmesh-ci
+        run: |
+          PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 .venv/bin/python -m pytest tests/test_compose_manager_home_recovery.py \
+            -q --tb=short --maxfail=1 --junitxml="$EVIDENCE/manager-recovery.xml"
+          for workload in idle chat assignment; do
+            jq -e --arg image "$BACKEND_REF" --arg workload "$workload" '.backend == $image and .workload == $workload and .attachment == "fenced" and .fresh_run != null' "$EVIDENCE/manager-recovery-$workload.json"
+          done
 
       - name: 14 Check that the stack stops cleanly
         run: |

@@ -146,6 +146,7 @@ class RecoveryRequest(StrictRequest):
     operation_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     generation: int = Field(ge=1)
     acknowledge_uncertain_outcome: bool
+    file_change_only: bool = False
 
 
 class RetireAttachmentsRequest(StrictRequest):
@@ -196,8 +197,15 @@ async def recovery_status(space_id: str, request: Request):
 async def accept_observed_state(space_id: str, body: RecoveryRequest, request: Request):
     service, actor = _service(request), await _actor(request)
     await _chat_lifecycle_guard(service, actor, space_id, body.generation)
-    await SpaceRecovery(service).accept_current_state(actor=actor, space_id=space_id, expected_generation=body.generation, operation_id=body.operation_id, acknowledge_uncertain_outcome=body.acknowledge_uncertain_outcome)
+    await SpaceRecovery(service).accept_current_state(
+        actor=actor, space_id=space_id, expected_generation=body.generation, operation_id=body.operation_id, acknowledge_uncertain_outcome=body.acknowledge_uncertain_outcome, file_change_only=body.file_change_only
+    )
     return {"complete": True, "resolution": "owner-accepted-current-state"}
+
+
+@router.get("/{space_id}/recovery/{operation_id}")
+async def recovery_operation(space_id: str, operation_id: str, request: Request, generation: int = Query(ge=1)):
+    return await SpaceRecovery(_service(request)).operation(actor=await _actor(request), space_id=space_id, expected_generation=generation, operation_id=operation_id)
 
 
 @router.post("/{space_id}/lifecycle")

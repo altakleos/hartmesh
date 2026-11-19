@@ -169,7 +169,8 @@ async def test_public_provider_identity_is_used_without_private_configuration(pu
     try:
         source = await fixed_source(host, e.link, "refused.interrupted_recovery")
         assert source["values"]["provider"] == "Example Provider"
-        assert render_plain(source["key"], "en", **source["values"]).startswith("Example Provider restored or repaired")
+        assert "Example Provider" not in render_plain(source["key"], "en", **source["values"])
+        assert render_plain("interrupted.reason.operator", "en", **source["values"]).endswith("by Example Provider.")
         source = await fixed_source(host, e.link, "net.blocked_ask")
         text = render_plain(source["key"], "en", **source["values"])
         assert "a site" in text and "None" not in text

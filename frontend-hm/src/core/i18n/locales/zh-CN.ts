@@ -334,8 +334,8 @@ export function createZhCN(product: string): Translations {
           `${name}没有完成此任务，且${name}的工作环境在一段时间未使用后关闭。`,
         lifecycle: (name) =>
           `管理者在${name}处理此任务时暂停或停用了${name}，或更改了${name}的权限、监督者或工作说明，关闭了${name}的工作环境。`,
-        storageRecovery: (provider, name) =>
-          `${provider}在${name}处理此任务时恢复或修复了${name}的文件，关闭了${name}的工作环境。继续前请检查文件。`,
+        storageRecovery: (name) =>
+          `这项任务期间，${name} 的工作区已关闭。请先检查文件，再继续。`,
         operator: (name, provider) =>
           `${name}处理此任务时，${provider}关闭了${name}的工作环境以进行维护。`,
         hostReplaced: (name) =>
@@ -407,8 +407,8 @@ export function createZhCN(product: string): Translations {
         `${name} 的文件空间已满，因此 ${name} 无法启动。请联系 ${supervisor} 删除文件，或联系 ${support} 增加空间。`,
       interruptedByManager: (name) =>
         `管理者更改了 ${name} 的设置，重启了 ${name} 的工作环境并停止了此回复。${name} 文件中已保存的内容没有丢失。请再次发送消息以继续。`,
-      interruptedByRecovery: (provider, name) =>
-        `${provider} 恢复或修复了 ${name} 的文件，关闭了 ${name} 的工作环境并停止了此回复。请几分钟后再次发送消息。如果文件已恢复，请先检查文件。`,
+      interruptedByRecovery: (name) =>
+        `这次回复期间，${name} 的工作区已关闭。请先检查文件，再继续。`,
       interrupted: (name) =>
         `${name} 的工作环境已重启，停止了此回复。请再次发送消息。`,
       interruptedByService: "服务已重启，停止了此回复。请再次发送消息。",
@@ -417,6 +417,37 @@ export function createZhCN(product: string): Translations {
       makeEmployeeNotice:
         "这会添加一位使用相同职责说明的独立 AI 员工。不会复制文件和记忆；请在新 AI 员工的文件标签页添加所需文件。",
       files: {
+        recovery: {
+          reader: (name, supervisor) =>
+            `${name} 的文件仍有一项变更待确认。如果一直没有进展，请联系${supervisor}。`,
+          pending: (name) =>
+            `${name} 的文件仍有一项变更待确认。需要用到这些文件的新工作可能要稍候。`,
+          lifecycle: (name, support) =>
+            `${name} 的文件有一次备份或还原未完成。请联系${support}。`,
+          save: (path) => `尚未完成：保存 ${path}`,
+          folder: (path) => `尚未完成：创建文件夹 ${path}`,
+          rename: (path, destination) =>
+            `尚未完成：将 ${path} 重命名为 ${destination}`,
+          remove: (path) => `尚未完成：删除 ${path}`,
+          copy: (path) => `尚未完成：将文件复制到 ${path}`,
+          accept: "接受文件现状",
+          confirm: (name) =>
+            `${product} 无法确认这项变更是否已完成。接受后，${name} 的工作区将关闭，文件将保持现状。正在运行的程序会停止，文件可能不完整。已经开始的回复仍可能送达。如果涉及任务，请先检查任务状态，再继续。`,
+          inspect: (folder, file) =>
+            `请在${folder}中查看 ${file}。上传的文件名可能带有编号。`,
+          acknowledge: "我了解这项文件变更可能尚未完成。",
+          accepted: (folder, file) =>
+            `已接受文件现状。请在${folder}中查看 ${file}。`,
+          rootFolder: "顶层文件夹",
+          active: "这项变更仍待确认。",
+          settled: "服务已处理这项文件变更。请先检查文件，再继续。",
+          hostUnconfirmed:
+            "服务已检查这项变更，但无法确认结果。请先检查文件，再继续。",
+          absent: "没有这项变更的结果记录。",
+          unknown: "无法确认这项变更的结果。",
+          ready: (name) => `${name} 可以重新开始工作。`,
+          unconfirmed: (name) => `尚未确认${name}是否可以重新开始工作。`,
+        },
         root: (name) => `${name} 的文件`,
         name: "名称",
         size: "大小",

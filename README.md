@@ -1039,6 +1039,16 @@ If an upload, edit, rename, or delete loses its response, **Check again** reads
 the original operation's status. An unknown outcome calls for inspecting the
 current files before submitting a new change.
 
+If a file change has been pending for five minutes, a manager with **Can see
+all work** can open the employee’s **Files** tab, inspect the affected path
+and choose **Accept the files as they are**. This closes the workspace and
+keeps the files in their current state. A running program can leave a file
+unfinished. A reply already in progress may still arrive. For an assignment,
+check its status before continuing. Check the destination folder before
+repeating the file change. The tab confirms when the employee can work again
+after checking both the Home and execution availability. An interrupted
+backup or restore needs support.
+
 If a workspace repeatedly loses access to its Home, AI assistants and AI
 employees can remain unavailable. Ask the provider to stop the affected
 workspace and repair its Home.

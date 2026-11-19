@@ -23,6 +23,7 @@ import { InstanceRunNotice } from "@/components/workspace/chats/instance-run-not
 import type { AgentInstanceDetail } from "@/core/agent-instances/api";
 import type { Refusal } from "@/core/agent-instances/errors";
 import { I18nProvider } from "@/core/i18n/context";
+import { setLocaleInCookie } from "@/core/i18n/cookies";
 
 const binding = {
   id: "a".repeat(32),
@@ -52,9 +53,14 @@ function detail(permissions: number): AgentInstanceDetail {
     execution: { execution: "ready", reason: null },
   };
 }
-function show(refusal: Partial<Refusal>, permissions = 7) {
+function show(
+  refusal: Partial<Refusal>,
+  permissions = 7,
+  locale: "en-US" | "zh-CN" = "en-US",
+) {
+  setLocaleInCookie(locale);
   return render(
-    <I18nProvider initialLocale="en-US">
+    <I18nProvider initialLocale={locale}>
       <InstanceRunNotice
         binding={binding}
         detail={detail(permissions)}
@@ -124,3 +130,21 @@ test("execution refusals use the execution notice, and manager-only refusals rem
   show({ reason: "managers-only" });
   expect(screen.queryByRole("alert")).toBeNull();
 });
+
+test.each([
+  [
+    "en-US",
+    "Researcher's workspace closed during this reply. Check the files before continuing.",
+  ],
+  ["zh-CN", "这次回复期间，Researcher 的工作区已关闭。请先检查文件，再继续。"],
+] as const)(
+  "reports the observed workspace closure in %s",
+  (locale, message) => {
+    show(
+      { name: "ResidentInterrupted", reason: "storage-recovery" },
+      7,
+      locale,
+    );
+    expect(screen.getByRole("alert").textContent).toBe(message);
+  },
+);

@@ -250,7 +250,7 @@ export interface Translations {
       outcomeUncertain: (name: string) => string;
       idle: (name: string) => string;
       lifecycle: (name: string) => string;
-      storageRecovery: (provider: string, name: string) => string;
+      storageRecovery: (name: string) => string;
       operator: (name: string, provider: string) => string;
       hostReplaced: (name: string) => string;
       unknown: (name: string) => string;
@@ -436,7 +436,7 @@ export interface Translations {
     fullStart: (name: string, support: string) => string;
     fullStartAsk: (name: string, supervisor: string, support: string) => string;
     interruptedByManager: (name: string) => string;
-    interruptedByRecovery: (provider: string, name: string) => string;
+    interruptedByRecovery: (name: string) => string;
     interrupted: (name: string) => string;
     interruptedByService: string;
     create: {
@@ -478,6 +478,29 @@ export interface Translations {
       addedNoConversation: (name: string) => string;
     };
     files: {
+      recovery: {
+        reader: (name: string, supervisor: string) => string;
+        pending: (name: string) => string;
+        lifecycle: (name: string, support: string) => string;
+        save: (path: string) => string;
+        folder: (path: string) => string;
+        rename: (path: string, destination: string) => string;
+        remove: (path: string) => string;
+        copy: (path: string) => string;
+        accept: string;
+        confirm: (name: string) => string;
+        inspect: (folder: string, file: string) => string;
+        acknowledge: string;
+        accepted: (folder: string, file: string) => string;
+        rootFolder: string;
+        active: string;
+        settled: string;
+        hostUnconfirmed: string;
+        absent: string;
+        unknown: string;
+        ready: (name: string) => string;
+        unconfirmed: (name: string) => string;
+      };
       root: (name: string) => string;
       name: string;
       size: string;

@@ -1,6 +1,7 @@
 """Explicit quiesced resource lifecycle; current grants are never restored."""
 
 import re
+from contextlib import AsyncExitStack
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 
@@ -10,7 +11,7 @@ from deerflow.persistence.spaces.files import SpaceFileOperationRow
 from deerflow.persistence.spaces.lifecycle import SpaceBackupRow
 from deerflow.persistence.spaces.model import SpaceEventRow
 from deerflow.spaces import snapshots
-from deerflow.spaces.contract import MutationMode, Permission, SpaceConflict, SpaceDenied, validate_generation
+from deerflow.spaces.contract import MutationMode, Permission, SpaceConflict, SpaceDenied, SpaceNotFound, validate_generation
 from deerflow.spaces.filesystem import FileConflict
 from deerflow.spaces.service import SpaceOperationPending, _reservation
 from deerflow.utils.file_io import await_drained, run_file_io
@@ -197,7 +198,7 @@ class SpaceRecovery:
 
     async def status(self, *, actor, space_id):
         # Reading durable recovery facts must work while file access is pending.
-        await self.registry.get(actor=actor, space_id=space_id, permission=Permission.ADMIN)
+        space = await self.registry.get(actor=actor, space_id=space_id, permission=Permission.ADMIN)
         async with self.registry._sf() as session:
             operations = (
                 (await session.execute(select(SpaceFileOperationRow).where(SpaceFileOperationRow.space_id == space_id).order_by((SpaceFileOperationRow.phase == "pending").desc(), SpaceFileOperationRow.created_at.desc()).limit(200)))
@@ -208,23 +209,35 @@ class SpaceRecovery:
             from deerflow.spaces.attachments import SpaceAttachments
 
             attachments = {a.id: a for a, _ in await SpaceAttachments._current(session, [space_id])}
-            return {
-                "operations": [
-                    {
-                        "operation_id": op.operation_id,
-                        "generation": op.generation,
-                        "phase": op.phase,
-                        "request": op.request,
-                        "result": None if op.phase == "pending" and isinstance(op.request, dict) and op.request.get("action") == "mkdir" else op.result,
-                    }
-                    for op in operations
-                ],
+            listing = {
+                "operations": [self._operation_view(op) for op in operations],
                 "backups": [asdict(Backup(b.id, b.space_id, b.generation, b.size_bytes, b.sha256, b.consistency)) for b in backups],
                 "attachments": [{"id": a.id, "incarnation": a.incarnation, "phase": a.phase, "actor_kind": a.actor_kind, "actor_id": a.actor_id} for a in attachments.values()],
                 "can_fence": self.attachments is not None,
             }
+        await self.registry.get(actor=actor, space_id=space_id, permission=Permission.ADMIN, expected_generation=space.generation)
+        return listing
 
-    async def accept_current_state(self, *, actor, space_id, expected_generation, operation_id, acknowledge_uncertain_outcome):
+    @staticmethod
+    def _operation_view(op):
+        # SQLite returns stored UTC datetimes without their timezone.
+        created = op.created_at if op.created_at.tzinfo else op.created_at.replace(tzinfo=UTC)
+        result = None if op.phase == "pending" and isinstance(op.request, dict) and op.request.get("action") == "mkdir" else op.result
+        return {"operation_id": op.operation_id, "generation": op.generation, "phase": op.phase, "request": op.request, "result": result, "created_at": created.isoformat()}
+
+    async def operation(self, *, actor, space_id, expected_generation, operation_id):
+        self.files._operation_id(operation_id)
+        validate_generation(expected_generation)
+        await self.registry.get(actor=actor, space_id=space_id, permission=Permission.ADMIN, expected_generation=expected_generation)
+        async with self.registry._sf() as session:
+            row = await session.get(SpaceFileOperationRow, (space_id, operation_id))
+            if row is None or row.generation != expected_generation:
+                raise SpaceNotFound("Recovery operation is unavailable")
+            result = self._operation_view(row)
+        await self.registry.get(actor=actor, space_id=space_id, permission=Permission.ADMIN, expected_generation=expected_generation)
+        return result
+
+    async def accept_current_state(self, *, actor, space_id, expected_generation, operation_id, acknowledge_uncertain_outcome, file_change_only=False):
         """Owner accepts observed bytes, without asserting or replaying an intent.
 
         Recovery of partial restore/delete advances the lifecycle generation.
@@ -236,33 +249,63 @@ class SpaceRecovery:
         validate_generation(expected_generation)
         requests = {space_id: (Permission.ADMIN, expected_generation)}
 
-        async def perform():
+        original = None
+
+        async def pending(session):
+            nonlocal original
+            operation = await session.get(SpaceFileOperationRow, (space_id, operation_id), with_for_update=True)
+            if operation is None or operation.phase != "pending":
+                raise SpaceConflict("No matching pending operation exists")
+            if file_change_only and (operation.generation != expected_generation or not isinstance(operation.request, dict) or operation.request.get("action") not in ("put", "write", "mkdir", "rename", "remove", "copy")):
+                raise SpaceConflict("This file change cannot be accepted for the current generation")
+            if file_change_only:
+                identity = (operation.actor_kind, operation.actor_id, operation.request, operation.created_at)
+                if original is not None and original != identity:
+                    raise SpaceConflict("The pending file change has changed")
+                original = identity
+            return operation
+
+        async def accept(locks):
+            from deerflow.spaces.workflows import _owner, acquire, close
+
             token = _reservation.set(space_id)
             try:
                 async with self.registry.admitted(actor=actor, requests=requests, operation_id=(space_id, operation_id)) as (session, rows):
-                    operation = await session.get(SpaceFileOperationRow, (space_id, operation_id))
-                    if operation is None or operation.phase != "pending":
-                        raise SpaceConflict("No matching pending operation exists")
+                    operation = await pending(session)
                     if rows[space_id][0].mode != MutationMode.NATIVE:
                         raise SpaceDenied("Required mediated recovery controller is unavailable")
                     from deerflow.spaces.attachments import SpaceAttachments
 
                     attachment_ids = sorted({a.id for a, _ in await SpaceAttachments._current(session, [space_id], lock=True)})
+                    if file_change_only:
+                        volume = await self.files._volume(session, rows[space_id][0])
+                        descriptors = await run_file_io(acquire, {space_id: volume})
+                        locks.push_async_callback(run_file_io, close, descriptors)
+                        locks.callback(_owner.reset, _owner.set((self.files, frozenset((space_id,)))))
             finally:
                 _reservation.reset(token)
-            await self._quiesce(actor, space_id, expected_generation, operation_id, attachment_ids)
+            if file_change_only and self.attachments is not None and attachment_ids:
+
+                async def current(session, _attachments):
+                    await pending(session)
+
+                await self.attachments.retire(reason="storage-recovery", actor=actor, space_id=space_id, expected_generation=expected_generation, operation_id=operation_id, attachment_ids=attachment_ids, admission=current)
+            else:
+                await self._quiesce(actor, space_id, expected_generation, operation_id, attachment_ids)
             async with self.registry.admitted(actor=actor, requests=requests, operation_id=(space_id, operation_id)) as (session, rows):
                 row, _grant = rows[space_id]
                 if row.mode != MutationMode.NATIVE:
                     raise SpaceDenied("Required mediated recovery controller is unavailable")
-                operation = await session.get(SpaceFileOperationRow, (space_id, operation_id))
-                if operation is None or operation.phase != "pending":
-                    raise SpaceConflict("No matching pending operation exists")
+                operation = await pending(session)
                 await self._require_fenced(session, space_id)
                 await self.files._volume(session, row)
                 if operation.request.get("action") in ("restore", "delete", "archive"):
                     self._advance(session, row, actor, "recovery", {"operation_id": operation_id, "resolution": "owner-accepted-current-state"})
                 operation.phase = "failed"
                 operation.result = {"resolution": "owner-accepted-current-state", "actor_kind": actor.kind, "actor_id": actor.subject_id}
+
+        async def perform():
+            async with AsyncExitStack() as locks:
+                await accept(locks)
 
         await await_drained(perform())

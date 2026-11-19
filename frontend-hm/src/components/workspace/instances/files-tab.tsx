@@ -49,6 +49,7 @@ import {
   FileOperationNotice,
   PendingFileChange,
 } from "./file-operation-notice";
+import { FileRecoveryNotice } from "./file-recovery-notice";
 import { AgentFileRefusal } from "./file-refusal";
 
 type Props = {
@@ -94,6 +95,7 @@ export function FilesTab(props: Props) {
       key={`${user?.id}:${user?.system_role}:${user?.permissions?.join(",")}:${props.instance.id}:${props.instance.generation}:${props.instance.permissions}:${props.instance.status}:${props.instance.home_id}:${Math.max(props.instance.home_generation ?? 0, observed?.home === props.instance.home_id ? observed.generation : 0)}:${props.initialFolder}`}
       {...props}
       home={props.instance.home_id}
+      supervisor={supervisor}
       onGeneration={setObserved}
     />
   );
@@ -105,11 +107,13 @@ function FileBrowser({
   home,
   initialFolder,
   onGeneration,
+  supervisor,
 }: {
   instance: api.AgentInstanceDetail;
   changed?: () => void;
   home: string;
   initialFolder?: string;
+  supervisor: string;
   onGeneration: (value: { home: string; generation: number }) => void;
 }) {
   const { user } = useAuth();
@@ -132,6 +136,8 @@ function FileBrowser({
     instance.id,
     instance.generation,
     instance.permissions,
+    home,
+    instance.home_generation,
   ];
   const space = useQuery({
     queryKey: [...key, "space"],
@@ -141,6 +147,7 @@ function FileBrowser({
     },
     retry: false,
     staleTime: 0,
+    refetchInterval: 60_000,
   });
   const files = useQuery({
     queryKey: [...key, "files", path],
@@ -346,6 +353,15 @@ function FileBrowser({
     return <p role="alert">{copy.accessNotSaved(instance.name)}</p>;
   const notices = (
     <>
+      <FileRecoveryNotice
+        instance={instance}
+        space={space.data}
+        reading={space.isSuccess ? space.dataUpdatedAt : 0}
+        supervisor={supervisor}
+        refreshSpace={async () =>
+          (await space.refetch({ throwOnError: true })).data
+        }
+      />
       {checks.map(({ id, file }) => (
         <PendingFileChange
           key={id}

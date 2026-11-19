@@ -152,8 +152,13 @@ async def test_pending_operation_keeps_resource_and_recovery_visible(space_file_
         assert metadata.status_code == 200 and metadata.json()["storage_state"] == "recovery-pending"
         status = await client.get(base + "/recovery")
         assert status.status_code == 200 and status.json()["operations"][0]["phase"] == "pending"
+        exact = base + "/recovery/" + op
+        assert (await client.get(exact, params={"generation": 1})).json() == status.json()["operations"][0]
         assert (await client.post(base + "/recovery", json={"operation_id": op, "generation": 1, "acknowledge_uncertain_outcome": False})).status_code == 400
-        assert (await client.post(base + "/recovery", json={"operation_id": op, "generation": 1, "acknowledge_uncertain_outcome": True})).status_code == 200
+        assert (await client.post(base + "/recovery", json={"operation_id": op, "generation": 1, "acknowledge_uncertain_outcome": True, "file_change_only": True})).status_code == 200
+        accepted = (await client.get(exact, params={"generation": 1})).json()
+        assert accepted["phase"] == "failed" and accepted["result"]["resolution"] == "owner-accepted-current-state"
+        assert (await client.get(base + "/recovery/" + operation(), params={"generation": 1})).status_code == 404
 
 
 @pytest.mark.asyncio

@@ -117,7 +117,7 @@ export function WorkContainedNotice({
       sentence = copy.lifecycle(name);
       break;
     case "storage-recovery":
-      sentence = copy.storageRecovery(provider, name);
+      sentence = copy.storageRecovery(name);
       break;
     case "operator":
       sentence = copy.operator(name, provider);

@@ -202,7 +202,7 @@ TEXTS: dict[str, str] = {
     "interrupted.reason.outcome-uncertain": "{name}'s last step did not report back, so {name}'s workspace was closed to keep the files safe. Check the files before you continue.",
     "interrupted.reason.idle": "The work was left unfinished, and {name}'s workspace closed after a period without activity.",
     "interrupted.reason.lifecycle": "A manager of {name} paused or retired {name}, or changed {name}'s access, supervisor or brief. That closed {name}'s workspace.",
-    "interrupted.reason.storage-recovery": "{provider} restored or repaired {name}'s files during this work, which closed {name}'s workspace. Check the files before you continue.",
+    "interrupted.reason.storage-recovery": "{name}'s workspace closed during this assignment. Check the files before continuing.",
     "interrupted.reason.operator": "{name}'s workspace was closed for maintenance by {provider}.",
     "interrupted.reason.host-replaced": "The service moved to a new server. {name}'s files are as of the last backup. Check the files before you continue.",
     "interrupted.reason.unknown": "This work was interrupted.",
@@ -416,7 +416,7 @@ TEXTS: dict[str, str] = {
     "error.model_refused": "The AI service refused this request, so the message was not answered. Ask {support} to check it.",
     "answer.on_web": "This answer cannot be shown here. It is in {product} on the web.",
     "refused.interrupted_manager": "A manager of {name} changed {name}'s settings, which restarted {name}'s workspace and stopped this answer. Nothing saved in {name}'s files was lost. Your message is kept.",
-    "refused.interrupted_recovery": "{provider} restored or repaired {name}'s files, which closed {name}'s workspace and stopped this answer. Your message is kept. Check the files first, then try again in a few minutes.",
+    "refused.interrupted_recovery": "{name}'s workspace closed during this reply. Your message is kept. Check the files before continuing.",
     "net.blocked_ask": "{name} could not reach {host}, which is not on the list of sites allowed here. Ask {supervisor} to allow {host} for a short time, or ask {support} to have {host} added to the list.",
     "net.blocked": (
         "{name} could not reach {host}, which is not on the list of sites allowed here. "
