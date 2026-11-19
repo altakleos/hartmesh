@@ -117,6 +117,7 @@ def test_reuse_checked_home_data_on_older_build(compose, session, version):
     blocked = offline_check(compose, expected=2)
     assert blocked["total"] == blocked["checked"] == count and blocked["pages"] >= 2
     assert any(row["space_id"] == affected["home_id"] and row["action"] == "copy" and row["attachments"] for row in blocked["blockers"])
+    (evidence.parent / f"rollback-{version}-refusal.json").write_text(json.dumps(blocked, sort_keys=True), encoding="utf-8")
 
     start_gateway(compose)
     await_execution_ready(session)
@@ -167,6 +168,7 @@ def test_reuse_checked_home_data_on_older_build(compose, session, version):
         json.dumps(
             {
                 "version": version,
+                "qualification": "older Gateway on the checked storage",
                 "backend": expected_image,
                 "image_id": entry["Image"],
                 "gateway": entry["Id"],

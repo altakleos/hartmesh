@@ -17,6 +17,7 @@ from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperatio
 from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceMountRow
 from deerflow.persistence.spaces.model import SpaceRow
 from deerflow.spaces.attachments import SpaceAttachments
+from deerflow.spaces.incarnations import verify_bound
 from deerflow.spaces.native_create_evidence import NativeEvidenceReader
 from deerflow.spaces.native_resident_evidence import NativeResidentRoot
 from deerflow.spaces.runtime_owner import PoolRuntimeOwner
@@ -76,7 +77,9 @@ def _check_roots(claim, record, bindings, owners, seen_homes, readonly):
     if home.space_id in seen_homes or claim.actor.kind != "nonhuman" or owners.get(home.space_id) != claim.actor.subject_id or home.alias != "home" or not home.writable or binding is None or binding[0] != home.generation:
         raise CommandRefused(f"Workspace {claim.id} cannot be associated with one active Home and owner")
     seen_homes.add(home.space_id)
-    current = (NativeResidentRoot.from_view(home, binding[1]), *(NativeResidentRoot.from_readonly(root) for root in readonly))
+    bound = binding[1]
+    observed_home = verify_bound(bound.physical, bound.backing_handle, managed_home=True)
+    current = (NativeResidentRoot.from_view(home, observed_home), *(NativeResidentRoot.from_readonly(root) for root in readonly))
     if record.roots != current:
         raise CommandRefused(f"Workspace {claim.id} does not match its current storage roots")
 

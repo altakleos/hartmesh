@@ -108,6 +108,20 @@ jobs:
           test "$(grep -c -F "$BACKEND_REF" /opt/hartmesh/compose.yaml)" = 3
           if grep -q 'ghcr.io/altakleos/hartmesh-backend@' /opt/hartmesh/compose.yaml; then exit 1; fi
 
+      - name: Build the candidate product UI and install its browser rehearsal
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_home_rollback
+        run: |
+          docker build --target prod --tag localhost:80/hartmesh-frontend:ci --file frontend-hm/Dockerfile .
+          docker push localhost:80/hartmesh-frontend:ci
+          frontend_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' localhost:80/hartmesh-frontend:ci)
+          case "$frontend_ref" in localhost:80/hartmesh-frontend@sha256:*) ;; *) exit 1 ;; esac
+          sudo sed -i -E "s#ghcr\.io/altakleos/hartmesh-frontend@sha256:[0-9a-f]{64}#${frontend_ref}#g" /opt/hartmesh/compose.yaml /opt/hartmesh/images.txt
+          test "$(grep -c -F "$frontend_ref" /opt/hartmesh/compose.yaml)" = 1
+          echo "HARTMESH_BROWSER_FRONTEND=$frontend_ref" >> "$GITHUB_ENV"
+          cd backend
+          uv sync --frozen --group dev --extra browser
+          .venv/bin/python -m playwright install --with-deps chromium
+
       - name: 9 Write the data directory, the model file and the .env contract
         run: |
           sudo install -d -o 1000 -g 1000 -m 0750 /srv/hartmesh/postgres /srv/hartmesh/redis /srv/hartmesh/home /srv/hartmesh/uploads /srv/hartmesh/artifacts
@@ -254,6 +268,9 @@ jobs:
           HARTMESH_BUNDLE_ADMIN_PASSWORD: 'Acceptance-Admin-2026!'
           HARTMESH_BUNDLE_RUNTIME: hartmesh-ci
         run: |
+          test -s "$EVIDENCE/attachment-browser-interrupted.png"
+          test -s "$EVIDENCE/attachment-browser-recovered.png"
+          jq -e --arg image "$HARTMESH_BROWSER_FRONTEND" '.frontend == $image and (.requests | length) >= 2 and .interrupted != .recovered' "$EVIDENCE/attachment-browser.json"
           for version in 61 60; do
             tag="v2.2.0+hartmesh.$version"
             git fetch --no-tags origin "refs/tags/$tag:refs/tags/$tag"

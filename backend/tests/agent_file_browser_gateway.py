@@ -13,40 +13,62 @@ import _storage_spaces_test_support as storage_support
 import pytest
 import uvicorn
 from _storage_spaces_test_support import ALICE, FixtureCatalog, FixtureVolume
+from sqlalchemy import func, select
 from test_agent_file_http import file_app
 from test_agent_instances import make_instances
 
 from app.gateway.routers.spaces import router as space_router
 from deerflow.agent_instances.contract import AgentPermission
 from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
-from deerflow.persistence.spaces.files import SpaceFileOperationRow
+from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
 from deerflow.spaces.filesystem import ConfinedFilesystem
 
 
-def hold_first_intent(app, registry, patch):
+def hold_first_intent(app, registry, root, sf, patch):
     """Hold a real uncommitted intent while another connection reads its status."""
-    entered, release = asyncio.Event(), asyncio.Event()
+    gates = {action: (asyncio.Event(), asyncio.Event()) for action in ("put", "rename", "remove")}
     admitted = registry.admitted
 
     @asynccontextmanager
     async def gated(**kwargs):
         async with admitted(**kwargs) as (session, rows):
             yield session, rows
-            if any(isinstance(row, SpaceFileOperationRow) and row.request.get("path") == "deferred.txt" for row in session.new):
+            for row in session.new:
+                if not isinstance(row, SpaceFileOperationRow):
+                    continue
+                action, path = row.request.get("action"), row.request.get("path")
+                if (action, path) not in (("put", "deferred.txt"), ("rename", "concurrent.txt"), ("remove", "concurrent.txt")):
+                    continue
+                entered, release = gates[action]
+                if action != "put":
+                    # The browser's first change is still uncommitted. Replace
+                    # the name from outside that writer, then roll the writer
+                    # back after the test has observed automatic and manual reads.
+                    replacement = root / "replacement-fixture"
+                    replacement.write_text("replacement-" + action, encoding="utf-8")
+                    replacement.replace(root / path)
                 entered.set()
                 await asyncio.wait_for(release.wait(), 45)
+                if action != "put":
+                    raise ConnectionAbortedError(errno.ECONNABORTED, "test rollback before intent commit")
 
     patch.setattr(registry, "admitted", gated)
 
     @app.get("/test/intent")
-    async def at_commit():
-        await asyncio.wait_for(entered.wait(), 30)
+    async def at_commit(action: str = "put"):
+        await asyncio.wait_for(gates[action][0].wait(), 30)
         return {"entered": True}
 
     @app.post("/test/commit")
-    async def resume():
-        release.set()
+    async def resume(action: str = "put"):
+        gates[action][1].set()
         return {"released": True}
+
+    @app.get("/test/observed")
+    async def observed():
+        async with sf() as session:
+            count = await session.scalar(select(func.count()).select_from(SpaceFileOperationRow))
+        return {"receipts": count, "current": (root / "concurrent.txt").read_text(encoding="utf-8"), "destination": (root / "moved-concurrent.txt").exists()}
 
 
 def inject_file_failures(app, files, patch):
@@ -93,7 +115,10 @@ async def serve(thread_id, folder):
         async with aclosing(make_instances(folder, SimpleNamespace(param="sqlite"), patch)) as fixture:
             app, agents, agent, authority, sf = await file_app(await anext(fixture), patch, creation_id="a" * 32)
             app.include_router(space_router)
-            hold_first_intent(app, agents.files.registry, patch)
+            home = await agents.files.registry.get(actor=ALICE, space_id=agent.home_id)
+            async with sf() as session:
+                backing = await session.get(SpaceBackingRow, home.backing_handle)
+            hold_first_intent(app, agents.files.registry, agents.files.catalog.verified[backing.slot_id].data_path, sf, patch)
             inject_file_failures(app, agents.files, patch)
 
             @app.post("/test/revoke-use")

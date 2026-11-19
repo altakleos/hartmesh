@@ -311,6 +311,87 @@ test("a check can see no record while the first upload is committing, then recov
   expect((await stored(request, "deferred.txt")).text).toBe("committed once");
 });
 
+test("an in-flight first rename or delete cannot be repeated by checking its missing receipt", async ({
+  page,
+  request,
+}) => {
+  await seed(request, "concurrent.txt", "previous");
+  const observe = async () =>
+    (await (
+      await request.get(gateway.origin + "/test/observed", { headers: cookie })
+    ).json()) as { receipts: number; current: string; destination: boolean };
+  const initial = await observe();
+  let mutation: ReturnType<APIRequestContext["post"]> | undefined;
+  let writes = 0;
+  let reads = 0;
+  let expectedHandle = "";
+  await wire(page, async (route, url) => {
+    const sent = route.request();
+    if (sent.method() === "POST") {
+      const body = sent.postDataJSON() as {
+        action: string;
+        operation_id: string;
+      };
+      expectedHandle = body.operation_id;
+      writes++;
+      mutation = request.post(url, { headers: cookie, data: body });
+      const held = await request.get(gateway.origin + "/test/intent", {
+        headers: cookie,
+        params: { action: body.action },
+      });
+      expect(await held.json()).toEqual({ entered: true });
+      if (body.action === "rename") await route.abort("connectionreset");
+      else await route.fulfill({ status: 502, body: "unavailable" });
+    } else {
+      expect(sent.method()).toBe("GET");
+      expect(sent.postData()).toBeNull();
+      expect(url).toContain("/home/operations/" + expectedHandle);
+      const result = await route.fetch({
+        url,
+        headers: { ...sent.headers(), ...cookie },
+      });
+      expect(await result.json()).toEqual({ status: "unknown" });
+      reads++;
+      await route.fulfill({ response: result });
+    }
+  });
+  await files(page);
+  for (const [index, action] of ["rename", "remove"].entries()) {
+    const button = action === "rename" ? "Rename" : "Delete";
+    await page
+      .getByRole("row")
+      .filter({ hasText: "concurrent.txt" })
+      .getByRole("button", { name: button, exact: true })
+      .click();
+    const dialog = page.getByRole("dialog");
+    if (action === "rename")
+      await dialog.getByRole("textbox").fill("moved-concurrent.txt");
+    await dialog.getByRole("button", { name: button, exact: true }).click();
+    await expect(page.getByText("No result is recorded yet.")).toBeVisible();
+    const before = reads;
+    await page.getByRole("button", { name: "Check again" }).click();
+    await expect.poll(() => reads).toBeGreaterThan(before);
+    const expected = {
+      receipts: initial.receipts,
+      current: "replacement-" + action,
+      destination: false,
+    };
+    expect(await observe()).toEqual(expected);
+    await request.post(gateway.origin + "/test/commit", {
+      headers: cookie,
+      params: { action },
+    });
+    expect((await mutation!)?.status()).toBe(503);
+    expect(await observe()).toEqual(expected);
+    expect(writes).toBe(index + 1);
+    await page
+      .getByRole("article")
+      .filter({ hasText: "concurrent.txt" })
+      .getByRole("button", { name: "Close" })
+      .click();
+  }
+});
+
 test("the open Files tab recovers its upload across a Gateway process restart", async ({
   page,
   request,

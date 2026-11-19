@@ -1272,15 +1272,28 @@ def test_graceful_gateway_restart_leaves_no_unresolved_attempt(compose, session,
     assert unresolved == "0"
 
 
+@pytest.fixture
+def attachment_browser(compose, session, employee):
+    image = os.environ.get("HARTMESH_BROWSER_FRONTEND")
+    if not image:
+        yield None
+        return
+    from _compose_attachment_browser import open_attachment_browser
+
+    with open_attachment_browser(compose, session, new_conversation(session, employee), image, required("EVIDENCE")) as browser:
+        yield browser
+
+
 @contextmanager
-def attachment_awaiting_commit(compose, session, employee, workspace_id):
+def attachment_awaiting_commit(compose, session, employee, workspace_id, browser):
     """Hold exactly the synthetic attachment's acknowledgement after its bytes land."""
     operation = uuid.uuid4().hex
     name = "interrupted-" + operation + ".txt"
     content = b"synthetic attachment " + operation.encode("ascii")
     space = employee["instance"]["home_id"]
     path = "uploads/" + name
-    endpoint = f"/api/agent-instances/{employee['instance']['id']}/conversations/{employee['thread_id']}/files/operations"
+    thread = browser.thread if browser else employee["thread_id"]
+    endpoint = f"/api/agent-instances/{employee['instance']['id']}/conversations/{thread}/files/operations"
     predicate = f"space_id={sql(space)} AND request->>'path'={sql(path)}"
     trigger = "acceptance_file_" + operation
     compose.psql(
@@ -1291,10 +1304,14 @@ def attachment_awaiting_commit(compose, session, employee, workspace_id):
     try:
         with ThreadPoolExecutor(max_workers=1) as client:
             with AllocationBarrier(compose, lock_key=trigger) as barrier:
-                upload = client.submit(session.request, "POST", endpoint, params={"operation_id": operation}, files={"file": (name, content, "text/plain")}, expected=502, timeout=60)
+                if browser:
+                    operation = browser.submit(endpoint, name, content)
+                    upload = None
+                else:
+                    upload = client.submit(session.request, "POST", endpoint, params={"operation_id": operation}, files={"file": (name, content, "text/plain")}, expected=502, timeout=60)
 
                 def waiting():
-                    if upload.done():
+                    if upload and upload.done():
                         pytest.fail(f"upload completed before the commit barrier: {upload.result()}")
                     return compose.psql(f"SELECT count(*) FROM pg_stat_activity WHERE {barrier.identity['pid']}=ANY(pg_blocking_pids(pid)) AND wait_event='advisory' AND query ILIKE '%UPDATE storage_space_file_operations%'") == "1"
 
@@ -1304,9 +1321,12 @@ def attachment_awaiting_commit(compose, session, employee, workspace_id):
                 assert compose.invoke(["docker", "exec", workspace_id, "cat", "/mnt/user-data/" + path]).stdout.encode() == content
                 outcome = dict(operation=operation, row_id=row_id, name=name, path=path, endpoint=endpoint, sha256=hashlib.sha256(content).hexdigest(), predicate=predicate)
                 yield outcome
-                lost = upload.result(timeout=20)
-                assert lost.status_code == 502 and lost.headers["server"].startswith("nginx")
-                outcome["proxy_status"] = lost.status_code
+                if browser:
+                    outcome["proxy_status"] = browser.observe_interruption()
+                else:
+                    lost = upload.result(timeout=20)
+                    assert lost.status_code == 502 and lost.headers["server"].startswith("nginx")
+                    outcome["proxy_status"] = lost.status_code
             assert barrier.drained
     finally:
         compose.psql(f"DROP TRIGGER {trigger} ON storage_space_file_operations; DROP FUNCTION {trigger}()")
@@ -1337,10 +1357,10 @@ def check_recovered_attachment(compose, session, employee, outcome):
     evidence.write_text(json.dumps({"proxy_status": outcome["proxy_status"], "operation_id": outcome["operation"], "receipt": rows, "status": first, "files": files}), encoding="utf-8")
 
 
-def test_killed_gateway_settles_the_attempt_failed_with_an_attempt_contained_event(compose, session, employee):
+def test_killed_gateway_settles_the_attempt_failed_with_an_attempt_contained_event(compose, session, employee, attachment_browser):
     held, identity = held_attempt(compose, session, employee)
     startup = compose.logs().count("agents: ready (")
-    with attachment_awaiting_commit(compose, session, employee, identity["container_id"]) as upload:
+    with attachment_awaiting_commit(compose, session, employee, identity["container_id"], attachment_browser) as upload:
         compose.run("kill", "-s", "KILL", "gateway")
     compose.run("up", "-d", "--wait", timeout=240)
     settled = await_attempt(session, employee, held["id"], {"failed"})
@@ -1360,6 +1380,8 @@ def test_killed_gateway_settles_the_attempt_failed_with_an_attempt_contained_eve
 
     assert eventually(startup_settled)
     check_recovered_attachment(compose, session, employee, upload)
+    if attachment_browser:
+        attachment_browser.confirm(upload)
     compose.state["contained_work"] = settled
 
 

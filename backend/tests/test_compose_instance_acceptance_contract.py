@@ -244,6 +244,20 @@ def test_manual_home_rollback_gate_checks_both_immutable_older_bundles():
     assert '["skipped", "failure", "error"]' in gate["run"]
 
 
+def test_candidate_browser_rehearsal_uses_the_built_product_ui_and_real_file_action():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/compose-instances.yml").read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["bundle-instances"]["steps"]
+    build = next(step for step in steps if "frontend-hm/Dockerfile" in step.get("run", ""))
+    gate = next(step for step in steps if "attachment-browser.json" in step.get("run", ""))
+    assert build["if"] == gate["if"] == "github.event_name == 'workflow_dispatch' && inputs.verify_home_rollback"
+    assert 'echo "HARTMESH_BROWSER_FRONTEND=$frontend_ref" >> "$GITHUB_ENV"' in build["run"]
+    assert "uv sync --frozen --group dev --extra browser" in build["run"]
+    assert "attachment-browser-interrupted.png" in gate["run"] and "attachment-browser-recovered.png" in gate["run"]
+    source = (ROOT / "backend/tests/_compose_attachment_browser.py").read_text(encoding="utf-8")
+    assert ".expect_file_chooser()" in source and ".set_files(" in source
+    assert ".route(" not in source and ".fulfill(" not in source
+
+
 def test_operator_helper_uses_the_image_environment_and_actual_socket_group():
     tree = ast.parse((ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8"))
     bundle = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Bundle")
