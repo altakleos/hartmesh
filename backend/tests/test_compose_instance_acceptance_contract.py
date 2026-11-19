@@ -59,6 +59,10 @@ def test_cleanup_bootstrap_preserves_helper_argv_and_drops_privileges():
 def test_helpers_use_the_image_environment_and_fault_case_has_an_assignment_barrier():
     source = (ROOT / "backend/tests/test_compose_instance_acceptance.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
+    bootstrap = next(node.value.value for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "CLEANUP_BOOTSTRAP" for target in node.targets))
+    assert "export HOME=/tmp/gateway-home" in bootstrap
+    assert 'export DOCKER_CONFIG="$HOME/.docker"' in bootstrap
+    assert bootstrap.index("setpriv --reuid=1000") < bootstrap.index('mkdir -p -m 0700 "$HOME"') < bootstrap.index('exec "$@"')
     bundle = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Bundle")
     for name in ("gateway", "accounts"):
         helper = next(node for node in bundle.body if isinstance(node, ast.FunctionDef) and node.name == name)
