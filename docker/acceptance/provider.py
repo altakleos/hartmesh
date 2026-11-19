@@ -4,15 +4,33 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 UPLOAD_MARKER = "UPLOAD-ACCEPTANCE-726"
 ARTIFACT = "Synthetic acceptance artifact.\nUploaded text: UPLOAD-ACCEPTANCE-726\n"
 FINAL = "Acceptance complete. Your synthetic artifact is ready."
+
+
+def final_observation(token):
+    directory = os.environ.get("HARTMESH_MODEL_BARRIER_DIR")
+    if not directory:
+        raise ValueError("model observation requires the hosted driver")
+    armed = Path(directory) / ("armed-" + token)
+    if not armed.is_file():
+        raise ValueError("model observation was not armed")
+    (Path(directory) / ("waiting-" + token)).touch()
+    deadline = time.monotonic() + 90
+    while armed.exists():
+        if time.monotonic() >= deadline:
+            raise ValueError("final model call exceeded its qualification deadline")
+        time.sleep(0.05)
+    return {"content": "Final observed response " + hashlib.sha256(token.encode("ascii")).hexdigest()}
 
 
 def tool_result_content(value: object, *, allow_preflight_failure: bool = False) -> str:
@@ -103,7 +121,8 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
             {"filepaths": ["/mnt/user-data/outputs/acceptance.txt"]},
         )
     else:
-        return {"content": FINAL}
+        observed = re.search(r"acceptance:file:final:([a-f0-9]{32})\b", str(turn[0].get("content")))
+        return final_observation(observed[1]) if observed else {"content": FINAL}
     offered = {tool.get("function", {}).get("name") for tool in body["tools"]}
     if name not in offered:
         raise ValueError(f"required real tool not offered: {name}")
@@ -161,6 +180,8 @@ def work_reply(body, turn):
                 )
             else:
                 return {"content": "Work acceptance complete."}
+        elif observed := re.fullmatch(r"acceptance:work:final:([a-f0-9]{32})", objective):
+            return final_observation(observed[1])
         elif "acceptance:work:hold" in objective:
             if len(results) == 1:
                 name, arguments = "bash", {"command": "sleep 300"}
