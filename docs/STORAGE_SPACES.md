@@ -842,6 +842,13 @@ resolution; it neither replays it nor claims its intended change completed.
 Partial lifecycle reconciliation advances the generation. Required mediated
 recovery controllers cannot be bypassed by this native recovery surface.
 
+Before an in-place downgrade, check pending directory creations. Current
+settlement checks the identity of a directory created by this writer and
+flushes its parent. If it cannot confirm the directory, inspect the files and
+resolve the pending operation before downgrading. Older Gateways can classify
+a replacement directory as complete from its name alone. They can also retain
+one empty private staging directory per affected Space.
+
 The additive `0032_storage_lifecycle` migration adds attachment, mount and backup
 facts after `0031`, preserving previous ancestry and all existing feature bytes.
 Used containment/backup facts cannot be downgraded away. The mandatory native tier

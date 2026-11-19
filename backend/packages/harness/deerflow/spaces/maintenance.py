@@ -7,12 +7,14 @@ import os
 import re
 import stat
 from copy import deepcopy
+from dataclasses import dataclass
 
 from sqlalchemy import select
 
 from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
 from deerflow.persistence.spaces.model import SpaceRow
-from deerflow.spaces.attachments import SpaceAttachments
+from deerflow.spaces import directory_creation
+from deerflow.spaces.attachments import RetainedAttachment, SpaceAttachments
 from deerflow.spaces.filesystem import FileConflict, UnsafeSpacePath, _path
 from deerflow.spaces.incarnations import BoundVolume, validate_marker
 from deerflow.spaces.settlement import host_settlement_result
@@ -20,9 +22,11 @@ from deerflow.spaces.workflows import WorkflowLockMissing, WorkflowReceipt, _own
 from deerflow.utils.file_io import run_file_io
 
 logger = logging.getLogger(__name__)
-_ACTIONS = frozenset(("write", "put", "mkdir", "rename", "remove", "feature-workflow"))
+_DIRECT_ACTIONS = frozenset(("write", "put", "mkdir", "rename", "remove"))
+_ACTIONS = _DIRECT_ACTIONS | {"feature-workflow"}
 _BINDING = ("backing_handle", "space_id", "slot_id", "filesystem_uuid", "root_inode", "control_inode", "max_bytes", "max_inodes")
 _INTENT = ("space_id", "operation_id", "actor_kind", "actor_id", "generation", "request")
+_OBSERVED_INTENT = (*_INTENT, "created_at", "result")
 
 
 def _facts(row, attributes):
@@ -89,15 +93,20 @@ def _require_same_entry(filesystem, path, observed):
         raise FileConflict("File changed during settlement")
 
 
-def _direct(filesystem, request):
+def _direct_path(request):
     path, action = _path(request["path"]), request["action"]
     # Malformed intents cannot be interpreted as a refusal to inspect a name.
     if action in ("write", "put") and (not isinstance(request["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", request["sha256"]) is None):
         raise ValueError("The intended digest is invalid")
     if action == "rename":
         _path(request["destination"])
+    return path
+
+
+def _direct(filesystem, request):
+    path = _direct_path(request)
     try:
-        return _observed_direct(filesystem, request, action, path)
+        return _observed_direct(filesystem, request, request["action"], path)
     except _NameUnconfirmed:
         return "failed", {"resolution": "host-unconfirmed"}
 
@@ -151,6 +160,15 @@ def _observed_direct(filesystem, request, action, path):
 def _cleanup(filesystem):
     root = filesystem._control_fd
     for name in os.listdir(root):
+        if name == ".mkdir-stage":
+            metadata = os.stat(name, dir_fd=root, follow_symlinks=False)
+            if stat.S_ISDIR(metadata.st_mode) and metadata.st_uid == os.getuid() and not metadata.st_mode & 0o077:
+                try:
+                    os.rmdir(name, dir_fd=root)
+                except OSError as exc:
+                    if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                        raise
+            continue
         if re.fullmatch(r"stage-[0-9a-f]{32}", name) is None:
             continue
         metadata = os.stat(name, dir_fd=root, follow_symlinks=False)
@@ -159,7 +177,61 @@ def _cleanup(filesystem):
     os.fsync(root)
 
 
-async def _settle(files, candidate, *, discard=False, raise_errors=False, operator_host_id=None, discard_admission=None):
+@dataclass(frozen=True)
+class BlockedFileOperation:
+    """A pending direct operation observed under writer exclusion with one active Home mount."""
+
+    space_id: str
+    operation_id: str
+    attachment: RetainedAttachment
+    intent: tuple
+    parent: tuple
+
+    @classmethod
+    async def capture(cls, session, parent, operation, mounts):
+        if parent is None or parent.status != "active" or parent.mode != "native" or operation is None or operation.phase != "pending" or operation.generation != parent.generation:
+            return None
+        if len(mounts) != 1 or not isinstance(operation.request, dict) or operation.request.get("action") not in _DIRECT_ACTIONS:
+            return None
+        if operation.request["action"] == "mkdir" and operation.result is not None and not directory_creation.valid_identity(operation.result):
+            return None
+        attachment, mount = mounts[0]
+        if attachment.phase != "active" or attachment.actor_kind != "nonhuman" or (mount.generation, mount.alias, mount.writable) != (parent.generation, "home", 1):
+            return None
+        scope = (await SpaceAttachments._mount_scope(session, [attachment.id]))[attachment.id]
+        if len(scope) != 1:
+            return None
+        other = await session.scalar(
+            select(SpaceFileOperationRow.operation_id).where(SpaceFileOperationRow.space_id == parent.id, SpaceFileOperationRow.phase == "pending", SpaceFileOperationRow.operation_id != operation.operation_id).limit(1)
+        )
+        if other is not None:
+            return None
+        _direct_path(operation.request)
+        claim = SpaceAttachments._retained_claim(attachment, scope)
+        return cls(parent.id, operation.operation_id, claim, _facts(operation, _OBSERVED_INTENT), _facts(parent, ("backing_handle", "custody_kind", "custodian_kind", "custodian_id")))
+
+    async def matches_locked(self, session, parent):
+        operation = await session.get(SpaceFileOperationRow, (self.space_id, self.operation_id), with_for_update=True)
+        if operation is None or _facts(operation, _OBSERVED_INTENT) != self.intent:
+            return False
+        mounts = await SpaceAttachments._current(session, [self.space_id], lock=True)
+        return await self.capture(session, parent, operation, mounts) == self
+
+    async def acquire_if_current(self, files, session):
+        """Borrow the containment transaction. Caller holds returned locks through intent commit."""
+        from deerflow.spaces.service import SpaceOperationPending
+
+        parent = await session.get(SpaceRow, self.space_id)
+        if not await self.matches_locked(session, parent):
+            return []
+        volume = await files._volume(session, parent)
+        try:
+            return await run_file_io(acquire, {self.space_id: volume}, create=False)
+        except (SpaceOperationPending, WorkflowLockMissing):
+            return []
+
+
+async def _settle(files, candidate, *, discard=False, raise_errors=False, operator_host_id=None, discard_admission=None, observe=False):
     if discard and (not isinstance(operator_host_id, str) or not 1 <= len(operator_host_id) <= 128):
         raise ValueError("Operator discard requires its Docker host identity")
     log = getattr(files, "maintenance_logger", logger)
@@ -190,11 +262,14 @@ async def _settle(files, candidate, *, discard=False, raise_errors=False, operat
                 return False
             if current is None or current.phase != "pending" or _facts(current, _INTENT) != _facts(candidate, _INTENT) or (not discard and row.status != "active") or row.mode != "native":
                 return False
-            if await SpaceAttachments._current(session, [row.id], lock=True):
+            mounts = await SpaceAttachments._current(session, [row.id], lock=True)
+            if mounts and not observe:
                 return False
             await run_file_io(validate_marker, filesystem, binding.backing_handle)
             if not descriptors:
                 descriptors = await run_file_io(acquire, {row.id: volume}, control_fds={row.id: filesystem._control_fd})
+            if mounts:
+                return await BlockedFileOperation.capture(session, row, current, mounts)
             tokens.append((_owner, _owner.set((files, frozenset((candidate.space_id,))))))
             tokens.append((_read_only, _read_only.set(False)))
             request = current.request
@@ -213,6 +288,8 @@ async def _settle(files, candidate, *, discard=False, raise_errors=False, operat
                 if resolution not in ("host-settled", "host-reconciled"):
                     raise ValueError("Workflow settlement did not confirm an outcome")
                 current.phase, current.result = "complete", {"resolution": resolution, "value": None, "facts": receipt.value["facts"]}
+            elif request["action"] == "mkdir" and current.result is not None:
+                current.phase, current.result = await run_file_io(directory_creation.settle, filesystem, _path(request["path"]), current.result)
             else:
                 current.phase, current.result = await run_file_io(_direct, filesystem, request)
             current.result = host_settlement_result(current.result)
@@ -265,7 +342,7 @@ async def discard_interrupted(files, *, space_id, operation_id, host_id):
     return await await_drained(_settle(files, candidate, discard=True, raise_errors=True, operator_host_id=host_id))
 
 
-async def settle_interrupted(files, *, space_id=None, operation_id=None):
+async def settle_interrupted(files, *, space_id=None, operation_id=None, blocked_residents=None):
     log = getattr(files, "maintenance_logger", logger)
     statement = select(SpaceFileOperationRow).where(SpaceFileOperationRow.phase == "pending")
     if space_id is not None:
@@ -278,7 +355,11 @@ async def settle_interrupted(files, *, space_id=None, operation_id=None):
         action = candidate.request.get("action") if isinstance(candidate.request, dict) else None
         if isinstance(action, str) and action in _ACTIONS:
             try:
-                count += await _settle(files, candidate)
+                result = await _settle(files, candidate, observe=blocked_residents is not None and space_id is None and action in _DIRECT_ACTIONS)
+                if isinstance(result, BlockedFileOperation):
+                    blocked_residents[result.attachment.id] = result
+                elif result:
+                    count += 1
             except Exception as exc:
                 log.warning("storage: file operation %s in space %s not settled: %s", candidate.operation_id, candidate.space_id, exc)
     return count

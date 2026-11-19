@@ -268,8 +268,11 @@ Busy refusals carry workflow/lifecycle cause. Completed IDs bind exact actor,
 generation and request. Drain the entire owned mutation before cancellation.
 `put_unique` deduplicates after rechecking the named inode or takes a free numbered
 name, including when the occupied file cannot be read. Direct workers record the
-publishing syscall before flushing. Only proven pre-publication file refusals
-commit a failed intent. Mutation parents reject symlinks. Trusted controller admission borrows
+publishing syscall before flushing. Record pre-effect refusals under writer
+ownership even after a grant is revoked. Direct mkdir pins its private stage
+before publication. Recovery rechecks its inode generation and flushes the
+same directory and parent. Older readers settle from the visible name. Mutation
+parents reject symlinks. Trusted controller admission borrows
 the mutation transaction before its intent and effect. Human-attributed requests
 retain the canonical six fields; callers drain spool and metadata workers too.
 `export_file` may borrow a trusted controller admission before and after its
@@ -404,8 +407,10 @@ label-based fencing/cleanup. Retain v5 evidence after SQL fencing. The live
 Gateway may retire a prepared record only after confirmed fenced SQL, its canonical
 batch and fresh root/whole-graph absence proof, then perform normal finalization.
 Finished no-record retries recheck journal uncertainty after the final census.
-Targeted `settle_interrupted` requires both IDs and leaves other intents pending;
-no arguments retain maintenance's full pass. `snapshots.backup(target=...)` keeps
+Targeted settlement needs both IDs. Only scheduled settlement observes abandoned
+direct writes under writer exclusion. Before closing, recheck the same pending
+operation, Home generation, idle resident and attachment incarnation under the
+containment fence. `snapshots.backup(target=...)` keeps
 exclusive private creation and archive guards, fsyncing the actual destination.
 An optional destination directory FD pins archive creation, digest and cleanup.
 Source traversal opens each root-relative inode without symlink following, pins

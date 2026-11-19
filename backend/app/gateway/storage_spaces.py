@@ -1047,7 +1047,13 @@ async def _maintenance_step(app, *, timeout: float) -> bool:
         except Exception:
             logger.exception("storage: assignment repair failed; existing facts are kept")
         try:
-            status.file_operations_settled += await app.state.storage_spaces.settle_interrupted()
+            if runtime is None:
+                status.file_operations_settled += await app.state.storage_spaces.settle_interrupted()
+            else:
+                # Publish only a complete pass to the runtime that requested it.
+                blocked = {}
+                status.file_operations_settled += await app.state.storage_spaces.settle_interrupted(blocked_residents=blocked)
+                runtime.blocked_file_operations = blocked
         except Exception:
             logger.exception("storage: operation settlement failed; existing facts are kept")
         if not status.agents_ready_reported and (await execution_state(app)).execution == "ready":

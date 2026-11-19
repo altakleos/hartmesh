@@ -23,13 +23,17 @@ from deerflow.sandbox.lease import run_sync_lifecycle_operation
 from deerflow.spaces.attachments import AttachmentPending, ResourceMount
 from deerflow.spaces.chat_paths import ChatStoragePaths
 from deerflow.spaces.runtime_owner import StorageRuntimeUnavailable
-from deerflow.utils.file_io import await_drained
+from deerflow.utils.file_io import await_drained, run_file_io
 
 logger = logging.getLogger(__name__)
 
 
 class _ResidentSnapshotChanged(Exception):
     pass
+
+
+class _FileClosureDeferred(Exception):
+    """The confirmed workspace no longer needs, or is not idle for, this close."""
 
 
 class _ResidentAccountingChanged(Exception):
@@ -53,6 +57,7 @@ class ResidentRuntime:
         self.provider, self.attachments = registry.provider, registry.attachments
         self.files = app.state.storage_spaces
         self.foreign_run_blocks = frozenset()
+        self.blocked_file_operations = {}
         self.workspace_qualified = False
         self._qualification_revision = 0
         self._closing_tasks = None
@@ -603,6 +608,69 @@ class ResidentRuntime:
                 self.invalidate_accounting("reconcile-scan-error")
                 raise
 
+    async def _close_for_file_settlement(self, observation, identity, entry, claim, deadline):
+        """Called under this Home's reconciliation fence after full resident confirmation."""
+        from deerflow.spaces.workflows import close
+
+        def idle():
+            return (
+                entry.lock.locked()
+                and entry.reconciling
+                and entry.attachment_id == claim.id
+                and self.app.state.resident_runtime is self
+                and self.attachments.provider.host_id == claim.host_id
+                and self.registry.retained.get(claim.id) == claim
+                and not self.registry.in_flight(identity.id)
+                and not self.registry._has_reservation(entry.home_id)
+                and entry.preparation is None
+                and not self._closing
+                and not self.foreign_run_blocks
+                and not self.accounting_retry
+                and time.monotonic() < deadline
+            )
+
+        if observation.attachment != claim or not idle():
+            return True
+        descriptors = []
+
+        async def admit(session, attachments):
+            if attachments != ((claim.id, claim.container_id),) or not idle():
+                raise _FileClosureDeferred
+            # A concurrent owner update takes precedence. Avoid waiting on
+            # an instance writer while holding the Space parent lock.
+            owners = (await session.scalars(select(AgentInstanceRow.id).where(AgentInstanceRow.home_id == entry.home_id))).all()
+            owner = await session.scalar(select(AgentInstanceRow).where(AgentInstanceRow.id == identity.id).with_for_update(skip_locked=True))
+            if owners != [identity.id] or owner is None or InstanceIdentity.from_row(owner) != identity:
+                raise _FileClosureDeferred
+            descriptors.extend(await observation.acquire_if_current(self.files, session))
+            if not descriptors:
+                raise _FileClosureDeferred
+            attempt = await session.scalar(
+                select(AgentWorkAttemptRow.id).join(AgentWorkRow, AgentWorkRow.id == AgentWorkAttemptRow.work_id).where(AgentWorkRow.instance_id == identity.id, AgentWorkAttemptRow.status.in_(UNRESOLVED)).limit(1)
+            )
+            runs = await self.app.state.run_store._borrowed_inflight(session)
+            self._validate_run_snapshot(runs)
+            if attempt is not None or any(run.get("metadata", {}).get("agent_instance_id") == identity.id or run.get("metadata", {}).get("agent_attachment_id") == claim.id for run in runs) or not idle():
+                raise _FileClosureDeferred
+
+        try:
+            confirmed = await self.attachments.contain_host(claim.id, "outcome-uncertain", admission=admit)
+        except _FileClosureDeferred:
+            return True
+        finally:
+            await await_drained(run_file_io(close, descriptors))
+        if not confirmed and not descriptors:
+            # Native scope acquisition precedes the domain callback. A manager
+            # may already have retired the original graph. Reconcile the new
+            # snapshot under the same deadline if the old observation is stale.
+            async with self.files.registry.host_locked([entry.home_id]) as (session, parents):
+                if not await observation.matches_locked(session, parents.get(entry.home_id)):
+                    raise _ResidentSnapshotChanged(claim.id)
+        logger.warning("agents: workspace %s closure %s for file operation %s in space %s", claim.id, "confirmed" if confirmed else "pending", observation.operation_id, observation.space_id)
+        if confirmed:
+            self.app.state.agent_execution.attachments_fenced += 1
+        return confirmed
+
     async def _reconcile_rows(self, *, attachment_ids=None, deadline):
         """Associate only unique qualified Homes; preserve foreign live owners."""
         runs = await self.inventory_runs()
@@ -760,6 +828,8 @@ class ResidentRuntime:
                                 raise StorageRuntimeUnavailable("Workspace resume lost its exact retained identity")
                             self.registry.retain(fresh)
                             self.registry.associate(identity, self.registry.retained[claim.id], generation=generation, preserve_idle=home_pending)
+                            if home_pending and (observation := self.blocked_file_operations.pop(claim.id, None)) is not None:
+                                return await self._close_for_file_settlement(observation, identity, entry, claim, deadline)
                             return True
                 else:
                     reason = "container-absent"

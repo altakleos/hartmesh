@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
@@ -163,6 +164,46 @@ async def test_use_withdrawn_after_receipt_preflight_cannot_write_bytes(file_adm
     assert entered
     async with e.db.sessions() as reader:
         assert not list(await reader.scalars(select(SpaceFileOperationRow)))
+
+
+@pytest.mark.parametrize("change", ["space_grant", "use", "link", "health", "policy", "disconnect"])
+async def test_refusal_after_file_intent_marks_only_that_write_failed(file_admission, monkeypatch, change):
+    from app.telegram_bots.instance_file_authority import prepare_file_write
+    from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramInstancePolicyRow
+
+    e = file_admission
+    access = await prepare_file_write(e.live.authority, e.link, current=lambda: True)
+    key = uuid4().hex
+    admitted = e.files.registry.admitted
+    changed = False
+
+    @asynccontextmanager
+    async def withdraw_after_intent(**kwargs):
+        nonlocal changed
+        async with admitted(**kwargs) as (session, rows):
+            yield session, rows
+            created = any(isinstance(row, SpaceFileOperationRow) and row.operation_id == key for row in session.new)
+        if created:
+            async with e.db.sessions.begin() as writer:
+                if change == "space_grant":
+                    await writer.execute(delete(SpaceGrantRow).where(SpaceGrantRow.space_id == e.home.id))
+                elif change == "use":
+                    await writer.execute(update(AgentInstanceGrantRow).values(permissions=2))
+                elif change == "policy":
+                    writer.add(TelegramInstancePolicyRow(instance_id=e.link.agent_ref, policy="off", updated_by=e.link.owner_user_id, updated_at=datetime.now(UTC)))
+                else:
+                    values = {"link": {"binding_generation": e.link.binding_generation + 1}, "health": {"health": "conflict"}, "disconnect": {"notices": {"policy_discard": uuid4().hex}}}
+                    await writer.execute(update(TelegramBotLinkRow).where(TelegramBotLinkRow.id == e.link.id).values(**values[change]))
+            changed = True
+
+    monkeypatch.setattr(e.files.registry, "admitted", withdraw_after_intent)
+    with io.BytesIO(b"document") as content, pytest.raises((PermissionError, ValueError)):
+        await access.apply(operation_id=key, name="report.pdf", content=content, size=8)
+    assert changed
+    async with e.db.sessions() as reader:
+        row = await reader.get(SpaceFileOperationRow, (e.home.id, key))
+        assert (row.phase, row.result) == ("failed", None)
+    assert all(not (volume.data_path / "uploads").exists() for volume in e.files.catalog.verified.values())
 
 
 async def test_file_write_rechecks_execution_without_resident_admission(file_admission, monkeypatch):
