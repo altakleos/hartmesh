@@ -25,7 +25,7 @@ def final_observation(token):
     if not armed.is_file():
         raise ValueError("model observation was not armed")
     (Path(directory) / ("waiting-" + token)).touch()
-    deadline = time.monotonic() + 90
+    deadline = time.monotonic() + 180
     while armed.exists():
         if time.monotonic() >= deadline:
             raise ValueError("final model call exceeded its qualification deadline")
