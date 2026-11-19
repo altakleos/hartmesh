@@ -87,6 +87,8 @@ async def test_receipt_settlement_retains_facts_and_only_removes_owned_stages(sp
     unrelated.write_bytes(b"keep")
     directory = volume.control_path / ("stage-" + operation())
     directory.mkdir()
+    empty_stage = volume.control_path / ".mkdir-stage"
+    empty_stage.mkdir(mode=0o700)
     link = volume.control_path / ("stage-" + operation())
     link.symlink_to(unrelated)
     assert await files.settle_interrupted() == 1
@@ -95,6 +97,7 @@ async def test_receipt_settlement_retains_facts_and_only_removes_owned_stages(sp
     assert_host_settlement(result, {"resolution": "host-settled", "value": None, "facts": receipt.value["facts"]})
     assert not receipt.path.exists()
     assert not stage.exists()
+    assert not empty_stage.exists()
     assert unrelated.read_bytes() == b"keep" and directory.is_dir() and link.is_symlink()
 
 

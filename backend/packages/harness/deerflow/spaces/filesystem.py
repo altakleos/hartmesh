@@ -37,6 +37,10 @@ class FileConflict(SpaceConflict):
     """The existing file differs from the revision the caller admitted."""
 
 
+class FileStepRefused(FileConflict):
+    nothing_changed = True
+
+
 class SpaceFull(FileConflict):
     """The filesystem has no room; nothing was published."""
 
@@ -290,7 +294,7 @@ class ConfinedFilesystem:
             os.close(parent)
 
     @staticmethod
-    def _rename_no_replace(source_fd: int, source: str, destination_fd: int, destination: str) -> None:
+    def _rename_no_replace(source_fd: int, source: str, destination_fd: int, destination: str, *, into_descendant: bool = False) -> None:
         libc = ctypes.CDLL(None, use_errno=True)
         operation = getattr(libc, "renameat2", None)
         if operation is None:
@@ -302,6 +306,8 @@ class ConfinedFilesystem:
                 raise FileConflict("Destination already exists")
             if error in (errno.ENOSPC, errno.EDQUOT):
                 raise SpaceFull("The filesystem has no room; nothing was published")
+            if error == errno.EINVAL and into_descendant:
+                raise FileStepRefused("A directory cannot be moved into itself")
             if error in (errno.ENOSYS, errno.EINVAL):
                 raise FilesystemUnavailable("The host cannot supply atomic no-replace publication")
             raise OSError(error, os.strerror(error))
@@ -329,7 +335,7 @@ class ConfinedFilesystem:
         destination_fd = None
         try:
             destination_fd, new_name = self._parent(destination)
-            self._rename_no_replace(source_fd, name, destination_fd, new_name)
+            self._rename_no_replace(source_fd, name, destination_fd, new_name, into_descendant=destination.startswith(source + "/"))
             self.published_action = "rename"
             os.fsync(source_fd)
             os.fsync(destination_fd)

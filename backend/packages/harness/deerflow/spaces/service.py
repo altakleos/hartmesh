@@ -25,9 +25,10 @@ from sqlalchemy.exc import IntegrityError
 
 from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
 from deerflow.persistence.spaces.model import SpaceGrantRow, SpaceRow
+from deerflow.spaces import directory_creation
 from deerflow.spaces.backings import BackingUnavailable, PreparedVolumeCatalog
 from deerflow.spaces.contract import Custody, FeatureBinding, InvalidPrincipal, MutationMode, Permission, PrincipalRef, Space, SpaceConflict, SpaceDenied
-from deerflow.spaces.filesystem import FileConflict, FileTooLarge, UnsafeSpacePath, _path
+from deerflow.spaces.filesystem import FileConflict, FileStepRefused, FileTooLarge, UnsafeSpacePath, _path
 from deerflow.spaces.incarnations import prepare_marker, verify_bound
 from deerflow.spaces.provision import LAYOUT
 from deerflow.spaces.registry import SpaceRegistry, _stored_permissions
@@ -50,12 +51,8 @@ class SpaceOperationPending(StorageOperationPending, SpaceConflict):
         self.cause = cause
 
 
-class _FileStepRefused(FileConflict):
-    nothing_changed = True
-
-
 class _BeforePublication(Exception):
-    """Transport a proven primitive refusal across the file worker boundary."""
+    """A refusal from admission or a primitive known to precede publication."""
 
     def __init__(self, refusal):
         self.refusal = refusal
@@ -464,10 +461,10 @@ class SpaceFiles:
                 published = filesystem.published_action
                 if published is not None and not (published == "mkdir" and action == "put"):
                     raise
-                if isinstance(exc, PermissionError) and exc.errno in (errno.EACCES, errno.EPERM) and action != "mkdir":
-                    refusal = _FileStepRefused("The file step was refused; nothing was changed")
+                if isinstance(exc, PermissionError) and exc.errno in (errno.EACCES, errno.EPERM):
+                    refusal = FileStepRefused("The file step was refused; nothing was changed")
                 elif isinstance(exc, FileTooLarge) and action in {"write", "copy"}:
-                    refusal = _FileStepRefused("File differs from the loaded revision" if action == "write" else "The file is larger than 64 MiB")
+                    refusal = FileStepRefused("File differs from the loaded revision" if action == "write" else "The file is larger than 64 MiB")
                 elif isinstance(exc, (FileConflict, FileNotFoundError, UnsafeSpacePath)):
                     refusal = exc
                 else:
@@ -551,6 +548,25 @@ class SpaceFiles:
             descriptors = await run_file_io(acquire, volumes)
             token = _owner.set((self, frozenset(volumes)))
 
+        async def record_refusal(*, native):
+            # The effect transaction has rolled back. The file-writer lock is
+            # still ours. Mediated receipts also require the current grants
+            # for every source and destination the controller was using.
+            try:
+                if native:
+                    admission = self.registry.host_locked([destination_id])
+                else:
+                    admission = self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id))
+                async with admission as (session, _):
+                    operation = await session.get(SpaceFileOperationRow, (destination_id, operation_id))
+                    self._same_operation(operation, actor, generation, request)
+                    if operation.phase != "pending":
+                        raise SpaceConflict("The operation was settled before its refusal was recorded")
+                    operation.phase = "failed"
+                    operation.result = None
+            except Exception as exc:
+                raise SpaceOperationPending("File refusal could not be confirmed; inspect recovery status") from exc
+
         async def mutate():
             async with self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id)) as (session, rows):
                 if controller_admission is not None:
@@ -566,37 +582,65 @@ class SpaceFiles:
                 await own(volumes)
                 if request["action"] == "copy":
                     await self._transfer_audience(session, rows, actor, request)
-                session.add(SpaceFileOperationRow(space_id=destination_id, operation_id=operation_id, actor_kind=actor.kind, actor_id=actor.subject_id, generation=generation, phase="pending", request=request))
+                # Only native resources use host settlement. A mediated
+                # resource keeps its controller's recovery and file protocol.
+                native = rows[destination_id][0].mode == MutationMode.NATIVE
+                staged_directory = native and request["action"] == "mkdir"
+                intent = SpaceFileOperationRow(space_id=destination_id, operation_id=operation_id, actor_kind=actor.kind, actor_id=actor.subject_id, generation=generation, phase="pending", request=request)
+                session.add(intent)
+                preparation_refusal = None
+                if staged_directory:
+                    try:
+                        intent.result = await run_file_io(self._direct_io, volumes[destination_id], "mkdir", directory_creation.prepare)
+                    except _BeforePublication as failure:
+                        intent.phase = "failed"
+                        preparation_refusal = failure.refusal
+            if preparation_refusal is not None:
+                raise preparation_refusal
+            admitted_effect, committing = False, False
             try:
                 async with self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id)) as (session, rows):
+                    admitted_effect = True
                     operation = await session.get(SpaceFileOperationRow, (destination_id, operation_id))
                     self._same_operation(operation, actor, generation, request)
                     if operation.phase != "pending":
                         raise SpaceOperationPending("The operation was settled before publication")
                     volumes = {key: await self._volume(session, row) for key, (row, _) in rows.items()}
-                    if controller_admission is not None:
-                        await controller_admission(session, rows)
-                    if request["action"] == "copy":
-                        await self._transfer_audience(session, rows, actor, request)
-                    result = await run_file_io(call, volumes)
+                    try:
+                        if controller_admission is not None:
+                            await controller_admission(session, rows)
+                        if request["action"] == "copy":
+                            await self._transfer_audience(session, rows, actor, request)
+                    except Exception as exc:
+                        if not native:
+                            raise
+                        raise _BeforePublication(exc) from exc
+                    if staged_directory:
+                        result = await run_file_io(call, volumes, operation.result)
+                    else:
+                        result = await run_file_io(call, volumes)
                     operation.phase = "complete"
                     operation.result = {"value": result}
+                    committing = True
                 return result
             except _BeforePublication as failure:
-                # The effect transaction rolled back, including changes made by
-                # its admission callback. Keep host ownership until the exact
-                # failed row is committed, before reporting a clean refusal.
-                try:
-                    async with self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id)) as (session, _):
-                        operation = await session.get(SpaceFileOperationRow, (destination_id, operation_id))
-                        self._same_operation(operation, actor, generation, request)
-                        if operation.phase != "pending":
-                            raise SpaceConflict("The operation was settled before its refusal was recorded")
-                        operation.phase = "failed"
-                except Exception as exc:
-                    raise SpaceOperationPending("File refusal could not be confirmed; inspect recovery status") from exc
-                raise failure.refusal from failure.__cause__
+                await record_refusal(native=native)
+                raise failure.refusal from None
             except Exception as exc:
+                if native and not admitted_effect and isinstance(exc, (SpaceDenied, InvalidPrincipal, SpaceConflict)):
+                    await record_refusal(native=True)
+                    raise
+                if committing and staged_directory:
+                    # The effect is durable. A fresh receipt may resolve a lost
+                    # commit acknowledgement without repeating the creation.
+                    try:
+                        async with self.registry._sf() as session:
+                            exact = await session.get(SpaceFileOperationRow, (destination_id, operation_id))
+                            self._same_operation(exact, actor, generation, request)
+                            if exact.phase == "complete" and exact.result == {"value": None}:
+                                return None
+                    except Exception as read_error:
+                        raise SpaceOperationPending("Directory creation could not be confirmed; inspect recovery status") from read_error
                 # Filesystem publication and database commit cannot be one atomic
                 # transaction. Never erase an intent or automatically replay it
                 # when the publication/commit result is uncertain.
@@ -766,7 +810,7 @@ class SpaceFiles:
 
         return await await_drained(perform())
 
-    async def settle_interrupted(self, *, space_id: str | None = None, operation_id: str | None = None) -> int:
+    async def settle_interrupted(self, *, space_id: str | None = None, operation_id: str | None = None, blocked_residents=None) -> int:
         from deerflow.spaces.maintenance import settle_interrupted
 
         if (space_id is None) != (operation_id is None):
@@ -774,7 +818,7 @@ class SpaceFiles:
         if space_id is not None:
             self._operation_id(space_id)
             self._operation_id(operation_id)
-        return await await_drained(settle_interrupted(self, space_id=space_id, operation_id=operation_id))
+        return await await_drained(settle_interrupted(self, space_id=space_id, operation_id=operation_id, blocked_residents=blocked_residents))
 
     @staticmethod
     def _provenance(request, on_behalf_of, *, size=None):
@@ -927,7 +971,7 @@ class SpaceFiles:
             destination_id=space_id,
             operation_id=operation_id,
             request=self._provenance({"action": "mkdir", "path": path}, on_behalf_of),
-            call=lambda volumes: self._direct_io(volumes[space_id], "mkdir", lambda fs: fs.mkdir(path)),
+            call=lambda volumes, identity: self._direct_io(volumes[space_id], "mkdir", lambda fs: directory_creation.publish(fs, path, identity)),
             controller_admission=controller_admission,
         )
 

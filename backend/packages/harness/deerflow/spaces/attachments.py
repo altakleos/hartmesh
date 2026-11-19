@@ -440,6 +440,7 @@ class SpaceAttachments:
             retry_reason = reason
             unknown_attachment = False
             callback_rejected = False
+            intent_committed = False
             try:
                 async with self.registry._sf() as session:
                     row = await session.get(SpaceAttachmentRow, attachment_id)
@@ -469,6 +470,7 @@ class SpaceAttachments:
                             self._record_closure(record, kind="host", subject_id=self.provider.host_id, reason=stored_reason)
                             record.phase = "fence_pending"
                         stored_reason = self._closure_reason(record, stored_reason)
+                    intent_committed = True
                     async with self.registry.host_locked(parent_ids) as (session, parents):
                         if set(parents) != set(parent_ids):
                             raise AttachmentPending("Attachment resources are unavailable")
@@ -489,7 +491,11 @@ class SpaceAttachments:
                     raise
                 # Inputs for host replay, rather than historical attribution:
                 # a first human closure reason is not a valid host API input.
-                self.uncontained[attachment_id] = retry_reason
+                # A domain callback cannot authorize an unconditional retry
+                # before the intent commit is confirmed. After a lost reply,
+                # reconciliation reads the actual durable phase on its next pass.
+                if admission is None or intent_committed:
+                    self.uncontained[attachment_id] = retry_reason
                 logger.warning("Storage host containment remains pending for %s (%s)", attachment_id, type(exc).__name__)
                 return False
             self.uncontained.pop(attachment_id, None)

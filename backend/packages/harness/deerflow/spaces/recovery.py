@@ -209,7 +209,16 @@ class SpaceRecovery:
 
             attachments = {a.id: a for a, _ in await SpaceAttachments._current(session, [space_id])}
             return {
-                "operations": [{"operation_id": op.operation_id, "generation": op.generation, "phase": op.phase, "request": op.request, "result": op.result} for op in operations],
+                "operations": [
+                    {
+                        "operation_id": op.operation_id,
+                        "generation": op.generation,
+                        "phase": op.phase,
+                        "request": op.request,
+                        "result": None if op.phase == "pending" and isinstance(op.request, dict) and op.request.get("action") == "mkdir" else op.result,
+                    }
+                    for op in operations
+                ],
                 "backups": [asdict(Backup(b.id, b.space_id, b.generation, b.size_bytes, b.sha256, b.consistency)) for b in backups],
                 "attachments": [{"id": a.id, "incarnation": a.incarnation, "phase": a.phase, "actor_kind": a.actor_kind, "actor_id": a.actor_id} for a in attachments.values()],
                 "can_fence": self.attachments is not None,

@@ -12,11 +12,12 @@ from deerflow_extension_api.storage import StorageConflict
 from test_storage_spaces_maintenance import intent, outcome
 from test_storage_spaces_service import space_file_storage as space_file_storage
 
-from deerflow.persistence.spaces.files import SpaceBackingRow
+from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.spaces.facade import HostStorageProvider
 from deerflow.spaces.filesystem import ConfinedFilesystem, FilesystemUnavailable
-from deerflow.spaces.service import SpaceOperationPending
+from deerflow.spaces.recovery import SpaceRecovery
+from deerflow.spaces.service import SpaceFiles, SpaceOperationPending
 
 
 async def root_for(sf, catalog, space):
@@ -50,19 +51,200 @@ async def test_permission_refused_before_file_effect_is_terminal(space_file_stor
     item.write_bytes(b"original")
     folder.chmod(0)
     try:
-        for action in ("write", "rename", "remove", "put", "copy"):
+        for action in ("write", "rename", "remove", "put", "copy", "mkdir"):
             key = operation()
             with pytest.raises(StorageConflict) as caught:
                 await change(files, source, target, action, key, "private/original")
             assert getattr(caught.value, "nothing_changed", False), action
             assert await outcome(sf, target, key) == ("failed", None)
-        key = operation()
-        with pytest.raises(SpaceOperationPending):
-            await change(files, source, target, "mkdir", key, "private/new")
-        assert await outcome(sf, target, key) == ("pending", None)
     finally:
         folder.chmod(0o700)
     assert list(folder.iterdir()) == [item] and item.read_bytes() == b"original"
+
+
+@pytest.mark.asyncio
+async def test_folder_move_into_descendant_fails_cleanly(space_file_storage):
+    files, sf, catalog = space_file_storage
+    space = await home(files)
+    root = await root_for(sf, catalog, space)
+    (root / "notes" / "drafts").mkdir(parents=True)
+    key = operation()
+    with pytest.raises(StorageConflict) as caught:
+        await files.rename(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=key, path="notes", destination="notes/drafts/old")
+    assert getattr(caught.value, "nothing_changed", False)
+    assert await outcome(sf, space, key) == ("failed", None)
+    assert (root / "notes" / "drafts").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_unpublished_directory_is_settled_and_its_one_stage_reclaimed(space_file_storage, monkeypatch):
+    files, sf, catalog = space_file_storage
+    space = await home(files)
+    root = await root_for(sf, catalog, space)
+    existing = root / "notes"
+    existing.mkdir()
+    original = existing.stat()
+    key = operation()
+
+    def cut_off(*args):
+        raise OSError(errno.EIO, "publication unconfirmed")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(ConfinedFilesystem, "_rename_no_replace", staticmethod(cut_off))
+        with pytest.raises(SpaceOperationPending):
+            await files.mkdir(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=key, path="notes")
+    stage = root.parent / "control" / ".mkdir-stage"
+    phase, evidence = await outcome(sf, space, key)
+    assert phase == "pending" and stage.stat().st_ino == evidence["inode"]
+    [reported] = (await SpaceRecovery(files).status(actor=ALICE, space_id=space.id))["operations"]
+    assert reported["phase"] == "pending" and reported["result"] is None
+    assert await SpaceFiles(files.registry, catalog).settle_interrupted() == 1
+    phase, resolution = await outcome(sf, space, key)
+    assert phase == "failed"
+    assert_host_settlement(resolution, {"resolution": "host-settled"})
+    assert not stage.exists() and os.path.samestat(original, existing.stat())
+
+
+@pytest.mark.asyncio
+async def test_mkdir_flush_checks_the_parent_that_contains_the_named_directory(space_file_storage, monkeypatch):
+    files, sf, catalog = space_file_storage
+    space = await home(files)
+    root = await root_for(sf, catalog, space)
+    parent = root / "pages"
+    parent.mkdir()
+    original = parent.stat()
+    fsync = os.fsync
+    moved = False
+
+    def flush(fd):
+        nonlocal moved
+        result = fsync(fd)
+        if not moved and os.path.samestat(original, os.fstat(fd)):
+            moved = True
+            parent.rename(root / "previous")
+            parent.mkdir()
+            (root / "previous" / "notes").rename(parent / "notes")
+        return result
+
+    key = operation()
+    with monkeypatch.context() as fault:
+        fault.setattr(os, "fsync", flush)
+        with pytest.raises(SpaceOperationPending):
+            await files.mkdir(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=key, path="pages/notes")
+    assert moved and (parent / "notes").is_dir()
+    assert (await outcome(sf, space, key))[0] == "pending"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("receipt", ["different", "unavailable"])
+async def test_mkdir_with_lost_commit_ack_needs_a_readable_matching_receipt(space_file_storage, monkeypatch, receipt):
+    files, sf, catalog = space_file_storage
+    space = await home(files)
+    root = await root_for(sf, catalog, space)
+    key = operation()
+    admitted = files.registry.admitted
+
+    @asynccontextmanager
+    async def lost_ack(**kwargs):
+        async with admitted(**kwargs) as entry:
+            yield entry
+        if (root / "notes").is_dir():
+            if receipt == "different":
+                async with sf.begin() as writer:
+                    row = await writer.get(SpaceFileOperationRow, (space.id, key))
+                    row.request = {**row.request, "path": "other"}
+            else:
+
+                def unavailable():
+                    raise OSError("database unavailable")
+
+                monkeypatch.setattr(files.registry, "_sf", unavailable)
+            raise OSError("commit acknowledgement lost")
+
+    monkeypatch.setattr(files.registry, "admitted", lost_ack)
+    with pytest.raises(SpaceOperationPending):
+        await files.mkdir(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=key, path="notes")
+    assert (root / "notes").is_dir()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["durable", "no-inode-generation", "replaced", "flush", "before-commit", "after-commit"])
+async def test_mkdir_ownership_refusal_requires_durable_exact_directory(space_file_storage, monkeypatch, boundary):
+    files, sf, catalog = space_file_storage
+    space = await home(files)
+    root = await root_for(sf, catalog, space)
+    directory = root / "notes"
+    key = operation()
+    args = dict(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=key, path="notes")
+    flushed, refused = False, False
+    fsync = os.fsync
+
+    def refuse(*args, **kwargs):
+        nonlocal refused
+        refused = True
+        assert directory.is_dir()
+        if boundary == "replaced":
+            directory.rename(root / "original")
+            directory.mkdir()
+        raise PermissionError(errno.EPERM, "ownership refused")
+
+    def flush(fd):
+        nonlocal flushed
+        if os.path.samestat(os.fstat(fd), root.stat()):
+            if boundary == "flush":
+                raise OSError(errno.EIO, "parent flush unconfirmed")
+            flushed = True
+        return fsync(fd)
+
+    admitted = files.registry.admitted
+
+    @asynccontextmanager
+    async def lose_commit_ack(**kwargs):
+        async with admitted(**kwargs) as value:
+            yield value
+            if refused and boundary == "before-commit":
+                raise OSError("commit unconfirmed")
+        if refused and boundary == "after-commit":
+            raise OSError("commit unconfirmed")
+
+    with monkeypatch.context() as fault:
+        if boundary == "no-inode-generation":
+            import fcntl
+
+            def unsupported(*args):
+                raise OSError(errno.ENOTTY, "inode version unavailable")
+
+            fault.setattr(fcntl, "ioctl", unsupported)
+        fault.setattr(os, "chown", refuse)
+        fault.setattr(os, "fchown", refuse)
+        fault.setattr(os, "fsync", flush)
+        fault.setattr(files.registry, "admitted", lose_commit_ack)
+        if boundary in {"durable", "after-commit", "no-inode-generation"}:
+            assert await files.mkdir(**args) is None
+        else:
+            with pytest.raises(SpaceOperationPending):
+                await files.mkdir(**args)
+    assert refused and directory.is_dir()
+    restarted = SpaceFiles(files.registry, catalog)
+    if boundary in {"durable", "after-commit", "no-inode-generation"}:
+        assert flushed
+        assert await outcome(sf, space, key) == ("complete", {"value": None})
+        assert await restarted.mkdir(**args) is None
+    else:
+        phase, evidence = await outcome(sf, space, key)
+        assert phase == "pending" and evidence["inode"] > 0
+        if boundary == "flush":
+            with monkeypatch.context() as still_broken:
+                still_broken.setattr(os, "fsync", flush)
+                assert await restarted.settle_interrupted() == 0
+        if boundary == "replaced" or evidence["inode_generation"] is None:
+            assert await restarted.settle_interrupted() == 0
+            assert await outcome(sf, space, key) == ("pending", evidence)
+        else:
+            assert await restarted.settle_interrupted() == 1
+            phase, result = await outcome(sf, space, key)
+            assert phase == "complete"
+            assert_host_settlement(result, {"resolution": "host-settled", "value": None})
 
 
 @pytest.mark.asyncio
@@ -197,6 +379,7 @@ async def test_file_refusal_requires_confirmed_effect_and_commit_boundary(space_
     root = await root_for(sf, catalog, target)
     real_replace, real_unlink = os.replace, os.unlink
     original_admit = files.registry.admitted
+    original_host_locked = files.registry.host_locked
     for number in (errno.EPERM, errno.EACCES):
         for fault in ("before-publish", "stage-cleanup", "commit", "refusal-commit", "authority"):
             key, count = operation(), 0
@@ -221,13 +404,21 @@ async def test_file_refusal_requires_confirmed_effect_and_commit_boundary(space_
                     if count == 2 and fault == "authority":
                         raise PermissionError(number, "authority changed")
                     yield value
-                    if (count, fault) in {(2, "commit"), (3, "refusal-commit")}:
+                    if count == 2 and fault == "commit":
+                        raise PermissionError(number, "commit unconfirmed")
+
+            @asynccontextmanager
+            async def host_locked(*args, **kwargs):
+                async with original_host_locked(*args, **kwargs) as value:
+                    yield value
+                    if fault == "refusal-commit":
                         raise PermissionError(number, "commit unconfirmed")
 
             with monkeypatch.context() as inject:
                 inject.setattr(os, "replace", replace)
                 inject.setattr(os, "unlink", unlink)
                 inject.setattr(files.registry, "admitted", admitted)
+                inject.setattr(files.registry, "host_locked", host_locked)
                 with pytest.raises(StorageConflict) as caught:
                     await change(files, target, target, "write", key, path)
             if fault == "before-publish":

@@ -1030,12 +1030,18 @@ exit 2 means recovery or Gateway settlement remains unfinished. See
 [the command guide](docs/STORAGE_SPACES.md#ai-agent-operator-commands) before recovery.
 
 When a Home file change is interrupted, other employees can keep working while
-the service checks the affected workspace. A retained workspace can hold up
-settlement until its idle timeout. The service restores access to a Home root
+the service checks the affected workspace. Once active work ends, maintenance
+can close that workspace and check whether the file change took effect. The
+next turn starts a fresh workspace. Closing stops background programs, which
+can leave a file unfinished. The service restores access to a Home root
 only after verifying its current employee, mounted volume, and private binding.
 If an upload, edit, rename, or delete loses its response, **Check again** reads
 the original operation's status. An unknown outcome calls for inspecting the
 current files before submitting a new change.
+
+If a workspace repeatedly loses access to its Home, AI assistants and AI
+employees can remain unavailable. Ask the provider to stop the affected
+workspace and repair its Home.
 
 Preparation also publishes a private `.native-creates` directory outside storage
 views and temporary probes. Managed native chats now record each container request

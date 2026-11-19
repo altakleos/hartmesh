@@ -7,6 +7,9 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      backend_image:
+        description: Optional published backend digest for mounted bundle qualification
+        type: string
       verify_home_rollback:
         description: Rehearse in-place Home rollback against the two supported older builds
         type: boolean
@@ -84,12 +87,19 @@ jobs:
           curl -fsS -o /dev/null http://127.0.0.1:18080/health
 
       - name: 6 Build the backend image from this commit
+        if: inputs.backend_image == ''
         run: docker build --build-arg UV_EXTRAS=postgres --tag localhost:80/hartmesh-backend:ci --file backend/Dockerfile .
 
-      - name: 7 Give the image a digest reference
+      - name: Start the registry for locally built images
+        if: inputs.backend_image == '' || inputs.verify_home_rollback
         run: |
           docker run -d --name ci-registry -p 127.0.0.1:80:5000 registry:2
           for attempt in $(seq 1 20); do curl -fsS http://127.0.0.1/v2/ && break; sleep 0.5; done
+          curl -fsS http://127.0.0.1/v2/
+
+      - name: 7 Give the image a digest reference
+        if: inputs.backend_image == ''
+        run: |
           # The containerd image store takes a portless localhost for https, and plain http only with port 80 named.
           docker push localhost:80/hartmesh-backend:ci
           backend_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' localhost:80/hartmesh-backend:ci)
@@ -97,6 +107,16 @@ jobs:
           echo "BACKEND_REF=$backend_ref" >> "$GITHUB_ENV"
           docker run --rm --entrypoint sh "$backend_ref" -c 'set -eu; command -v nsenter; command -v setpriv; docker --version' > "$EVIDENCE/backend-tools.txt"
           cat "$EVIDENCE/backend-tools.txt"
+
+      - name: Use the requested backend candidate
+        if: inputs.backend_image != ''
+        env:
+          CANDIDATE: ${{ inputs.backend_image }}
+        run: |
+          [[ "$CANDIDATE" =~ ^ghcr\.io/altakleos/hartmesh-backend@sha256:[0-9a-f]{64}$ ]]
+          docker pull "$CANDIDATE"
+          echo "BACKEND_REF=$CANDIDATE" >> "$GITHUB_ENV"
+          docker run --rm --entrypoint sh "$CANDIDATE" -c 'set -eu; command -v nsenter; command -v setpriv; docker --version' > "$EVIDENCE/backend-tools.txt"
 
       - name: 8 Install the bundle at /opt/hartmesh with the built image
         run: |
@@ -106,7 +126,6 @@ jobs:
           sudo find /opt/hartmesh -type f -exec chmod 0644 {} +
           sudo sed -i -E "s#ghcr\.io/altakleos/hartmesh-backend@sha256:[0-9a-f]{64}#${BACKEND_REF}#g" /opt/hartmesh/compose.yaml /opt/hartmesh/images.txt
           test "$(grep -c -F "$BACKEND_REF" /opt/hartmesh/compose.yaml)" = 3
-          if grep -q 'ghcr.io/altakleos/hartmesh-backend@' /opt/hartmesh/compose.yaml; then exit 1; fi
 
       - name: Build the candidate product UI and install its browser rehearsal
         if: github.event_name == 'workflow_dispatch' && inputs.verify_home_rollback
@@ -255,6 +274,23 @@ jobs:
           assert not tree.findall(".//skipped"), "an acceptance case was skipped"
           assert not tree.findall(".//failure") and not tree.findall(".//error")
           PY
+
+      - name: Measure Home settlement and the first fresh answer
+        env:
+          HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
+          HARTMESH_BUNDLE_URL: http://localhost:2026
+          HARTMESH_BUNDLE_PROJECT_DIR: /opt/hartmesh
+          HARTMESH_BUNDLE_ENV_FILE: /srv/hartmesh/.env
+          HARTMESH_BUNDLE_ADMIN_EMAIL: admin@example.com
+          HARTMESH_BUNDLE_ADMIN_PASSWORD: 'Acceptance-Admin-2026!'
+          HARTMESH_BUNDLE_RUNTIME: hartmesh-ci
+        working-directory: backend
+        run: |
+          PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 .venv/bin/python -m pytest tests/test_compose_home_settlement.py \
+            -q --tb=short --maxfail=1 --junitxml="$EVIDENCE/settlement.xml"
+          for workload in idle assignment restart; do
+            jq -e --arg image "$BACKEND_REF" --arg workload "$workload" '.backend == $image and .workload == $workload and .eligible_to_settlement_seconds < 150' "$EVIDENCE/workspace-settlement-$workload.json"
+          done
 
       - name: Qualify in-place Home rollback on both older builds
         if: github.event_name == 'workflow_dispatch' && inputs.verify_home_rollback
