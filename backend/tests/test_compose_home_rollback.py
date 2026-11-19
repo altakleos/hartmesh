@@ -5,6 +5,7 @@ import os
 import uuid
 from pathlib import Path
 
+import httpx
 import pytest
 
 if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("HARTMESH_VERIFY_HOME_ROLLBACK") != "1":
@@ -28,9 +29,20 @@ def stop_gateway(bundle):
     assert "Application shutdown complete." in log.stderr + log.stdout
 
 
-def start_gateway(bundle):
+def start_gateway(bundle, session):
     bundle.run("up", "-d", "--wait", "--no-deps", "gateway", timeout=300)
-    bundle.run("exec", "-T", "nginx", "nginx", "-s", "reload")
+    # The shipped non-root master uses the rendered config and its /tmp PID.
+    # After a replacement the previous worker can briefly retain a DNS answer.
+    bundle.run("exec", "-T", "nginx", "nginx", "-c", "/tmp/nginx.conf", "-s", "reload")
+
+    def through_proxy():
+        try:
+            response = session.request("GET", "/health/ready", expected=(200, 502, 503, 504), timeout=5)
+        except httpx.TransportError:
+            return False
+        return response.status_code == 200 and response.json()["status"] == "ready"
+
+    eventually(through_proxy, timeout=30, interval=1)
     gateway = bundle.run("ps", "--no-trunc", "--quiet", "gateway").stdout.strip()
     (entry,) = json.loads(bundle.invoke(["docker", "inspect", gateway]).stdout)
     return entry
@@ -116,7 +128,7 @@ def test_reuse_checked_home_data_on_older_build(compose, session, version):
     assert any(row["space_id"] == affected["home_id"] and row["action"] == "copy" and row["attachments"] for row in blocked["blockers"])
     (evidence.parent / f"rollback-{version}-refusal.json").write_text(json.dumps(blocked, sort_keys=True), encoding="utf-8")
 
-    start_gateway(compose)
+    start_gateway(compose, session)
     await_execution_ready(session)
     summary = compose.ai("status")
     assert summary["pending_operations_truncated"] and len(summary["pending_operations"]) == 200
@@ -153,7 +165,7 @@ def test_reuse_checked_home_data_on_older_build(compose, session, version):
     cleared = offline_check(compose, expected=0)
     assert cleared["checked"] == cleared["total"] == count and cleared["pages"] >= 2 and cleared["blocked"] == 0
 
-    entry = start_gateway(older)
+    entry = start_gateway(older, session)
     assert entry["Config"]["Image"] == expected_image and entry["State"]["Health"]["Status"] == "healthy"
     readiness = await_execution_ready(session)
     legacy_status = older.ai("status")
@@ -188,5 +200,5 @@ def test_reuse_checked_home_data_on_older_build(compose, session, version):
     # Remove only this case's synthetic records after the older build has drained.
     for space in (quiet["home_id"], affected["home_id"], user_space):
         compose.psql(f"DELETE FROM storage_space_file_operations WHERE space_id={sql(space)} AND left(operation_id,24)={sql(batch)}")
-    start_gateway(compose)
+    start_gateway(compose, session)
     await_execution_ready(session)

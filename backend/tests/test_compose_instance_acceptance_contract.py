@@ -248,6 +248,21 @@ def test_manual_home_rollback_gate_checks_both_immutable_older_bundles():
     assert '["skipped", "failure", "error"]' in gate["run"]
 
 
+def test_rollback_reloads_the_shipped_nginx_master_and_checks_the_public_route():
+    compose = yaml.safe_load((ROOT / "deploy/compose/compose.yaml").read_text(encoding="utf-8"))
+    assert compose["services"]["nginx"]["command"] == ["sh", "/opt/hartmesh/nginx/render.sh"]
+    render = (ROOT / "deploy/compose/nginx/render.sh").read_text(encoding="utf-8")
+    assert 'TARGET="${HARTMESH_NGINX_TARGET:-/tmp/nginx.conf}"' in render and 'exec nginx -c "$TARGET"' in render
+    config = (ROOT / "deploy/compose/nginx/nginx.conf").read_text(encoding="utf-8")
+    assert "pid /tmp/nginx.pid;" in config and "location /health {" in config
+    tree = ast.parse((ROOT / "backend/tests/test_compose_home_rollback.py").read_text(encoding="utf-8"))
+    start = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "start_gateway")
+    commands = [tuple(ast.literal_eval(arg) for arg in call.args) for call in ast.walk(start) if isinstance(call, ast.Call) and ast.unparse(call.func) == "bundle.run"]
+    assert commands[:2] == [("up", "-d", "--wait", "--no-deps", "gateway"), ("exec", "-T", "nginx", "nginx", "-c", "/tmp/nginx.conf", "-s", "reload")]
+    assert "'GET', '/health/ready'" in ast.unparse(start)
+    assert "eventually(through_proxy" in ast.unparse(start)
+
+
 def test_candidate_browser_rehearsal_uses_the_built_product_ui_and_real_file_action():
     workflow = yaml.safe_load((ROOT / ".github/workflows/compose-instances.yml").read_text(encoding="utf-8"))
     steps = workflow["jobs"]["bundle-instances"]["steps"]
