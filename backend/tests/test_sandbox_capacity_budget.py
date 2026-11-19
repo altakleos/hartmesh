@@ -19,7 +19,7 @@ asserts on ``provider._sandboxes`` passes on the defect, because the defect
 tracks its overshoot perfectly well.
 
 **Saturation is constructed, because it does not occur on its own.** Six
-saturation events across four releases of estate qualification every one found
+saturation events across four releases of operator qualification every one found
 a warm entry to evict: ``Evicted warm-pool sandbox ... to stay within
 replicas=2`` six times and the soft-limit branch zero times. Both slots merely
 *occupied* takes the path that already worked. The breach needs both slots
@@ -288,7 +288,7 @@ def test_an_in_process_reuse_at_capacity_takes_no_slot(tmp_path, monkeypatch):
 def test_eviction_is_preferred_to_waiting_when_something_is_parked(tmp_path, monkeypatch):
     """A parked container is the cheap slot and is taken without a wait.
 
-    This is the path the estate's six saturation events actually took, and it
+    This is the path all six observed saturation events took, and it
     must keep working unchanged: the budget is what is new, not the eviction.
     """
     provider, backend = _make_provider(tmp_path, monkeypatch, replicas=2)
@@ -471,7 +471,7 @@ def test_a_set_whose_teardown_did_not_confirm_occupies_a_slot_in_the_count(tmp_p
     This one has nothing active and nothing to evict, so the only thing that
     can refuse the second acquisition is the quarantined set occupying a slot.
 
-    The case the estate actually produces: a ``docker stop`` that times out
+    The case seen in operation: a ``docker stop`` that times out
     under runsc leaves a container running that nobody can confirm gone.
     """
     provider, backend = _make_provider(tmp_path, monkeypatch, replicas=2)

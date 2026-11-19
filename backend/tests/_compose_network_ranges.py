@@ -9,7 +9,7 @@ same operator's networks, so both answer to one exclusion list, and it lives
 here rather than in either test module so the two cannot drift apart.
 
 ``EXTERNAL_RANGES`` is that operator's own address space as recorded on
-2026-09-08; the two kosmos /16s (pods, services) are the ones the tenant
+2026-09-08; the two /16s of its Kubernetes cluster (pods, services) are the ones the tenant
 profile's ``172.30.10.0/24`` sat inside, and ``192.168.200.0/24`` is the one the
 development stack sat on.
 
