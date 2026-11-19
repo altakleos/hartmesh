@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.62] - 2026-11-19
+
+### Fixed
+
+- An interrupted file operation in an AI employee's Home no longer blocks
+  other employees from working after the writer exits. For a verified,
+  host-owned Home, the Gateway restores owner access to the root directory
+  during startup and periodic maintenance.
+- After an interrupted file operation, the web UI checks the status of the
+  original request without sending the file or repeating the mutation. The
+  web UI and Telegram distinguish a write refused before publication from a
+  write whose outcome is still uncertain. Extensions can inspect the
+  `nothing_changed` attribute on the existing conflict error when the file
+  operation is known to have stopped before publication.
+
+### Operations
+
+- Operators can page through the pending file operations inventory with
+  `ai pending`. The Compose guide describes how to drain writers and use
+  `check-rollback` before starting an older Gateway on the current data.
+
+### Schema changes
+
+- No database schema changes since v2.2.0+hartmesh.61.
+
 ## [2.2.0+hartmesh.61] - 2026-11-18
 
 ### Changed
