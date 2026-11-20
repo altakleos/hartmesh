@@ -33,17 +33,28 @@ export function ArtifactPreviewError({
   isMock,
   message,
   downloadLabel,
+  retry,
 }: {
   filepath: string;
   threadId: string;
   isMock?: boolean;
   message: string;
   downloadLabel: string;
+  retry?: { label: string; onClick: () => void };
 }) {
   return (
-    <div className="flex size-full items-center justify-center p-6">
+    <div
+      role="group"
+      aria-label={message}
+      className="flex size-full items-center justify-center p-6"
+    >
       <div className="flex max-w-sm flex-col items-center gap-4 text-center">
         <p className="text-muted-foreground text-sm">{message}</p>
+        {retry && (
+          <Button onClick={retry.onClick} variant="outline">
+            {retry.label}
+          </Button>
+        )}
         <Button asChild>
           <a
             href={urlOfArtifact({

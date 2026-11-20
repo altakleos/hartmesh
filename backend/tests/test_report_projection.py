@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+from _projection_support import ready_projection_host
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 
@@ -43,6 +44,7 @@ def client_for(*, owner=True, installed=True, enabled=True):
     app.state.extensions, diagnostics = load_extensions(specs)
     assert not diagnostics
     app.include_router(artifacts.router)
+    app.router.lifespan_context = ready_projection_host
     return TestClient(app)
 
 

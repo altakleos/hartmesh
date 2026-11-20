@@ -10,8 +10,9 @@ artifact-bearing `PluginContribution` explicitly negotiates `api_version=2`, whi
 page-only v1 contributions remain compatible. Registration validates literal
 suffixes, IDs, strict byte budgets and unique compatibility queries atomically.
 The generic artifact route resolves only installed declarations, after the
-existing read/owner gate. It reads one no-follow source descriptor and runs the
-sync projector in a drained worker, returning the full captured source SHA-256.
+read/owner gate. Hash a no-follow source, then reopen under the worker slot.
+Return the captured bytes' SHA-256 after rechecking authority. Accept only
+importable module-level projectors and drain the bounded child on every exit.
 Canonical downloads bypass projection. Public metadata exposes no callback or
 source configuration. See [the capability contract](../../../../../contracts/artifact_view/plugins.md).
 

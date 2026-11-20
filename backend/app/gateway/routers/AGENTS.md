@@ -8,10 +8,11 @@ never project a synthetic owner.
 Artifact `preview=namespace/id` uses `_artifact_projection.py`: match installed,
 enabled literal suffixes/compatibility queries after the read/owner fence.
 `report_preview=true` uses that fence for output reports. Public descriptors expose
-budgets/markers only. Capture one bounded no-follow snapshot; project/serialize
-in a drained worker, with original-byte SHA-256 ETags. Source/response limits are
-16/1 MiB. No cache, report mutation or ordinary/download projection. Unsupported
-capabilities return 501 for bounded source fallback.
+budgets/markers only. Hash admitted descriptors in chunks; read a full source only after obtaining the
+bounded worker slot. Return the projected snapshot's SHA-256 ETag. Refresh owner,
+credential, binding and Space access before delivery, including on memo hits.
+The projection host owns capacity, byte budgets, subprocess cleanup and caching.
+Download and ordinary reads preserve canonical bytes.
 Managed chat files use `chat_files.py`/`ChatUploadSession`: fresh human User
 admission, pinned descriptors and private quota-counted stages. Shared reads refresh
 Company admission. Retain ranges, ZIP-member/projector budgets and private no-store

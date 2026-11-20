@@ -53,7 +53,7 @@ import {
   reconcileArtifactDraft,
 } from "@/core/artifacts/editing";
 import { useArtifactContent } from "@/core/artifacts/hooks";
-import { loadArtifactContent } from "@/core/artifacts/loader";
+import { loadArtifactContent, PreviewBusyError } from "@/core/artifacts/loader";
 import { getArtifactViewState } from "@/core/artifacts/preview";
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import {
@@ -247,11 +247,13 @@ export function ArtifactFileDetail({
     fullContentRequested,
     loadFullContent,
     loadSourcePreview,
+    retryPreview,
     isLoading,
     error,
   } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
+    viewerId: user?.id,
     enabled: (isCodeFile || Boolean(installation)) && !isWriteFile,
     ...(presentation ? { presentation } : {}),
   });
@@ -275,6 +277,9 @@ export function ArtifactFileDetail({
   ]);
   const [failedPresentation, setFailedPresentation] = useState<string | null>(
     null,
+  );
+  const binaryPresentationFailed = Boolean(
+    installation && !isCodeFile && failedPresentation === nativeIdentity,
   );
   const isPluginPreview = Boolean(
     installation &&
@@ -900,12 +905,24 @@ export function ArtifactFileDetail({
                 {t.artifactViews.unsupported}
               </p>
             )}
-          {error && (
+          {(Boolean(error) || binaryPresentationFailed) && (
             <ArtifactPreviewError
               filepath={filepath}
               threadId={threadId}
               isMock={isMock}
-              message={t.artifactPreview.previewFailed}
+              message={
+                error instanceof PreviewBusyError
+                  ? t.artifactPreview.busy
+                  : t.artifactPreview.previewFailed
+              }
+              retry={
+                error instanceof PreviewBusyError
+                  ? {
+                      label: t.artifactPreview.retry,
+                      onClick: () => void retryPreview(),
+                    }
+                  : undefined
+              }
               downloadLabel={t.common.download}
             />
           )}
@@ -959,8 +976,10 @@ export function ArtifactFileDetail({
                 isMock={isMock}
                 onUnavailable={() => {
                   setFailedPresentation(nativeIdentity);
-                  loadSourcePreview();
-                  setViewMode("code");
+                  if (isCodeFile) {
+                    loadSourcePreview();
+                    setViewMode("code");
+                  }
                 }}
               />
             )}
@@ -1013,6 +1032,8 @@ export function ArtifactFileDetail({
               </pre>
             )}
           {!isCodeFile &&
+            !binaryPresentationFailed &&
+            !error &&
             !isPluginPreview &&
             !sourceView &&
             canPreviewInBrowser && (
@@ -1023,6 +1044,8 @@ export function ArtifactFileDetail({
               />
             )}
           {!isCodeFile &&
+            !binaryPresentationFailed &&
+            !error &&
             !isPluginPreview &&
             !sourceView &&
             !canPreviewInBrowser && (

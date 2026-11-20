@@ -1574,6 +1574,11 @@ async def get_current_user_from_request(request: Request):
     }:
         return state_user
 
+    return await resolve_session_cookie(request)
+
+
+async def resolve_session_cookie(request: Request):
+    """Resolve the original cookie against the current account and token version."""
     from app.gateway.auth import decode_token
     from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError, token_error_to_code
 

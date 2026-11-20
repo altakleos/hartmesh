@@ -406,13 +406,7 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         app_state = getattr(getattr(request, "scope", {}).get("app"), "state", None)
         installed = installed_projection(getattr(app_state, "extensions", None), getattr(request, "query_params", {}))
         if installed is not None:
-            if chat_access is not None:
-                return await chat_access.read_with(
-                    request,
-                    path,
-                    lambda source: project_artifact(installed, thread_id, path, user_id=owner_user_id, source_reader=lambda budget: source.read(budget + 1)),
-                )
-            return await await_drained(asyncio.to_thread(project_artifact, installed, thread_id, path, user_id=owner_user_id))
+            return await project_artifact(installed, thread_id, path, request=request, user_id=owner_user_id, chat_access=chat_access)
 
     # Check if this is a request for a file inside a .skill archive (e.g., xxx.skill/SKILL.md)
     if ".skill/" in path:

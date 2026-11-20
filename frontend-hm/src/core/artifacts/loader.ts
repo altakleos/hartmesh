@@ -10,6 +10,7 @@ import type { AgentThreadState } from "../threads";
 import { buildWriteFileDraftContent } from "./preview";
 import { readBoundedArtifactBytes } from "./response";
 import { urlOfArtifact } from "./utils";
+import { resolveStoredArtifactLanguage } from "./viewer";
 
 function fnv1aHash(value: string): string {
   let hash = 0x811c9dc5;
@@ -38,6 +39,10 @@ async function sha256OfText(content: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
+}
+
+export class PreviewBusyError extends Error {
+  override name = "PreviewBusyError";
 }
 
 export const ARTIFACT_PREVIEW_MAX_BYTES = 1024 * 1024;
@@ -142,8 +147,11 @@ async function readArtifactContent({
         void late.body?.cancel().catch(() => undefined);
       })
     : await pending;
-  const loadSourcePreview = () =>
-    loadArtifactContent({
+  const loadSourcePreview = async () => {
+    if (resolveStoredArtifactLanguage(filepath) === null) {
+      throw new Error("Download the original file to open it.");
+    }
+    return loadArtifactContent({
       filepath,
       threadId,
       isMock,
@@ -154,6 +162,34 @@ async function readArtifactContent({
         ? { presentation: { ...presentation, marker: undefined } }
         : {}),
     });
+  };
+  if (requestProjection && response.status === 503) {
+    const { bytes, truncated } = await readBoundedArtifactBytes(
+      response,
+      4096,
+      signal,
+    );
+    if (!truncated) {
+      let detail: unknown;
+      try {
+        detail = JSON.parse(new TextDecoder().decode(bytes));
+      } catch {
+        // An intermediary can return plain text when the service is unavailable.
+      }
+      if (
+        typeof detail === "object" &&
+        detail !== null &&
+        "detail" in detail &&
+        typeof detail.detail === "object" &&
+        detail.detail !== null &&
+        "code" in detail.detail &&
+        detail.detail.code === "preview-busy"
+      ) {
+        throw new PreviewBusyError("Previews are busy.");
+      }
+    }
+    throw new Error("Failed to load artifact: 503");
+  }
   if (requestProjection && [413, 415, 422, 501].includes(response.status)) {
     await response.body?.cancel();
     return loadSourcePreview();

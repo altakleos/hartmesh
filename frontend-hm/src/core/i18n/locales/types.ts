@@ -902,6 +902,8 @@ export interface Translations {
     limited: (previewSize: string, totalSize?: string) => string;
     loadFullFile: string;
     loadingFullFile: string;
+    retry: string;
+    busy: string;
     previewFailed: string;
     viewSource: string;
     missingTarget: string;
