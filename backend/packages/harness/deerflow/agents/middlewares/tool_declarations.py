@@ -311,6 +311,43 @@ class ToolPolicyNameResolver:
         return name
 
 
+def isolate_instance_declarations(middlewares, configured, *, read_only=False):
+    """Capture external positions before any authorization or schema copies."""
+    from deerflow.extensions import record_runtime_diagnostic
+    from deerflow.extensions.isolation import IsolatedMiddleware
+
+    config_ids = {id(item) for item in configured}
+    positions = set()
+    view = list(middlewares)
+    for index, item in enumerate(view):
+        if id(item) not in config_ids and not isinstance(item, IsolatedMiddleware):
+            continue
+        positions.add(index)
+        if read_only and not isinstance(item, IsolatedMiddleware):
+            # Reads need the middleware's schema and node names, even if its own
+            # copy protocol is unsuitable for a run. This host-owned wrapper
+            # preserves hooks, schema and its build-local declaration on copy.
+            view[index] = IsolatedMiddleware.for_state_read(item, record_runtime_diagnostic)
+        elif getattr(item, "tools", ()):
+            clone = _independent_copy(item)
+            _assign_narrowed_tools(clone, item, ())
+            view[index] = clone
+    return view, positions
+
+
+def instance_tool_names(tools, middlewares, external_positions):
+    """Verify the final stack and freeze the names available to the dispatcher."""
+    names = {tool.name for tool in tools}
+    resolver = ToolPolicyNameResolver()
+    for index, item in enumerate(middlewares):
+        if index in external_positions:
+            if getattr(item, "tools", ()):
+                raise DeclaredToolViewError(f"Middleware {_middleware_name(item)} restored tool declarations during instance graph assembly")
+        else:
+            names.update(resolver.name(tool, owner=_middleware_name(item)) for tool in _iter_declared(item, allow_sequences=True))
+    return frozenset(names)
+
+
 def _tool_policy_denial(name: str, allowed_names: frozenset[str] | None, denied_names: frozenset[str]) -> str | None:
     if name in denied_names:
         return "listed in disallowed_tools"

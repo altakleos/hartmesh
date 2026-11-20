@@ -70,10 +70,10 @@ class RecordingModel(GenericFakeChatModel):
         return self
 
 
-def _load_extension(monkeypatch, middleware):
+def _load_extension(monkeypatch, middleware, scope=AgentScope.SUBAGENT):
     class Contributor:
         def contribute_middlewares(self, app_store, context):
-            return [MiddlewarePlacement(middleware, Placement.TOOL_VISIBLE, AgentScope.SUBAGENT)]
+            return [MiddlewarePlacement(middleware, Placement.TOOL_VISIBLE, scope)]
 
     @extension(api="0.2.0", name="declared-policy-test")
     def install(registry, config):

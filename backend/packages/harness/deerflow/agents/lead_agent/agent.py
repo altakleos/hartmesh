@@ -505,6 +505,7 @@ def build_middlewares(
     extensions=None,
     subagent_execution_capacity: int | None = None,
     assignment_proposals: bool = False,
+    external_middlewares: list | None = None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -773,6 +774,9 @@ def build_middlewares(
     configured_middlewares = load_configured_extension_middlewares(resolved_app_config, scope="lead")
     if configured_middlewares:
         middlewares.extend(configured_middlewares)
+    if external_middlewares is not None:
+        external_middlewares.extend(custom_middlewares or ())
+        external_middlewares.extend(configured_middlewares)
 
     # LLMErrorHandlingMiddleware gives a run one model-boundary retry for a true
     # empty stop. Keep a terminal fallback for post-tool responses that still have
@@ -1656,6 +1660,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         top_k=resolved_app_config.tool_search.auto_promote_top_k,
     )
     mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(authorized_tools, deferred_names=setup.deferred_names)
+    external_middlewares = [] if instance_execution else None
     middlewares = build_middlewares(
         config,
         model_name=model_name,
@@ -1671,11 +1676,14 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         skill_authorization=skill_authorization,
         subagent_execution_capacity=subagent_execution_capacity,
         assignment_proposals=any(tool.name == "propose_assignment" for tool in authorized_tools),
+        external_middlewares=external_middlewares,
     )
     if instance_execution:
         from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
+        from deerflow.agents.middlewares.tool_declarations import instance_tool_names, isolate_instance_declarations
 
         middlewares.insert(0, InstanceAuthorityMiddleware(require_memory_audience=memory_enabled))
+        middlewares, external_positions = isolate_instance_declarations(middlewares, external_middlewares, read_only=not instance_execution.execution_allowed)
     middlewares, declared_authorized = narrow_declared_tools(
         middlewares,
         outcome=layer_one,
@@ -1704,6 +1712,8 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         runtime_scope=build_runtime_scope(execution=instance_execution, tools=authorized_tools, memory_enabled=memory_enabled and resolved_app_config.memory.enabled),
     )
     graph_middlewares = normalize_middleware_state_schemas(middlewares, mode)
+    if instance_execution:
+        graph_middlewares[0].allowed_tool_names = instance_tool_names(final_tools, graph_middlewares, external_positions)
     verify_declared_tool_view(graph_middlewares, authorized_names=declared_authorized)
     state_schema = get_thread_state_schema(mode)
     graph = create_agent(

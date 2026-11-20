@@ -656,6 +656,7 @@ def build_subagent_runtime_middlewares(
     authorization_provider=None,
     skill_authorization=None,
     extensions=None,
+    external_middlewares: list | None = None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
     if app_config is None:
@@ -793,7 +794,10 @@ def build_subagent_runtime_middlewares(
 
     from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
 
-    middlewares.extend(load_configured_extension_middlewares(app_config, scope="subagent"))
+    configured_middlewares = load_configured_extension_middlewares(app_config, scope="subagent")
+    middlewares.extend(configured_middlewares)
+    if external_middlewares is not None:
+        external_middlewares.extend(configured_middlewares)
 
     # Same provider output-length guard the lead agent uses. A subagent answer
     # cut off at the model's output limit would otherwise reach the lead as a

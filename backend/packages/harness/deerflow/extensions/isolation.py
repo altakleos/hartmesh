@@ -188,6 +188,16 @@ class IsolatedMiddleware(AgentMiddleware):
         self.transformers = getattr(inner, "transformers", ())
         self.state_schema = getattr(inner, "state_schema", AgentMiddleware.state_schema)
 
+    @classmethod
+    def for_state_read(cls, inner, on_error):
+        """Keep an existing configured middleware's checkpoint name and schema."""
+        view = cls(inner, inner.name, on_error)
+        # Only newly contributed extension nodes receive graph-safe names.
+        # A read reconstructs nodes already named by the configured middleware.
+        view._name = inner.name
+        view.tools = ()
+        return view
+
     def __copy__(self) -> IsolatedMiddleware:
         """State-preserving shallow copy; never rebuilds from ``inner``.
 
