@@ -3,6 +3,10 @@
 Compose files, nginx configuration and the sandbox provisioner. The Helm chart
 in `deploy/helm/` carries the same nginx routes.
 
+The mounted Compose qualification for company MCP connections runs three read-only
+fixtures from the signed backend image. Their counters distinguish requests, discovery,
+and real tool calls. See [release qualification](../RELEASING.md#company-connection-qualification).
+
 ```bash
 cd backend && python -m pytest tests -q -k "nginx or compose or sigterm"
 ```

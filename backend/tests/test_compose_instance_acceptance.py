@@ -285,14 +285,14 @@ class Person:
     def upload(self, thread_id, content=MARKER, *, name="input.txt", expected=200):
         return self.request("POST", f"/api/threads/{thread_id}/uploads", files={"files": (name, content, "text/plain")}, expected=expected)
 
-    def run(self, thread_id, *, success=True, files=None, message="acceptance:file"):
+    def run(self, thread_id, *, success=True, files=None, message="acceptance:file", helpers=False):
         response = self.request(
             "POST",
             f"/api/langgraph/threads/{thread_id}/runs/stream",
             json={
                 "assistant_id": "lead_agent",
                 "input": {"messages": [{"type": "human", "content": message, **({"additional_kwargs": {"files": files}} if files is not None else {})}]},
-                "context": {"mode": "flash", "model_name": "acceptance-model", "thinking_enabled": False, "subagent_enabled": False},
+                "context": {"mode": "flash", "model_name": "acceptance-model", "thinking_enabled": False, "subagent_enabled": helpers},
                 "stream_mode": ["values", "messages-tuple", "updates"],
             },
         )

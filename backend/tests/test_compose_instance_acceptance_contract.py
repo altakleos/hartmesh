@@ -272,7 +272,7 @@ def test_rollback_reloads_the_shipped_nginx_master_and_checks_the_public_route()
     assert 'TARGET="${HARTMESH_NGINX_TARGET:-/tmp/nginx.conf}"' in render and 'exec nginx -c "$TARGET"' in render
     config = (ROOT / "deploy/compose/nginx/nginx.conf").read_text(encoding="utf-8")
     assert "pid /tmp/nginx.pid;" in config and "location /health {" in config
-    tree = ast.parse((ROOT / "backend/tests/test_compose_home_rollback.py").read_text(encoding="utf-8"))
+    tree = ast.parse((ROOT / "backend/tests/_compose_gateway_restart.py").read_text(encoding="utf-8"))
     start = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "start_gateway")
     commands = [tuple(ast.literal_eval(arg) for arg in call.args) for call in ast.walk(start) if isinstance(call, ast.Call) and ast.unparse(call.func) == "bundle.run"]
     assert commands[:2] == [("up", "-d", "--wait", "--no-deps", "gateway"), ("exec", "-T", "nginx", "nginx", "-c", "/tmp/nginx.conf", "-s", "reload")]

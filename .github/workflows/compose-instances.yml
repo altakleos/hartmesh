@@ -10,6 +10,14 @@ on:
       backend_image:
         description: Optional published backend digest for mounted bundle qualification
         type: string
+      connections:
+        description: Qualify signed connection images with explicit test config or the shipped default
+        type: choice
+        options: [skip, explicit, bundle-default]
+        default: skip
+      frontend_image:
+        description: Signed frontend digest required for connection qualification
+        type: string
       verify_home_rollback:
         description: Rehearse in-place Home rollback against the two supported older builds
         type: boolean
@@ -21,13 +29,15 @@ concurrency:
 
 permissions:
   contents: read
+  packages: read
+  attestations: read
 
 jobs:
   bundle-instances:
     name: Storage and agents in the Compose bundle (Linux Docker)
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-26.04
-    timeout-minutes: ${{ inputs.verify_home_rollback && 110 || 60 }}
+    timeout-minutes: ${{ (inputs.verify_home_rollback || (github.event_name == 'workflow_dispatch' && inputs.connections != 'skip')) && 110 || 60 }}
     env:
       C: docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env
       EVIDENCE: ${{ github.workspace }}/bundle-evidence
@@ -109,6 +119,30 @@ jobs:
           docker run --rm --entrypoint sh "$backend_ref" -c 'set -eu; command -v nsenter; command -v setpriv; docker --version' > "$EVIDENCE/backend-tools.txt"
           cat "$EVIDENCE/backend-tools.txt"
 
+      - name: Install crane for signed connection candidates
+        if: github.event_name == 'workflow_dispatch' && inputs.connections != 'skip'
+        uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+
+      - name: Verify connection candidate images
+        if: github.event_name == 'workflow_dispatch' && inputs.connections != 'skip'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BACKEND: ${{ inputs.backend_image }}
+          FRONTEND: ${{ inputs.frontend_image }}
+          HOME_ROLLBACK: ${{ inputs.verify_home_rollback }}
+        run: |
+          test "$HOME_ROLLBACK" != true
+          version=$(python3 -c 'import json; print(json.load(open("frontend-hm/package.json"))["version"])')
+          for component in backend frontend; do
+            case "$component" in backend) image="$BACKEND" ;; frontend) image="$FRONTEND" ;; esac
+            [[ "$image" =~ ^ghcr\.io/altakleos/hartmesh-${component}@sha256:[0-9a-f]{64}$ ]]
+            crane config --platform linux/amd64 "$image" | jq -e --arg head "$GITHUB_SHA" '.config.Labels["org.opencontainers.image.revision"] == $head'
+            python3 scripts/release_artifacts.py verify-candidate --repository "$GITHUB_REPOSITORY" \
+              --component "$component" --version "$version" --image "$image" --revision "$GITHUB_SHA"
+          done
+          docker pull "$FRONTEND"
+          echo "HARTMESH_BROWSER_FRONTEND=$FRONTEND" >> "$GITHUB_ENV"
+
       - name: Use the requested backend candidate
         if: inputs.backend_image != ''
         env:
@@ -182,6 +216,26 @@ jobs:
           ENV
           sudo chmod 0644 /srv/hartmesh/.env /srv/hartmesh/operator/models.yaml
 
+      - name: Install the connection qualification fixture
+        if: github.event_name == 'workflow_dispatch' && inputs.connections != 'skip'
+        env:
+          ACTIVATION: ${{ inputs.connections }}
+        run: |
+          sudo sed -i -E "s#ghcr.io/altakleos/hartmesh-frontend@sha256:[0-9a-f]{64}#${HARTMESH_BROWSER_FRONTEND}#g" /opt/hartmesh/compose.yaml /opt/hartmesh/images.txt
+          test "$(grep -c -F "$HARTMESH_BROWSER_FRONTEND" /opt/hartmesh/compose.yaml)" = 1
+          bash docker/acceptance/connections/tls.sh "$BACKEND_REF" /opt/hartmesh
+          sudo install -m 0644 docker/acceptance/connections/compose.yaml /opt/hartmesh/connections.yaml
+          sudo install -m 0644 docker/acceptance/connections/notice_service.py /opt/hartmesh/notice_service.py
+          echo 'HARTMESH_PRIVATE_ENDPOINTS=notices-a.example.test:8080,notices-b.example.test:8080' | sudo tee -a /srv/hartmesh/.env >/dev/null
+          if [ "$ACTIVATION" = explicit ]; then
+            # Prior to default activation, supply just this option in the disposable operator template.
+            sudo backend/.venv/bin/python docker/acceptance/connections/template.py on
+            echo 'HARTMESH_AGENT_CONNECTIONS=on' | sudo tee -a /srv/hartmesh/.env >/dev/null
+          fi
+          cd backend
+          uv sync --frozen --group dev --extra browser
+          .venv/bin/python -m playwright install --with-deps chromium
+
       - name: Prefetch every pinned bundle image
         run: |
           while IFS= read -r image; do
@@ -224,6 +278,7 @@ jobs:
           tail -n 1 "$EVIDENCE/prepare-again.json" | jq -e '.command == "prepare" and .returncode == 0 and .verdict == "nothing-to-do" and (.prepared_now | add) == 0 and .prepared == {"user": 3, "assistant": 3, "employee": 2, "company": 1} and .fstab.changed == false and (.problems | length) == 0'
 
       - name: 13 Run the acceptance tests
+        if: github.event_name != 'workflow_dispatch' || inputs.connections == 'skip'
         working-directory: backend
         run: |
           env PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 \
@@ -278,6 +333,7 @@ jobs:
           PY
 
       - name: Measure Home settlement and the first fresh answer
+        if: github.event_name != 'workflow_dispatch' || inputs.connections == 'skip'
         env:
           HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
           HARTMESH_BUNDLE_URL: http://localhost:2026
@@ -340,6 +396,7 @@ jobs:
           PY
 
       - name: Observe manager acceptance during the last model call
+        if: github.event_name != 'workflow_dispatch' || inputs.connections == 'skip'
         working-directory: backend
         env:
           HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
@@ -355,6 +412,51 @@ jobs:
           for workload in idle chat assignment; do
             jq -e --arg image "$BACKEND_REF" --arg workload "$workload" '.backend == $image and .workload == $workload and .attachment == "fenced" and .fresh_run != null' "$EVIDENCE/manager-recovery-$workload.json"
           done
+
+      - name: Install connection rollback bundles
+        if: github.event_name == 'workflow_dispatch' && inputs.connections != 'skip'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for version in 66 61 60; do
+            tag="v2.2.0+hartmesh.$version"
+            case "$version" in
+              66) commit=d9d1a21a4451b13d0919c665b51b7635aba9fc91 ;;
+              61) commit=40aa905acbb4e7d890b0a4840a9915de0a710ea9 ;;
+              60) commit=b2548de9ae0ee664c526fcbad294aec5f1ad75f9 ;;
+            esac
+            git fetch --no-tags origin "refs/tags/$tag:refs/tags/$tag"
+            test "$(git rev-parse "$tag^{commit}")" = "$commit"
+            directory="/opt/hartmesh-rollback-$version"
+            sudo install -d -m 0755 "$directory"
+            git archive "$commit:deploy/compose" | sudo tar -x -C "$directory"
+            backend=$(grep -E '^ghcr\.io/altakleos/hartmesh-backend@sha256:[0-9a-f]{64}$' "$directory/images.txt")
+            for component in backend frontend; do
+              image=$(grep -E "^ghcr\.io/altakleos/hartmesh-${component}@sha256:[0-9a-f]{64}$" "$directory/images.txt")
+              python3 scripts/release_artifacts.py verify-candidate --repository "$GITHUB_REPOSITORY" \
+                --component "$component" --version "${tag#v}" --image "$image" --revision "$commit"
+              docker pull "$image"
+            done
+            bash docker/acceptance/connections/tls.sh "$backend" "$directory"
+            echo "$tag $commit $backend" >> "$EVIDENCE/connection-rollback-builds.txt"
+          done
+
+      - name: Exercise company connections with mounted employees
+        if: github.event_name == 'workflow_dispatch' && inputs.connections != 'skip'
+        env:
+          HARTMESH_VERIFY_CONNECTIONS: ${{ inputs.connections }}
+          HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
+          HARTMESH_BUNDLE_URL: http://localhost:2026
+          HARTMESH_BUNDLE_PROJECT_DIR: /opt/hartmesh
+          HARTMESH_BUNDLE_ENV_FILE: /srv/hartmesh/.env
+          HARTMESH_BUNDLE_ADMIN_EMAIL: admin@example.com
+          HARTMESH_BUNDLE_ADMIN_PASSWORD: 'Acceptance-Admin-2026!'
+          HARTMESH_BUNDLE_RUNTIME: hartmesh-ci
+        working-directory: backend
+        run: |
+          PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 .venv/bin/python -m pytest tests/test_compose_agent_connections.py \
+            -q --tb=short --maxfail=1 -p no:randomly --junitxml="$EVIDENCE/connections.xml"
+          jq -e '.complete == true and (.rollback | keys) == ["60","61","66"]' "$EVIDENCE/connections.json"
 
       - name: 14 Check that the stack stops cleanly
         run: |

@@ -348,3 +348,30 @@ gate so that a merge cannot leave one behind:
   actions in release notes, or explicitly state that there are none.
 - **Version sources.** When upstream changes its version, the five sources
   must agree again: `scripts/verify_versions.sh` says which one does not.
+
+## Company connection qualification
+
+Run the mounted company-connection rehearsal before enabling employee connections
+and again against the final release images after changing the bundle default.
+Dispatch on the release branch at the commit used to build both images.
+The workflow verifies both signatures, source revisions, and running image IDs.
+
+```bash
+gh workflow run compose-instances.yml --repo altakleos/hartmesh --ref <candidate-branch> \
+  -f connections=explicit \
+  -f backend_image=ghcr.io/altakleos/hartmesh-backend@sha256:<backend-digest> \
+  -f frontend_image=ghcr.io/altakleos/hartmesh-frontend@sha256:<frontend-digest>
+```
+
+Use `connections=bundle-default` on the final candidate. The initial run
+supplies an explicit feature option in its disposable template. The final
+run starts with the shipped default, then exercises the operator's off/on
+switch. Both use a mounted employee Home, a synthetic model and three isolated
+HTTPS fixtures. A temporary CA is added to each disposable Gateway's trusted
+roots. Two service addresses appear in its private endpoint list.
+
+Read the workflow attempt's `connections.json` and JUnit results for browser,
+assignment, revocation, and rollback outcomes. The rehearsal opens prior test
+data with the published .66, .61, and .60 bundles. Production rollback for
+this feature targets .66. Keep the ordinary two-store Docker acceptance record
+and the ordinary mounted qualification for the final release as separate gates.

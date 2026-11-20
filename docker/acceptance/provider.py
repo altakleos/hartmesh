@@ -94,12 +94,15 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
         if message.get("role") == "tool":
             # Only this real read is optional. Never promote a failed upload,
             # actual write or presentation to successful fixture progression.
-            message = {**message, "content": tool_result_content(message.get("content"), allow_preflight_failure=file_turn and tool_index == 1)}
+            expected_refusal = work_turn and tool_index == 3 and message.get("name") == "notices_read_notice"
+            message = {**message, "content": tool_result_content(message.get("content"), allow_preflight_failure=(file_turn and tool_index == 1) or expected_refusal)}
             tool_index += 1
         normalized.append(message)
     turn = normalized
     if work_turn:
         return work_reply(body, turn)
+    if "acceptance:notice:" in str(turn[0].get("content")):
+        return notice_reply(body, turn)
     if skill_match:
         return skill_reply(body, turn, skill_match.group(1))
     if "acceptance:preview" in str(turn[0].get("content")):
@@ -151,6 +154,39 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def notice_reply(body, turn):
+    offered = {entry.get("function", {}).get("name") for entry in body["tools"]}
+    request = str(turn[0].get("content"))
+    results = [str(message["content"]) for message in turn if message.get("role") == "tool"]
+    if "acceptance:notice:helper" in request or "acceptance:notice:unassigned" in request:
+        if any(isinstance(name, str) and name.endswith("_read_notice") for name in offered):
+            raise ValueError("An unassigned notice tool was offered")
+        message = "Helper saw no notice connection." if "acceptance:notice:helper" in request else "No notice connection is available."
+        return {"content": message}
+    if "acceptance:notice:delegate" in request:
+        if results:
+            if "Helper saw no notice connection." not in results[-1]:
+                raise ValueError("Missing result from the helper")
+            return {"content": "Helper confirmed its offered tools."}
+        name, arguments = "task", {"subagent_type": "general-purpose", "description": "Check available notices", "prompt": "acceptance:notice:helper"}
+    elif "acceptance:notice:read" in request:
+        if results:
+            for service in ("notices-a", "notices-b"):
+                text = f"Notice from {service}."
+                if text in results[-1]:
+                    return {"content": text}
+            raise ValueError("Missing notice from the MCP service")
+        assigned = offered.intersection({"notices_read_notice", "bulletins_read_notice"})
+        if len(assigned) != 1:
+            raise ValueError("Expected exactly one granted notice tool")
+        name, arguments = assigned.pop(), {}
+    else:
+        raise ValueError("Unknown notice scenario")
+    if name not in offered:
+        raise ValueError("Expected notice scenario tool was not offered")
+    return {"tool_calls": [{"id": "call_notice", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}]}
+
+
 def work_reply(body, turn):
     """Stateless script of real Work tools; no application inference bypass."""
     offered = {tool.get("function", {}).get("name") for tool in body["tools"]}
@@ -194,6 +230,28 @@ def work_reply(body, turn):
                 )
             else:
                 return {"content": "Work acceptance complete."}
+        elif notices := re.fullmatch(r"acceptance:work:notices:([a-f0-9]{32})", objective):
+            # The test driver changes the registry between real tool responses.
+            # Distinct call IDs are supplied below for each turn of the model.
+            name, arguments = "notices_read_notice", {}
+            if len(results) >= 2 and "Notice from notices-a." not in results[1]["content"]:
+                raise ValueError("First call did not reach the original service")
+            if len(results) == 2:
+                final_observation(notices[1] + "-edit")
+            if len(results) >= 3 and "Notice from notices-b." not in results[2]["content"]:
+                raise ValueError("Second call did not reach the replacement service")
+            if len(results) == 3:
+                final_observation(notices[1] + "-revoke")
+            elif len(results) == 4:
+                refusal = results[3]["content"]
+                if not refusal.strip() or "Notice from notices-" in refusal:
+                    raise ValueError("The retired connection returned a successful notice")
+                name, arguments = "report_work", {"report": {
+                    "operation_id": hashlib.sha256((work_id + ":" + attempt_id).encode()).hexdigest()[:32], "expected_revision": revision,
+                    "action": "outcome", "statement": "Read the updated notice before the connection was taken away.",
+                }}
+            elif len(results) > 4:
+                return {"content": "Notice assignment complete."}
         elif observed := re.fullmatch(r"acceptance:work:final:([a-f0-9]{32})", objective):
             return final_observation(observed[1])
         elif "acceptance:work:hold" in objective:
