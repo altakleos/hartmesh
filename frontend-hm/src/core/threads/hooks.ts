@@ -129,7 +129,17 @@ const EMPTY_RUN_INPUTS: RunInput[] = [];
 /** How long after a run ends the input list is still polled for its successor. */
 export const RUN_INPUT_SETTLE_POLL_MS = 120_000;
 
+export type SentTurn = {
+  optimisticId: string;
+  /** Null means a new conversation; an absent ID has no safe text fallback. */
+  previousHumanId?: string | null;
+  text: string;
+  runId?: string;
+};
+
 export type SendMessageOptions = {
+  /** Ordinary web composer submissions can request viewport alignment after admission. */
+  keepSentMessageInView?: boolean;
   /** The composer's current catalog resolution, independent of settings effects. */
   modelContext?: Pick<
     LocalSettings["context"],
@@ -1843,6 +1853,10 @@ export function useThreadStream({
       owned.active = false;
     };
   }, [currentViewThreadId, agentInstanceId]);
+  const [composerTurn, setComposerTurn] = useState<{
+    owner: typeof viewOwner.current;
+    turn: SentTurn;
+  } | null>(null);
   // Optimistic messages shown before the server stream responds.
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
   const [optimisticThreadId, setOptimisticThreadId] = useState<string | null>(
@@ -2766,6 +2780,7 @@ export function useThreadStream({
   // objects against canonical history.
   const renderedMessageSnapshotRef = useRef<{
     threadId: string | null;
+    lastVisibleHumanId?: string;
     messages: Message[];
     order: readonly string[];
   }>({
@@ -2962,15 +2977,29 @@ export function useThreadStream({
         ...(optimisticFiles.length > 0 ? { files: optimisticFiles } : {}),
       };
 
+      const sendOwner = viewOwner.current;
+      const snapshot = renderedMessageSnapshotRef.current;
+      const previousHumanId = pending.newThread
+        ? null
+        : snapshot.threadId === threadId
+          ? snapshot.lastVisibleHumanId
+          : undefined;
       const newOptimistic: Message[] = [];
       if (!hideFromUI) {
         newOptimistic.push({
           type: "human",
-          id: `opt-human-${Date.now()}`,
+          id: `opt-human-${Date.now()}-${pending.sequence}`,
           content: text ? [{ type: "text", text }] : "",
           additional_kwargs: optimisticAdditionalKwargs,
         });
       }
+
+      const optimisticId = newOptimistic[0]?.id;
+      const sentTurn =
+        options?.keepSentMessageInView && optimisticId
+          ? { optimisticId, previousHumanId, text }
+          : null;
+      if (sentTurn) setComposerTurn({ owner: sendOwner, turn: sentTurn });
 
       if (optimisticFiles.length > 0 && !hideFromUI) {
         // Mock AI message while files are being uploaded
@@ -3091,6 +3120,16 @@ export function useThreadStream({
             } else {
               pending.accepted = true;
               pending.runId = meta.run_id;
+              if (
+                sentTurn &&
+                sendOwner.active &&
+                sendOwner === viewOwner.current
+              ) {
+                setComposerTurn({
+                  owner: sendOwner,
+                  turn: { ...sentTurn, runId: meta.run_id },
+                });
+              }
               // Admission owns these bytes now. A later run error must not
               // restore an accepted draft or retain its browser File objects.
               pending.message = undefined;
@@ -3170,7 +3209,13 @@ export function useThreadStream({
         // Retain admitted run identity until the next send. An older run's
         // callbacks cannot refuse or settle that later admission.
         if (pendingSend.current === pending) {
-          if (!pending.accepted || pending.retired) pendingSend.current = null;
+          if (!pending.accepted || pending.retired) {
+            pendingSend.current = null;
+            if (sentTurn)
+              setComposerTurn((current) =>
+                current?.turn === sentTurn ? null : current,
+              );
+          }
           sendInFlightRef.current = false;
         }
       }
@@ -3486,8 +3531,19 @@ export function useThreadStream({
       visibleMergedMessages,
       pendingSupersededMessageIds,
     );
+    // A visible human may have no ID and therefore may be absent from the
+    // identity ledger. Never mistake its predecessor for the send boundary.
+    let lastVisibleHumanId: string | undefined;
+    for (let index = visibleMergedMessages.length - 1; index >= 0; index--) {
+      const message = visibleMergedMessages[index];
+      if (message?.type === "human") {
+        lastVisibleHumanId = message.id;
+        break;
+      }
+    }
     renderedMessageSnapshotRef.current = {
       threadId: threadId ?? null,
+      lastVisibleHumanId,
       messages: renderedMessageLedger,
       order: renderedMessageLedger
         .map(messageIdentity)
@@ -3516,6 +3572,8 @@ export function useThreadStream({
 
   return {
     thread: mergedThread,
+    sentTurn:
+      composerTurn?.owner === viewOwner.current ? composerTurn.turn : null,
     pendingUsageMessages,
     sendMessage,
     regenerateMessage,

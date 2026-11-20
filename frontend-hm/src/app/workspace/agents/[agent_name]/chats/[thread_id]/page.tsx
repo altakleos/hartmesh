@@ -112,6 +112,7 @@ export default function AgentChatPage() {
   const {
     thread,
     pendingUsageMessages,
+    sentTurn,
     sendMessage,
     regenerateMessage,
     editAndRegenerateMessage,
@@ -195,7 +196,7 @@ export default function AgentChatPage() {
         threadId,
         message,
         { agent_name },
-        options,
+        { ...options, keepSentMessageInView: true },
       );
       if (message.files.length > 0) {
         return sendPromise;
@@ -357,6 +358,7 @@ export default function AgentChatPage() {
             <main className="flex min-h-0 max-w-full grow flex-col">
               <div className="flex min-h-0 flex-1 justify-center">
                 <MessageList
+                  sentTurn={sentTurn}
                   activeRunId={activeRunId}
                   activeRunStartedAt={activeRunStartedAt}
                   agentTarget={{ kind: "custom_agent", name: agent_name }}

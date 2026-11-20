@@ -172,6 +172,7 @@ export default function ChatPage() {
   const {
     thread,
     pendingUsageMessages,
+    sentTurn,
     sendMessage,
     regenerateMessage,
     editAndRegenerateMessage,
@@ -385,6 +386,7 @@ export default function ChatPage() {
         const capture = attachedFiles.capture();
         return sendMessage(threadId, { ...message, files: [] }, undefined, {
           ...options,
+          keepSentMessageInView: true,
           additionalKwargs: {
             ...options?.additionalKwargs,
             files: capture.files,
@@ -401,7 +403,10 @@ export default function ChatPage() {
         );
       // PromptInput preserves both text and files for a rejected admission,
       // and clears only the captured submission after the server admits it.
-      return sendMessage(threadId, message, undefined, options);
+      return sendMessage(threadId, message, undefined, {
+        ...options,
+        keepSentMessageInView: true,
+      });
     },
     [
       sendMessage,
@@ -626,6 +631,7 @@ export default function ChatPage() {
                     />
                   ) : (
                     <MessageList
+                      sentTurn={sentTurn}
                       activeRunId={activeRunId}
                       activeRunStartedAt={activeRunStartedAt}
                       agentTarget={agentTarget}

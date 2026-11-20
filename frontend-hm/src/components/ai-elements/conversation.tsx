@@ -68,20 +68,26 @@ export const ConversationEmptyState = ({
   </div>
 );
 
-export type ConversationScrollButtonProps = ComponentProps<typeof Button>;
+export type ConversationScrollButtonProps = ComponentProps<typeof Button> & {
+  visible?: boolean;
+  onBeforeScroll?: () => void;
+};
 
 export const ConversationScrollButton = ({
   className,
+  visible,
+  onBeforeScroll,
   ...props
 }: ConversationScrollButtonProps) => {
   const { isAtBottom, scrollToBottom } = useStickToBottomContext();
 
   const handleScrollToBottom = useCallback(() => {
+    onBeforeScroll?.();
     scrollToBottom();
-  }, [scrollToBottom]);
+  }, [onBeforeScroll, scrollToBottom]);
 
   return (
-    !isAtBottom && (
+    (visible ?? !isAtBottom) && (
       <Button
         className={cn(
           "absolute bottom-4 left-[50%] translate-x-[-50%] rounded-full",

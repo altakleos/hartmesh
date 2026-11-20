@@ -91,6 +91,7 @@ import {
 } from "@/core/tasks/subtask-result";
 import type { AgentTarget } from "@/core/telegram-bots/web-pages";
 import type { AgentThreadState } from "@/core/threads";
+import type { SentTurn } from "@/core/threads/hooks";
 import {
   runActivityLabel,
   useTurnProgress,
@@ -118,6 +119,11 @@ import {
   MessageTokenUsageList,
 } from "./message-token-usage";
 import { RunActivity, RunDuration } from "./run-duration";
+import {
+  SentMessageScroll,
+  sentGroupIndex,
+  type SentScrollControl,
+} from "./sent-message-scroll";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
 import {
@@ -297,6 +303,7 @@ function LoadMoreHistoryIndicator({
 }
 
 export function MessageList({
+  sentTurn,
   agentTarget,
   archiveDownloadsEnabled = true,
   className,
@@ -323,6 +330,7 @@ export function MessageList({
   initialScroll = "smooth",
   resizeScroll = "smooth",
 }: {
+  sentTurn?: SentTurn | null;
   /** Whose conversation this is; without one no link under an answer is drawn. */
   agentTarget?: AgentTarget;
   archiveDownloadsEnabled?: boolean;
@@ -402,6 +410,16 @@ export function MessageList({
       workspaceStartingLong,
     ],
   );
+  const [releasedTurn, setReleasedTurn] = useState<string>();
+  const sentIndex = useMemo(
+    () =>
+      sentTurn?.optimisticId === releasedTurn
+        ? -1
+        : sentGroupIndex(groupedMessages, sentTurn),
+    [groupedMessages, sentTurn, releasedTurn],
+  );
+  const sentScroll = useRef<SentScrollControl>({ holding: false });
+  const footer = useRef<HTMLDivElement>(null);
   const chapters = useMemo(
     () =>
       buildConversationChapters(
@@ -449,6 +467,7 @@ export function MessageList({
         return;
       }
       setActiveChapter({ threadId, chapterId });
+      sentScroll.current.clear?.();
       virtualMessageListRef.current?.scrollToGroup(chapter.groupIndex, {
         align: "start",
         behavior: "auto",
@@ -1198,6 +1217,9 @@ export function MessageList({
         data-testid={testId}
         initial={initialScroll}
         resize={resizeScroll}
+        targetScrollTop={(bottom, { scrollElement }) =>
+          sentScroll.current.holding ? scrollElement.scrollTop : bottom
+        }
       >
         <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-8">
           <LoadMoreHistoryIndicator
@@ -1208,6 +1230,8 @@ export function MessageList({
           <VirtualMessageList
             ref={virtualMessageListRef}
             groups={groupedMessages}
+            sentIndex={sentIndex}
+            sentScroll={sentScroll}
             isLoading={thread.isLoading}
             onActiveGroupChange={
               conversationOutlineEnabled ? handleActiveGroupChange : undefined
@@ -1581,12 +1605,25 @@ export function MessageList({
               <RunActivity startTime={turnStartTime} label={activityLabel} />
             </div>
           )}
-          <div style={{ height: `${paddingBottom}px` }} />
+          <div ref={footer} style={{ height: `${paddingBottom}px` }} />
         </ConversationContent>
-        <ConversationScrollButton
-          aria-label={t.common.scrollToBottom}
-          className="z-10"
-        />
+        {sentTurn ? (
+          <SentMessageScroll
+            onRelease={setReleasedTurn}
+            turn={sentTurn}
+            groupIndex={sentIndex}
+            groupId={groupedMessages[sentIndex]?.id}
+            loading={thread.isLoading}
+            footer={footer}
+            control={sentScroll}
+            label={t.common.scrollToBottom}
+          />
+        ) : (
+          <ConversationScrollButton
+            aria-label={t.common.scrollToBottom}
+            className="z-10"
+          />
+        )}
       </Conversation>
       {conversationOutlineEnabled && (
         <ConversationOutline
