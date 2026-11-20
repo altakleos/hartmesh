@@ -1250,12 +1250,19 @@ class SubagentExecutor:
             middleware_kwargs["skill_authorization"] = skill_authorization
         if mcp_routing_middleware is not None:
             middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
+        if self.agent_execution is not None:
+            from deerflow.agents.middlewares.tool_declarations import instance_tool_names, isolate_instance_declarations
+
+            external_middlewares = []
+            middleware_kwargs["external_middlewares"] = external_middlewares
         middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
         if self.input_gate is not None:
             from deerflow.agents.middlewares.run_input_middleware import ChildInputContinuationMiddleware, ChildInputMiddleware
 
             middlewares.insert(0, ChildInputMiddleware(self.input_gate))
             middlewares.append(ChildInputContinuationMiddleware(self.input_gate))
+        if self.agent_execution is not None:
+            middlewares, external_positions = isolate_instance_declarations(middlewares, external_middlewares)
         # Authorization Layer 1 for middleware-declared tools (e.g. extension
         # contributions): collect from the built stack, decide with the same
         # provider/principal as the ordinary pass (offloaded off the event
@@ -1337,7 +1344,8 @@ class SubagentExecutor:
             from deerflow.agent_instances.memory import execution_memory_enabled
             from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
 
-            middlewares.insert(0, InstanceAuthorityMiddleware(require_memory_audience=execution_memory_enabled(self.agent_execution, (self.app_config or get_app_config()).memory)))
+            allowed_names = instance_tool_names(bound_tools, middlewares, external_positions)
+            middlewares.insert(0, InstanceAuthorityMiddleware(require_memory_audience=execution_memory_enabled(self.agent_execution, (self.app_config or get_app_config()).memory), allowed_tool_names=allowed_names))
         # Delta normalization can copy middleware, so audit both policies on
         # the final instances that create_agent will bind.
         if declared_authorized is not None:

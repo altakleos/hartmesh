@@ -112,6 +112,14 @@ complete accounting before opening admission, and drains shutdown in order.
 The run API distinguishes a Gateway shutdown from a human Stop. Shutdown records
 its reason before cancelling active runs; a run that finishes during shutdown
 keeps its outcome.
+
+AI employees, AI assistants and their helpers use the tools authorized for each
+run. Installed or configured middleware keeps its hooks. Its tool declarations
+apply to ordinary personal conversations. On deployments that use delta
+checkpoints, a middleware that restores tool declarations when copied can
+prevent an instance run from starting. Updating its copy behavior restores
+the run. Existing conversations remain readable.
+
 The AI employee's runtime guidance describes its admitted persistent Home and
 available file tools. Files survive conversations; clearing recalled memory does
 not remove them. Presenting an output registers a mutable reference: viewing it

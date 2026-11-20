@@ -103,6 +103,13 @@ card support from current Use+Inspect for each actual message.
 `chat_tools(execution)` registers `show_web_page` for normal instance conversations in lead
 assembly, before tool authorization; Work attempts and subagents do not receive it.
 
+Instance lead and helper builders record external middleware positions before
+authorization and schema copies. They remove those declarations for this build,
+verify the same positions after checkpoint normalization and give the outer
+authority middleware the final host tool names for sync and async dispatch.
+Read-only assembly retains configured node names, hooks and state schemas through
+a host-owned copy. Keep personal graphs and shared extension instances independent.
+
 Workspace refusal types in `contract.py` use the existing `Refusal` HTTP envelope.
 All eight `ResidentUnavailable` subclasses default to 409, including workspace
 `files-full`, distinct from the personal-chat 507. Preserve cause metadata and

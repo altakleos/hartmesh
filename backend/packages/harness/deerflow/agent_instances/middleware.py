@@ -32,9 +32,10 @@ def _local_date(messages) -> HumanMessage | None:
 
 
 class InstanceAuthorityMiddleware(AgentMiddleware):
-    def __init__(self, *, require_memory_audience=False):
+    def __init__(self, *, require_memory_audience=False, allowed_tool_names=frozenset()):
         super().__init__()
         self.require_memory_audience = require_memory_audience
+        self.allowed_tool_names = allowed_tool_names
 
     def _validate_sync(self, runtime):
         from deerflow.agent_instances.runtime import current_environment
@@ -73,12 +74,21 @@ class InstanceAuthorityMiddleware(AgentMiddleware):
     async def abefore_model(self, state, runtime):
         await self._validate_async(runtime)
 
+    def _check_tool(self, request):
+        name = request.tool_call.get("name")
+        if not isinstance(name, str) or name not in self.allowed_tool_names:
+            from deerflow.agent_instances.contract import AgentDenied
+
+            raise AgentDenied("This tool is unavailable in the current instance run")
+
     def wrap_tool_call(self, request, handler):
         self._validate_sync(request.runtime)
+        self._check_tool(request)
         return handler(request)
 
     async def awrap_tool_call(self, request, handler):
         await self._validate_async(request.runtime)
+        self._check_tool(request)
         return await handler(request)
 
     def _with_identity(self, request, work_context=None):

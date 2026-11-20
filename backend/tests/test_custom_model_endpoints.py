@@ -364,6 +364,7 @@ def test_proxy_settings_of_the_environment_are_not_used(deployment, stubs, monke
 @pytest.mark.parametrize("policy_field", [[], ["endpoint_policy: public"]], ids=["provider-model", "provider-model-with-the-policy-field"])
 def test_a_model_that_cannot_be_built_says_nothing_of_its_settings(policy_field, deployment, stubs, monkeypatch, caplog):
     service = stubs()
+    caplog.set_level(logging.INFO, logger="deerflow")
     monkeypatch.setenv("HM_TEST_VALUE", "plain-marker-word")
     # A provider's own profile with a setting its class refuses.
     profile = ["name: provider-model", "use: langchain_openai:ChatOpenAI", f"model: {MODEL_ID}", f"base_url: {service.base_url()}", f"api_key: {KEY}", "max_retries: $HM_TEST_VALUE", *policy_field]
@@ -375,14 +376,16 @@ def test_a_model_that_cannot_be_built_says_nothing_of_its_settings(policy_field,
         create_chat_model("provider-model", attach_tracing=False)
 
     _tenant_written(monkeypatch, service)
-    with caplog.at_level(logging.ERROR, logger="deerflow.models.factory"), pytest.raises(ValueError) as failure:
+    with pytest.raises(ValueError) as failure:
         create_chat_model("provider-model", attach_tracing=False)
 
     assert str(failure.value) == "This model could not be built"
     assert failure.value.__cause__ is None and failure.value.__suppress_context__
     # The log has the kind of error and the field that failed, not what the field held.
-    assert caplog.messages == ["Model 'provider-model' could not be built (ValidationError: max_retries)"]
-    assert "plain-marker-word" not in caplog.text
+    factory_records = [(record.levelno, record.getMessage()) for record in caplog.records if record.name == "deerflow.models.factory"]
+    assert factory_records == [(logging.ERROR, "Model 'provider-model' could not be built (ValidationError: max_retries)")]
+    for value in ("plain-marker-word", KEY, service.base_url()):
+        assert value not in caplog.text
 
 
 def test_a_caller_cannot_put_another_client_in_their_place(deployment, stubs, monkeypatch):
