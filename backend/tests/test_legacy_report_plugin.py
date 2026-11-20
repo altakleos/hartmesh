@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from _projection_support import legacy_report_package as legacy_report_package
 
 from app.gateway.routers import artifacts
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
@@ -20,21 +21,19 @@ ENTRY = "hartmesh_legacy_report:install"
 
 
 @pytest.mark.parametrize("provider_config", ["config.example.yaml", "deploy/compose/config.yaml"])
-def test_provider_configurations_activate_the_packaged_historical_adapter(monkeypatch, provider_config):
+def test_provider_configurations_activate_the_packaged_historical_adapter(provider_config):
     document = yaml.safe_load((ROOT / provider_config).read_text(encoding="utf-8"))
     declarations = [entry for entry in document.get("plugins", []) if entry.get("use") == ENTRY]
     assert len(declarations) == 1
     declaration = declarations[0]
     assert declaration["package"] == "hartmesh-legacy-report"
     assert declaration["enabled"] is True
-    monkeypatch.syspath_prepend(str(PACKAGE))
     loaded, diagnostics = load_extensions([ExtensionSpec(use=declaration["use"], enabled=declaration["enabled"], required=True, config=declaration["config"])])
     assert not diagnostics
     assert loaded.plugins[0][1].artifacts[0].compat_queries == ("report_preview",)
 
 
-def load_report(monkeypatch, **config):
-    monkeypatch.syspath_prepend(str(PACKAGE))
+def load_report(**config):
     return load_extensions([ExtensionSpec(use=ENTRY, required=True, config={"enabled": True, **config})])
 
 
@@ -43,8 +42,8 @@ def test_artifact_router_has_no_builtin_report_dispatch():
     assert not (ROOT / "backend/app/gateway/routers/_report_projection.py").exists()
 
 
-def test_provider_package_loads_through_the_existing_lifecycle(monkeypatch):
-    loaded, diagnostics = load_report(monkeypatch)
+def test_provider_package_loads_through_the_existing_lifecycle():
+    loaded, diagnostics = load_report()
     assert not diagnostics
     source, plugin = loaded.plugins[0]
     assert source == ENTRY
@@ -58,12 +57,12 @@ def test_provider_package_loads_through_the_existing_lifecycle(monkeypatch):
     assert not diagnostics and not disabled.plugins
     removed, diagnostics = load_extensions([])
     assert not diagnostics and not removed.plugins
-    reloaded, diagnostics = load_report(monkeypatch)
+    reloaded, diagnostics = load_report()
     assert not diagnostics and reloaded.plugins[0][1].artifacts[0].id == declaration.id
 
 
-def test_projection_filters_display_fields_without_changing_source(monkeypatch):
-    loaded, _ = load_report(monkeypatch)
+def test_projection_filters_display_fields_without_changing_source():
+    loaded, _ = load_report()
     project = loaded.plugins[0][1].artifacts[0].project
     source = json.loads(FIXTURE.read_text(encoding="utf-8"))
     source["raw_rows"] = [{"private_row": "retained"}]
@@ -77,18 +76,18 @@ def test_projection_filters_display_fields_without_changing_source(monkeypatch):
 
 
 @pytest.mark.parametrize("raw", [b"{bad", b"[]", b'{"meta":{},"version":NaN}'])
-def test_projector_rejects_malformed_data(monkeypatch, raw):
-    loaded, _ = load_report(monkeypatch)
+def test_projector_rejects_malformed_data(raw):
+    loaded, _ = load_report()
     with pytest.raises(ValueError):
         loaded.plugins[0][1].artifacts[0].project(raw)
 
 
 @pytest.mark.parametrize("enabled", ["true", 1, None])
-def test_package_enablement_requires_an_operator_boolean(monkeypatch, enabled):
+def test_package_enablement_requires_an_operator_boolean(enabled):
     from deerflow.extensions.loader import ExtensionLoadError
 
     with pytest.raises(ExtensionLoadError):
-        load_report(monkeypatch, enabled=enabled)
+        load_report(enabled=enabled)
 
 
 @pytest.mark.parametrize("old_layout", [True, False], ids=["misnamed-layout-refused", "packaged-layout-upgrades-and-removes"])

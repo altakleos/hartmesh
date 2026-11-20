@@ -842,8 +842,10 @@ async def _lifespan_resources(app: FastAPI) -> AsyncGenerator[None, None]:
     # provider built on the event-loop thread would otherwise install SIGTERM/
     # SIGINT handlers that destroy every sandbox before uvicorn starts the run
     # drain. `_runtime_with_mcp_pool_shutdown` closes the provider afterwards.
+    from app.gateway.routers._artifact_projection import projection_lifespan
+
     with hold_sandbox_shutdown_ownership():
-        async with _gateway_lifespan(app):
+        async with _gateway_lifespan(app), projection_lifespan(app):
             yield
 
 

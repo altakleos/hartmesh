@@ -79,14 +79,13 @@ in `artifacts`, separate from `surfaces`. Never register artifacts as pages.
 or validates a passive return. Shadow DOM isolates styles, not privileges;
 operator-installed modules are trusted and share no React runtime.
 
-Select handlers only through installed suffix declarations; ambiguity uses
-ordinary access. Mount identity includes account/thread/path/module/source
-SHA-256/locale/theme. Cancellation retires host services, observes late work,
-disposes controllers/raster URLs and prevents late toasts. Discovery/module/
-transcript reads have bounds/deadlines. Generic `preview=namespace/id`
-projections have separate query keys and declared source/preview budgets.
-Malformed display data falls back to bounded canonical reads; permission/path
-failures remain terminal. See [plugin capability](../contracts/artifact_view/plugins.md).
+Select handlers by installed suffix; ambiguity uses ordinary access. Mount by
+account/thread/path/module/source SHA-256/locale/theme. Cancellation retires
+services, disposes controllers/raster URLs and prevents late toasts.
+Bound discovery, module and transcript reads. `preview=namespace/id` keys
+include viewer and byte budgets. A busy response offers Retry. On failure,
+offer Download for binary files or bounded text for recognized text formats.
+Permission/path failures remain terminal. See [plugin capability](../contracts/artifact_view/plugins.md).
 
 `core/artifact-views/` owns passive `*.view.json` v1 and `ArtifactView`: six flat
 primitives, authored strings and explicit local exports. Unknown structure

@@ -66,7 +66,7 @@ async function openTheReport(
   page: Page,
   reportRequests: string[] = [],
   reportSaves: string[] = [],
-  projectionAvailable = true,
+  projectionAvailable: boolean | "busy-once" = true,
   chartsAvailable = true,
 ) {
   mockLangGraphAPI(page, {
@@ -82,6 +82,7 @@ async function openTheReport(
     ],
   });
   await installLegacyReportPlugin(page);
+  let busy = projectionAvailable === "busy-once";
   await page.route(
     `**/api/threads/${THREAD_ID}/artifacts${REPORT_PATH}*`,
     (route) => {
@@ -99,6 +100,14 @@ async function openTheReport(
       const url = route.request().url();
       reportRequests.push(url);
       const projected = new URL(url).searchParams.has("preview");
+      if (projected && busy) {
+        busy = false;
+        return route.fulfill({
+          status: 503,
+          headers: { "Retry-After": "1" },
+          json: { detail: { code: "preview-busy" } },
+        });
+      }
       if (projected && !projectionAvailable)
         return route.fulfill({ status: 422, body: "Projection unavailable" });
       const source = JSON.parse(REPORT_JSON) as Record<string, unknown>;
@@ -169,6 +178,34 @@ async function openTheReport(
 }
 
 test.describe("business report card", () => {
+  test("offers Retry and Download until the preview worker is ready", async ({
+    page,
+  }, testInfo) => {
+    const requests: string[] = [];
+    const card = await openTheReport(page, requests, [], "busy-once");
+    await expect(
+      page.getByText("Previews are busy. Try again in a moment."),
+    ).toBeVisible();
+    await expect(
+      page
+        .getByRole("group", {
+          name: "Previews are busy. Try again in a moment.",
+        })
+        .getByRole("link", { name: "Download", exact: true }),
+    ).toHaveAttribute("href", /download=true/);
+    await testInfo.attach("Busy preview in the conversation file panel", {
+      body: await page.screenshot(),
+      contentType: "image/png",
+    });
+    await page.getByRole("button", { name: "Retry", exact: true }).click();
+    await expect(
+      card.getByRole("heading", { name: "August 2026 Business Review" }),
+    ).toBeVisible();
+    expect(
+      requests.filter((url) => new URL(url).searchParams.has("preview")),
+    ).toHaveLength(2);
+  });
+
   for (const mode of ["projection", "fallback", "remount"] as const) {
     test(`preserves canonical rows through ${mode} editing and saving`, async ({
       page,

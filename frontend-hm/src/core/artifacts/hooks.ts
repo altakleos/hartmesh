@@ -15,11 +15,13 @@ export function useArtifactContent({
   threadId,
   enabled,
   presentation,
+  viewerId,
 }: {
   filepath: string;
   threadId: string;
   enabled?: boolean;
   presentation?: ArtifactPresentationRequest;
+  viewerId?: string;
 }) {
   const isWriteFile = useMemo(() => {
     return filepath.startsWith("write-file:");
@@ -54,7 +56,7 @@ export function useArtifactContent({
       isMock,
       fullContentRequested,
       ...(presentation && !fullContentRequested
-        ? ["installed-preview", presentation, sourcePreviewRequested]
+        ? ["installed-preview", presentation, viewerId, sourcePreviewRequested]
         : []),
     ],
     [
@@ -64,6 +66,7 @@ export function useArtifactContent({
       fullContentRequested,
       presentation,
       sourcePreviewRequested,
+      viewerId,
     ],
   );
   const { data, isLoading, error, refetch } = useQuery({
@@ -85,6 +88,7 @@ export function useArtifactContent({
       });
     },
     enabled,
+    ...(presentation ? { retry: false } : {}),
     gcTime: isArtifactViewPath(filepath) || presentation ? 0 : undefined,
     staleTime: 0,
     refetchOnWindowFocus: true,
@@ -120,6 +124,7 @@ export function useArtifactContent({
     fullContentRequested,
     loadFullContent,
     loadSourcePreview,
+    retryPreview: refetch,
     isLoading,
     error,
   };

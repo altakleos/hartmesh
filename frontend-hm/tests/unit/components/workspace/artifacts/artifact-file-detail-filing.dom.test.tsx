@@ -24,6 +24,8 @@ const extensionState = rs.hoisted(() => ({
   projected: false,
   truncated: false,
   loadFull: rs.fn(),
+  error: null as Error | null,
+  retry: rs.fn(),
 }));
 
 rs.mock("sonner", () => ({ toast: { success: rs.fn(), error: rs.fn() } }));
@@ -59,7 +61,8 @@ rs.mock("@/core/artifacts/hooks", () => ({
     isLoading: false,
     data: { content: "", size: 12, is_binary: true },
     isPending: false,
-    error: null,
+    error: extensionState.error,
+    retryPreview: extensionState.retry,
   }),
 }));
 rs.mock("@/components/workspace/artifacts/context", () => ({
@@ -89,6 +92,7 @@ rs.mock("@/components/workspace/messages/context", () => ({
 }));
 
 import { ArtifactFileDetail } from "@/components/workspace/artifacts/artifact-file-detail";
+import { PreviewBusyError } from "@/core/artifacts/loader";
 import type { LoadedContribution } from "@/core/extensions/registry";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
@@ -129,12 +133,27 @@ describe("ArtifactFileDetail filing", () => {
     extensionState.projected = false;
     extensionState.truncated = false;
     extensionState.loadFull.mockReset();
+    extensionState.error = null;
+    extensionState.retry.mockReset();
     artifacts.recorded = [];
   });
 
   afterEach(() => {
     cleanup();
     rs.restoreAllMocks();
+  });
+
+  it("offers an explicit retry and the original download while the preview worker is busy", () => {
+    extensionState.entries = [legacyReportContribution()];
+    extensionState.error = new PreviewBusyError();
+    renderPanel(REPORT);
+    expect(
+      screen.getByText("Previews are busy. Try again in a moment."),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(extensionState.retry).toHaveBeenCalledTimes(1);
+    const download = screen.getByRole("link", { name: "Download" });
+    expect(download.getAttribute("href")).toContain("download=true");
   });
 
   it("files a report's download with the reports, as the report card does", () => {
@@ -164,9 +183,13 @@ describe("ArtifactFileDetail filing", () => {
     expect(shareWithEveryone).toHaveBeenCalledWith([notes], undefined);
   });
 
-  it.each([".pdf", ".opaque"])(
-    "lets an installed renderer own a non-code %s preview",
-    (suffix) => {
+  it.each([
+    [".pdf", true],
+    [".opaque", true],
+    [".pdf", false],
+  ] as const)(
+    "preserves the binary source without a raw fetch for %s (renderer available: %s)",
+    async (suffix, available) => {
       const source = `/mnt/user-data/outputs/sample${suffix}`;
       artifacts.list = [source];
       extensionState.content = '{"summary":"Projected binary summary"}';
@@ -199,6 +222,7 @@ describe("ArtifactFileDetail filing", () => {
                 title: "Summary",
                 kind: "native",
                 mount(root, context) {
+                  if (!available) throw new Error("Renderer unavailable");
                   root.textContent = (
                     JSON.parse(context.artifact.content) as { summary: string }
                   ).summary;
@@ -214,6 +238,14 @@ describe("ArtifactFileDetail filing", () => {
         },
       ];
       const { container } = renderPanel(source);
+      if (!available) {
+        await screen.findByText(enUS.artifactPreview.previewFailed);
+        expect(container.querySelector("iframe")).toBeNull();
+        expect(
+          screen.getByRole("link", { name: "Download" }).getAttribute("href"),
+        ).toContain("download=true");
+        return;
+      }
       expect(
         screen.getByTestId("plugin-artifact-presentation").firstElementChild
           ?.shadowRoot?.textContent,

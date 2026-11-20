@@ -4,12 +4,13 @@ from dataclasses import replace
 
 import pytest
 from deerflow_extension_api.plugins import ArtifactPresentation, BrowserModule, PluginContribution
+from support.artifact_projectors import summary
 
 from deerflow.extensions.registry import ExtensionRegistry
 
 
 def declaration(**changes):
-    return replace(ArtifactPresentation(id="summary", suffixes=(".summary.json",), project=lambda raw: b'{"summary":"ready"}', projection_marker="example-summary-v1"), **changes)
+    return replace(ArtifactPresentation(id="summary", suffixes=(".summary.json",), project=summary, projection_marker="example-summary-v1"), **changes)
 
 
 def plugin(**changes):
@@ -56,6 +57,7 @@ def test_page_only_v1_remains_supported_and_artifacts_negotiate_explicitly():
         {"compat_queries": ("download",)},
         {"compat_queries": ("legacy", "legacy")},
         {"project": "module:load"},
+        {"project": lambda raw: raw},
     ],
 )
 def test_invalid_artifact_declarations_cannot_half_register(changes):

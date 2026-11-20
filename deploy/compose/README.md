@@ -1779,6 +1779,16 @@ set as a multiple of a measured peak rather than against an observed failure,
 so what it gives up is stated headroom rather than margin of unknown size.
 Moving the 5.0 GiB line instead is the operator's call, not this profile's.
 
+An installed artifact projector, including the business report, uses one worker
+per Gateway. Its wall deadline is 10 seconds, CPU allowance 8 seconds and Linux
+address-space limit 256 MiB. Eight other requests can wait up to 8 seconds.
+The host budgets 20 worker-seconds per rolling minute, reads up to 16 MiB of
+source, accepts up to 1 MiB of output, and retains up to 64 results within
+16 MiB. During a preview, allowing 288 MiB for the child, one source and the
+cache leaves 214 MiB above the historical 586 MiB baseline for other processes.
+These figures describe limits and a historical baseline. The release image's
+actual workload peak is a separate measurement.
+
 Every term of that line, so a change to one has to name the other it took
 from: services 2880 MiB (the table above), two 1024 MiB sandbox slots, and
 their two 96 MiB relays is 5120 MiB, exactly 5.0 GiB.

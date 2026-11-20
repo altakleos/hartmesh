@@ -27,6 +27,7 @@ from deerflow_extension_api import ExtensionRegistry as ExtensionRegistryContrac
 from deerflow_extension_api.plugins import ArtifactPresentation, BrowserAssets, BrowserModule, PluginContribution
 
 from deerflow.extensions.model_access import ModelInvocationScope, ModelInvocationService
+from deerflow.extensions.projection_host import projector_reference
 
 _Entry = tuple[str, Any]
 
@@ -196,6 +197,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             if item.project is not None:
                 if not callable(item.project) or inspect.iscoroutinefunction(item.project) or not isinstance(item.projection_marker, str) or not re.fullmatch(r"[a-z][a-z0-9.-]{0,95}", item.projection_marker):
                     raise ValueError("Artifact projections require a sync callback and valid marker")
+                projector_reference(item.project)
             elif item.projection_marker is not None or item.compat_queries:
                 raise ValueError("Artifact projection metadata requires a projector")
             if len(item.compat_queries) > 4:

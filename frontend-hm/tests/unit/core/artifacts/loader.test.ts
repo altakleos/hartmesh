@@ -82,6 +82,41 @@ describe("loadArtifactContent", () => {
     },
   );
 
+  it("keeps a binary projection refusal on the original Download action", async () => {
+    const fetch = rs
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => new Response(null, { status: 422 }));
+    await expect(
+      loadArtifactContent({
+        filepath: "/mnt/user-data/outputs/sample.xlsx",
+        threadId: "one",
+        presentation,
+      }),
+    ).rejects.toThrow();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["preview-busy", "storage-unavailable"])(
+    "distinguishes %s at the preview endpoint",
+    async (code) => {
+      const fetch = rs
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(
+          Response.json({ detail: { code } }, { status: 503 }),
+        );
+      await expect(
+        loadArtifactContent({
+          filepath: "/mnt/user-data/outputs/sample.xlsx",
+          threadId: "one",
+          presentation,
+        }),
+      ).rejects.toMatchObject({
+        name: code === "preview-busy" ? "PreviewBusyError" : "Error",
+      });
+      expect(fetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("keeps generic projection authorization and path denial terminal", async () => {
     const fetch = rs
       .spyOn(globalThis, "fetch")

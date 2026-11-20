@@ -1217,6 +1217,9 @@ Unsupported storage credentials also run chats without files. Uploads and edits
 stage privately on the qualified volume and report `files-full` with HTTP 507
 when capacity or inode headroom is exhausted. Free room by deleting files or old
 conversations. Artifact reads retain range requests and installed preview plugins.
+The Gateway runs each installed preview in a short-lived worker. When previews
+are busy, the file panel offers Retry and Download. Download opens the original
+file even when a preview exceeds its budget.
 Deleting a conversation confirms its containers are gone before removing its files.
 Branching the latest turn copies workspace, uploads and outputs into a separate
 quota-counted conversation; historical turns and chats without personal storage

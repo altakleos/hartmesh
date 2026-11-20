@@ -1128,6 +1128,8 @@ export function createEnUS(product: string): Translations {
           : `Showing the first ${previewSize}.`,
       loadFullFile: "Load full file",
       loadingFullFile: "Loading full file...",
+      retry: "Retry",
+      busy: "Previews are busy. Try again in a moment.",
       previewFailed:
         "This file could not be previewed. You can still download it.",
       viewSource: "View source",

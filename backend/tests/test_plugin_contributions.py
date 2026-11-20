@@ -9,6 +9,7 @@ from deerflow_extension_api.plugins import ArtifactPresentation, BackendAction, 
 from deerflow_extension_api.settings import SettingsField
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from support.artifact_projectors import summary
 
 from app.gateway.routers.plugins import router
 from deerflow.extensions.registry import ExtensionRegistry
@@ -78,7 +79,7 @@ def test_one_card_and_deployment_owned_switch(plugin_client):
 
 def test_artifact_discovery_exposes_only_installed_public_capabilities(plugin_client):
     http, role, _, plugin = plugin_client
-    declaration = ArtifactPresentation(id="summary", suffixes=(".summary.json",), source_max_bytes=4096, preview_max_bytes=1024, project=lambda raw: b"{}", projection_marker="example-summary-v1", compat_queries=("legacy_preview",))
+    declaration = ArtifactPresentation(id="summary", suffixes=(".summary.json",), source_max_bytes=4096, preview_max_bytes=1024, project=summary, projection_marker="example-summary-v1", compat_queries=("legacy_preview",))
     registry = ExtensionRegistry()
     with registry.attributed_to("private:installed-source"):
         registry.plugin(replace(plugin, enabled=True, api_version=2, artifacts=(declaration,)))
