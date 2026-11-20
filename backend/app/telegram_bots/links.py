@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.settings import SettingsRepository
 from app.telegram_bots.sql_readers import reader_session
+from app.telegram_bots.sql_writers import writer_session
 from app.telegram_bots.token_pattern import TOKEN_BODY
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow, ChannelConversationRow, ChannelCredentialRow, ChannelOAuthStateRow
 from deerflow.persistence.channel_connections.sql import ChannelConnectionRepository
@@ -507,7 +508,7 @@ class BotLinkRepository:
 
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[AsyncSession]:
-        async with self.session_factory() as session, session.begin():
+        async with writer_session(self.session_factory) as session:
             if session.get_bind().dialect.name == "sqlite":
                 await session.execute(text("BEGIN IMMEDIATE"))
             yield session
