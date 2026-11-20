@@ -12,7 +12,7 @@ from zipfile import ZipFile
 import pytest
 import yaml
 from _office_fixture import W, archive, document, relationships, workbook, zip_parts
-from _projection_support import ready_projection_host
+from _projection_support import installed_or_checkout_package, ready_projection_host
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
@@ -26,9 +26,15 @@ from deerflow.extensions.loader import ExtensionSpec, load_extensions
 from deerflow.runtime.user_context import get_effective_user_id
 
 ROOT = Path(__file__).resolve().parents[2]
-PACKAGE = ROOT / "backend/extensions/sources/hartmesh-office-preview"
 ENTRY = "hartmesh_office_preview:install"
 GOLDEN = ROOT / "frontend-hm/tests/fixtures/office"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def office_package():
+    checkout = ROOT / "backend/extensions/sources/hartmesh-office-preview"
+    with installed_or_checkout_package("hartmesh_office_preview", checkout):
+        yield
 
 
 def saved(document):
@@ -50,8 +56,7 @@ def deck_sample():
 
 
 @pytest.fixture
-def projections(monkeypatch):
-    monkeypatch.syspath_prepend(str(PACKAGE))
+def projections():
     loaded, diagnostics = load_extensions([ExtensionSpec(use=ENTRY, required=True)])
     assert not diagnostics
     ((source, plugin),) = loaded.plugins
@@ -82,7 +87,6 @@ def test_passive_documents_match_the_browser_corpus(projections, kind, suffix, s
 @pytest.mark.skipif(os.name == "nt", reason="descriptor-relative artifact reads require POSIX")
 @pytest.mark.parametrize("owner", [True, False])
 def test_workbook_via_authorized_artifact_route(monkeypatch, tmp_path, owner):
-    monkeypatch.syspath_prepend(str(PACKAGE))
     paths = paths_module.Paths(tmp_path)
     monkeypatch.setattr(paths_module, "_paths", paths)
     directory = paths.sandbox_outputs_dir("office-chat", user_id=get_effective_user_id())
