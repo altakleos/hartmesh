@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.67] - 2026-11-20
+
+### Added
+
+- Administrators can add and edit remote HTTP and SSE tool connections in Settings and check whether a saved connection answers. A successful check shows how many tools it offers. The JSON editor remains available.
+- An employee or assistant manager can give the agent a company connection. People opening the agent or its conversation can see which connections it can use. The agent can call the service during a conversation, an assignment, or a run started by an installed package the operator explicitly listed. Helpers have no company connections.
+- Calls use the service account configured on the connection and can send information outside the company without asking for approval. The web conversation records tool calls and answers. Telegram shows the agent’s answers, with a connection disclosure in its greeting and privacy reply.
+
+### Fixed
+
+- Gateway shutdown now waits for a committed Telegram writer to return its database connection.
+
+### Operations
+
+- Upgrade from a restarted `2.2.0+hartmesh.66` after confirming zero pending file operations. Grants are off by default in this qualification build. Set `agent_connections.enabled` to `true` in the Gateway configuration to enable them. Turning it off suspends use and preserves managers’ choices.
+- A change to a connection’s address or credential takes effect at the next call. Removing and recreating it requires a fresh grant. A durable sending record without a final outcome means the action may have reached the service. Check that service before repeating the action.
+- Rolling back to .66 removes employee and assistant tool access. The stored choices can take effect again on upgrade. Keep the switch off on return if the rollback followed an incident. Treat complete configuration backups as privileged because restoring one can restore its grants.
+
+### Schema changes
+
+No database migration. Connection grants use the existing extensions configuration file. Call receipts use the existing run event store.
+
 ## [2.2.0+hartmesh.66] - 2026-11-20
 
 ### Added
