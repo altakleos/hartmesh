@@ -22,7 +22,10 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/core/auth/AuthProvider";
-import { useCustomerAdministration } from "@/core/features/hooks";
+import {
+  useAgentInstances,
+  useCustomerAdministration,
+} from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   checkMCPConnection,
@@ -56,6 +59,7 @@ export function ToolSettingsPage() {
   const { t } = useI18n();
   const { user } = useAuth();
   const { config, isLoading, error } = useMCPConfig();
+  const feature = useAgentInstances();
   const adminRequired =
     error instanceof MCPConfigRequestError && error.isAdminRequired;
   return (
@@ -79,6 +83,11 @@ export function ToolSettingsPage() {
             <MCPServerList
               key={JSON.stringify([user?.id, user?.system_role])}
               servers={config.mcp_servers}
+              counts={
+                feature.connections === true
+                  ? config.given_agent_counts
+                  : undefined
+              }
             />
           )
         )}
@@ -89,8 +98,10 @@ export function ToolSettingsPage() {
 
 function MCPServerList({
   servers,
+  counts,
 }: {
   servers?: Record<string, MCPServerConfig>;
+  counts?: Record<string, number>;
 }) {
   const { t } = useI18n();
   const { isPending, mutate: enableMCPServer } = useEnableMCPServer();
@@ -140,6 +151,7 @@ function MCPServerList({
     checker.current?.controller.abort();
     checker.current = null;
     setCheck(null);
+    setChangedName(null);
   }
   async function runCheck(
     name: string,
@@ -166,6 +178,14 @@ function MCPServerList({
       if (!owner.signal.aborted)
         setCheck({ name, saved, definition, result: "unavailable" });
     }
+  }
+  const [changedName, setChangedName] = useState<string | null>(null);
+  function affected(name: string | null) {
+    const value =
+      name !== null && counts && Object.hasOwn(counts, name) ? counts[name] : 0;
+    return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+      ? value
+      : 0;
   }
   const [definition, setDefinition] = useState("");
   const [definitionError, setDefinitionError] = useState<string | null>(null);
@@ -279,7 +299,12 @@ function MCPServerList({
           serverName: editor.name,
           server: editedConfig,
         },
-        { onSuccess: closeEditor },
+        {
+          onSuccess: () => {
+            setChangedName(editor.name);
+            closeEditor();
+          },
+        },
       );
     }
   }
@@ -329,6 +354,16 @@ function MCPServerList({
                 <ItemDescription className="line-clamp-4">
                   {config.description}
                 </ItemDescription>
+                {affected(name) > 0 && (
+                  <p className="text-sm">
+                    {t.settings.tools.connection.givenCount(affected(name))}
+                  </p>
+                )}
+                {changedName === name && affected(name) > 0 && (
+                  <p role="status">
+                    {t.settings.tools.connection.changedFor(affected(name))}
+                  </p>
+                )}
                 {currentCheck && (
                   <p role="status" className="text-sm">
                     {currentCheck.saved &&
@@ -368,7 +403,12 @@ function MCPServerList({
                   disabled={readOnly || localReadOnly || isMutating}
                   onCheckedChange={(checked) => {
                     clearCheck();
-                    enableMCPServer({ serverName: name, enabled: checked });
+                    const state = { serverName: name, enabled: checked };
+                    if (affected(name))
+                      enableMCPServer(state, {
+                        onSuccess: () => setChangedName(name),
+                      });
+                    else enableMCPServer(state);
                   }}
                 />
                 <Button
@@ -448,6 +488,7 @@ function MCPServerList({
                     : { operation: "create", servers: { [name]: server } },
                   {
                     onSuccess: (saved) => {
+                      if (editor.mode === "edit") setChangedName(name);
                       closeEditor();
                       const server = saved.mcp_servers[name];
                       if (server) void runCheck(name, true, server);
@@ -512,10 +553,15 @@ function MCPServerList({
           <DialogHeader>
             <DialogTitle>{t.settings.tools.removeServer}</DialogTitle>
             <DialogDescription>
-              {t.settings.tools.removeServerDescription.replace(
-                "{name}",
-                displayServerName(pendingRemoval),
-              )}
+              {affected(pendingRemoval)
+                ? t.settings.tools.connection.removeGiven(
+                    displayServerName(pendingRemoval),
+                    affected(pendingRemoval),
+                  )
+                : t.settings.tools.removeServerDescription.replace(
+                    "{name}",
+                    displayServerName(pendingRemoval),
+                  )}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

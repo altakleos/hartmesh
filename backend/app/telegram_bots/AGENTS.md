@@ -11,8 +11,8 @@ Compose's renderer owns enabled/public URL/bot limits/voice provider and the
 legacy-channel closure; an absent environment key means on. See
 `deploy/compose/README.md`.
 
-Keep bot network, supervisor and router startup outside configuration loading.
-Use socket-free transports and synthetic credentials in offline tests.
+Keep transport startup outside config loading and use socket-free test fixtures.
+Resolve usable connection names at greeting or privacy delivery after live Use checks.
 Use `authority.internal_request` only after live owner ceilings and bot-scope checks.
 
 `work_text_inputs.py` routes plain text for shown Work prompts and,

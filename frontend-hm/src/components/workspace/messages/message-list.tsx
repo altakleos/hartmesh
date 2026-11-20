@@ -304,6 +304,7 @@ function LoadMoreHistoryIndicator({
 
 export function MessageList({
   sentTurn,
+  showPackageOrigins = false,
   agentTarget,
   archiveDownloadsEnabled = true,
   className,
@@ -331,6 +332,7 @@ export function MessageList({
   resizeScroll = "smooth",
 }: {
   sentTurn?: SentTurn | null;
+  showPackageOrigins?: boolean;
   /** Whose conversation this is; without one no link under an answer is drawn. */
   agentTarget?: AgentTarget;
   archiveDownloadsEnabled?: boolean;
@@ -1258,6 +1260,7 @@ export function MessageList({
                       const item = (
                         <MessageListItem
                           message={msg}
+                          employeeConversation={showPackageOrigins}
                           isLoading={
                             thread.isLoading &&
                             groupIndex === groupedMessages.length - 1

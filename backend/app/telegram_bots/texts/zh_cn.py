@@ -289,12 +289,12 @@ TEXTS: dict[str, str] = {
     "agent.deleted": "{name} 已删除。\n{name} 的文件也已删除，无法恢复 {name}。此聊天不再回答。如需从 Telegram 删除此对话，请删除聊天。",
     "hello.assistant": (
         "已以 {email} 连接。此聊天是 {name}，你的 AI 助理（{role}）。其他 Telegram 账号无法在此发消息。\n\n{na"
-        "me} 不会自行开始任何事。像与同事交流一样向 {name} 提问，或说说需要做什么。/work 显示当前工作。你在此发送的文件会交给 {name}。\n\n{name}"
+        "me} 会在这里回复你。像与同事交流一样向 {name} 提问，或说说需要做什么。/work 显示当前工作。你在此发送的文件会交给 {name}。\n\n{name}"
         " 是 AI，可能出错。采取行动前请核实相关信息。"
     ),
     "hello.employee": (
         "已以 {email} 连接。此聊天是 {name}，一位 AI 员工（{role}）。其他 Telegram 账号无法在此发消息。\n\n{na"
-        "me} 不会自行开始任何事。像与同事交流一样向 {name} 提问，或说说需要做什么。/work 显示当前工作。你在此发送的文件会交给 {name}。\n\n{name}"
+        "me} 会在这里回复你。像与同事交流一样向 {name} 提问，或说说需要做什么。/work 显示当前工作。你在此发送的文件会交给 {name}。\n\n{name}"
         " 是 AI，可能出错。采取行动前请核实相关信息。"
     ),
     "help.agent": (
@@ -309,8 +309,12 @@ TEXTS: dict[str, str] = {
         "- /stop 停止正在进行的事\n"
         "- /settings 设置此聊天何时可以主动发消息，以及语言\n"
         "\n"
-        "{name} 不会自行开始任何事，但有问题、结果或故障需要你处理时，会主动在这里发消息。"
+        "有问题、结果或故障需要你处理时，{name}会主动在这里发消息。"
     ),
+    "hello.connections": "{name}可以使用：{names}。发送 /privacy 了解详情。",
+    "privacy.connections": "{name}可以使用：{names}。你在此输入或发送的内容可能被发往这些服务。本聊天显示{name}的回答，你也可以在网页版对话中查看连接活动。",
+    "privacy.connections_more": "另有 {count} 个连接",
+    "privacy.connections_unavailable": "暂时无法查看连接详情。分享信息前请先查看智能体页面。",
     "privacy.company": "有权查看 {name} 全部工作的人，可以在 {product} 中阅读此对话。你发送的文件保存在 {name} 的文件中，有权查看 {name} 全部工作的人都可以打开。",
     "privacy.protected": "{name} 的管理者已关闭此聊天的转发和保存功能。{name} 主动发送的消息需要点按“显示”才能查看详情。",
     "profile.short.agent": "AI 助理。私人聊天：只回答连接此机器人的人。",
@@ -565,7 +569,7 @@ FORMS.update(
         "hello.assistant": {
             "colleague": (
                 "已以 {email} 连接。此聊天是 {name}，{owner} 的 AI 助理（{role}）。其他 Telegram 账号无法在此发消"
-                "息。\n\n{name} 不会自行开始任何事。像与同事交流一样向 {name} 提问，或说说需要做什么。你在此发送的文件会交给 {name}。\n"
+                "息。\n\n{name} 会在这里回复你。像与同事交流一样向 {name} 提问，或说说需要做什么。你在此发送的文件会交给 {name}。\n"
                 "\n{name} 是 AI，可能出错。采取行动前请核实相关信息。"
             )
         },

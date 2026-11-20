@@ -19,6 +19,8 @@ const mcpMockState = rs.hoisted(() => ({
   updateIsPending: false,
   updateMutate: rs.fn(),
   servers: {} as Record<string, unknown>,
+  counts: {} as Record<string, number>,
+  connections: true,
 }));
 // A server carrying config this page never renders: it must survive a write
 // that only meant to add or remove some other entry.
@@ -82,6 +84,7 @@ rs.mock("@/core/i18n/hooks", () => ({
 }));
 
 rs.mock("@/core/features/hooks", () => ({
+  useAgentInstances: () => ({ connections: mcpMockState.connections }),
   useCustomerAdministration: () => ({
     localMcpManagement: mcpMockState.localMcpManagement,
   }),
@@ -90,7 +93,10 @@ rs.mock("@/core/features/hooks", () => ({
 
 rs.mock("@/core/mcp/hooks", () => ({
   useMCPConfig: () => ({
-    config: { mcp_servers: mcpMockState.servers },
+    config: {
+      mcp_servers: mcpMockState.servers,
+      given_agent_counts: mcpMockState.counts,
+    },
     isLoading: false,
     error: null,
   }),
@@ -153,6 +159,8 @@ afterEach(() => {
   mcpMockState.mutate.mockReset();
   mcpMockState.updateMutate.mockReset();
   mcpMockState.servers = {};
+  mcpMockState.counts = {};
+  mcpMockState.connections = true;
   cleanup();
 });
 
@@ -661,4 +669,28 @@ it("shows a saved diagnostic only after the refreshed list matches the returned 
   view.rerender(<ToolSettingsPage />);
   expect(screen.queryByRole("status")).toBeNull();
   expect(mcpMockState.check).toHaveBeenCalledTimes(1);
+});
+
+it("shows affected agent counts on the correct connection and explains removal", () => {
+  twoServers();
+  mcpMockState.counts = { remote: 2 };
+  render(<ToolSettingsPage />);
+  expect(screen.getByText("Given to 2 AI agents")).toBeDefined();
+  fireEvent.click(screen.getByRole("button", { name: "Delete remote" }));
+  expect(screen.getByRole("dialog").textContent).toContain(
+    "2 AI agents will lose",
+  );
+  expect(screen.getByRole("dialog").textContent).toContain("same name");
+});
+
+it("withdraws cached counts and removal warnings when the deployment turns connections off", () => {
+  twoServers();
+  mcpMockState.counts = { remote: 2 };
+  const view = render(<ToolSettingsPage />);
+  expect(screen.getByText("Given to 2 AI agents")).toBeDefined();
+  mcpMockState.connections = false;
+  view.rerender(<ToolSettingsPage />);
+  expect(screen.queryByText(/Given to/)).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Delete remote" }));
+  expect(screen.getByRole("dialog").textContent).not.toContain("2 AI agents");
 });

@@ -4,6 +4,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 
 import { AgentAvatar } from "@/components/workspace/instances/agent-avatar";
+import { ConnectionDisclosure } from "@/components/workspace/instances/instance-connections";
 import { usePersonNames } from "@/components/workspace/person-name";
 import type { AgentInstanceDetail } from "@/core/agent-instances/api";
 import { useAuth } from "@/core/auth/AuthProvider";
@@ -15,11 +16,13 @@ export function ConversationAgentHeader({
   detail,
   title,
   alsoWorking,
+  showConnections = false,
 }: {
   binding: NonNullable<AgentThread["agent_instance"]>;
   detail: AgentInstanceDetail | null;
   title: ReactNode;
   alsoWorking: boolean;
+  showConnections?: boolean;
 }) {
   const { user } = useAuth();
   const { t } = useI18n();
@@ -57,6 +60,9 @@ export function ConversationAgentHeader({
           <span>{subline}</span>
           {alsoWorking && <span>{copy.chat.alsoWorking}</span>}
         </div>
+        {showConnections && detail?.status === "active" && (
+          <ConnectionDisclosure key={detail.id} instance={detail} />
+        )}
       </div>
     </div>
   );

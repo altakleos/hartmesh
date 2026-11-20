@@ -29,6 +29,10 @@ import { usePeople } from "@/core/people/hooks";
 
 import { AgentAvailabilityNotice } from "./agent-header";
 import {
+  ActiveChatAccessNote,
+  ManagerConnections,
+} from "./instance-connections";
+import {
   LifecycleFailure,
   useLifecycleActions,
   useLifecycleModal,
@@ -40,8 +44,18 @@ export function AccessTab() {
   const { instance } = actions;
   const { user } = useAuth();
   const { t } = useI18n();
+  const feature = useAgentInstances();
   return (instance.permissions & INSPECT) === 0 ? (
-    <p>{t.agentInstances.access.manageNeedsInspect(instance.name)}</p>
+    <>
+      <p>
+        {feature.connections
+          ? t.agentInstances.connections.peopleNeedInspect(instance.name)
+          : t.agentInstances.access.manageNeedsInspect(instance.name)}
+      </p>
+      {feature.connections && !!(instance.permissions & MANAGE) && (
+        <ManagerConnections instance={instance} disabled={actions.busy} />
+      )}
+    </>
   ) : (
     <AccessControls
       key={`${user?.id}:${user?.system_role}:${user?.permissions?.join(",")}:${instance.id}:${instance.permissions}`}
@@ -120,9 +134,17 @@ function AccessControls() {
         )}
       </div>
       <div className="text-muted-foreground space-y-1 text-sm">
-        <p>{copy.useHelp(instance.name)}</p>
+        <p>
+          {copy.useHelp(instance.name)}{" "}
+          {feature.connections &&
+            t.agentInstances.connections.chatUse(instance.name)}
+        </p>
         <p>{copy.inspectHelp(instance.name)}</p>
-        <p>{copy.manageHelp(instance.name)}</p>
+        <p>
+          {feature.connections
+            ? t.agentInstances.connections.manage(instance.name)
+            : copy.manageHelp(instance.name)}
+        </p>
       </div>
       {grants.isPending ? (
         <p role="status">{t.agentInstances.loading}</p>
@@ -160,6 +182,9 @@ function AccessControls() {
       >
         {copy.add}
       </Button>
+      {feature.connections && !!(instance.permissions & MANAGE) && (
+        <ManagerConnections instance={instance} disabled={actions.busy} />
+      )}
       <TelegramPolicySection instance={instance} />
       {adding && (
         <PeoplePicker
@@ -268,6 +293,7 @@ function GrantRow({
   const [removing, setRemoving] = useState(false);
   useLifecycleModal(removing);
   const manageLocked = (own || lastManager) && !!(grant.permissions & MANAGE);
+  const feature = useAgentInstances();
   const manager = !!(permissions & MANAGE);
   const latest = actions.lastApplied;
   const saved =
@@ -310,7 +336,12 @@ function GrantRow({
         <p>{own ? copy.ownManage : copy.lastManager(actions.instance.name)}</p>
       )}
       {!!(permissions & USE) && !(permissions & INSPECT) && (
-        <p>{copy.chatOnlyNote(name, actions.instance.name)}</p>
+        <p>
+          {copy.chatOnlyNote(name, actions.instance.name)}{" "}
+          {feature.connections && (
+            <ActiveChatAccessNote instance={actions.instance} person={name} />
+          )}
+        </p>
       )}
       <div className="flex gap-2">
         {permissions !== grant.permissions && (

@@ -405,6 +405,43 @@ export interface Translations {
     | "source",
     string
   > & {
+    connections: {
+      peopleNeedInspect: (name: string) => string;
+      heading: string;
+      intro: (name: string) => string;
+      adminControl: string;
+      exposure: (name: string) => string;
+      empty: string;
+      loadFailed: string;
+      writeFailed: string;
+      giveTitle: (name: string, connection: string) => string;
+      giveScope: (name: string) => string;
+      giveData: (name: string) => string;
+      giveAccount: string;
+      brief: (name: string) => string;
+      members: (count: number, name: string) => string;
+      give: string;
+      changed: string;
+      givenBy: (person: string, date: string) => string;
+      givenOn: (date: string) => string;
+      unsupported: string;
+      active: (name: string, names: string) => string;
+      disclosure: (name: string) => string;
+      chatUse: (name: string) => string;
+      chatOnly: (person: string, name: string) => string;
+      manage: (name: string) => string;
+      packageOrigin: (source: string, person: string) => string;
+      reasons: Record<
+        | "switched-off"
+        | "not-remote"
+        | "per-person-credentials"
+        | "per-request-credentials"
+        | "agent-credential"
+        | "long-running"
+        | "ambiguous",
+        string
+      >;
+    };
     welcome: {
       title: (name: string) => string;
       body: (name: string) => string;
@@ -1843,6 +1880,9 @@ export interface Translations {
     };
     tools: {
       connection: {
+        givenCount: (n: number) => string;
+        changedFor: (n: number) => string;
+        removeGiven: (name: string, n: number) => string;
         discardJson: string;
         changed: string;
         add: string;

@@ -40,7 +40,9 @@ INSTANCE_AVAILABILITY_KEYS = frozenset("unavailable.off unavailable.paused unava
 INSTANCE_FAILURE_KEYS = frozenset("busy.two_conversations busy.starting_elsewhere refused.restarting refused.files_busy start.ws_1 start.ws_30 start.ws_failed refused.files_full refused.files_full_ask".split())
 INSTANCE_FAILURE_KEYS |= {"start.ws_failed_again", "refused.interrupted_manager", "refused.interrupted_recovery", "net.blocked_ask", "net.blocked"}
 LIFECYCLE_KEYS = frozenset("access.agent_off agent.paused agent.retired agent.deleted".split())
-INSTANCE_PRESENTATION_KEYS = frozenset("hello.assistant hello.employee help.agent privacy.company privacy.protected profile.short.agent profile.description.agent".split())
+INSTANCE_PRESENTATION_KEYS = frozenset(
+    "hello.assistant hello.employee hello.connections privacy.connections privacy.connections_more privacy.connections_unavailable help.agent privacy.company privacy.protected profile.short.agent profile.description.agent".split()
+)
 POLICY_KEYS = frozenset({"policy.off", "policy.on", "policy.on_protected", "policy.protected", "policy.unprotected"})
 
 

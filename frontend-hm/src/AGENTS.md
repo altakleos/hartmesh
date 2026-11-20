@@ -76,6 +76,11 @@ no customer-facing storage notice exposes byte capacities or pool terminology.
    successful mutation invalidates the account/role-scoped `["mcpConfig", …]` after the response.
    The remote form edits the complete masked definition. Preserve existing header
    spelling and the exact mask. Check only a saved name and render fixed result codes.
+   Agent connection queries are account-, permission- and generation-scoped.
+   Viewer rows have only name and host. Confirm a grant against the current
+   manager row and chat-member count, then refetch after either write outcome.
+   Instance human rows require the same thread, run, package, requester and message ID
+   in the host-issued run receipt before resolving an origin label.
    Current-chat MCP background tasks use `core/background-tasks`: the header
    trigger is hidden for new/mock/static-demo threads and unless `/api/features`
    reports the startup-scoped `mcp_tasks` capability; the list query is disabled

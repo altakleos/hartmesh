@@ -364,6 +364,58 @@ export function createZhCN(product: string): Translations {
         `${name} 无法访问 ${host}，该网站不在允许列表中。如需暂时允许，请在您自己的对话中让 ${name} 访问 ${host}，并在询问时允许该网站。然后请 ${name} 重试，或在已结束的任务上点击恢复。永久列表由 ${provider} 设置。`,
     },
     agentInstances: {
+      connections: {
+        peopleNeedInspect: (name) =>
+          `要管理哪些人能与${name}协作，你还需要「可查看全部工作」权限。请让另一位管理者为你授予此权限。`,
+        heading: "连接",
+        intro: (name) =>
+          `你可以把公司的 MCP 连接分配给${name}，用于对话、任务和产品自动继续的工作。每次操作都可以直接执行，无需事先询问。`,
+        adminControl: "管理员可以随时更改连接使用的服务和账号。",
+        exposure: (name) =>
+          `${name}能读取的任何内容都可能通过这些连接发出。即使限制聊天权限，${name}也可能根据读到的内容采取行动，包括连接从公司外部带回的信息。请只分配工作所需的连接。`,
+        empty: "公司还没有 MCP 连接。管理员可以在设置中的「工具」里添加。",
+        loadFailed: "无法加载当前连接。",
+        writeFailed: "无法确认更改。请先检查当前连接，再决定是否重试。",
+        giveTitle: (name, connection) => `将「${connection}」分配给${name}？`,
+        giveScope: (name) =>
+          `${name}可以在对话、任务、大型作业的最后一步以及获准软件包发起的工作中使用此连接，无需事先询问。`,
+        giveData: (name) =>
+          `${name}可以读取的任何内容，包括对话、附件、文件和公司「共享」文件夹里的内容，都可能被发送到该服务。它可能根据他人的请求或读到的内容采取行动，包括公司外部人员通过连接返回的信息。你决定谁能聊天以及分配哪些连接，外部服务决定返回什么内容。`,
+        giveAccount:
+          "无论由谁提出请求，服务看到的都是连接配置的账号。管理员可以随时更改服务或账号。",
+        brief: (name) =>
+          `你可以通过工作说明指导${name}，但说明无法限制连接实际执行的操作。`,
+        members: (count, name) =>
+          `目前有 ${count} 人可以与${name}聊天并要求它使用此连接。`,
+        give: "分配连接",
+        changed: "连接或聊天成员已变化。请关闭此窗口，核对最新信息。",
+        givenBy: (person, date) => `${person}于${date}分配`,
+        givenOn: (date) => `于${date}分配`,
+        unsupported: "此连接无法分配。",
+        active: (name, names) =>
+          `${name}可以使用：${names}。你在此输入或附加的内容可能被发往这些服务。`,
+        disclosure: (name) =>
+          `${name}使用这些连接时无需事先询问。根据他人的请求或自己读到的内容，${name}可能发出你输入或附加的内容，以及它文件中的任何信息。能够管理${name}的人决定为它分配哪些连接。`,
+        chatUse: (name) => `任何能与${name}聊天的人都可以要求它使用连接。`,
+        chatOnly: (person, name) =>
+          `${person}可以要求${name}使用连接，包括发出其文件中的信息。`,
+        manage: (name) =>
+          `更改工作说明、权限、连接和文件，以及暂停、停用或删除${name}。`,
+        packageOrigin: (source, person) => `由${source}为${person}发起`,
+        reasons: {
+          "switched-off": "管理员已关闭此连接。",
+          "not-remote": "此连接会在服务器上启动程序，因此无法分配。",
+          "per-person-credentials":
+            "此连接使用每个人自己的凭据，因此无法分配。",
+          "per-request-credentials":
+            "此连接从每次请求中获取凭据，因此无法分配。",
+          "agent-credential":
+            "提供方已将此连接专门保留给一个智能体，因此无法分配。",
+          "long-running": "此连接会在后台运行长任务，因此无法分配。",
+          ambiguous:
+            "此连接与另一个连接使用相同的标识。管理员需要移除其中一个，然后重新添加。",
+        },
+      },
       welcome: {
         title: (name) => `${name} 已准备好`,
         body: (name) => `${name} 会在对话之间保留文件和记忆。`,
@@ -2136,6 +2188,11 @@ export function createZhCN(product: string): Translations {
       },
       tools: {
         connection: {
+          givenCount: (n) => `已分配给 ${n} 个 AI 智能体`,
+          changedFor: (n) =>
+            `此更改将在这 ${n} 个 AI 智能体的下一次操作时生效。`,
+          removeGiven: (name, n) =>
+            `要移除「${name}」吗？聊天中将无法使用其工具，${n} 个 AI 智能体将失去此连接。日后即使添加同名连接，能够管理它们的人也需要重新分配。`,
           discardJson: "放弃表单更改并打开 JSON 编辑器",
           changed: "编辑期间此连接已更改。请重新打开以查看当前设置。",
           add: "添加连接",

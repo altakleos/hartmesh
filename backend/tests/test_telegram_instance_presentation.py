@@ -325,3 +325,43 @@ async def test_rename_pushes_name_and_picture_to_every_bot_and_records_full_targ
             assert row.profile_pending is False
     finally:
         await second.channel.stop()
+
+
+async def test_privacy_does_not_send_names_revoked_while_waiting_to_deliver(presentation, monkeypatch):
+    import asyncio
+
+    from test_telegram_bot_handlers import message
+
+    from app.telegram_bots import presentation as facts
+    from app.telegram_bots.commands import CallbackCommands
+    from app.telegram_bots.producer import OutboxSender
+
+    e = presentation
+    await definition(e, "custom", 1)
+    await e.db.links.end_pending(e.link.id, skip_reason="superseded")
+    e.services.commands = CallbackCommands(e.services)
+    e.services.eligibility = e.live.authority.delivery
+    current = [{"name": "Weekly notes", "host": "notes.example.test"}]
+    monkeypatch.setattr(facts, "connections_enabled", lambda: True)
+    monkeypatch.setattr(facts, "visible_connections", lambda _: list(current))
+    assert await e.channel.handle_update(message(e, 1804, content="/privacy"))
+    limiter = e.channel.bot.rate_limiter
+
+    async def revoke(_):
+        current.clear()
+        limiter._short_hold_until = 0
+
+    limiter._sleep = revoke
+    limiter._short_hold_until = limiter._time() + 1
+
+    async def send(*, link_id, **kwargs):
+        return await e.channel.send_part(**kwargs)
+
+    sender = OutboxSender(e.services.outbox, run_id="privacy-connection-fixture", deliver_part=send, eligibility=e.live.authority.delivery)
+    try:
+        assert await sender.tick() == 1
+        await asyncio.wait_for(sender.drain(), 3)
+        assert current == []
+        assert [c.endpoint for c in e.channel.bot.request.calls] == ["getMe"]
+    finally:
+        await sender.stop()
