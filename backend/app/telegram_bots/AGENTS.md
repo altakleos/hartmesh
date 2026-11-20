@@ -1,7 +1,7 @@
 # Managed Telegram bots
 
 Work/recovery and receipt custody: [guide](../../docs/TELEGRAM_WORK.md).
-Drain session close and writer settlement: `sql_readers.py`, `sql_writers.py`.
+Drain SQL reads and writes in `sql_readers.py` and `sql_writers.py`.
 
 `config.py` validates optional `AppConfig.model_extra["telegram_bots"]` without
 starting services. Nested models forbid unknown keys and coercion; absence returns
@@ -11,8 +11,8 @@ Compose's renderer owns enabled/public URL/bot limits/voice provider and the
 legacy-channel closure; an absent environment key means on. See
 `deploy/compose/README.md`.
 
-Keep transport startup outside config loading and use socket-free test fixtures.
-Resolve usable connection names at greeting or privacy delivery after live Use checks.
+Keep startup out of config loading. Use socket-free fakes and test credentials.
+Recheck Use and connection names before sending greetings or privacy replies.
 Use `authority.internal_request` only after live owner ceilings and bot-scope checks.
 
 `work_text_inputs.py` routes plain text for shown Work prompts and,
