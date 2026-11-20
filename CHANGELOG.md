@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Operations
 
-- Upgrading the standard Compose bundle leaves the Office reader off. The candidate rendered all three Office formats and returned the original download bytes. During preview work, five-trial median chat latency rose 10.54% and file-list latency rose 14.54%. Both exceeded the 10% allowance.
+- Upgrading the standard Compose bundle leaves the Office reader off. The candidate rendered all three Office formats and returned the original download bytes. During preview work, five-trial median file-list latency rose from 6.618 to 8.401 ms, exceeding the 10% allowance. Chat latency rose 8.83%, within the allowance.
 - Custom server-side projectors must be synchronous module-level functions that the child process can import. Make their modules readable by the worker identity. An incompatible entry can prevent a required extension from loading.
 - An in-place downgrade to v2.2.0+hartmesh.63 needs no data conversion. It restores in-process rendering for source-only business reports. To withdraw an Office presenter that was enabled explicitly, remove its plugin entry and restart the Gateway.
 
