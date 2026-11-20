@@ -182,13 +182,25 @@ def test_owned_loop_waits_only_for_its_original_autoclear_binding(tmp_path, chan
         assert not calls and binding.is_dir()
 
 
+@pytest.mark.parametrize("unavailable", [errno.ENOENT, errno.ENODEV], ids=["attribute-removed", "backing-device-gone"])
 @pytest.mark.parametrize("outcome", ["retired", "rebound", "incomplete", "replaced"])
-def test_owned_loop_observes_partial_sysfs_retirement(tmp_path, outcome):
+def test_owned_loop_observes_partial_sysfs_retirement(tmp_path, monkeypatch, outcome, unavailable):
     sysfs = tmp_path / "device"
     binding = sysfs / "loop"
     binding.mkdir(parents=True)
     original = {"backing_file": "/own.img", "offset": "0", "sizelimit": "0", "autoclear": "1"}
-    # Autoclear can remove the attributes before the binding directory.
+    # An open sysfs attribute may lose its device before the directory retires.
+    backing = binding / "backing_file"
+    if unavailable == errno.ENODEV:
+        backing.touch()
+        read_text = Path.read_text
+
+        def read_attribute(path, *args, **kwargs):
+            if path == backing and path.stat().st_size == 0:
+                raise OSError(errno.ENODEV, "device retired")
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read_attribute)
     meta = sysfs.stat()
     now, calls = [0.0], []
 
@@ -196,6 +208,7 @@ def test_owned_loop_observes_partial_sysfs_retirement(tmp_path, outcome):
         assert seconds == 0.05 and not calls
         now[0] += 1
         if outcome == "retired":
+            backing.unlink(missing_ok=True)
             binding.rmdir()
         elif outcome == "rebound":
             for name, value in {**original, "backing_file": "/other.img"}.items():
@@ -223,3 +236,17 @@ def test_owned_loop_observes_partial_sysfs_retirement(tmp_path, outcome):
         with pytest.raises(RuntimeError, match="changed"):
             remove()
         assert not calls
+
+
+def test_loop_retirement_propagates_unrelated_attribute_errors(tmp_path, monkeypatch):
+    binding = tmp_path / "loop"
+    binding.mkdir()
+    meta = tmp_path.stat()
+
+    def io_error(path, **kwargs):
+        raise OSError(errno.EIO, "sysfs read error")
+
+    monkeypatch.setattr(Path, "read_text", io_error)
+    with pytest.raises(OSError) as caught:
+        remove_owned_loop(41, 73, tmp_path, expected=(meta.st_dev, meta.st_ino), retiring_binding={}, ioctl=pytest.fail, sleep=pytest.fail)
+    assert caught.value.errno == errno.EIO
