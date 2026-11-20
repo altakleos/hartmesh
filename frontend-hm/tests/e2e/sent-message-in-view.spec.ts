@@ -10,8 +10,8 @@ import {
   MOCK_THREAD_ID,
 } from "./utils/mock-api";
 
-const sent = "Please summarize the next step";
-const short = "One short reply.";
+const sent = "What is the next step for this draft?";
+const short = "Review the draft together, then send it to the team.";
 const history = (count: number) =>
   Array.from({ length: count }, (_, index) => ({
     id: `history-${index}`,
@@ -139,6 +139,10 @@ for (const [width, height, count, agent] of [
       await expect(
         page.getByRole("button", { name: /scroll to bottom/i }),
       ).toBeHidden();
+      await test.info().attach("Sent question, reply and composer", {
+        body: await page.screenshot({ animations: "disabled" }),
+        contentType: "image/png",
+      });
     } finally {
       await chat.close();
     }
