@@ -2100,6 +2100,8 @@ menu at their next start.
 
 Account-policy checks and run configuration preparation keep file reads off the
 Gateway event loop so Telegram admission can continue serving other requests.
+When the Gateway stops, it waits for Telegram bot-link and delivery-queue
+writes to commit or roll back and return their database connections.
 
 Connected AI assistants and AI employees can now message you when a question,
 result or problem needs your attention. Reply to questions, review complete

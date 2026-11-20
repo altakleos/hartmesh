@@ -1,7 +1,7 @@
 # Managed Telegram bots
 
 Work/recovery and receipt custody: [guide](../../docs/TELEGRAM_WORK.md).
-Owned SQL readers drain close: `sql_readers.py`.
+Drain session close and writer settlement: `sql_readers.py`, `sql_writers.py`.
 
 `config.py` validates optional `AppConfig.model_extra["telegram_bots"]` without
 starting services. Nested models forbid unknown keys and coercion; absence returns
