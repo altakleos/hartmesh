@@ -120,7 +120,7 @@ test("an ordinary chat previews the workbook and downloads its original bytes", 
   await panel.getByRole("button", { name: "Download", exact: true }).click();
   const file = await downloaded;
   expect(file.suggestedFilename()).toBe("sample.xlsx");
-  expect(readFileSync((await file.path()))).toEqual(source);
+  expect(readFileSync(await file.path())).toEqual(source);
 });
 
 test("an AI employee's workbook keeps the ordinary file link", async ({
