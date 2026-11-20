@@ -147,60 +147,60 @@ for (const [width, height, count, agent] of [
       await chat.close();
     }
   });
+
+  test(`a long answer grows below the sent row and the jump reaches the real bottom (${width}px)`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height });
+    const chat = await heldChat(page, count, agent);
+    try {
+      await chat.send();
+      await expect.poll(() => offset(chat.row, chat.viewport)).toBe(16);
+      const long = Array.from(
+        { length: 35 },
+        (_, i) => `Paragraph ${i + 1} about the conversation.`,
+      ).join("\n\n");
+      chat.reply(long);
+      const jump = page.getByRole("button", { name: /scroll to bottom/i });
+      await expect(jump).toBeVisible();
+      await expect.poll(() => offset(chat.row, chat.viewport)).toBe(16);
+      await jump.click();
+      await expect(
+        page.getByText("Paragraph 35 about the conversation."),
+      ).toBeInViewport();
+      await expect
+        .poll(() =>
+          chat.viewport.evaluate(
+            (v) => v.scrollHeight - v.clientHeight - v.scrollTop,
+          ),
+        )
+        .toBeLessThanOrEqual(2);
+    } finally {
+      await chat.close();
+    }
+  });
+
+  test(`a message taller than the viewport keeps the ordinary bottom-follow behavior (${width}px)`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height });
+    const text = "Sentence with enough words to wrap on a phone. "
+      .repeat(80)
+      .trim();
+    const chat = await heldChat(page, count, agent, text);
+    try {
+      await chat.send();
+      await expect
+        .poll(() => chat.row.evaluate((r) => r.clientHeight))
+        .toBeGreaterThan(await chat.viewport.evaluate((v) => v.clientHeight));
+      await expect.poll(() => offset(chat.row, chat.viewport)).toBeLessThan(0);
+      chat.reply(short);
+      await expect(page.getByText(short)).toBeInViewport();
+    } finally {
+      await chat.close();
+    }
+  });
 }
-
-test("a long answer grows below the sent row and the jump reaches the real bottom", async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  const chat = await heldChat(page, 16, false);
-  try {
-    await chat.send();
-    await expect.poll(() => offset(chat.row, chat.viewport)).toBe(16);
-    const long = Array.from(
-      { length: 35 },
-      (_, i) => `Paragraph ${i + 1} about the conversation.`,
-    ).join("\n\n");
-    chat.reply(long);
-    const jump = page.getByRole("button", { name: /scroll to bottom/i });
-    await expect(jump).toBeVisible();
-    await expect.poll(() => offset(chat.row, chat.viewport)).toBe(16);
-    await jump.click();
-    await expect(
-      page.getByText("Paragraph 35 about the conversation."),
-    ).toBeInViewport();
-    await expect
-      .poll(() =>
-        chat.viewport.evaluate(
-          (v) => v.scrollHeight - v.clientHeight - v.scrollTop,
-        ),
-      )
-      .toBeLessThanOrEqual(2);
-  } finally {
-    await chat.close();
-  }
-});
-
-test("a message taller than the viewport keeps the ordinary bottom-follow behavior", async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 360, height: 640 });
-  const text = "Sentence with enough words to wrap on a phone. "
-    .repeat(80)
-    .trim();
-  const chat = await heldChat(page, 8, false, text);
-  try {
-    await chat.send();
-    await expect
-      .poll(() => chat.row.evaluate((r) => r.clientHeight))
-      .toBeGreaterThan(await chat.viewport.evaluate((v) => v.clientHeight));
-    await expect.poll(() => offset(chat.row, chat.viewport)).toBeLessThan(0);
-    chat.reply(short);
-    await expect(page.getByText(short)).toBeInViewport();
-  } finally {
-    await chat.close();
-  }
-});
 
 test("keyboard scrolling releases the held row while the answer is arriving", async ({
   page,
