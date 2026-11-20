@@ -4,17 +4,15 @@ import hashlib
 import io
 import json
 import os
-import sys
 import tomllib
 from datetime import date, time, timedelta
-from importlib.util import find_spec
 from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
 import yaml
 from _office_fixture import W, archive, document, relationships, workbook, zip_parts
-from _projection_support import ready_projection_host
+from _projection_support import installed_or_checkout_package, ready_projection_host
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
@@ -34,21 +32,9 @@ GOLDEN = ROOT / "frontend-hm/tests/fixtures/office"
 
 @pytest.fixture(scope="module", autouse=True)
 def office_package():
-    name = "hartmesh_office_preview"
-    if find_spec(name) is not None:
+    checkout = ROOT / "backend/extensions/sources/hartmesh-office-preview"
+    with installed_or_checkout_package("hartmesh_office_preview", checkout):
         yield
-        return
-    # A checkout without the extensions group can exercise the same route.
-    # Only expose its source when parent and child would both lack the package.
-    before = set(sys.modules)
-    with pytest.MonkeyPatch.context() as patch:
-        patch.syspath_prepend(str(ROOT / "backend/extensions/sources/hartmesh-office-preview"))
-        try:
-            yield
-        finally:
-            for module in set(sys.modules) - before:
-                if module == name or module.startswith(name + "."):
-                    del sys.modules[module]
 
 
 def saved(document):
