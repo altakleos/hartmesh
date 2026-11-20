@@ -1846,6 +1846,28 @@ stream in flight drops). `volatile-lru` evicts only keys that carry a TTL; the
 stream bridge's keys all do, so a key written without one is never evicted
 to make room.
 
+### Conversation title search in v2.2.0+hartmesh.65
+
+A signed-in user searched 2,000 synthetic conversation titles through nginx.
+The fixture included one additional title owned by a second user. The warm
+workload alternated between an older hit, a full page of matches, a specific
+title, and an empty result. The browser also opened the older conversation
+from the Chats page.
+
+| Docker run | Requests | Measured p95 | Requests over 300 ms |
+| --- | ---: | ---: | ---: |
+| [PR source](https://github.com/altakleos/hartmesh/actions/runs/44738777884) | 60 | 160.1 ms | 2 |
+| [Release candidate](https://github.com/altakleos/hartmesh/actions/runs/44769183389) | 60 | 164.5 ms | 2 |
+
+The acceptance limit was 300 ms at the 95th percentile of all 60 requests.
+On the candidate, the two requests over 300 ms were lookups for a specific
+title. They took 389.6 and 406.2 ms.
+The release measurement used Gateway and frontend images built from
+`edc9db0107804aae0fe418946ab036a9f3e7de19`. The Gateway had two CPUs and 1,088 MiB of memory.
+PostgreSQL had 768 MiB, with synchronous commits off and a 200 ms WAL
+writer delay. Both containers had zero swap allowance. Timings describe
+the hosted Docker runner. Tenant hardware and workloads can differ.
+
 ### Preview measurements for v2.2.0+hartmesh.64
 
 Office previews stay off in this profile. On the release images, file listing
