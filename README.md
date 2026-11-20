@@ -74,7 +74,10 @@ See [the file API](docs/AGENT_EXECUTION.md#direct-agent-file-writes). My assista
 and AI employees provide role-based setup and separate Conversations, Files, Work,
 Memory, Access and Settings tabs. Conversations show the AI identity and supervisor;
 attachments save immediately in the agent's files. Colleagues with Can chat alone
-see produced filenames; opening files requires Can see all work. Managers can
+see produced filenames and can ask the agent about anything in its files. Opening
+a file directly requires Can see all work. The agent file API accepts a file from
+your own conversation after you confirm that the agent and its users can access
+the copy. Managers can
 update the brief and access, pause, retire or delete the AI assistant or AI employee.
 Messages that supply a valid time zone give the model the person's current local
 date and UTC offset without adding that context to the saved conversation.

@@ -12,6 +12,7 @@ from deerflow.persistence.spaces.files import SpaceFileOperationRow
 from deerflow.persistence.spaces.model import SpaceGrantRow, SpaceRow
 from deerflow.spaces.backings import BackingUnavailable
 from deerflow.spaces.contract import Permission, SpaceConflict
+from deerflow.spaces.file_import import FileImport
 from deerflow.spaces.filesystem import FileConflict, SpaceFull, UnsafeSpacePath, _path
 from deerflow.spaces.provision import HOST_WRITE_MARGIN_BYTES, HOST_WRITE_MIN_INODES
 from deerflow.spaces.service import MAX_TRANSFER_BYTES, SpaceOperationPending
@@ -118,7 +119,8 @@ class AgentFiles:
         request = row.request
         if not isinstance(request, dict) or request.get("on_behalf_of") != requester.subject_id or request.get("action") not in ("put", "write", "mkdir", "rename", "remove"):
             return {"status": "unknown"}
-        if upload_name is not None and (request["action"] != "put" or request.get("path") != "uploads/" + upload_name):
+        original_path = request.get("requested_path") if "import_binding" in request else request.get("path")
+        if upload_name is not None and (request["action"] != "put" or original_path != "uploads/" + upload_name):
             return {"status": "unknown"}
         if row.phase == "pending":
             return {"status": "pending"}
@@ -136,7 +138,9 @@ class AgentFiles:
             stem, dot, extension = upload_name.rpartition(".")
             stem, extension = (stem, dot + extension) if dot and stem else (upload_name, "")
             numbered = rf"uploads/{re.escape(stem)} \(([2-9]|[1-9][0-9]+)\){re.escape(extension)}"
-            if value.path != request["path"] and not re.fullmatch(numbered, value.path):
+            if "import_binding" in request and value.path != request["path"]:
+                return {"status": "unconfirmed"}
+            if value.path != original_path and not re.fullmatch(numbered, value.path):
                 return {"status": "unconfirmed"}
             if value.size != request.get("size") or value.sha256 != request.get("sha256") or type(value.deduplicated) is not bool:
                 return {"status": "unconfirmed"}
@@ -156,6 +160,7 @@ class AgentFiles:
         size: int | None = None,
         expected_sha256: str | None = None,
         admission=None,
+        file_import: FileImport | None = None,
     ) -> AgentFileResult:
         if instance.status != "active":
             raise AgentFileRefusal("agent-not-active", name=instance.name)
@@ -188,6 +193,10 @@ class AgentFiles:
             digest = None
         recorded_action = "write" if action == "put" and expected_sha256 is not None else action
         request = {"action": recorded_action, "path": path, "destination": destination, "sha256": digest, "size": size, "on_behalf_of": requester.subject_id}
+        if file_import is not None:
+            if recorded_action != "put" or path.count("/") != 1 or not path.startswith("uploads/"):
+                raise ValueError("An import requires a Home upload destination")
+            request.update(file_import.request_fields(path))
         files = self.agents.files
         try:
             async with files.registry.admitted(actor=instance.principal, requests={instance.home_id: (Permission.READ, None)}, operation_id=(instance.home_id, operation_id)) as (session, admitted):
@@ -195,7 +204,8 @@ class AgentFiles:
                     await admission(session, admitted)
                 row = await session.get(SpaceFileOperationRow, (instance.home_id, operation_id))
                 if row is not None:
-                    if row.request != request or (row.actor_kind, row.actor_id) != (instance.principal.kind, instance.principal.subject_id):
+                    same_request = row.request == request if file_import is None else (row.generation == admitted[instance.home_id][0].generation and file_import.same_request(row.request, request))
+                    if not same_request or (row.actor_kind, row.actor_id) != (instance.principal.kind, instance.principal.subject_id):
                         raise SpaceConflict("The operation ID already identifies a different request")
                     if row.phase == "complete":
                         return self._result(recorded_action, request, row.result["value"])
@@ -212,7 +222,7 @@ class AgentFiles:
             if action == "put":
                 payload = await await_drained(run_file_io(self._payload, content, size, digest))
                 if expected_sha256 is None:
-                    value = await files.put_unique(**options, content=payload)
+                    value = await files.put_unique(**options, content=payload, **({"file_import": file_import} if file_import is not None else {}))
                 else:
                     value = await files.write(**options, content=payload, expected_sha256=expected_sha256, create=False)
             elif action == "rename":

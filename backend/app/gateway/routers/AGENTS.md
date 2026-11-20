@@ -25,6 +25,11 @@ human rights under mutation SQL and drain spool workers. Operation-status GETs
 read attributed receipts with current rights and no workspace admission. The
 operations routes derive private IDs from the persisted signing key, requester,
 Home and conversation incarnation. Key rotation makes prior lookups unknown.
+Home imports use the same scoped operation lookup with the originally picked name.
+Their private source fingerprint and operation ID share one signing-key snapshot.
+Keep the key across restarts. Rotation makes old nonces unknown. Check the Home
+or its managed recovery record before starting a new operation after rotation.
+Hold source access through the destination effect using the borrowed writer.
 Declare `GET /roles` before `GET /{instance_id}`.
 
 `chat_cleanup.py` admits purpose-bound deletion, including unsupported credentials,

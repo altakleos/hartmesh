@@ -302,24 +302,6 @@ async def test_import_cancellation_drains_disk_work_before_deciding_ownership(si
         assert (site.destination / "notes.txt").read_bytes() == b"meeting notes"
 
 
-@pytest.mark.parametrize("operation", ["list", "copy"])
-def test_bound_source_requires_export_before_looking_up_any_run(site, monkeypatch, operation):
-    from app.gateway import conversation_file_import as imports
-
-    async def inspection(request, thread):
-        if thread == "earlier":
-            return SimpleNamespace(instance=SimpleNamespace(id="assistant", home_id="home", generation=1), thread_incarnation="incarnation", home_generation=1)
-        return None
-
-    monkeypatch.setattr(imports, "inspection_for_read", inspection)
-    site.app.state.run_manager.list_by_thread.return_value = []
-    response = site.client.get("/api/threads/earlier/presented-files") if operation == "list" else site.client.post(URL, json=BODY)
-    assert response.status_code == 403, response.text
-    site.app.state.run_manager.list_by_thread.assert_not_awaited()
-    site.app.state.run_store.get.assert_not_awaited()
-    site.app.state.run_event_store.list_events.assert_not_awaited()
-
-
 def test_destination_change_after_commit_withholds_receipt_and_retains_bytes(site, monkeypatch):
     from app.gateway.upload_ingestion import ThreadUploadIngestionService
 

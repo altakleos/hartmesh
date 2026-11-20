@@ -12,6 +12,7 @@ from deerflow.persistence.spaces.lifecycle import SpaceBackupRow
 from deerflow.persistence.spaces.model import SpaceEventRow
 from deerflow.spaces import snapshots
 from deerflow.spaces.contract import MutationMode, Permission, SpaceConflict, SpaceDenied, SpaceNotFound, validate_generation
+from deerflow.spaces.file_import import visible_source
 from deerflow.spaces.filesystem import FileConflict
 from deerflow.spaces.service import SpaceOperationPending, _reservation
 from deerflow.utils.file_io import await_drained, run_file_io
@@ -223,7 +224,12 @@ class SpaceRecovery:
         # SQLite returns stored UTC datetimes without their timezone.
         created = op.created_at if op.created_at.tzinfo else op.created_at.replace(tzinfo=UTC)
         result = None if op.phase == "pending" and isinstance(op.request, dict) and op.request.get("action") == "mkdir" else op.result
-        return {"operation_id": op.operation_id, "generation": op.generation, "phase": op.phase, "request": op.request, "result": result, "created_at": created.isoformat()}
+        request = op.request
+        if isinstance(request, dict) and request.get("action") == "put" and ("source" in request or "import_binding" in request):
+            request = {key: value for key, value in request.items() if key not in {"source", "import_binding"}}
+            if (source := visible_source(op.request.get("source"))) is not None:
+                request["source"] = source
+        return {"operation_id": op.operation_id, "generation": op.generation, "phase": op.phase, "request": request, "result": result, "created_at": created.isoformat()}
 
     async def operation(self, *, actor, space_id, expected_generation, operation_id):
         self.files._operation_id(operation_id)

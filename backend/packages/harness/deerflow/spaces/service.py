@@ -28,6 +28,8 @@ from deerflow.persistence.spaces.model import SpaceGrantRow, SpaceRow
 from deerflow.spaces import directory_creation
 from deerflow.spaces.backings import BackingUnavailable, PreparedVolumeCatalog
 from deerflow.spaces.contract import Custody, FeatureBinding, InvalidPrincipal, MutationMode, Permission, PrincipalRef, Space, SpaceConflict, SpaceDenied
+from deerflow.spaces.file_import import MAX_NAME_SUFFIX as MAX_NAME_SUFFIX
+from deerflow.spaces.file_import import FileImport, numbered_paths
 from deerflow.spaces.filesystem import FileConflict, FileStepRefused, FileTooLarge, UnsafeSpacePath, _path
 from deerflow.spaces.incarnations import prepare_marker, verify_bound
 from deerflow.spaces.provision import LAYOUT
@@ -35,7 +37,6 @@ from deerflow.spaces.registry import SpaceRegistry, _stored_permissions
 from deerflow.utils.file_io import await_drained, run_file_io
 
 MAX_TRANSFER_BYTES = 64 * 1024 * 1024
-MAX_NAME_SUFFIX = 99
 _reservation = ContextVar("storage_lifecycle_reservation", default=None)
 
 
@@ -494,6 +495,9 @@ class SpaceFiles:
     async def export_file(self, *, actor: PrincipalRef, space_id: str, path: str, max_bytes: int = MAX_TRANSFER_BYTES, controller_admission=None) -> bytes:
         return await self._bounded_read(actor=actor, space_id=space_id, permission=Permission.READ | Permission.EXPORT, path=path, max_bytes=max_bytes, controller_admission=controller_admission)
 
+    async def export_regular(self, *, actor, space_id, path, maximum_bytes=None, controller_admission):
+        return await self._read(actor=actor, space_id=space_id, permission=Permission.READ | Permission.EXPORT, call=lambda fs: fs.read_named_regular(path, maximum_bytes), controller_admission=controller_admission)
+
     async def _bounded_read(self, *, actor, space_id, permission, path, max_bytes, controller_admission=None):
         for attempt in range(2):
             try:
@@ -527,7 +531,7 @@ class SpaceFiles:
         if (operation.actor_kind, operation.actor_id, operation.generation, operation.request) != (actor.kind, actor.subject_id, generation, request):
             raise SpaceConflict("The operation ID already identifies a different request")
 
-    async def _mutate(self, *, actor, requests, destination_id, operation_id, request, call, controller_admission=None):
+    async def _mutate(self, *, actor, requests, destination_id, operation_id, request, call, controller_admission=None, prepare_import_path=None):
         self._operation_id(operation_id)
         generation = requests[destination_id][1]
         if generation is None:
@@ -573,6 +577,8 @@ class SpaceFiles:
                     await controller_admission(session, rows)
                 existing = await session.get(SpaceFileOperationRow, (destination_id, operation_id))
                 if existing is not None:
+                    if prepare_import_path is not None and FileImport.same_request(existing.request, request):
+                        request["path"] = existing.request["path"]
                     self._same_operation(existing, actor, generation, request)
                     if existing.phase == "complete":
                         return existing.result["value"]
@@ -580,6 +586,8 @@ class SpaceFiles:
                 # Validate provider and audience before writing a durable intent.
                 volumes = {key: await self._volume(session, row) for key, (row, _) in rows.items()}
                 await own(volumes)
+                if prepare_import_path is not None:
+                    request["path"] = await run_file_io(self._io, volumes[destination_id], prepare_import_path)
                 if request["action"] == "copy":
                     await self._transfer_audience(session, rows, actor, request)
                 # Only native resources use host settlement. A mediated
@@ -861,15 +869,25 @@ class SpaceFiles:
             controller_admission=controller_admission,
         )
 
-    async def put_unique(self, *, actor, space_id, expected_generation, operation_id, path, content: bytes, on_behalf_of: str, controller_admission=None):
+    async def put_unique(self, *, actor, space_id, expected_generation, operation_id, path, content: bytes, on_behalf_of: str, controller_admission=None, file_import: FileImport | None = None):
         _path(path)
         if not isinstance(content, bytes) or len(content) > MAX_TRANSFER_BYTES:
             raise ValueError("File import must contain at most64MiB")
         digest = await await_drained(run_file_io(lambda: hashlib.sha256(content).hexdigest()))
         request = self._provenance({"action": "put", "path": path, "sha256": digest}, on_behalf_of, size=len(content))
 
+        if file_import is not None:
+            request.update(file_import.request_fields(path))
+
+        def prepare_import_path(filesystem):
+            for candidate in numbered_paths(path):
+                match = self._matches_existing_upload(filesystem, candidate, content, digest)
+                if match is not False:
+                    return candidate
+            raise FileConflict("Destination already exists")
+
         def publish(filesystem):
-            parent, _, name = path.rpartition("/")
+            parent = path.rpartition("/")[0]
             # An upload can precede the first workspace. Keep directory creation
             # confined and inside this one durable file operation.
             if parent == "uploads":
@@ -883,33 +901,20 @@ class SpaceFiles:
                         os.close(descriptor)
                 else:
                     os.close(descriptor)
-            try:
-                observed_path = filesystem._open(path, os.O_PATH | os.O_NOFOLLOW, follow_symlinks=False)
-            except FileNotFoundError:
-                pass
-            else:
-                descriptor = None
-                try:
-                    if stat.S_ISREG(os.fstat(observed_path).st_mode):
-                        try:
-                            descriptor = os.open(f"/proc/self/fd/{observed_path}", os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOCTTY)
-                        except PermissionError:
-                            pass  # Occupied but unreadable; try the next available name.
-                finally:
-                    os.close(observed_path)
-                if descriptor is not None:
-                    try:
-                        duplicate = self._same_named_content(filesystem, path, descriptor, content, digest)
-                    finally:
-                        os.close(descriptor)
-                    if duplicate:
-                        return {"path": path, "size": len(content), "sha256": digest, "deduplicated": True}
-            stem, dot, extension = name.rpartition(".")
-            stem, extension = (stem, dot + extension) if dot and stem else (name, "")
-            for number in range(1, MAX_NAME_SUFFIX + 1):
-                candidate = path if number == 1 else (parent + "/" if parent else "") + f"{stem} ({number}){extension}"
-                if len(candidate.rsplit("/", 1)[-1].encode("utf-8")) > 255:
-                    continue
+            if file_import is not None:
+                # Resident writers may use the Home after the intent was saved.
+                # Only this recorded name can ever receive these bytes.
+                chosen = request["path"]
+                match = self._matches_existing_upload(filesystem, chosen, content, digest)
+                if match is False:
+                    raise FileConflict("Destination already exists")
+                if match is None:
+                    filesystem.write_atomic(chosen, content, expected_sha256=None, create=True)
+                return {"path": chosen, "size": len(content), "sha256": digest, "deduplicated": match is True}
+
+            if self._matches_existing_upload(filesystem, path, content, digest):
+                return {"path": path, "size": len(content), "sha256": digest, "deduplicated": True}
+            for candidate in numbered_paths(path):
                 try:
                     filesystem.write_atomic(candidate, content, expected_sha256=None, create=True)
                 except UnsafeSpacePath:
@@ -932,7 +937,29 @@ class SpaceFiles:
             request=request,
             call=lambda volumes: self._direct_io(volumes[space_id], "put", publish),
             controller_admission=controller_admission,
+            prepare_import_path=prepare_import_path if file_import is not None else None,
         )
+
+    @classmethod
+    def _matches_existing_upload(cls, filesystem, path, content, digest):
+        """None for an available name, True for equal bytes, False for an occupied name."""
+        try:
+            observed = filesystem._open(path, os.O_PATH | os.O_NOFOLLOW, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        try:
+            if not stat.S_ISREG(os.fstat(observed).st_mode):
+                return False
+            try:
+                descriptor = os.open(f"/proc/self/fd/{observed}", os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOCTTY)
+            except PermissionError:
+                return False
+            try:
+                return cls._same_named_content(filesystem, path, descriptor, content, digest)
+            finally:
+                os.close(descriptor)
+        finally:
+            os.close(observed)
 
     @staticmethod
     def _same_named_content(filesystem, path, descriptor, content, digest):
