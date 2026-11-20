@@ -4,8 +4,10 @@ import hashlib
 import io
 import json
 import os
+import sys
 import tomllib
 from datetime import date, time, timedelta
+from importlib.util import find_spec
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -26,9 +28,27 @@ from deerflow.extensions.loader import ExtensionSpec, load_extensions
 from deerflow.runtime.user_context import get_effective_user_id
 
 ROOT = Path(__file__).resolve().parents[2]
-PACKAGE = ROOT / "backend/extensions/sources/hartmesh-office-preview"
 ENTRY = "hartmesh_office_preview:install"
 GOLDEN = ROOT / "frontend-hm/tests/fixtures/office"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def office_package():
+    name = "hartmesh_office_preview"
+    if find_spec(name) is not None:
+        yield
+        return
+    # A checkout without the extensions group can exercise the same route.
+    # Only expose its source when parent and child would both lack the package.
+    before = set(sys.modules)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.syspath_prepend(str(ROOT / "backend/extensions/sources/hartmesh-office-preview"))
+        try:
+            yield
+        finally:
+            for module in set(sys.modules) - before:
+                if module == name or module.startswith(name + "."):
+                    del sys.modules[module]
 
 
 def saved(document):
@@ -50,8 +70,7 @@ def deck_sample():
 
 
 @pytest.fixture
-def projections(monkeypatch):
-    monkeypatch.syspath_prepend(str(PACKAGE))
+def projections():
     loaded, diagnostics = load_extensions([ExtensionSpec(use=ENTRY, required=True)])
     assert not diagnostics
     ((source, plugin),) = loaded.plugins
@@ -82,7 +101,6 @@ def test_passive_documents_match_the_browser_corpus(projections, kind, suffix, s
 @pytest.mark.skipif(os.name == "nt", reason="descriptor-relative artifact reads require POSIX")
 @pytest.mark.parametrize("owner", [True, False])
 def test_workbook_via_authorized_artifact_route(monkeypatch, tmp_path, owner):
-    monkeypatch.syspath_prepend(str(PACKAGE))
     paths = paths_module.Paths(tmp_path)
     monkeypatch.setattr(paths_module, "_paths", paths)
     directory = paths.sandbox_outputs_dir("office-chat", user_id=get_effective_user_id())
