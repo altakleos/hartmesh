@@ -9,6 +9,7 @@ import sys
 import threading
 
 import pytest
+from _projection_support import installed_or_checkout_package
 
 from deerflow.extensions import projection_host, projection_worker
 from deerflow.extensions.projection_host import ProjectionError, ProjectionHost, projector_reference
@@ -55,6 +56,39 @@ def test_requires_importable_module_function(projectors):
     for invalid in (lambda raw: raw, str.encode, os.getpid):
         with pytest.raises(ValueError):
             projector_reference(invalid)
+
+
+@pytest.mark.parametrize("preload_installed", [True, False], ids=["installed-before-fixture", "checkout-only"])
+@pytest.mark.asyncio
+async def test_extension_fixture_uses_one_package_for_gateway_and_child(tmp_path, monkeypatch, preload_installed):
+    name = "projection_test_package"
+    installed = tmp_path / "installed"
+    checkout = tmp_path / "checkout"
+    for root in (installed, checkout):
+        package = root / name
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "projector.py").write_text(f"def echo(raw): return {root.name.encode()!r} + raw", encoding="utf-8")
+    if preload_installed:
+        monkeypatch.syspath_prepend(str(installed))
+        importlib.import_module(name + ".projector")
+    try:
+        with installed_or_checkout_package(name, checkout):
+            function = importlib.import_module(name + ".projector").echo
+            host = ProjectionHost()
+            host.start([function])
+            try:
+                await host.wait_ready()
+                content, _, _ = await request(host, function, b"-example")
+                assert content == (b"installed-example" if preload_installed else b"checkout-example")
+            finally:
+                await host.close()
+        assert str(checkout) not in sys.path
+        assert (name in sys.modules) == preload_installed
+        assert (name + ".projector" in sys.modules) == preload_installed
+    finally:
+        sys.modules.pop(name + ".projector", None)
+        sys.modules.pop(name, None)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process credentials")
