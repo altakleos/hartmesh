@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.65] - 2026-11-20
+
+### Changed
+
+- When signed in to a live deployment, open **Chats** and type in **Search conversation titles** to find older conversations without loading each page. Search includes the conversations your current access permits. Select **More results** to see further matches. Title search works without a message-search provider. The static demo searches its bundled titles locally.
+- After a message is accepted in web chat, the sent message stays in view while the reply grows beneath it. Scrolling or using the scroll keys returns control to the reader. The jump-to-bottom button takes you to the newest content.
+
+### Fixed
+
+- The web chat keeps one copy of a newly sent question when the saved conversation and the live reply arrive in a different order.
+- AI assistants, AI employees and their helpers keep the tool set the host grants them when an installed or configured middleware declares additional tools. This applies to conversations and assignments. Ordinary personal chat continues to use its configured tools.
+
+### Operations
+
+- On the candidate images, a signed-in search across 2,000 conversation titles took 164.5 ms at the 95th percentile across 60 requests. The Docker run used the distribution’s Gateway and PostgreSQL limits.
+- API clients can use the `message_search` field from `GET /api/features` to check whether a ready provider is available to the current user.
+- Configured middleware that declares tools must support an independent copy. With delta checkpoints, that copy must also preserve the restricted tool list. Otherwise an affected employee, assistant or helper run can fail to start. Existing conversations remain readable.
+- An in-place downgrade to v2.2.0+hartmesh.64 requires no data conversion. Chats reverts to filtering already loaded titles and following the bottom of a reply. The earlier instance tool behavior returns for deployments with middleware that declares tools.
+
+### Schema changes
+
+- No database schema changes since v2.2.0+hartmesh.64.
+
 ## [2.2.0+hartmesh.64] - 2026-11-20
 
 ### Changed
