@@ -85,6 +85,20 @@ def test_synthetic_provider_requires_actual_upload_tool_result() -> None:
     assert provider.reply(body) == {"content": provider.FINAL}
 
 
+def test_synthetic_recipient_reads_both_attachments_before_answering():
+    provider = load(ROOT / "docker/acceptance/provider.py")
+    body = {"messages": [{"role": "user", "content": "acceptance:attachments"}], "tools": [{"function": {"name": "read_file"}}]}
+    for name, content in (("acceptance.txt", provider.ARTIFACT), ("local.txt", "Local attachment.")):
+        call = provider.reply(body)["tool_calls"][0]["function"]
+        assert call["name"] == "read_file"
+        assert json.loads(call["arguments"]) == {"path": "/mnt/user-data/uploads/" + name}
+        body["messages"].append({"role": "tool", "content": "different bytes"})
+        with pytest.raises(ValueError, match="attachment content"):
+            provider.reply(body)
+        body["messages"][-1]["content"] = content
+    assert provider.reply(body) == {"content": "Both attachments were read."}
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux process-group acceptance runner")
 def test_runner_timeout_terminates_its_process_group(tmp_path: Path) -> None:
     runner = load(ROOT / "scripts/docker_acceptance.py")

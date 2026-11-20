@@ -108,10 +108,20 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
         return {"content": "Timing sample complete."}
     if "acceptance:fallback" in str(turn[0].get("content")):
         return fallback_reply(body, turn)
-    if "acceptance:file" not in str(turn[0].get("content")):
-        raise ValueError("unrecognized acceptance prompt")
     results = [message for message in turn if message.get("role") == "tool"]
-    if not results:
+    if "acceptance:attachments" in str(turn[0].get("content")):
+        attachments = (("acceptance.txt", ARTIFACT), ("local.txt", "Local attachment."))
+        if len(results) > len(attachments):
+            raise ValueError("Unexpected extra attachment read")
+        for result, (_, expected) in zip(results, attachments, strict=False):
+            if result["content"].rstrip("\n") != expected.rstrip("\n"):
+                raise ValueError("The receiving conversation read unexpected attachment content")
+        if len(results) == len(attachments):
+            return {"content": "Both attachments were read."}
+        name, arguments = "read_file", {"path": "/mnt/user-data/uploads/" + attachments[len(results)][0]}
+    elif "acceptance:file" not in str(turn[0].get("content")):
+        raise ValueError("unrecognized acceptance prompt")
+    elif not results:
         name, arguments = "read_file", {"path": "/mnt/user-data/uploads/input.txt"}
     elif len(results) == 1:
         if UPLOAD_MARKER not in str(results[-1].get("content")):

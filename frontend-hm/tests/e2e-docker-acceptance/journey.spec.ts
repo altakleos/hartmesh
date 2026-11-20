@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 import { expect, test, type Page } from "@playwright/test";
 
@@ -22,6 +23,101 @@ async function openSharedFiles(page: Page) {
       .getByTestId("shared-files-list")
       .getByRole("link", { name: "acceptance.txt", exact: true }),
   ).toBeVisible();
+}
+
+async function attachFromFirstConversation(page: Page, sourceThread: string) {
+  await page.goto("/workspace/chats/new");
+  await page.getByTestId("add-attachments-button").click();
+  const fromConversation = page.getByRole("menuitem", {
+    name: "From a conversation",
+  });
+  await expect(fromConversation).toBeVisible();
+  await page.screenshot({
+    path: test.info().outputPath("attach-menu.png"),
+    animations: "disabled",
+  });
+  await fromConversation.click();
+  const picker = page.getByRole("dialog", { name: "From a conversation" });
+  // This isolated account has exactly one conversation when the picker opens.
+  const sources = picker.getByRole("listitem");
+  await expect(sources).toHaveCount(1);
+  const presented = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname ===
+      `/api/threads/${sourceThread}/presented-files`,
+  );
+  await sources.getByRole("button").click();
+  expect((await presented).status()).toBe(200);
+  const file = picker.getByRole("button", { name: /^acceptance\.txt/ });
+  await expect(file).toBeEnabled();
+  await page.screenshot({
+    path: test.info().outputPath("conversation-file-picker.png"),
+  });
+  const imported = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/uploads/from-conversation"),
+  );
+  await file.click();
+  const receipt = await imported;
+  expect(receipt.ok(), await receipt.text()).toBe(true);
+  expect(await receipt.json()).toMatchObject({
+    filename: "acceptance.txt",
+    size: Buffer.byteLength(artifact),
+    sha256: createHash("sha256").update(artifact).digest("hex"),
+    virtual_path: "/mnt/user-data/uploads/acceptance.txt",
+  });
+  await expect(picker).toBeHidden();
+  await expect(
+    page.getByRole("button", { name: "Remove acceptance.txt", exact: true }),
+  ).toBeVisible();
+  await page.getByLabel("Upload files").setInputFiles({
+    name: "local.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("Local attachment.\n"),
+  });
+  const input = page.getByPlaceholder(/how can i assist you/i);
+  await input.fill("acceptance:attachments — read both attachments.");
+  const sent = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/runs/stream"),
+  );
+  await page.getByRole("button", { name: "Submit", exact: true }).click();
+  const request = await sent;
+  const messages = (
+    request.postDataJSON() as {
+      input: {
+        messages: {
+          additional_kwargs?: { files?: { filename: string; path: string }[] };
+        }[];
+      };
+    }
+  ).input.messages;
+  expect(
+    messages
+      .at(-1)
+      ?.additional_kwargs?.files?.map(({ filename, path }) => [filename, path])
+      .sort(),
+  ).toEqual([
+    ["acceptance.txt", "/mnt/user-data/uploads/acceptance.txt"],
+    ["local.txt", "/mnt/user-data/uploads/local.txt"],
+  ]);
+  await expect(
+    page.getByText("Both attachments were read.", { exact: true }),
+  ).toBeVisible({ timeout: 60_000 });
+  await expect(page).toHaveURL(/\/workspace\/chats\/[a-f0-9-]+$/);
+  const target = new URL(page.url()).pathname.split("/").at(-1)!;
+  expect(target).not.toBe(sourceThread);
+  await page.reload();
+  await expect(
+    page.getByText("Both attachments were read.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByTitle("acceptance.txt", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByTitle("local.txt", { exact: true })).toBeVisible();
+  return target;
 }
 
 test("production Docker login, upload, streamed tools, files, history and confirmed deletion", async ({
@@ -149,6 +245,9 @@ test("production Docker login, upload, streamed tools, files, history and confir
     fullPage: true,
   });
 
+  const destination = await attachFromFirstConversation(page, thread);
+  await page.goto(chatUrl);
+
   const exportStarted = await context.request.post("/api/account/export", {
     headers,
   });
@@ -177,11 +276,16 @@ with zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read())) as archive:
     prefix = "conversations/" + sys.argv[1]
     assert archive.read(prefix + "/files/outputs/acceptance.txt").decode() == sys.argv[2]
     assert archive.read(prefix + "/files/uploads/input.txt") == b"UPLOAD-ACCEPTANCE-726\\n"
+    destination = "conversations/" + sys.argv[3]
+    assert archive.read(destination + "/files/uploads/acceptance.txt").decode() == sys.argv[2]
+    assert archive.read(destination + "/files/uploads/local.txt") == b"Local attachment.\\n"
+    assert destination + "/files/outputs/acceptance.txt" not in archive.namelist()
     transcript = json.loads(archive.read(prefix + "/transcript.json"))
     assert "Acceptance complete. Your synthetic artifact is ready." in json.dumps(transcript)
 print("export verified")`,
       thread,
       artifact,
+      destination,
     ],
     { input: archive, encoding: "utf8", timeout: 10_000 },
   );
@@ -269,6 +373,11 @@ print("export verified")`,
   await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
   expect((await context.request.get(artifactUrl)).status()).toBe(404);
   await expect(row).toHaveCount(0);
+  const importedDownload = await context.request.get(
+    `/api/threads/${destination}/artifacts/mnt/user-data/uploads/acceptance.txt`,
+  );
+  expect(importedDownload.status()).toBe(200);
+  expect(await importedDownload.text()).toBe(artifact);
 
   // Kept and published copies survive removal of their source conversation.
   await page.goto("/workspace/files");
