@@ -25,6 +25,7 @@ import httpx
 
 from deerflow.community.endpoint_policy import is_private_endpoint
 from deerflow.community.url_safety import resolve_host_addresses, validate_public_http_url
+from deerflow.mcp.discovery_errors import EndpointAddressRefused
 
 
 def _public_addresses(url: httpx.URL, refusal: str) -> list[str]:
@@ -36,7 +37,7 @@ def _public_addresses(url: httpx.URL, refusal: str) -> list[str]:
         return candidates
 
     if validate_public_http_url(str(url), action="connect to", resolver=resolve):
-        raise ValueError(refusal)
+        raise EndpointAddressRefused(refusal)
     # Literal IP URLs are validated without calling the resolver.
     return list(dict.fromkeys(addresses)) if addresses else [str(ipaddress.ip_address(url.host))]
 

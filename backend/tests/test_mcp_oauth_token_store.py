@@ -673,3 +673,39 @@ def test_request_fingerprint_follows_token_request_parameters_not_the_chain():
         assert oauth_token_request_fingerprint(changed) != fingerprint, update
         assert oauth_config_fingerprint(changed) == oauth_config_fingerprint(base), "the refresh-token chain is unaffected"
     assert oauth_token_request_fingerprint(base.model_copy(update={"extra_token_params": {"resource": "https://api"}})) == fingerprint
+
+
+def test_lease_renews_while_the_http_client_loads_tls_trust(session_factory, cipher, endpoint, monkeypatch):
+    """Both replicas wait for one exchange even with a blocked client constructor."""
+    entered = threading.Event()
+    renewed = threading.Event()
+    release = threading.Event()
+    constructor = httpx.AsyncClient
+    renew = McpOAuthTokenStore.renew
+    monkeypatch.setattr(oauth_store, "REFRESH_LEASE_SECONDS", 1.5)
+    monkeypatch.setattr(oauth_store, "REFRESH_POLL_SECONDS", 0.05)
+
+    def slow_client(*args, **kwargs):
+        entered.set()
+        assert release.wait(8)
+        return constructor(*args, **kwargs)
+
+    def observe_renew(self, key, lease_owner):
+        held = renew(self, key, lease_owner)
+        if held:
+            renewed.set()
+        return held
+
+    monkeypatch.setattr(httpx, "AsyncClient", slow_client)
+    monkeypatch.setattr(McpOAuthTokenStore, "renew", observe_renew)
+    a, b = (_replica(session_factory, cipher) for _ in range(2))
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        first = workers.submit(lambda: asyncio.run(a.get_authorization_header(SERVER)))
+        try:
+            assert entered.wait(4)
+            second = workers.submit(lambda: asyncio.run(b.get_authorization_header(SERVER)))
+            assert renewed.wait(3), "HTTP client setup blocked renewal of the live database lease"
+        finally:
+            release.set()
+        assert first.result(5) == second.result(5) == "Bearer access-1"
+    assert endpoint.refresh_requests == ["refresh-0"]
