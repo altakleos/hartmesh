@@ -54,6 +54,7 @@ import {
   getMessageRunId,
   getRunDurationDisplaysByGroupIndex,
 } from "@/core/messages/run-duration";
+import type { SentTurn } from "@/core/messages/sent-turn";
 import {
   buildTokenDebugSteps,
   type TokenDebugStep,
@@ -91,7 +92,6 @@ import {
 } from "@/core/tasks/subtask-result";
 import type { AgentTarget } from "@/core/telegram-bots/web-pages";
 import type { AgentThreadState } from "@/core/threads";
-import type { SentTurn } from "@/core/threads/hooks";
 import {
   runActivityLabel,
   useTurnProgress,

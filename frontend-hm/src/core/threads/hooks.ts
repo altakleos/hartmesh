@@ -47,6 +47,7 @@ import {
 import { useI18n } from "../i18n/hooks";
 import type { Translations } from "../i18n/locales";
 import { getMessageRunId, parseRunStartTime } from "../messages/run-duration";
+import { canonicalSentIndex, type SentTurn } from "../messages/sent-turn";
 import {
   hasContent,
   hasToolCalls,
@@ -128,14 +129,6 @@ export type ThreadStreamOptions = {
 const EMPTY_RUN_INPUTS: RunInput[] = [];
 /** How long after a run ends the input list is still polled for its successor. */
 export const RUN_INPUT_SETTLE_POLL_MS = 120_000;
-
-export type SentTurn = {
-  optimisticId: string;
-  /** Null means a new conversation; an absent ID has no safe text fallback. */
-  previousHumanId?: string | null;
-  text: string;
-  runId?: string;
-};
 
 export type SendMessageOptions = {
   /** Ordinary web composer submissions can request viewport alignment after admission. */
@@ -646,10 +639,18 @@ export function reconcileThreadHistoryRows(
   return reconciled;
 }
 
+function isLocalOptimistic(message: Message, optimistic: readonly Message[]) {
+  return optimistic.some(
+    (local) =>
+      local === message || Boolean(local.id && local.id === message.id),
+  );
+}
+
 export function mergeMessages(
   historyMessages: Message[],
   threadMessages: Message[],
   optimisticMessages: Message[],
+  sentTurn?: SentTurn | null,
 ): Message[] {
   const savedTurnDurations = new Map<string, number>();
   const savedRunIds = new Map<string, string>();
@@ -793,7 +794,7 @@ export function mergeMessages(
     ...optimisticMessages,
   ]);
 
-  return merged.map((message) => {
+  const withRunMetadata = merged.map((message) => {
     const identity = messageIdentity(message);
     if (!identity) {
       return message;
@@ -819,6 +820,22 @@ export function mergeMessages(
     }
     return message;
   });
+  // Either the journal or the SDK checkpoint can reach the display first.
+  // Local rows cannot confirm one another. A server ID may resemble a local ID.
+  if (
+    sentTurn?.runId &&
+    optimisticMessages.some(
+      (message) => message.id === sentTurn.optimisticId,
+    ) &&
+    canonicalSentIndex(withRunMetadata, sentTurn, (message) =>
+      isLocalOptimistic(message, optimisticMessages) ? undefined : message,
+    ) >= 0
+  ) {
+    return withRunMetadata.filter(
+      (message) => message.id !== sentTurn.optimisticId,
+    );
+  }
+  return withRunMetadata;
 }
 
 /**
@@ -3490,6 +3507,8 @@ export function useThreadStream({
   // already captured by these deps, and resolveTransientHistoryBridge is
   // idempotent for entries canonical history has absorbed, so memoizing on the
   // coalesced snapshot cannot pin a stale bridge.
+  const sentTurn =
+    composerTurn?.owner === viewOwner.current ? composerTurn.turn : null;
   const mergedMessages = useMemo(() => {
     const effectiveHistory = resolveThreadTransientHistoryBridge(
       visibleHistory,
@@ -3503,6 +3522,7 @@ export function useThreadStream({
       effectiveHistory,
       renderMessages,
       visibleOptimisticMessages,
+      sentTurn,
     );
     const localTurnOrderBaseline = localTurnOrderBaselineIdentitiesRef.current;
     return localTurnOrderBaseline === null
@@ -3511,6 +3531,7 @@ export function useThreadStream({
   }, [
     previouslyRenderedOrder,
     renderMessages,
+    sentTurn,
     threadId,
     transientHistoryOrder,
     visibleHistory,
@@ -3534,9 +3555,13 @@ export function useThreadStream({
     // A visible human may have no ID and therefore may be absent from the
     // identity ledger. Never mistake its predecessor for the send boundary.
     let lastVisibleHumanId: string | undefined;
-    for (let index = visibleMergedMessages.length - 1; index >= 0; index--) {
-      const message = visibleMergedMessages[index];
-      if (message?.type === "human") {
+    for (let index = mergedMessages.length - 1; index >= 0; index--) {
+      const message = mergedMessages[index];
+      if (
+        message?.type === "human" &&
+        !isHiddenFromUIMessage(message) &&
+        !isLocalOptimistic(message, visibleOptimisticMessages)
+      ) {
         lastVisibleHumanId = message.id;
         break;
       }
@@ -3549,7 +3574,13 @@ export function useThreadStream({
         .map(messageIdentity)
         .filter(isNonEmptyString),
     };
-  }, [mergedMessages, pendingSupersededMessageIds, thread.isLoading, threadId]);
+  }, [
+    mergedMessages,
+    pendingSupersededMessageIds,
+    thread.isLoading,
+    threadId,
+    visibleOptimisticMessages,
+  ]);
   const pendingUsageMessages = thread.isLoading
     ? getMessagesAfterBaseline(
         persistedMessages,
@@ -3572,8 +3603,7 @@ export function useThreadStream({
 
   return {
     thread: mergedThread,
-    sentTurn:
-      composerTurn?.owner === viewOwner.current ? composerTurn.turn : null,
+    sentTurn,
     pendingUsageMessages,
     sendMessage,
     regenerateMessage,

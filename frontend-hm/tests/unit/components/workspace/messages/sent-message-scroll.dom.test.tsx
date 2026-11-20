@@ -6,8 +6,8 @@ import {
   sentGroupIndex,
   type SentScrollControl,
 } from "@/components/workspace/messages/sent-message-scroll";
+import type { SentTurn } from "@/core/messages/sent-turn";
 import type { MessageGroup } from "@/core/messages/utils";
-import type { SentTurn } from "@/core/threads/hooks";
 
 const context = rs.hoisted(() => ({
   scrollRef: { current: null as HTMLDivElement | null },
@@ -113,6 +113,13 @@ function view(initial: SentTurn, loading = true) {
       disconnect = rs.fn();
     },
   );
+  const frames = new Map<number, FrameRequestCallback>();
+  let frameId = 0;
+  rs.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    frames.set(++frameId, callback);
+    return frameId;
+  });
+  rs.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
   let groupId = "optimistic";
   const ui = (turn: SentTurn, active: boolean) => (
     <SentMessageScroll
@@ -130,6 +137,13 @@ function view(initial: SentTurn, loading = true) {
     viewport,
     control,
     resize: () => act(resize),
+    moveRow: (start: number) => sizeRow(row, start),
+    nextFrame: () =>
+      act(() => {
+        const callbacks = [...frames.values()];
+        frames.clear();
+        for (const callback of callbacks) callback(performance.now());
+      }),
     rerender: (turn: SentTurn, active: boolean) =>
       rendered.rerender(ui(turn, active)),
     replace() {
@@ -179,15 +193,29 @@ describe("sent message viewport ownership", () => {
     chat.rerender(admitted, true);
     expect(chat.viewport.scrollTop).toBe(0);
   });
+  it("finishes the two first-layout frames even if admission and finish render together", () => {
+    const chat = view(admitted, false);
+    chat.moveRow(366);
+    chat.nextFrame();
+    expect(chat.viewport.scrollTop).toBe(350);
+    chat.nextFrame();
+    chat.viewport.scrollTop = 300;
+    chat.resize();
+    expect(chat.viewport.scrollTop).toBe(300);
+  });
   it("settles an immediately complete turn and transfers a late replacement once", () => {
     const chat = view(admitted, false);
     expect(chat.viewport.scrollTop).toBe(334);
+    chat.nextFrame();
+    chat.nextFrame();
     chat.viewport.scrollTop = 300;
     chat.resize();
     expect(chat.viewport.scrollTop).toBe(300);
     chat.replace();
     chat.rerender(admitted, false);
     expect(chat.viewport.scrollTop).toBe(369);
+    chat.nextFrame();
+    chat.nextFrame();
     chat.viewport.scrollTop = 290;
     chat.resize();
     expect(chat.viewport.scrollTop).toBe(290);

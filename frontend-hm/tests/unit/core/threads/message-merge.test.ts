@@ -2348,3 +2348,106 @@ test("optimisticMessagesAfterUpload keeps the human message with its uploaded fi
   // Nothing to do without a human message to carry the files.
   expect(optimisticMessagesAfterUpload([], uploaded)).toEqual([]);
 });
+
+test("a journaled human replaces only the optimistic row for its admitted send", () => {
+  const journaled = {
+    type: "human" as const,
+    id: "server",
+    content: "Question",
+    run_id: "run",
+  };
+  const local: Message = { type: "human", id: "opt-sent", content: "Question" };
+  const other: Message = {
+    type: "human",
+    id: "other-optimistic",
+    content: "Question",
+  };
+  const pending = {
+    optimisticId: "opt-sent",
+    previousHumanId: null,
+    text: "Question",
+  };
+  const admitted = { ...pending, runId: "run" };
+  expect(mergeMessages([], [], [local, other], admitted)).toEqual([
+    local,
+    other,
+  ]);
+  expect(mergeMessages([journaled], [], [local, other], admitted)).toEqual([
+    journaled,
+    other,
+  ]);
+  expect(mergeMessages([journaled], [], [local], pending)).toEqual([
+    journaled,
+    local,
+  ]);
+  for (const unrelated of [
+    { ...journaled, run_id: "other-run" },
+    { ...journaled, content: "A later input" },
+    { ...journaled, additional_kwargs: { hide_from_ui: true } },
+  ]) {
+    expect(mergeMessages([unrelated], [], [local], admitted)).toEqual([
+      unrelated,
+      local,
+    ]);
+  }
+});
+
+test("an untagged checkpoint can confirm the first human after a known boundary", () => {
+  const first: Message = { type: "human", id: "existing", content: "Repeated" };
+  const local: Message = {
+    type: "human",
+    id: "opt-current",
+    content: "Repeated",
+  };
+  const incoming: Message = { ...first, id: "canonical" };
+  const admitted = {
+    runId: "run",
+    optimisticId: "opt-current",
+    previousHumanId: "existing",
+    text: "Repeated",
+  };
+  expect(mergeMessages([first], [first, incoming], [local], admitted)).toEqual([
+    first,
+    incoming,
+  ]);
+  expect(mergeMessages([first], [first], [local], admitted)).toEqual([
+    first,
+    local,
+  ]);
+  expect(
+    mergeMessages([], [incoming], [local], {
+      ...admitted,
+      previousHumanId: null,
+    }),
+  ).toEqual([incoming]);
+  expect(
+    mergeMessages([], [first], [local], {
+      ...admitted,
+      previousHumanId: undefined,
+    }),
+  ).toEqual([first, local]);
+});
+
+test("a stored previous human keeps its identity when its ID resembles a local ID", () => {
+  const previous: Message = {
+    type: "human",
+    id: "opt-human-imported",
+    content: "Earlier",
+  };
+  const own: Message = {
+    type: "human",
+    id: "opt-human-local",
+    content: "Question",
+  };
+  const next: Message = { type: "human", id: "canonical", content: "Question" };
+  const options = {
+    optimisticId: own.id!,
+    text: "Question",
+    runId: "confirmed",
+    previousHumanId: previous.id,
+  };
+  expect(mergeMessages([previous], [next], [own], options)).toEqual([
+    previous,
+    next,
+  ]);
+});

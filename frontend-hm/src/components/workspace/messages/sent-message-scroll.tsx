@@ -4,13 +4,8 @@ import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 
 import { ConversationScrollButton } from "@/components/ai-elements/conversation";
-import { getMessageRunId } from "@/core/messages/run-duration";
-import {
-  extractTextFromMessage,
-  stripUploadedFilesTag,
-  type MessageGroup,
-} from "@/core/messages/utils";
-import type { SentTurn } from "@/core/threads/hooks";
+import { canonicalSentIndex, type SentTurn } from "@/core/messages/sent-turn";
+import type { MessageGroup } from "@/core/messages/utils";
 
 export const GROUP_START_OFFSET = 16;
 
@@ -23,31 +18,9 @@ export function sentGroupIndex(
     (g) => g.type === "human" && g.id === turn.optimisticId,
   );
   if (optimistic >= 0) return optimistic;
-  const previous = turn.previousHumanId
-    ? groups.findIndex(
-        (g) => g.type === "human" && g.id === turn.previousHumanId,
-      )
-    : -1;
-  // When the previous boundary is absent, only an explicit run identity can
-  // identify the new row (e.g. during a history refresh).
-  const firstCandidate = groups.findIndex(
-    (group, i) => group.type === "human" && i > previous,
+  return canonicalSentIndex(groups, turn, (group) =>
+    group.type === "human" ? group.messages[0] : undefined,
   );
-  const explicit = groups.findIndex(
-    (group, i) =>
-      i > previous &&
-      group.type === "human" &&
-      getMessageRunId(group.messages[0]!) === turn.runId,
-  );
-  if (explicit >= 0) return explicit;
-  if (previous < 0 && turn.previousHumanId !== null) return -1;
-  const first = groups[firstCandidate]?.messages[0];
-  return first &&
-    !getMessageRunId(first) &&
-    stripUploadedFilesTag(extractTextFromMessage(first)) ===
-      stripUploadedFilesTag(turn.text)
-    ? firstCandidate
-    : -1;
 }
 
 export type SentScrollControl = {
@@ -202,15 +175,25 @@ export function SentMessageScroll({
         settleFrame = requestAnimationFrame(() => {
           if (phase !== "pinned") return;
           measure();
-          settleFrame = requestAnimationFrame(measure);
+          settleFrame = requestAnimationFrame(() => {
+            settleFrame = 0;
+            if (phase !== "pinned") return;
+            measure();
+            settleIfEnded();
+          });
         });
       }
       if (row && !isLoading) ended = true;
-      if (phase === "pinned" && ended) {
+      settleIfEnded();
+    };
+    function settleIfEnded() {
+      // A first reply can arrive and finish together while the welcome view
+      // gives way to chat. Complete the already-scheduled layout frames once.
+      if (phase === "pinned" && ended && !settleFrame) {
         phase = "settled";
         measure();
       }
-    };
+    }
     current.current = update;
     handle.clear = clear;
     viewport.addEventListener("scroll", measure, { passive: true });

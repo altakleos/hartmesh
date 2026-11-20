@@ -230,47 +230,96 @@ test("keyboard scrolling releases the held row while the answer is arriving", as
   }
 });
 
-test("the first admitted send survives new-chat URL replacement; reloading restores normal scrolling", async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  const human = { id: "first-human", type: "human", content: sent };
-  const answer = {
-    id: "msg-ai-1",
-    type: "ai",
-    content: "Hello from DeerFlow!",
-  };
-  mockLangGraphAPI(page, {
-    createdThreadMessages: [human, answer],
-    runStreamHandler: (route) =>
-      handleRunStream(route, {}, [human], { responseMessage: answer }),
+for (const holdJournal of [false, true]) {
+  test(`the first admitted send survives new-chat URL replacement and reload (${holdJournal ? "late" : "immediate"} journal)`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const human = { id: "first-human", type: "human", content: sent };
+    const answer = {
+      id: "msg-ai-1",
+      type: "ai",
+      content: "Hello from DeerFlow!",
+    };
+    // New threads start empty. The journal and the stream receipt identify
+    // the same run even when their updates reach the view in different orders.
+    const journal: Record<string, unknown>[] = [];
+    mockLangGraphAPI(page, {
+      createdThreadMessages: journal,
+      runStreamHandler: (route) => {
+        journal.push(
+          ...[human, answer].map((message) => ({
+            ...message,
+            run_id: MOCK_RUN_ID,
+          })),
+        );
+        return handleRunStream(route, {}, [human], { responseMessage: answer });
+      },
+    });
+    let releaseJournal: () => void = () => undefined;
+    let requested = false;
+    const journalPage = /\/api\/threads\/[^/]+\/messages\/page/;
+    if (holdJournal) {
+      const gate = new Promise<void>((resolve) => {
+        releaseJournal = resolve;
+      });
+      await page.route(journalPage, async (route) => {
+        requested = true;
+        await gate;
+        await route.fallback();
+      });
+    }
+    try {
+      await page.goto("/workspace/chats/new", {
+        waitUntil: "domcontentloaded",
+      });
+      const composer = page.getByPlaceholder(/how can i assist you/i);
+      await composer.fill(sent);
+      await composer.press("Enter");
+      const viewport = page
+        .getByTestId("main-message-list")
+        .locator(":scope > div")
+        .first();
+      const row = page
+        .getByText(sent, { exact: true })
+        .locator("xpath=ancestor::*[@data-message-group-index][1]");
+      await expect(page.getByText("Hello from DeerFlow!")).toBeVisible();
+      await expect(page).not.toHaveURL(/\/new$/);
+      await expect(row).toHaveCount(1);
+      await expect.poll(() => offset(row, viewport)).toBe(16);
+      if (holdJournal) {
+        await expect.poll(() => requested).toBe(true);
+        await expect(
+          page
+            .getByText(answer.content)
+            .locator("xpath=ancestor::*[@data-message-group-index][1]")
+            .getByRole("button", { name: "Regenerate" }),
+        ).toBeEnabled();
+        const delivered = page.waitForResponse(journalPage);
+        releaseJournal();
+        await (await delivered).finished();
+        await expect(
+          viewport.getByRole("button", { name: /loading/i }),
+        ).toBeHidden();
+        await expect(row).toHaveCount(1);
+        await expect.poll(() => offset(row, viewport)).toBe(16);
+      }
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await expect(composer).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByText("Hello from DeerFlow!")).toBeVisible();
+      await expect
+        .poll(() =>
+          viewport.evaluate(
+            (v) =>
+              parseFloat(
+                (v.firstElementChild?.lastElementChild as HTMLElement)?.style
+                  .marginBottom,
+              ) || 0,
+          ),
+        )
+        .toBe(0);
+    } finally {
+      releaseJournal();
+    }
   });
-  await page.goto("/workspace/chats/new", { waitUntil: "domcontentloaded" });
-  const composer = page.getByPlaceholder(/how can i assist you/i);
-  await composer.fill(sent);
-  await composer.press("Enter");
-  const viewport = page
-    .getByTestId("main-message-list")
-    .locator(":scope > div")
-    .first();
-  const row = page
-    .getByText(sent, { exact: true })
-    .locator("xpath=ancestor::*[@data-message-group-index][1]");
-  await expect(page.getByText("Hello from DeerFlow!")).toBeVisible();
-  await expect(page).not.toHaveURL(/\/new$/);
-  await expect.poll(() => offset(row, viewport)).toBe(16);
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await expect(composer).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText("Hello from DeerFlow!")).toBeVisible();
-  await expect
-    .poll(() =>
-      viewport.evaluate(
-        (v) =>
-          parseFloat(
-            (v.firstElementChild?.lastElementChild as HTMLElement)?.style
-              .marginBottom,
-          ) || 0,
-      ),
-    )
-    .toBe(0);
-});
+}
