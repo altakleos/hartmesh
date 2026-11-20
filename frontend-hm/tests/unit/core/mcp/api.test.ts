@@ -26,6 +26,7 @@ rs.mock("@/core/config", () => ({
 import { fetch as fetcher } from "@/core/api/fetcher";
 import {
   MCPConfigRequestError,
+  checkMCPConnection,
   loadMCPConfig,
   updateMCPConfig,
   updateMCPServerState,
@@ -154,4 +155,52 @@ describe("updateMCPServerState", () => {
       message: detail,
     });
   });
+});
+
+describe("checking a saved connection", () => {
+  test("sends only its name and returns only the tool count", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      Response.json({
+        status: "connected",
+        tool_count: 0,
+        detail: "irrelevant",
+      }),
+    );
+    expect(
+      await checkMCPConnection("Team notes", new AbortController().signal),
+    ).toEqual({ status: "connected", tool_count: 0 });
+    expect(mockedFetch).toHaveBeenCalledWith(
+      "/api/mcp/config/servers/Team%20notes/check",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(mockedFetch.mock.calls[0]?.[1]?.body).toBeUndefined();
+  });
+  test.each([
+    "unreachable",
+    "refused",
+    "not-mcp",
+    "timeout",
+    "bad-token-format",
+    "address-not-public",
+  ])("accepts the fixed reason %s", async (reason) => {
+    mockedFetch.mockResolvedValueOnce(
+      Response.json({ status: "failed", reason, extra: "upstream message" }),
+    );
+    expect(
+      await checkMCPConnection("notes", new AbortController().signal),
+    ).toEqual({ status: "failed", reason });
+  });
+  test.each([
+    { status: "failed", reason: "raw service error" },
+    { status: "connected", tool_count: -1 },
+    { status: "connected", tool_count: "2" },
+  ])(
+    "rejects unknown check data without echoing upstream text",
+    async (data) => {
+      mockedFetch.mockResolvedValueOnce(Response.json(data));
+      await expect(
+        checkMCPConnection("notes", new AbortController().signal),
+      ).rejects.toThrow("Connection check unavailable");
+    },
+  );
 });

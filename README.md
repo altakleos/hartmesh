@@ -1890,6 +1890,12 @@ still retain their error or partial-result status.
 
 #### MCP Server
 
+Administrators can open **Settings → Tools → Add connection** to enter a
+remote MCP service’s HTTPS address and optional service-account token.
+**Save and check** reports how many tools the service offers. A failed check
+leaves the connection saved for editing. Use **Check** to try again, or
+**Paste a JSON definition instead** for advanced configurations.
+
 Tool steps mark explicit execution failures. Scheduled-task steps show completed
 operations only after a valid response, rather than when the request is issued.
 

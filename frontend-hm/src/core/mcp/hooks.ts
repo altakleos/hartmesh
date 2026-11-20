@@ -6,6 +6,8 @@ import {
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 
+import { useAuth } from "@/core/auth/AuthProvider";
+
 import {
   createMCPServers,
   deleteMCPServer,
@@ -17,8 +19,9 @@ import {
 import type { MCPServerConfig } from "./types";
 
 export function useMCPConfig() {
+  const { user } = useAuth();
   const { data, isLoading, error } = useQuery({
-    queryKey: ["mcpConfig"],
+    queryKey: ["mcpConfig", user?.id, user?.system_role],
     queryFn: () => loadMCPConfig(),
     retry: (count, error) =>
       !(error instanceof MCPConfigRequestError) && count < 3,

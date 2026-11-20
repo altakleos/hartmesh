@@ -1,7 +1,7 @@
 "use client";
 
 import { PencilIcon, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -21,9 +21,15 @@ import {
 } from "@/components/ui/item";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useCustomerAdministration } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
-import { MCPConfigRequestError } from "@/core/mcp/api";
+import {
+  checkMCPConnection,
+  MCPConfigRequestError,
+  type ConnectionCheck,
+} from "@/core/mcp/api";
+import { formCanEdit } from "@/core/mcp/connection-form";
 import {
   useEnableMCPServer,
   useMCPConfig,
@@ -37,6 +43,7 @@ import {
 import type { MCPServerConfig } from "@/core/mcp/types";
 import { env } from "@/env";
 
+import { ConnectionForm } from "./connection-form";
 import { ProviderEnablementNotice } from "./provider-enablement-notice";
 import { SettingsSection } from "./settings-section";
 
@@ -47,6 +54,7 @@ function isLocalDefinition(server: MCPServerConfig) {
 
 export function ToolSettingsPage() {
   const { t } = useI18n();
+  const { user } = useAuth();
   const { config, isLoading, error } = useMCPConfig();
   const adminRequired =
     error instanceof MCPConfigRequestError && error.isAdminRequired;
@@ -67,7 +75,12 @@ export function ToolSettingsPage() {
         ) : error ? (
           <div>Error: {error.message}</div>
         ) : (
-          config && <MCPServerList servers={config.mcp_servers} />
+          config && (
+            <MCPServerList
+              key={JSON.stringify([user?.id, user?.system_role])}
+              servers={config.mcp_servers}
+            />
+          )
         )}
       </div>
     </SettingsSection>
@@ -83,8 +96,77 @@ function MCPServerList({
   const { isPending, mutate: enableMCPServer } = useEnableMCPServer();
   const { isPending: isWriting, mutate: mutateServer } = useMCPServerMutation();
   const [editor, setEditor] = useState<
-    { mode: "add" } | { mode: "edit"; name: string } | null
+    | { mode: "add" }
+    | { mode: "edit"; name: string; original: MCPServerConfig }
+    | null
   >(null);
+  const [editorKind, setEditorKind] = useState<"form" | "json">("form");
+  const [check, setCheck] = useState<{
+    name: string;
+    saved: boolean;
+    definition: string;
+    result: ConnectionCheck | "pending" | "unavailable";
+  } | null>(null);
+  const checker = useRef<{
+    controller: AbortController;
+    name: string;
+    definition: string;
+    prior?: string;
+    observed: boolean;
+  } | null>(null);
+  const listed = useRef(servers);
+  useLayoutEffect(() => {
+    listed.current = servers;
+    const owner = checker.current;
+    if (!owner) return;
+    const current = JSON.stringify(servers?.[owner.name]);
+    if (current === owner.definition) owner.observed = true;
+    // A just-saved list may still show the prior row until its refetch completes.
+    else if (owner.observed || owner.prior !== current) {
+      owner.controller.abort();
+      checker.current = null;
+      setCheck(null);
+    }
+  }, [servers]);
+  const mounted = useRef(false);
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      checker.current?.controller.abort();
+    };
+  }, []);
+  function clearCheck() {
+    checker.current?.controller.abort();
+    checker.current = null;
+    setCheck(null);
+  }
+  async function runCheck(
+    name: string,
+    saved: boolean,
+    server: MCPServerConfig,
+  ) {
+    if (!mounted.current) return;
+    checker.current?.controller.abort();
+    const owner = new AbortController();
+    const definition = JSON.stringify(server);
+    const prior = JSON.stringify(listed.current?.[name]);
+    checker.current = {
+      controller: owner,
+      name,
+      definition,
+      prior,
+      observed: prior === definition,
+    };
+    setCheck({ name, saved, definition, result: "pending" });
+    try {
+      const result = await checkMCPConnection(name, owner.signal);
+      if (!owner.signal.aborted) setCheck({ name, saved, definition, result });
+    } catch {
+      if (!owner.signal.aborted)
+        setCheck({ name, saved, definition, result: "unavailable" });
+    }
+  }
   const [definition, setDefinition] = useState("");
   const [definitionError, setDefinitionError] = useState<string | null>(null);
   const [pendingRemoval, setPendingRemoval] = useState<string | null>(null);
@@ -92,6 +174,9 @@ function MCPServerList({
   const readOnly = env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
   const { localMcpManagement } = useCustomerAdministration();
   const current = servers ?? {};
+  const editorStale =
+    editor?.mode === "edit" &&
+    JSON.stringify(editor.original) !== JSON.stringify(current[editor.name]);
   const entries = Object.entries(current);
   const isMutating = isPending || isWriting;
 
@@ -108,15 +193,19 @@ function MCPServerList({
   }
 
   function openAddEditor() {
+    clearCheck();
+    setEditorKind("form");
     setDefinition("");
     setDefinitionError(null);
     setEditor({ mode: "add" });
   }
 
   function openEditEditor(name: string, config: MCPServerConfig) {
+    clearCheck();
+    setEditorKind(formCanEdit(config) ? "form" : "json");
     setDefinition(formatMCPServerDefinition(name, config));
     setDefinitionError(null);
-    setEditor({ mode: "edit", name });
+    setEditor({ mode: "edit", name, original: config });
   }
 
   function handleSaveDefinition() {
@@ -212,7 +301,7 @@ function MCPServerList({
           disabled={readOnly || isMutating}
           onClick={openAddEditor}
         >
-          {t.settings.tools.addServer}
+          {t.settings.tools.connection.add}
         </Button>
       </div>
 
@@ -223,6 +312,10 @@ function MCPServerList({
       ) : (
         entries.map(([name, config]) => {
           const displayName = displayServerName(name);
+          const currentCheck =
+            check?.name === name && check.definition === JSON.stringify(config)
+              ? check
+              : null;
           const localReadOnly =
             isLocalDefinition(config) && !localMcpManagement;
           return (
@@ -236,14 +329,47 @@ function MCPServerList({
                 <ItemDescription className="line-clamp-4">
                   {config.description}
                 </ItemDescription>
+                {currentCheck && (
+                  <p role="status" className="text-sm">
+                    {currentCheck.saved &&
+                      t.settings.tools.connection.saved + " "}
+                    {currentCheck.result === "pending"
+                      ? t.settings.tools.connection.checking
+                      : currentCheck.result === "unavailable"
+                        ? t.settings.tools.connection.unavailable
+                        : currentCheck.result.status === "connected"
+                          ? t.settings.tools.connection.connected(
+                              currentCheck.result.tool_count,
+                            )
+                          : t.settings.tools.connection.reasons[
+                              currentCheck.result.reason
+                            ]}
+                  </p>
+                )}
               </ItemContent>
               <ItemActions className="gap-1">
+                {!isLocalDefinition(config) && (
+                  <Button
+                    aria-label={`${t.settings.tools.connection.check} ${displayName}`}
+                    size="sm"
+                    variant="outline"
+                    disabled={
+                      readOnly ||
+                      isMutating ||
+                      currentCheck?.result === "pending"
+                    }
+                    onClick={() => void runCheck(name, false, config)}
+                  >
+                    {t.settings.tools.connection.check}
+                  </Button>
+                )}
                 <Switch
                   checked={config.enabled}
                   disabled={readOnly || localReadOnly || isMutating}
-                  onCheckedChange={(checked) =>
-                    enableMCPServer({ serverName: name, enabled: checked })
-                  }
+                  onCheckedChange={(checked) => {
+                    clearCheck();
+                    enableMCPServer({ serverName: name, enabled: checked });
+                  }}
                 />
                 <Button
                   size="icon"
@@ -259,7 +385,10 @@ function MCPServerList({
                   variant="ghost"
                   aria-label={`${t.common.delete} ${displayName}`}
                   disabled={readOnly || localReadOnly || isMutating}
-                  onClick={() => setPendingRemoval(name)}
+                  onClick={() => {
+                    clearCheck();
+                    setPendingRemoval(name);
+                  }}
                 >
                   <Trash2 className="size-4" />
                 </Button>
@@ -273,47 +402,105 @@ function MCPServerList({
         open={editor !== null}
         onOpenChange={(open) => !open && !isWriting && closeEditor()}
       >
-        <DialogContent>
+        <DialogContent className="max-h-[85dvh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
-              {editor?.mode === "edit"
-                ? t.settings.tools.editServer
-                : t.settings.tools.addServer}
+              {editorKind === "form"
+                ? editor?.mode === "edit"
+                  ? t.settings.tools.connection.edit
+                  : t.settings.tools.connection.add
+                : editor?.mode === "edit"
+                  ? t.settings.tools.editServer
+                  : t.settings.tools.addServer}
             </DialogTitle>
             <DialogDescription>
-              {editor?.mode === "edit"
-                ? t.settings.tools.editServerDescription.replace(
-                    "{name}",
-                    editor.name,
-                  )
-                : t.settings.tools.addServerDescription}
+              {editorKind === "form"
+                ? t.settings.tools.connection.formDescription
+                : editor?.mode === "edit"
+                  ? t.settings.tools.editServerDescription.replace(
+                      "{name}",
+                      editor.name,
+                    )
+                  : t.settings.tools.addServerDescription}
             </DialogDescription>
           </DialogHeader>
-          <Textarea
-            className="min-h-52 font-mono text-xs"
-            aria-label={t.settings.tools.serverDefinitionLabel}
-            spellCheck={false}
-            value={definition}
-            placeholder={t.settings.tools.addServerPlaceholder}
-            onChange={(event) => setDefinition(event.target.value)}
-          />
-          {definitionError && (
-            <div className="text-destructive text-sm" role="alert">
-              {definitionError}
-            </div>
+          {editorStale ? (
+            <>
+              <p role="alert">{t.settings.tools.connection.changed}</p>
+              <DialogFooter>
+                <Button variant="outline" onClick={closeEditor}>
+                  {t.common.cancel}
+                </Button>
+              </DialogFooter>
+            </>
+          ) : editorKind === "form" && editor ? (
+            <ConnectionForm
+              name={editor.mode === "edit" ? editor.name : undefined}
+              original={editor.mode === "edit" ? editor.original : undefined}
+              servers={current}
+              pending={isWriting}
+              onCancel={closeEditor}
+              onJson={() => setEditorKind("json")}
+              onSave={(name, server) => {
+                mutateServer(
+                  editor.mode === "edit"
+                    ? { operation: "update", serverName: name, server }
+                    : { operation: "create", servers: { [name]: server } },
+                  {
+                    onSuccess: (saved) => {
+                      closeEditor();
+                      const server = saved.mcp_servers[name];
+                      if (server) void runCheck(name, true, server);
+                    },
+                  },
+                );
+              }}
+            />
+          ) : (
+            <>
+              <Textarea
+                className="min-h-52 font-mono text-xs"
+                aria-label={t.settings.tools.serverDefinitionLabel}
+                spellCheck={false}
+                value={definition}
+                placeholder={
+                  localMcpManagement
+                    ? t.settings.tools.addServerPlaceholder
+                    : JSON.stringify(
+                        {
+                          mcpServers: {
+                            "my-service": {
+                              type: "http",
+                              url: "https://mcp.example.com/mcp",
+                              headers: { Authorization: "Bearer <token>" },
+                            },
+                          },
+                        },
+                        null,
+                        2,
+                      )
+                }
+                onChange={(event) => setDefinition(event.target.value)}
+              />
+              {definitionError && (
+                <div className="text-destructive text-sm" role="alert">
+                  {definitionError}
+                </div>
+              )}
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  disabled={isWriting}
+                  onClick={closeEditor}
+                >
+                  {t.common.cancel}
+                </Button>
+                <Button disabled={isWriting} onClick={handleSaveDefinition}>
+                  {isWriting ? t.common.loading : t.common.save}
+                </Button>
+              </DialogFooter>
+            </>
           )}
-          <DialogFooter>
-            <Button
-              variant="outline"
-              disabled={isWriting}
-              onClick={closeEditor}
-            >
-              {t.common.cancel}
-            </Button>
-            <Button disabled={isWriting} onClick={handleSaveDefinition}>
-              {isWriting ? t.common.loading : t.common.save}
-            </Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
 

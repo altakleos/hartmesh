@@ -179,3 +179,81 @@ test("closes local management after effective discovery becomes unavailable", as
     settings.getByRole("button", { name: "Edit remote" }),
   ).toBeEnabled();
 });
+
+test("saves and checks a remote connection, then edits its description without replacing the stored token", async ({
+  page,
+}, info) => {
+  mockLangGraphAPI(page);
+  const stored: Record<string, Record<string, unknown>> = {};
+  const sequence: string[] = [];
+  await page.route("**/api/mcp/config", (route) =>
+    route.fulfill({ json: { mcp_servers: stored } }),
+  );
+  await page.route("**/api/mcp/config/servers", (route) => {
+    const payload = route.request().postDataJSON() as {
+      mcp_servers: Record<string, Record<string, unknown>>;
+    };
+    expect(payload.mcp_servers.notes?.headers).toEqual({
+      Authorization: "Bearer example",
+    });
+    stored.notes = {
+      ...payload.mcp_servers.notes,
+      headers: { Authorization: "***" },
+      session_init_timeout: null,
+      extra_setting: "preserved",
+    };
+    sequence.push("create");
+    return route.fulfill({ json: { mcp_servers: stored } });
+  });
+  await page.route("**/api/mcp/config/server", (route) => {
+    const payload = route.request().postDataJSON() as {
+      server_name: string;
+      server: Record<string, unknown>;
+    };
+    expect(payload).toEqual({
+      server_name: "notes",
+      server: { ...stored.notes, description: "Company notes" },
+    });
+    stored.notes = payload.server;
+    sequence.push("edit");
+    return route.fulfill({ json: { mcp_servers: stored } });
+  });
+  await page.route("**/api/mcp/config/servers/notes/check", (route) => {
+    expect(route.request().postData()).toBeNull();
+    sequence.push("check");
+    return route.fulfill({
+      json:
+        sequence.length === 2
+          ? { status: "failed", reason: "refused" }
+          : { status: "connected", tool_count: 2 },
+    });
+  });
+  await page.goto("/workspace/chats/new?settings=tools");
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  await settings.getByRole("button", { name: "Add connection" }).click();
+  const form = page.getByRole("dialog", { name: "Add connection" });
+  await form.getByLabel("Name", { exact: true }).fill("notes");
+  await form
+    .getByLabel("Address", { exact: true })
+    .fill("https://mcp.example.com/notes");
+  await form.getByLabel("Token (optional)", { exact: true }).fill("example");
+  await info.attach("connection-form", {
+    body: await form.screenshot(),
+    contentType: "image/png",
+  });
+  await form.getByRole("button", { name: "Save and check" }).click();
+  await expect(settings.getByRole("status")).toContainText(
+    "Saved. The connection was refused.",
+  );
+  await settings.getByRole("button", { name: "Edit notes" }).click();
+  const edit = page.getByRole("dialog", { name: "Edit connection" });
+  await expect(edit.getByLabel("Name", { exact: true })).toBeDisabled();
+  await edit
+    .getByLabel("Description (optional)", { exact: true })
+    .fill("Company notes");
+  await edit.getByRole("button", { name: "Save and check" }).click();
+  await expect(settings.getByRole("status")).toContainText(
+    "Saved. Connected. 2 tools.",
+  );
+  expect(sequence).toEqual(["create", "check", "edit", "check"]);
+});

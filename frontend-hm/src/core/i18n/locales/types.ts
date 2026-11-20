@@ -1842,6 +1842,42 @@ export interface Translations {
       languageDescription: string;
     };
     tools: {
+      connection: {
+        discardJson: string;
+        changed: string;
+        add: string;
+        edit: string;
+        formDescription: string;
+        name: string;
+        url: string;
+        token: string;
+        description: string;
+        tokenHelp: string;
+        more: string;
+        transport: string;
+        http: string;
+        sse: string;
+        json: string;
+        saveCheck: string;
+        check: string;
+        checking: string;
+        saved: string;
+        unavailable: string;
+        nameRule: string;
+        duplicate: string;
+        secureAddress: string;
+        tokenFormat: string;
+        literal: string;
+        connected: (n: number) => string;
+        reasons: {
+          unreachable: string;
+          refused: string;
+          "not-mcp": string;
+          timeout: string;
+          "bad-token-format": string;
+          "address-not-public": string;
+        };
+      };
       title: string;
       description: string;
       adminRequired: string;
