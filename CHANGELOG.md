@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Operations
 
+- In the mounted PostgreSQL acceptance run on this release's backend image,
+  an interrupted write settled in 96 seconds while idle, 22.6 seconds after
+  releasing a chat's final response, 20.5 seconds after stopping an assignment,
+  and 44.4 seconds across a Gateway restart. A fresh workspace completed the
+  next answer another 14.7–15.8 seconds after settlement in all four cases.
 - A workspace that repeatedly loses access to its Home can still leave AI
   assistants and employees unavailable. The provider must stop the affected
   workspace and repair the Home.
