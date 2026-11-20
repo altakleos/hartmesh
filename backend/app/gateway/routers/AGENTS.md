@@ -76,6 +76,8 @@ opened descriptor. Preflight paths determine HTTP errors, never permission to
 reopen through symlinked parents. Use `deerflow.files.store.open_regular_source`,
 and retain ownership until every offloaded operation has drained on cancellation.
 Conversation keep/publish sources remain lexical paths within uploads/outputs.
+`GET /threads/{id}/presented-files` pages finished run deliveries.
+`POST /threads/{id}/uploads/from-conversation` rechecks both conversations before publication; retries reuse the same bytes.
 Artifact reads preserve links until no-follow open. Default GET captures small
 editable files for SHA-256/ranges. HEAD and `stream=true` skip payload preparation;
 raw archive/projection/instance sources refuse. Owner/Space checks still apply.

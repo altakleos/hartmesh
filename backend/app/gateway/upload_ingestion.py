@@ -34,7 +34,7 @@ import os
 import shutil
 import tempfile
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -145,11 +145,13 @@ class ThreadUploadIngestionService:
     it when a per-file failure aborts the request, and attach mirrors that.
     """
 
-    def __init__(self, *, request: Request | None, thread_id: str, user_id: str, app_config: AppConfig) -> None:
+    def __init__(self, *, request: Request | None, thread_id: str, user_id: str, app_config: AppConfig, before_publish: Callable[[], Awaitable[None]] | None = None) -> None:
         self._request = request
         self._thread_id = thread_id
         self._user_id = user_id
         self._config = app_config
+        self.before_publish = before_publish
+        self.import_rollback = None
         self._limits: UploadLimits | None = None
         self._uploads_dir: Path | None = None
         self._sync_to_sandbox = False
@@ -235,7 +237,7 @@ class ThreadUploadIngestionService:
             await await_drained(acquire_lease())
         self._auto_convert = uploads._auto_convert_documents_enabled(self._config)
 
-    async def _link_commit_with_retry(self, uploads: Any, staged_path: Path, claimed_name: str) -> tuple[str, Path]:
+    async def _link_commit_with_retry(self, uploads: Any, staged_path: Path, claimed_name: str, *, original_name: str) -> tuple[str, Path]:
         """Publish a staged file under *claimed_name*, atomically and with no overwrite.
 
         ``os.link`` (inside ``_commit_upload_temp_no_overwrite`` /
@@ -251,13 +253,18 @@ class ThreadUploadIngestionService:
 
         async def publish() -> tuple[str, Path]:
             name = claimed_name
+            pinned = await run_file_io(self.import_rollback.pin, staged_path) if self.import_rollback else None
             while True:
                 try:
+                    if self.before_publish is not None:
+                        await self.before_publish()
                     path = await run_file_io(uploads._link_staged_no_overwrite, staged_path, self._uploads_dir, name)
+                    if self.import_rollback is not None:
+                        self.import_rollback.published[path.name] = pinned
                     self._written_paths.append(path)
                     return name, path
                 except FileExistsError:
-                    name = uploads.claim_unique_filename(name, self._seen_filenames)
+                    name = uploads.claim_unique_filename(original_name if self.before_publish else name, self._seen_filenames)
 
         # Publication and recording its cleanup owner are one admitted step.
         return await await_drained(publish())
@@ -312,8 +319,11 @@ class ThreadUploadIngestionService:
 
         async def publish() -> Path:
             nonlocal safe_filename, upload_temp, deferred_staged_path
+            pinned = await run_file_io(self.import_rollback.pin, upload_temp.handle.fileno()) if self.import_rollback else None
             while True:
                 try:
+                    if self.before_publish is not None:
+                        await self.before_publish()
                     path = await run_file_io(
                         uploads._commit_upload_temp_no_overwrite,
                         upload_temp,
@@ -323,7 +333,9 @@ class ThreadUploadIngestionService:
                     )
                     break
                 except FileExistsError:
-                    safe_filename = uploads.claim_unique_filename(safe_filename, self._seen_filenames)
+                    safe_filename = uploads.claim_unique_filename(original_filename if self.before_publish else safe_filename, self._seen_filenames)
+            if self.import_rollback is not None:
+                self.import_rollback.published[path.name] = pinned
             self._written_paths.append(path)
             if convert_source_fd is not None:
                 deferred_staged_path = upload_temp.temp_path
@@ -438,7 +450,7 @@ class ThreadUploadIngestionService:
                 if not md_staged:
                     self._seen_filenames.discard(unique_md_name)
                 else:
-                    unique_md_name, md_path = await self._link_commit_with_retry(uploads, Path(md_staged), unique_md_name)
+                    unique_md_name, md_path = await self._link_commit_with_retry(uploads, Path(md_staged), unique_md_name, original_name=provisional_md_name)
                     md_virtual_path = uploads.upload_virtual_path(md_path.name)
                     if self._sync_to_sandbox:
                         self._sync_targets.append((md_path, md_virtual_path))
@@ -496,7 +508,10 @@ class ThreadUploadIngestionService:
         if not self._written_paths:
             return
         uploads = _uploads()
-        await run_file_io(uploads._cleanup_uploaded_paths, self._written_paths)
+        if self.import_rollback is None:
+            await run_file_io(uploads._cleanup_uploaded_paths, self._written_paths)
+        else:
+            await run_file_io(self.import_rollback.rollback)
         for original, _ in self._companion_pairs:
             try:
                 await run_file_io(unregister_companion, original)

@@ -159,24 +159,27 @@ def output_view_qualifier(app):
     return OutputViewQualifier(issue)
 
 
-async def _snapshot_in_session(session, files, actor, namespace, key, *, required=None):
-    link = await session.get(StorageFeatureLinkRow, (namespace, key))
+async def _snapshot_in_session(session, files, actor, namespace, key, *, required=None, lock=False):
+    # A publication guard borrowing its destination's write transaction must
+    # observe fresh source grants and hold them until that transaction commits.
+    options = {"populate_existing": True, "with_for_update": {"read": True}} if lock else {}
+    link = await session.get(StorageFeatureLinkRow, (namespace, key), **options)
     if link is None:
         return None
-    row = await session.get(SpaceRow, link.space_id)
+    row = await session.get(SpaceRow, link.space_id, **options)
     if row is None or (row.status, row.mode, row.feature_namespace, row.feature_controller, row.feature_metadata_version) != ("active", "native", None, None, None):
         raise BackingUnavailable("The assigned role is unavailable")
     personal = namespace == "hm.user-space"
     expected = ("personal", "human", actor.subject_id) if personal else ("company", None, None)
     if (row.custody_kind, row.custodian_kind, row.custodian_id) != expected:
         raise BackingUnavailable("The assigned role has different custody")
-    grant = await session.get(SpaceGrantRow, (row.id, actor.kind, actor.subject_id))
+    grant = await session.get(SpaceGrantRow, (row.id, actor.kind, actor.subject_id), **options)
     if required is None:
         required = Permission.READ | Permission.WRITE if personal else Permission.READ | Permission.EXPORT
     view = files.registry._view(row, grant.permissions) if grant is not None else None
     if view is None or view.permissions & required != required:
         raise BackingUnavailable("The assigned role is not currently granted")
-    binding = await session.get(SpaceBackingRow, row.backing_handle)
+    binding = await session.get(SpaceBackingRow, row.backing_handle, **options)
     if binding is None or binding.space_id != row.id:
         raise BackingUnavailable("The assigned role has no current binding")
     fields = BindingFacts.__dataclass_fields__

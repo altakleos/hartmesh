@@ -1029,6 +1029,8 @@ async def _resolve_existing_thread(
     thread_id: str,
     thread_owner_user_id: str | None,
     thread_owner_kwargs: dict[str, Any],
+    *,
+    exact_owner: str | None = None,
 ) -> dict | None:
     """Return the existing thread_meta record for an idempotent create.
 
@@ -1037,6 +1039,11 @@ async def _resolve_existing_thread(
     Both the fast path and the insert-race recovery path resolve through here so
     a thread's ownership does not diverge based on which path found the record.
     """
+    if exact_owner is not None:
+        row = await thread_store.get(thread_id, user_id=None)
+        if row is not None and row.get("user_id") != exact_owner:
+            raise HTTPException(404, "Thread not found")
+        return row
     existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
     if existing_record is None and thread_owner_user_id:
         await thread_store.claim_unowned(thread_id, thread_owner_user_id)
@@ -1066,17 +1073,18 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     """
     thread_id = resolve_thread_id(body.thread_id)
     async with goal_thread_lock(thread_id):
-        return await _create_thread_locked(body, request, thread_id)
+        record = await _create_thread_locked(body, request, thread_id)
+        return _existing_thread_response(thread_id, record)
 
 
-async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thread_id: str) -> ThreadResponse:
+async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thread_id: str, *, exact_owner: str | None = None) -> dict:
     """Keep the idempotency read and initial writes in one lifecycle lock."""
     from app.gateway.deps import get_thread_store
 
     checkpointer = get_checkpointer(request)
     thread_store = get_thread_store(request)
     now = now_iso()
-    thread_owner_user_id = get_trusted_internal_owner_user_id(request)
+    thread_owner_user_id = exact_owner or get_trusted_internal_owner_user_id(request)
     thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
     # ``body.metadata`` is already stripped of server-reserved keys by
     # ``ThreadCreateRequest._strip_reserved`` — see the model definition.
@@ -1087,9 +1095,9 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
         metadata[DEERFLOW_ORIGIN_KEY] = origin
 
     # Idempotency: return existing record when already present
-    existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
+    existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs, exact_owner=exact_owner)
     if existing_record is not None:
-        return _existing_thread_response(thread_id, existing_record)
+        return existing_record
 
     from app.gateway.chat_storage import check_chat_thread_capacity, prepare_chat_request
 
@@ -1124,9 +1132,9 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
         # path does — instead of surfacing the conflict as a 500. Same-process
         # HTTP creates share the lifecycle lock; the memory store retains its
         # historical overwrite behavior for direct callers.
-        existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
+        existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs, exact_owner=exact_owner)
         if existing_record is not None:
-            return _existing_thread_response(thread_id, existing_record)
+            return existing_record
         # The same-owner reconciliation above found nothing, yet the insert hit
         # a duplicate primary key — so the surviving row belongs to *another*
         # user. That is the ownership-conflict case, which the route already
@@ -1166,7 +1174,7 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
     # ``metadata.deerflow_project_id`` from the assigned project_id column, so
     # echoing ``body.metadata`` here would omit the membership the retry path
     # (``_existing_thread_response``) reports.
-    return _existing_thread_response(thread_id, created_record)
+    return created_record
 
 
 @router.post("/{thread_id}/branches", response_model=ThreadBranchResponse)

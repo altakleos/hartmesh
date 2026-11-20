@@ -137,6 +137,16 @@ def _fit_utf8_bytes(text: str, budget: int) -> str:
     return encoded[:budget].decode("utf-8", errors="ignore")
 
 
+def numbered_upload_name(name: str, counter: int) -> str:
+    """Return the portable sibling name for a collision, preserving compound extensions."""
+    stem, suffix = _split_stem_suffix(name)
+    tag = f"_{counter}"
+    budget = _MAX_FILENAME_BYTES - len(tag.encode("utf-8")) - len(suffix.encode("utf-8"))
+    if budget < 1:
+        return _fit_utf8_bytes(stem + suffix, _MAX_FILENAME_BYTES - len(tag.encode("utf-8"))) + tag
+    return f"{_fit_utf8_bytes(stem, budget)}{tag}{suffix}"
+
+
 def claim_unique_filename(name: str, seen: set[str]) -> str:
     """Generate a case-insensitively unique filename by appending ``_N`` on collision.
 
@@ -160,17 +170,9 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
     if name.casefold() not in claimed:
         seen.add(name)
         return name
-    stem, suffix = _split_stem_suffix(name)
     counter = 1
     while True:
-        tag = f"_{counter}"
-        budget = _MAX_FILENAME_BYTES - len(tag.encode("utf-8")) - len(suffix.encode("utf-8"))
-        if budget < 1:
-            # Pathological suffix that leaves no room for a stem; keep the
-            # unique tag and fit the rest (stem + suffix tail) around it.
-            candidate = _fit_utf8_bytes(stem + suffix, _MAX_FILENAME_BYTES - len(tag.encode("utf-8"))) + tag
-        else:
-            candidate = f"{_fit_utf8_bytes(stem, budget)}{tag}{suffix}"
+        candidate = numbered_upload_name(name, counter)
         if candidate.casefold() not in claimed:
             break
         counter += 1
