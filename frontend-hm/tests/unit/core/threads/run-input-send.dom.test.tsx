@@ -281,6 +281,7 @@ test.each(["queue", "steer"] as const)(
     await act(async () => {
       await result.current.sendInput("Continue", mode);
     });
+    expect(result.current.sentTurn).toBeNull();
 
     expect(submittedInputs).toHaveLength(2);
     expect(submittedInputs[1]?.runId).toBe("run-2");

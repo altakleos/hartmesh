@@ -14,14 +14,20 @@ import {
   useRef,
   type Key,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 
 import type { MessageGroup } from "@/core/messages/utils";
 
+import {
+  GROUP_START_OFFSET,
+  type SentScrollControl,
+} from "./sent-message-scroll";
+
 const VIRTUALIZATION_THRESHOLD = 60;
 const ESTIMATED_ROW_HEIGHT = 176;
-const GROUP_START_OFFSET = 16;
+
 const VIRTUAL_SCROLL_SETTLE_ATTEMPTS = 4;
 const STATIC_SCROLL_SETTLE_ATTEMPTS = 2;
 
@@ -34,6 +40,8 @@ type ScrollToGroupOptions = {
 
 type VirtualMessageListProps = {
   groups: readonly MessageGroup[];
+  sentIndex?: number;
+  sentScroll?: RefObject<SentScrollControl>;
   isLoading: boolean;
   renderGroup: (group: MessageGroup, index: number) => ReactNode;
   onActiveGroupChange?: (groupIndex: number) => void;
@@ -55,7 +63,14 @@ export const VirtualMessageList = forwardRef<
   VirtualMessageListHandle,
   VirtualMessageListProps
 >(function VirtualMessageList(
-  { groups, isLoading, renderGroup, onActiveGroupChange },
+  {
+    groups,
+    isLoading,
+    renderGroup,
+    onActiveGroupChange,
+    sentIndex = -1,
+    sentScroll,
+  },
   ref,
 ) {
   const { isAtBottom, scrollRef, scrollToBottom, stopScroll } =
@@ -69,13 +84,13 @@ export const VirtualMessageList = forwardRef<
   const rangeExtractor = useCallback(
     (range: Range) => {
       const indices = defaultRangeExtractor(range);
-      if (activeIndex >= 0 && !indices.includes(activeIndex)) {
-        indices.push(activeIndex);
-        indices.sort((a, b) => a - b);
+      for (const index of [activeIndex, sentIndex]) {
+        if (index >= 0 && !indices.includes(index)) indices.push(index);
       }
+      indices.sort((a, b) => a - b);
       return indices;
     },
-    [activeIndex],
+    [activeIndex, sentIndex],
   );
   const virtualizer = useVirtualizer({
     count: groups.length,
@@ -228,11 +243,13 @@ export const VirtualMessageList = forwardRef<
     if (
       shouldVirtualize &&
       isAtBottom &&
+      !sentScroll?.current.holding &&
       !positionedInitialVirtualWindowRef.current
     ) {
       positionedInitialVirtualWindowRef.current = true;
       const scrollToLatest = () => {
-        virtualizer.scrollToIndex(groups.length - 1, { align: "end" });
+        if (!sentScroll?.current.holding)
+          virtualizer.scrollToIndex(groups.length - 1, { align: "end" });
       };
       scrollToLatest();
       // Dynamic row measurement changes the total after the first layout.
@@ -242,7 +259,11 @@ export const VirtualMessageList = forwardRef<
     } else if (!shouldVirtualize) {
       positionedInitialVirtualWindowRef.current = false;
     }
-    if (groups.length > previousCountRef.current && isAtBottom) {
+    if (
+      groups.length > previousCountRef.current &&
+      isAtBottom &&
+      !sentScroll?.current.holding
+    ) {
       void scrollToBottom({
         animation: "instant",
         preserveScrollPosition: true,
@@ -256,6 +277,7 @@ export const VirtualMessageList = forwardRef<
     groups.length,
     isAtBottom,
     scrollToBottom,
+    sentScroll,
     shouldVirtualize,
     virtualizer,
   ]);

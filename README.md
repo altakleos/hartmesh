@@ -27,7 +27,12 @@ The sibling `frontend/` is the pinned upstream reference. HartMesh's routes and
 selected UI features are listed in the [frontend scope guide](docs/FRONTEND_ISOLATION.md#product-scope);
 the upstream website's landing pages and showcases are separate from this UI.
 
-Chats include a jump-to-bottom control. Invalid cron fields remain custom expressions instead
+In web chats, an accepted message stays near the top while the answer grows below it.
+Scroll, touch the conversation, or press a scrolling key to take control. Use the
+jump-to-bottom button to follow the latest answer. Messages taller than the
+conversation keep the usual scrolling behavior.
+
+Invalid cron fields remain custom expressions instead
 of appearing as a valid preset. Optional extension packages can publish bounded
 usage documentation through the authenticated plugin API.
 

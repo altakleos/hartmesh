@@ -172,7 +172,9 @@ describe("storage refusal at the send boundary", () => {
     const message = { text: "  untouched draft  ", files: [] };
     await act(async () => {
       await result.current
-        .sendMessage("new-thread", message)
+        .sendMessage("new-thread", message, undefined, {
+          keepSentMessageInView: true,
+        })
         .catch(() => undefined);
     });
     expect(result.current.runRefusal).toMatchObject({
@@ -182,6 +184,7 @@ describe("storage refusal at the send boundary", () => {
       newThread: true,
       refusal: { code: "files-full", status: 507 },
     });
+    expect(result.current.sentTurn).toBeNull();
     expect(result.current.thread.messages).toEqual([]);
     expect(toasts.error).not.toHaveBeenCalled();
   });
@@ -676,4 +679,31 @@ it("reports a generic upload failure only once and never admits its draft", asyn
   expect(onSent).not.toHaveBeenCalled();
   expect(sdk.submit).not.toHaveBeenCalled();
   expect(toasts.error).toHaveBeenCalledTimes(1);
+});
+
+it("offers a sent row only to the view that received ordinary composer admission", async () => {
+  sdk.submit.mockResolvedValue(undefined);
+  const { result, rerender } = start();
+  let sending!: Promise<void>;
+  act(() => {
+    sending = result.current.sendMessage(
+      "new-thread",
+      { text: "A question", files: [] },
+      undefined,
+      { keepSentMessageInView: true },
+    );
+  });
+  expect(result.current.sentTurn?.runId).toBeUndefined();
+  await act(async () => {
+    created({ thread_id: "new-thread", run_id: "created-run" });
+    await sending;
+  });
+  expect(result.current.sentTurn).toMatchObject({
+    runId: "created-run",
+    optimisticId: expect.stringMatching(/^opt-human-/),
+  });
+  rerender({ id: "other-thread" });
+  expect(result.current.sentTurn).toBeNull();
+  rerender({ id: "new-thread" });
+  expect(result.current.sentTurn).toBeNull();
 });

@@ -468,5 +468,5 @@ Collapsed provider support keeps its named logo link. Browser-mocked Playwright 
 retain real-service outage checks. See the
 [runtime contract](../docs/RUNTIME_PRODUCT_IDENTITY.md).
 
-Chat scrolling offers an accessible jump-to-bottom control above task cards.
-User-scrolled history stays in place until that control is activated.
+An admitted composer send anchors its visible human row until reader input.
+History, replay and busy-run inputs never initiate that anchor.
