@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Operations
 
+- On the candidate images, a signed-in search across 2,000 conversation titles took 164.5 ms at the 95th percentile across 60 requests. The Docker run used the distribution’s Gateway and PostgreSQL limits.
 - API clients can use the `message_search` field from `GET /api/features` to check whether a ready provider is available to the current user.
 - Configured middleware that declares tools must support an independent copy. With delta checkpoints, that copy must also preserve the restricted tool list. Otherwise an affected employee, assistant or helper run can fail to start. Existing conversations remain readable.
 - An in-place downgrade to v2.2.0+hartmesh.64 requires no data conversion. Chats reverts to filtering already loaded titles and following the bottom of a reply. The earlier instance tool behavior returns for deployments with middleware that declares tools.
