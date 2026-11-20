@@ -935,6 +935,7 @@ dev = [
 ]
 extensions = [
     { name = "hartmesh-legacy-report" },
+    { name = "hartmesh-office-preview" },
 ]
 
 [package.metadata]
@@ -990,7 +991,10 @@ dev = [
     { name = "ruff", specifier = ">=0.14.11" },
     { name = "textual", specifier = ">=0.80" },
 ]
-extensions = [{ name = "hartmesh-legacy-report", directory = "extensions/sources/hartmesh-legacy-report" }]
+extensions = [
+    { name = "hartmesh-legacy-report", directory = "extensions/sources/hartmesh-legacy-report" },
+    { name = "hartmesh-office-preview", directory = "extensions/sources/hartmesh-office-preview" },
+]
 
 [[package]]
 name = "deerflow-extension-api"
@@ -1714,6 +1718,17 @@ wheels = [
 name = "hartmesh-legacy-report"
 version = "0.1.0"
 source = { directory = "extensions/sources/hartmesh-legacy-report" }
+dependencies = [
+    { name = "deerflow-extension-api" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "deerflow-extension-api", specifier = ">=0.2.5,<0.3" }]
+
+[[package]]
+name = "hartmesh-office-preview"
+version = "0.1.0"
+source = { directory = "extensions/sources/hartmesh-office-preview" }
 dependencies = [
     { name = "deerflow-extension-api" },
 ]

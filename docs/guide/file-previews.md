@@ -5,6 +5,22 @@
 
 # File attachments and previews
 
+## HartMesh Office file previews
+
+When the Gateway configuration enables the installed Office presentation,
+select an `.xlsx`, `.docx` or `.pptx` produced in an ordinary chat to read
+it in the file panel. Download retrieves the complete original file.
+
+- A workbook shows up to 200 rows and 12 columns per visible worksheet, within
+  a shared 5,000-cell budget. Formula cells show their saved value when present
+  and their formula text when a saved result is missing.
+- A Word document shows its body text, lists and tables in reading order.
+- A slide deck shows the text and speaker notes of up to 60 visible slides.
+
+The preview reports omissions. Pictures, charts and embedded objects remain in
+the original download. AI employee and assistant conversations, attachments,
+My Files and Shared retain their file download behavior.
+
 ## Attachments and downloads
 
 Attachments show individual ready, uploading, uploaded, failed and cancelled states.
@@ -20,9 +36,9 @@ without requiring sign-in.
 Deployments can add binary readers through the optional `artifactPreviews` browser
 contribution; see the [plugin contract](../full-stack-plugins.md#artifact-previews).
 
-## Office artifact preview extension
+## Upstream Office browser extension
 
-The optional [Office preview package](../../examples/deerflow-extension-office-preview/README.md)
+In upstream DeerFlow, the optional [Office preview package](../../examples/deerflow-extension-office-preview/README.md)
 adds read-only XLSX, DOCX and PPTX readers with search, worksheet/page navigation,
 Word outlines, PowerPoint thumbnails and per-file reading preferences. It requires
 the artifact-preview host contribution and operator installation; it is not enabled

@@ -1,0 +1,26 @@
+{
+  "format": "hartmesh.artifact-view",
+  "version": 1,
+  "title": "Workbook",
+  "blocks": [
+    {
+      "type": "table",
+      "columns": [
+        {
+          "label": "A"
+        },
+        {
+          "label": "B"
+        }
+      ],
+      "rows": [["Apples", "12"]],
+      "heading": "Sheet: Samples"
+    },
+    {
+      "type": "notice",
+      "tone": "neutral",
+      "text": "Pictures, charts, embedded objects and workbook layout are outside this preview. Download the original file for the complete content."
+    }
+  ],
+  "exports": []
+}

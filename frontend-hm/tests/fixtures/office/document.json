@@ -1,0 +1,43 @@
+{
+  "format": "hartmesh.artifact-view",
+  "version": 1,
+  "title": "Document",
+  "blocks": [
+    {
+      "type": "text",
+      "heading": "Field notes",
+      "paragraphs": [""]
+    },
+    {
+      "type": "text",
+      "paragraphs": ["Opening paragraph."]
+    },
+    {
+      "type": "list",
+      "items": ["Remember the list."],
+      "ordered": false
+    },
+    {
+      "type": "table",
+      "columns": [
+        {
+          "label": "Left"
+        },
+        {
+          "label": "Right"
+        }
+      ],
+      "rows": [["One", "Two"]]
+    },
+    {
+      "type": "text",
+      "paragraphs": ["Closing paragraph."]
+    },
+    {
+      "type": "notice",
+      "tone": "neutral",
+      "text": "Headers, footers, notes, comments, tracked deletions, pictures and embedded objects are outside this preview. Download the original file for the complete content."
+    }
+  ],
+  "exports": []
+}

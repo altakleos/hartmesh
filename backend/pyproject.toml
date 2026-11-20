@@ -60,7 +60,7 @@ memory-zh = ["deerflow-harness[memory-zh]"]
 # Managed extension packages are added here by `deerflow extensions install`.
 # Keeping them separate from development tooling lets every startup mode sync
 # the same locked runtime set without promoting those packages to core deps.
-extensions = ["hartmesh-legacy-report"]
+extensions = ["hartmesh-legacy-report", "hartmesh-office-preview"]
 dev = [
     # Direct SDK use in Claude provider serialization tests.
     "anthropic>=0.97.0",
@@ -124,3 +124,4 @@ deerflow-harness = { workspace = true }
 deerflow-extension-api = { workspace = true }
 
 hartmesh-legacy-report = { path = "extensions/sources/hartmesh-legacy-report" }
+hartmesh-office-preview = { path = "extensions/sources/hartmesh-office-preview" }

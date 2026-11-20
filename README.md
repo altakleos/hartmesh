@@ -4470,6 +4470,10 @@ only a preview, users can still exit editing while retaining their unsaved draft
 Active HTML, XHTML, and SVG artifacts remain forced downloads at the Gateway
 boundary.
 
+With the installed Office presentation enabled, a workbook, Word document or
+slide deck produced in an ordinary chat opens in the file panel. Download
+retrieves the original file. [Office preview scope](docs/guide/file-previews.md)
+
 Artifact previews and downloads preserve literal percent sequences in file names:
 `report%20final.md` and `report final.md` remain distinct files. Markdown links
 continue to accept URL-encoded paths.

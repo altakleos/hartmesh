@@ -91,7 +91,7 @@ Ancestry alone is not implementation evidence.
 | [`eb97327dd`](https://github.com/bytedance/deer-flow/commit/eb97327ddf80a95131065597bac19d64af47cfc4) | Adopt | Reject duplicate imported fact IDs regardless of their entry order. |
 | [`53c5195e5`](https://github.com/bytedance/deer-flow/commit/53c5195e5d4ffdf66f34be90251d97fdfe6fba56) | Adopt | Explain the invalid agent selection when run admission rejects it. |
 | [`b4410f64d`](https://github.com/bytedance/deer-flow/commit/b4410f64d469c0035f29c3b6bcc34b619a301fe9) | Adapt | Keep delegation occurrence identity exact across reused call IDs; approval transport remains deferred. |
-| [`81de0761e`](https://github.com/bytedance/deer-flow/commit/81de0761ed775f9d611a7e5155824dc12f84ff92) | Defer product enhancement | Office previews use a different browser renderer contract; current immediate uploads and revision-bound artifact views remain. |
+| [`81de0761e`](https://github.com/bytedance/deer-flow/commit/81de0761ed775f9d611a7e5155824dc12f84ff92) | Adapt | The optional [Office package](../../backend/extensions/sources/hartmesh-office-preview) presents ordinary conversation outputs through the bounded, revision-checked worker. It preserves the original download. [Worker PR](https://github.com/altakleos/hartmesh/pull/561) |
 | [`8853e6863`](https://github.com/bytedance/deer-flow/commit/8853e68638dcb98152041a381d1e6155d7b6b2a7) | Adapt | Strip server-owned checkpoint state from caller thread metadata while preserving existing HartMesh provenance exclusions. |
 | [`b16e19761`](https://github.com/bytedance/deer-flow/commit/b16e19761810092cde3004b97a41a78a91642e03) | Adopt | Close Codex asynchronous HTTP requests promptly on cancellation. |
 | [`bce5dc332`](https://github.com/bytedance/deer-flow/commit/bce5dc3327cd2dae6be73da4cd5523334b0b5013) | Adopt | Read Feishu post attachments from the platform's top-level files array. |
@@ -161,10 +161,11 @@ Ancestry alone is not implementation evidence.
 - Public conversation snapshots/forks additionally require managed destination,
   export and revocation policy; raw-path routes and authentication exemptions are
   omitted. Existing Files publication is unaffected.
-- Product gallery/details, project-memory pages, conversation search controls,
-  shared-conversation pages and Office previews remain unexposed. Office's
-  upstream browser hook differs from HartMesh's revision-qualified renderer
-  protocol. Existing immediate uploads and artifact views retain their lifetimes.
+- Product gallery/details, project-memory pages, conversation search controls
+  and shared-conversation pages remain unexposed. Office preview support arrived
+  after this sync as an operator-enabled package for ordinary conversation
+  outputs. It uses the existing revision-qualified renderer and preserves
+  immediate uploads and original downloads.
 - Sent-turn pinning requires actual product submission identities plus viewport
   geometry, keyboard and cancellation regressions. Only the independent accessible
   jump-to-bottom control is ported; regenerated/history turns keep current scroll
