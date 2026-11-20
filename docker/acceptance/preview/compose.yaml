@@ -1,0 +1,18 @@
+services:
+  gateway:
+    environment:
+      HOME: /tmp/preview-home
+      PYTHONDONTWRITEBYTECODE: "1"
+    command:
+      - sh
+      - -ec
+      - |
+        install -d -o 1000 -g 1000 /data /data/skills /data/skills/public /data/skills/custom /tmp/preview-home
+        printf '{"mcpServers":{},"skills":{}}' > /data/extensions_config.json
+        chown 1000:1000 /data/extensions_config.json
+        cd /app/backend
+        exec setpriv --reuid=1000 --regid=1000 --clear-groups --inh-caps=-all --no-new-privs /app/backend/.venv/bin/python \
+          -m uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
+    volumes:
+      - ${ACCEPTANCE_PREVIEW_CONFIG:?runner supplies the generated config}:/fixture/config.yaml:ro
+      - ./preview/sample_projector.py:/app/backend/.venv/lib/python3.12/site-packages/sample_projector.py:ro

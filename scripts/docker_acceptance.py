@@ -37,6 +37,18 @@ HARNESS_PATHS = (
     "frontend-hm/.npmrc",
     "frontend-hm/pnpm-workspace.yaml",
 )
+PREVIEW_PATHS = (
+    ".github/workflows/preview-measurement.yml",
+    "scripts/release_artifacts.py",
+    "scripts/release_acceptance.py",
+    "docker/acceptance/preview/compose.yaml",
+    "docker/acceptance/preview/plugins.yaml",
+    "docker/acceptance/preview/sample_projector.py",
+    "frontend-hm/playwright.preview-measurement.config.ts",
+    "frontend-hm/tests/e2e-preview-measurement",
+    "frontend-hm/tests/fixtures/business-report/2026-08-business-review.report.json",
+    "frontend-hm/tests/fixtures/office",
+)
 
 
 def snapshot_tracked(source: Path, target: Path) -> str:
@@ -123,6 +135,7 @@ def immutable_image(value: str) -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--measure-previews", action="store_true", help="Collect separate preview measurements on supplied candidate digests")
     parser.add_argument(
         "--artifacts",
         type=Path,
@@ -147,6 +160,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if bool(args.backend_image) != bool(args.frontend_image):
         parser.error("--backend-image and --frontend-image must be supplied together")
+    if args.measure_previews and (not args.backend_image or args.stores != "sqlite"):
+        parser.error("Preview measurement requires both image digests and the sqlite profile")
     if args.stores == "both" and args.backend_image:
         parser.error(
             "--stores both builds source; qualify supplied digests with named stores"
@@ -189,10 +204,10 @@ def inspect_image(image: str, *, env: dict[str, str]) -> dict[str, object]:
     }
 
 
-def harness_fingerprint() -> str:
+def harness_fingerprint(extra_paths: tuple[str, ...] = ()) -> str:
     digest = hashlib.sha256(b"hartmesh-docker-acceptance-v2\0")
     files = []
-    for relative in HARNESS_PATHS:
+    for relative in (*HARNESS_PATHS, *extra_paths):
         path = ROOT / relative
         if path.is_symlink() or not path.exists():
             raise ValueError(f"Acceptance harness requires a regular input: {relative}")
@@ -226,6 +241,13 @@ def workflow_identity() -> dict[str, object] | None:
         "event": event,
         "head_sha": head,
     }
+
+
+def check_preview_image(name: str, image: str, repository: str, revision: str | None, expected: str) -> None:
+    if image.split("@", 1)[0] != f"ghcr.io/{repository.lower()}-{name}":
+        raise ValueError(f"Measurement requires this repository's {name} image")
+    if not re.fullmatch(r"[0-9a-f]{40}", expected) or revision != expected:
+        raise ValueError(f"Measurement requires a {name} candidate built from the dispatched commit")
 
 
 def build_source_images(
@@ -300,18 +322,12 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
     ]
     if args.stores == "postgres-redis":
         compose += ["-f", str(ROOT / "docker/acceptance/compose.postgres-redis.yaml")]
-    commit = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-    ).strip()
     summary: dict[str, object] = {
         "schema": 2,
         "project": project,
         "status": "failed",
-        "mode": "images" if supplied else "source",
+        "mode": "preview-measurement" if args.measure_previews else "images" if supplied else "source",
         "stores": args.stores,
-        "harness_commit": commit,
-        "harness_sha256": harness_fingerprint(),
-        "source_commit": None if supplied else commit,
         "workflow": workflow_identity(),
     }
     print(f"Docker acceptance evidence: {artifacts}", flush=True)
@@ -319,6 +335,20 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
     previous_term = signal.signal(signal.SIGTERM, interrupted)
     previous_int = signal.getsignal(signal.SIGINT)
     try:
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        summary["harness_commit"] = commit
+        summary["source_commit"] = None if supplied else commit
+        summary["harness_sha256"] = harness_fingerprint(PREVIEW_PATHS) if args.measure_previews else harness_fingerprint()
+        if args.measure_previews:
+            verifier_env = env.copy()
+            env.pop("GH_TOKEN", None)
+            fixture = ROOT / "docker/acceptance"
+            config = (fixture / "acceptance-config.yaml").read_text(encoding="utf-8")
+            config = config.replace("log_level: warning\n", "log_level: info\n", 1)
+            generated = artifacts / "preview-config.yaml"
+            generated.write_text(config + "\n" + (fixture / "preview/plugins.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+            env["ACCEPTANCE_PREVIEW_CONFIG"] = str(generated)
+            compose += ["-f", str(fixture / "preview/compose.yaml")]
         # Verify local prerequisites without downloading or installing anything.
         run(
             ["docker", "info"], env=env, log=artifacts / "prerequisites.log", timeout=30
@@ -364,6 +394,25 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
             name: inspect_image(image, env=env)
             for name, image in (("backend", backend), ("frontend", frontend))
         }
+        if args.measure_previews:
+            identity = summary["workflow"]
+            if not identity or identity["event"] != "workflow_dispatch" or identity["head_sha"] != commit:
+                raise ValueError("Preview measurement requires an exact-commit workflow dispatch")
+            version = json.loads((ROOT / "frontend-hm/package.json").read_text(encoding="utf-8"))["version"]
+            summary["release_version"] = version
+            for name, image in summary["images"].items():
+                check_preview_image(name, image["requested"], identity["repository"], image["source_revision"], commit)
+                run(
+                    [sys.executable, str(ROOT / "scripts/release_artifacts.py"), "verify-candidate",
+                     "--repository", identity["repository"], "--component", name, "--version", version,
+                     "--image", image["requested"], "--revision", commit],
+                    env=verifier_env, log=artifacts / "provenance.log", timeout=180,
+                )
+                image["verified_candidate"] = True
+            summary["activation_evidence"] = {
+                "complete": False,
+                "unverified": ["container-wide OOM victim selection", "adversarial document and projector workloads"],
+            }
         started = True
         run(
             [*compose, "up", "--detach", "--wait", "--wait-timeout", "180"],
@@ -391,6 +440,8 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
                     f"Running {name} image does not match the recorded image"
                 )
             identity["running_image_id"] = actual
+            if args.measure_previews and name == "backend":
+                env["HARTMESH_PREVIEW_GATEWAY_ID"] = container
         fixture_images = {}
         for service in [
             "provider",
@@ -457,7 +508,7 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
             HARTMESH_ACCEPTANCE_ARTIFACTS=str(artifacts / "browser"),
             HARTMESH_ACCEPTANCE_PYTHON=sys.executable,
         )
-        run(
+        browser = run(
             [
                 sys.executable,
                 str(ROOT / "scripts/pnpm.py"),
@@ -468,12 +519,30 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
                 "playwright",
                 "test",
                 "--config",
-                "playwright.docker-acceptance.config.ts",
+                "playwright.preview-measurement.config.ts" if args.measure_previews else "playwright.docker-acceptance.config.ts",
             ],
             env=env,
             log=artifacts / "browser.log",
-            timeout=300,
+            timeout=360 if args.measure_previews else 300,
+            check=not args.measure_previews,
         )
+        if args.measure_previews:
+            # Some operators run the Gateway as root. Exercise the child's
+            # privilege drop in the same isolated image with a normal report.
+            root_probe = (
+                "from threading import Event; from deerflow.extensions.projection_host import _invoke; "
+                "from hartmesh_legacy_report.projection import project_report; "
+                "raw = b'{\"meta\":{}}'; "
+                "assert _invoke('project', project_report, raw, 64, 64, 10, Event()) == raw"
+            )
+            run(
+                [*compose, "exec", "-T", "--user", "0:0", "--workdir", "/app/backend", "gateway",
+                 "/app/backend/.venv/bin/python", "-c", root_probe],
+                env=env, log=artifacts / "root-worker.log", timeout=30,
+            )
+            summary["root_worker_report"] = "passed"
+            if browser.returncode:
+                raise RuntimeError("Browser preview checks failed; see browser.log and preview-observations.json")
         summary["status"] = "passed"
     except (
         OSError,
@@ -541,7 +610,8 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
             summary["status"] = "failed"
         signal.signal(signal.SIGTERM, previous_term)
         signal.signal(signal.SIGINT, previous_int)
-        (artifacts / "result.json").write_text(
+        receipt = "preview-result.json" if args.measure_previews else "result.json"
+        (artifacts / receipt).write_text(
             json.dumps(summary, indent=2) + "\n", encoding="utf-8"
         )
     print(f"Docker acceptance {summary['status']}; evidence: {artifacts}", flush=True)
@@ -598,6 +668,7 @@ def run_both_source(args: argparse.Namespace) -> int:
                 stores=store,
                 backend_image=None,
                 frontend_image=None,
+                measure_previews=False,
             )
             run_profile(profile, source_build=source)
             result = json.loads(

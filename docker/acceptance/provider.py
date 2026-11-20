@@ -102,6 +102,10 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
         return work_reply(body, turn)
     if skill_match:
         return skill_reply(body, turn, skill_match.group(1))
+    if "acceptance:preview" in str(turn[0].get("content")):
+        return preview_reply(body, turn)
+    if "acceptance:timing" in str(turn[0].get("content")):
+        return {"content": "Timing sample complete."}
     if "acceptance:fallback" in str(turn[0].get("content")):
         return fallback_reply(body, turn)
     if "acceptance:file" not in str(turn[0].get("content")):
@@ -289,6 +293,33 @@ def skill_reply(body, turn, package):
             }
         ]
     }
+
+
+def preview_reply(body, turn):
+    """Publish only the fixed, synthetic samples in this disposable chat."""
+    results = [message for message in turn if message.get("role") == "tool"]
+    output = "/mnt/user-data/outputs"
+    files = ("sample.report.json", "sample.xlsx", "sample.docx", "sample.pptx")
+    if not results:
+        name = "bash"
+        sources = " ".join(f"/mnt/user-data/uploads/{filename}" for filename in files)
+        arguments = {"command": (
+            f"cp {sources} {output}/ && "
+            f"cd {output} && cp sample.report.json busy.report.json && printf ' ' >> busy.report.json && "
+            "printf oversize > large.sample && printf invalid > invalid.sample && "
+            "printf interrupted > interrupted.sample && printf deadline > deadline.sample && printf address-limit > address.sample && "
+            "printf recovered > recovery.sample && "
+            "for i in 0 1 2 3 4 5 6 7 8 9 10 11; do printf 'sample-%s' \"$i\" > \"delay-$i.sample\"; done && "
+            "for i in 0 1 2 3 4; do printf 'turn-%s' \"$i\" > \"turn-$i.sample\"; done"
+        )}
+    elif len(results) == 1:
+        name, arguments = "present_files", {"filepaths": [f"{output}/{filename}" for filename in (*files, "busy.report.json")]}
+    else:
+        return {"content": "Preview files ready."}
+    if name not in {tool.get("function", {}).get("name") for tool in body["tools"]}:
+        raise ValueError(f"Required preview fixture tool unavailable: {name}")
+    return {"tool_calls": [{"id": f"call_preview_{len(results)}", "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(arguments)}}]}
 
 
 def fallback_reply(body, turn):

@@ -279,6 +279,130 @@ def test_release_guard_and_runner_cover_the_same_harness_and_fixture_declaration
     assert {name: services[name]["image"] for name in verifier.FIXTURES} == verifier.FIXTURES
 
 
+def test_acceptance_gateway_runs_with_bundle_resource_limits():
+    acceptance, bundle = [yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))["services"]["gateway"] for path in ("docker/acceptance/compose.yaml", "deploy/compose/compose.yaml")]
+    assert {name: acceptance[name] for name in ("mem_limit", "memswap_limit", "cpus", "pids_limit")} == {name: bundle[name] for name in ("mem_limit", "memswap_limit", "cpus", "pids_limit")}
+
+
+def test_preview_measurement_is_digest_only_and_has_separate_evidence():
+    runner = load(ROOT / "scripts/docker_acceptance.py")
+    for args in (["--measure-previews"], ["--measure-previews", "--stores", "both"]):
+        with pytest.raises(SystemExit):
+            runner.parse_args(args)
+    pinned = ["--backend-image", "example/backend@sha256:" + "a" * 64, "--frontend-image", "example/web@sha256:" + "b" * 64]
+    assert runner.parse_args([*pinned, "--measure-previews"]).measure_previews
+    assert not runner.parse_args(pinned).measure_previews
+    assert runner.harness_fingerprint(runner.PREVIEW_PATHS) != runner.harness_fingerprint()
+
+
+def test_preview_fixture_uses_real_tools_and_only_its_own_named_samples():
+    provider = load(ROOT / "docker/acceptance/provider.py")
+    body = {"messages": [{"role": "user", "content": "acceptance:preview"}], "tools": [{"function": {"name": name}} for name in ("bash", "present_files")]}
+    copy = provider.reply(body)["tool_calls"][0]["function"]
+    assert copy["name"] == "bash"
+    names = ["sample.report.json", "sample.xlsx", "sample.docx", "sample.pptx"]
+    assert all(f"/mnt/user-data/uploads/{name}" in json.loads(copy["arguments"])["command"] for name in names)
+    body["messages"].append({"role": "tool", "content": "copied"})
+    present = provider.reply(body)["tool_calls"][0]["function"]
+    assert present["name"] == "present_files"
+    assert set(json.loads(present["arguments"])["filepaths"]) == {f"/mnt/user-data/outputs/{name}" for name in [*names, "busy.report.json"]}
+    body["messages"].append({"role": "tool", "content": "presented"})
+    assert provider.reply(body)["content"] == "Preview files ready."
+
+
+def test_hosted_measurement_rejects_other_image_sources_and_commits():
+    runner = load(ROOT / "scripts/docker_acceptance.py")
+    revision = "e" * 40
+    refs = {name: f"ghcr.io/example/hartmesh-{name}@sha256:" + "b" * 64 for name in ("backend", "frontend")}
+    for name, ref in refs.items():
+        runner.check_preview_image(name, ref, "example/HartMesh", revision, revision)
+        with pytest.raises(ValueError):
+            runner.check_preview_image(name, ref.replace("example/", "elsewhere/"), "example/HartMesh", revision, revision)
+        with pytest.raises(ValueError):
+            runner.check_preview_image(name, ref, "example/HartMesh", "a" * 40, revision)
+
+
+def test_preview_measurement_checks_each_candidate_before_starting_services(monkeypatch, tmp_path):
+    runner = load(ROOT / "scripts/docker_acceptance.py")
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    refs = [f"ghcr.io/example/hartmesh-{name}@sha256:" + "b" * 64 for name in ("backend", "frontend")]
+    args = runner.parse_args(["--measure-previews", "--backend-image", refs[0], "--frontend-image", refs[1], "--artifacts", str(tmp_path)])
+    for key, value in {"GITHUB_REPOSITORY": "example/HartMesh", "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_SHA": revision, "GITHUB_RUN_ID": "7", "GITHUB_RUN_ATTEMPT": "1", "GH_TOKEN": "fixture"}.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(runner, "inspect_image", lambda ref, **kwargs: {"requested": ref, "source_revision": revision})
+    verified = []
+
+    def record(command, *, env, **kwargs):
+        if "verify-candidate" in command:
+            assert env["GH_TOKEN"] == "fixture"
+            verified.append(command)
+            if len(verified) == 2:
+                raise RuntimeError("candidate was built for another version")
+        else:
+            assert "GH_TOKEN" not in env
+        assert "up" not in command
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(runner, "run", record)
+    assert runner.run_profile(args) == 1
+    receipt = json.loads((tmp_path / "preview-result.json").read_text())
+    assert receipt["error"] == "candidate was built for another version"
+    for command, name, ref in zip(verified, ("backend", "frontend"), refs, strict=True):
+        for option, expected in (("--component", name), ("--image", ref), ("--revision", revision), ("--version", receipt["release_version"]), ("--repository", "example/HartMesh")):
+            assert command[command.index(option) + 1] == expected
+
+
+def test_preview_measurement_records_missing_fixture_failure(monkeypatch, tmp_path):
+    runner = load(ROOT / "scripts/docker_acceptance.py")
+    args = runner.parse_args(["--measure-previews", "--backend-image", "example/backend@sha256:" + "a" * 64, "--frontend-image", "example/frontend@sha256:" + "b" * 64, "--artifacts", str(tmp_path)])
+    monkeypatch.setattr(runner, "PREVIEW_PATHS", ("missing-preview-fixture",))
+    assert runner.run_profile(args) == 1
+    receipt = json.loads((tmp_path / "preview-result.json").read_text())
+    assert receipt["status"] == "failed"
+    assert "missing-preview-fixture" in receipt["error"]
+
+
+def test_measurement_profile_stays_out_of_ordinary_docker_acceptance():
+    fixture = ROOT / "docker/acceptance"
+    base = (fixture / "acceptance-config.yaml").read_text(encoding="utf-8")
+    assert not yaml.safe_load(base).get("plugins")
+    merged = yaml.safe_load(base + "\n" + (fixture / "preview/plugins.yaml").read_text(encoding="utf-8"))
+    assert {entry["use"] for entry in merged["plugins"]} == {"sample_projector:install", "hartmesh_legacy_report:install", "hartmesh_office_preview:install"}
+    assert "sample_projector" not in (fixture / "compose.yaml").read_text(encoding="utf-8")
+    gateway = yaml.safe_load((fixture / "preview/compose.yaml").read_text(encoding="utf-8"))["services"]["gateway"]
+    assert all(mount.endswith(":ro") for mount in gateway["volumes"])
+    assert "setpriv --reuid=1000 --regid=1000 --clear-groups" in gateway["command"][-1]
+    assert "--inh-caps=-all --no-new-privs" in gateway["command"][-1]
+    workflow = yaml.safe_load((ROOT / ".github/workflows/preview-measurement.yml").read_text(encoding="utf-8"))
+    assert set(workflow[True]) == {"workflow_dispatch"}
+    assert workflow["permissions"] == {"contents": "read", "packages": "read", "attestations": "read"}
+    assert workflow["jobs"]["measure"]["runs-on"].startswith("ubuntu-")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux candidate worker probe")
+def test_measurement_controls_use_one_finite_wait_and_one_zero_access_reservation(monkeypatch):
+    import errno
+    import mmap
+    import resource
+
+    fixture = load(ROOT / "docker/acceptance/preview/sample_projector.py")
+    calls = []
+    monkeypatch.setattr(fixture.time, "sleep", calls.append)
+    assert fixture.project(b"deadline") == b"deadline"
+    assert calls == [11]
+    limit = 256 << 20
+    monkeypatch.setattr(resource, "getrlimit", lambda kind: (limit, limit) if kind == resource.RLIMIT_AS else pytest.fail("unexpected limit"))
+
+    def refuse(fd, length, *, flags, prot):
+        assert (fd, length, flags, prot) == (-1, limit, mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS, 0)
+        calls.append(length)
+        raise OSError(errno.ENOMEM, "synthetic refusal")
+
+    monkeypatch.setattr(mmap, "mmap", refuse)
+    assert json.loads(fixture.project(b"address-limit")) == {"soft": limit, "hard": limit, "errno": errno.ENOMEM}
+    assert calls == [11, limit]
+
+
 def test_candidate_workflow_artifacts_are_small_retained_and_bound_to_the_attempt():
     workflow = yaml.safe_load((ROOT / ".github/workflows/docker-acceptance.yml").read_text(encoding="utf-8"))
     steps = workflow["jobs"]["acceptance"]["steps"]

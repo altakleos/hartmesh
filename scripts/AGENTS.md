@@ -443,6 +443,12 @@ source/harness hashes, and clean images only after both runs. The final tracked
 snapshot detects source drift. `pair-result.json` supplements each schema-2
 profile receipt; it does not replace published-candidate admission evidence.
 
+The optional preview measurement in `docker_acceptance.py` runs by separate
+workflow dispatch on the candidate build commit. Verify the requested registry,
+signed candidate provenance, version, source revision and running image IDs. Keep its configuration, browser
+journey, observations and receipt distinct from ordinary release acceptance.
+Only the disposable measurement stack loads its finite sample projector.
+
 ## Storage preparation
 
 `storage_spaces_volume.py` imports the harness `prepare_volumes` implementation

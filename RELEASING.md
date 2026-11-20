@@ -258,6 +258,35 @@ execution. It does not qualify a full deployment profile, real model quality,
 AIO/gVisor isolation, OIDC, VM infrastructure or Kubernetes; those remain separate
 consumer qualification. It creates no VM image.
 
+### Preview measurements on candidate images
+
+For a release changing installed previews, dispatch the following workflow after
+the candidate image build, while the branch still points at the version commit
+used for that build. Pass the two immutable digests from the successful build.
+
+```bash
+gh workflow run preview-measurement.yml --repo altakleos/hartmesh --ref <candidate-branch> \
+  -f backend_image=ghcr.io/altakleos/hartmesh-backend@sha256:<backend-digest> \
+  -f frontend_image=ghcr.io/altakleos/hartmesh-frontend@sha256:<frontend-digest>
+```
+
+The workflow verifies the signed build provenance, release version and build
+inputs of both digests. It matches their source revisions to its checkout and
+their IDs to the running containers, then exercises signed-in previews on the
+disposable Docker stack under the distribution Gateway limits. It retains
+the per-trial timings, Gateway memory and privilege observations, rendered
+Office fixtures and original download hashes, browser output, startup logs and
+`preview-result.json` in the attempt's measurement artifact. Check the
+observation file even when a browser check fails. Record the run, attempt,
+commit, digests, measured values and any outstanding criteria in the bundle
+README before choosing which presentations to enable. A missing criterion
+keeps a new presentation disabled by default. The ordinary Docker acceptance
+workflow still qualifies both store profiles after pinning.
+
+Rebuild and remeasure if an image input changes. Repeat the measurement if
+its harness changes. A bundle-only evidence or presentation configuration
+commit can reuse the measured images when all image and harness inputs match.
+
 ### The sandbox base image
 
 `docker/sandbox/Dockerfile` builds on upstream's all-in-one sandbox image,
