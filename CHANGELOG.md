@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.63] - 2026-11-20
+
+### Fixed
+
+- When an interrupted Home file change is waiting on an idle workspace, the
+  Gateway closes that workspace and checks the files. Active replies and
+  assignments keep their workspace until they finish or stop. Recovery also
+  works after the Gateway restarts. The next turn starts a fresh workspace.
+  Closing stops background programs and can leave a file unfinished.
+- A permission refusal before a file change takes effect, or an attempt to
+  move a directory into itself, can now settle immediately. Directory creation
+  checks the identity of the created folder before recording completion.
+
+### Added
+
+- After a Home file change has been pending for five minutes, a manager with
+  access to all work can choose **Accept the files as they are** in **Files**.
+  The action closes the workspace and keeps the current files. A reply already
+  in progress may still arrive. Check an assignment's status before continuing.
+  The page checks the recorded outcome, Home and employee readiness before
+  confirming that work can resume.
+
+### Operations
+
+- In the mounted PostgreSQL acceptance run on this release's backend image,
+  an interrupted write settled in 96 seconds while idle, 22.6 seconds after
+  releasing a chat's final response, 20.5 seconds after stopping an assignment,
+  and 44.4 seconds across a Gateway restart. A fresh workspace completed the
+  next answer another 14.7–15.8 seconds after settlement in all four cases.
+- A workspace that repeatedly loses access to its Home can still leave AI
+  assistants and employees unavailable. The provider must stop the affected
+  workspace and repair the Home.
+- Before an in-place downgrade, resolve pending directory creations. An older
+  Gateway can mistake a replacement folder for the original and can retain an
+  empty staging folder. Returning to `.62` also restores the previous idle
+  timeout and removes the manager recovery notice.
+
+### Schema changes
+
+- No database schema changes since v2.2.0+hartmesh.62.
+
 ## [2.2.0+hartmesh.62] - 2026-11-19
 
 ### Fixed
