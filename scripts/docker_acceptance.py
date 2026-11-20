@@ -361,7 +361,7 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
             config = (fixture / "acceptance-config.yaml").read_text(encoding="utf-8")
             if title_measurement:
                 overlay = fixture / "title-search"
-                extra = overlay / "config.yaml"
+                extra = overlay / "event-storage.yaml"
                 generated = artifacts / "title-search-config.yaml"
                 env["ACCEPTANCE_TITLE_CONFIG"] = str(generated)
             else:

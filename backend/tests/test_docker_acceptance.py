@@ -486,10 +486,29 @@ def test_title_measurement_uses_bundle_postgres_and_binds_source_or_candidate(tm
         assert base[key] == bundle["gateway"][key]
     for key in ("image", "command", "mem_limit", "memswap_limit", "pids_limit"):
         assert overlay["postgres"][key] == bundle["postgres"][key]
-    db_config = yaml.safe_load((ROOT / "docker/acceptance/title-search/config.yaml").read_text())
+    db_config = yaml.safe_load((ROOT / "docker/acceptance/title-search/event-storage.yaml").read_text())
     assert db_config["run_events"] == yaml.safe_load((ROOT / "deploy/compose/config.yaml").read_text())["run_events"]
     monkeypatch.setattr(runner, "TITLE_SEARCH_PATHS", ("missing-title-search-fixture",))
     assert runner.run_profile(runner.parse_args([*args, *refs, "--artifacts", str(tmp_path)])) == 1
     receipt = json.loads((tmp_path / "title-search-result.json").read_text())
     assert receipt["status"] == "failed"
     assert "missing-title-search-fixture" in receipt["error"]
+
+
+def test_title_source_checkout_contains_the_overlay_used_in_the_gateway_config(tmp_path, monkeypatch):
+    runner = load(ROOT / "scripts/docker_acceptance.py")
+    args = runner.parse_args(["--measure-titles", "--stores", "postgres-redis", "--artifacts", str(tmp_path)])
+
+    def before_docker(command, *, env, **kwargs):
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 1)
+        assert command == ["docker", "info"]
+        generated = yaml.safe_load(Path(env["ACCEPTANCE_TITLE_CONFIG"]).read_text())
+        assert generated["run_events"] == {"backend": "db"}
+        raise RuntimeError("checked generated fixture")
+
+    monkeypatch.setattr(runner, "run", before_docker)
+    assert runner.run_profile(args) == 1
+    assert json.loads((tmp_path / "title-search-result.json").read_text())["error"] == "checked generated fixture"
+    overlay = "docker/acceptance/title-search/event-storage.yaml"
+    assert subprocess.run(["git", "ls-files", "--error-unmatch", "--", overlay], cwd=ROOT, capture_output=True).returncode == 0
