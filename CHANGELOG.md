@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.66] - 2026-11-20
+
+### Added
+
+- In web chat, choose **From a conversation** in the attachment menu to pick a file a finished answer presented. The copy uses the file’s current contents and opens as a downloadable attachment. Inline output previews are unavailable for imported attachments. The copy stays in the destination if the source conversation is deleted. You can send it alongside a file from your device.
+- Choose **Browse agent conversations** to find a file an AI assistant or AI employee presented, including in a colleague’s conversation. Copying it into your personal chat requires **Can see all work** and access to export the agent’s files.
+- Giving a file from a personal chat to an agent asks for confirmation. The file goes into the agent’s Home, where anyone with **Can chat** can ask the agent about it. The access help now explains this. Direct transfers between agents are unavailable.
+
+### Operations
+
+- Before upgrading an installation, confirm that it has restarted on v2.2.0+hartmesh.63 or newer and has zero pending file operations. The picker needs no new configuration. Completed copies remain ordinary files after a downgrade to .65 or .63. Those versions do not offer the picker or its import routes.
+- Home imports use the existing file operation record. An exact retry with the same operation ID recognizes the stored destination name, including a collision suffix. Ordinary attachments keep their existing retry behavior.
+- After a downgrade to .63, the Gateway waits for the workspace to stop and checks an interrupted Home import against its recorded name and digest. A persistently unreadable file can settle as failed with `host-unconfirmed`. A changed storage identity or a temporary I/O failure can leave the operation pending and prevent that agent from answering.
+- Before downgrading to .60, follow the bundle rollback procedure. Afterward, check agent Homes for pending operations. If .60 cannot read the recorded file, the affected agent can remain unavailable. Inspect the exact operation, receipt and files before deciding whether to use `settle --discard`. Discard marks that operation failed and preserves the files. [Bundle rollback procedure](https://github.com/altakleos/hartmesh/blob/v2.2.0%2Bhartmesh.66/deploy/compose/README.md#rolling-back) · [Agent operator commands](https://github.com/altakleos/hartmesh/blob/v2.2.0%2Bhartmesh.66/docs/STORAGE_SPACES.md#ai-agent-operator-commands)
+
+### Schema changes
+
+- No database schema changes since v2.2.0+hartmesh.65.
+
 ## [2.2.0+hartmesh.65] - 2026-11-20
 
 ### Changed
