@@ -1848,24 +1848,24 @@ to make room.
 
 ### Preview measurements for v2.2.0+hartmesh.64
 
-Office previews stay off in this profile. On the release images, chat and file
-listing both exceeded the 10% latency allowance while preview work was running.
+Office previews stay off in this profile. On the release images, file listing
+exceeded the 10% latency allowance while preview work was running.
 Each row gives the median of five signed-in requests on hosted Linux.
 
 | Operation | Baseline | During preview work | Increase |
 | --- | ---: | ---: | ---: |
-| Chat turn | 291.522 ms | 322.258 ms | 10.54% |
-| File listing | 9.040 ms | 10.354 ms | 14.54% |
+| Chat turn | 220.975 ms | 240.498 ms | 8.83% |
+| File listing | 6.618 ms | 8.401 ms | 26.96% |
 
 The Gateway ran with two CPUs, 1088 MiB, zero swap and a 2048-process limit.
-Its cgroup memory peak was 291.06 MiB after warmup and before the first
-preview, and 320.83 MiB after the burst. The baseline plus the 288 MiB
-allowance was 579.06 MiB. The worker loaded all five tested projectors,
+Its cgroup memory peak was 294.70 MiB after warmup and before the first
+preview, and 321.34 MiB after the burst. The baseline plus the 288 MiB
+allowance was 582.70 MiB. The worker loaded all five tested projectors,
 including the source-only business report. The report rendered successfully.
 The root-launched worker also processed a report after dropping privileges.
 
 With the optional Office package active in the measurement, the workbook,
-document and slide deck projected in 345, 410 and 372 ms, respectively. Each
+document and slide deck projected in 290, 312 and 303 ms, respectively. Each
 rendered its expected content and omission notice. All three original downloads
 matched their source hashes. Of twelve overlapping previews, three completed
 and nine received the typed busy response. File listing overlapped a live
@@ -1873,18 +1873,18 @@ worker in each trial. Readiness returned 200, and Retry opened the report.
 
 The child refused a single zero-access address-space reservation at its
 256 MiB limit. A finite 11-second callback hit the ten-second deadline and
-returned 503 after 10.05 seconds while the Gateway stayed ready. The run
+returned 503 after 10.04 seconds while the Gateway stayed ready. The run
 did not establish kernel victim selection during container-wide memory
 exhaustion or behavior across adversarial documents and projectors.
 
-The [five-image build](https://github.com/altakleos/hartmesh/actions/runs/44711890618)
-and [measurement, attempt 1](https://github.com/altakleos/hartmesh/actions/runs/44713458630)
-used commit `69e0907041e5c825a040d414bf2ff753f70cbc59`. The workflow
+The [five-image build](https://github.com/altakleos/hartmesh/actions/runs/44724278939)
+and [measurement, attempt 1](https://github.com/altakleos/hartmesh/actions/runs/44724994042)
+used commit `155e356a2bd81b87de86ab995a2ae97b19002337`. The workflow
 verified signed candidate provenance and checked the running image IDs.
 The backend digest was
-`sha256:c1fbdb601b962ff7442a923fdf94fcbe59a5ac4b3867f42bba5b7f6bed55166f`
+`sha256:72fb0ce658aa4e044a2658f9b3b91cd17c7133ba552435834c74711ed593b365`
 and the frontend digest was
-`sha256:8b39967f91ae1964ce6669300d4513b859d015419d33f8e40b0704b81c5fb9f1`.
+`sha256:f3fba9ebdb75f0d0e716d38d2c234c61e8df038941525fbc3e125179400258b7`.
 The run artifact retains each timing, process observations, source and download
 hashes, and screenshots.
 
