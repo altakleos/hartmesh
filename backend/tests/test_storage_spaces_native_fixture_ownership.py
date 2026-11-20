@@ -180,3 +180,46 @@ def test_owned_loop_waits_only_for_its_original_autoclear_binding(tmp_path, chan
         assert calls == [(41, 0x4C81, 73)]
     if change is not None:
         assert not calls and binding.is_dir()
+
+
+@pytest.mark.parametrize("outcome", ["retired", "rebound", "incomplete", "replaced"])
+def test_owned_loop_observes_partial_sysfs_retirement(tmp_path, outcome):
+    sysfs = tmp_path / "device"
+    binding = sysfs / "loop"
+    binding.mkdir(parents=True)
+    original = {"backing_file": "/own.img", "offset": "0", "sizelimit": "0", "autoclear": "1"}
+    # Autoclear can remove the attributes before the binding directory.
+    meta = sysfs.stat()
+    now, calls = [0.0], []
+
+    def sleep(seconds):
+        assert seconds == 0.05 and not calls
+        now[0] += 1
+        if outcome == "retired":
+            binding.rmdir()
+        elif outcome == "rebound":
+            for name, value in {**original, "backing_file": "/other.img"}.items():
+                (binding / name).write_text(value, encoding="utf-8")
+        elif outcome == "replaced":
+            sysfs.rename(tmp_path / "old-device")
+            sysfs.mkdir()
+
+    def ioctl(*args):
+        assert outcome == "retired" and not binding.exists()
+        calls.append(args)
+        return 0
+
+    def remove():
+        remove_owned_loop(41, 73, sysfs, expected=(meta.st_dev, meta.st_ino), retiring_binding=original, ioctl=ioctl, clock=lambda: now[0], sleep=sleep)
+
+    if outcome == "retired":
+        remove()
+        assert calls == [(41, 0x4C81, 73)]
+    elif outcome == "incomplete":
+        with pytest.raises(TimeoutError, match="retire"):
+            remove()
+        assert now[0] == 5 and not calls
+    else:
+        with pytest.raises(RuntimeError, match="changed"):
+            remove()
+        assert not calls
