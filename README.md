@@ -73,11 +73,13 @@ containment before preparing a replacement; uncertain cleanup keeps it unavailab
 See [the file API](docs/AGENT_EXECUTION.md#direct-agent-file-writes). My assistants
 and AI employees provide role-based setup and separate Conversations, Files, Work,
 Memory, Access and Settings tabs. Conversations show the AI identity and supervisor;
-attachments save immediately in the agent's files. Colleagues with Can chat alone
-see produced filenames and can ask the agent about anything in its files. Opening
-a file directly requires Can see all work. The agent file API accepts a file from
-your own conversation after you confirm that the agent and its users can access
-the copy. Managers can
+attachments save immediately in the agent's files. **From a conversation** in
+the attach menu copies a file presented in another chat. In a personal chat,
+the composer shows the source conversation beside the attachment. Giving a file
+to an AI assistant or employee asks for confirmation. The copy stays in the
+agent's files, and anyone who can chat with the agent can ask about it.
+Colleagues with Can chat alone see produced filenames; opening files requires
+Can see all work. Managers can
 update the brief and access, pause, retire or delete the AI assistant or AI employee.
 Messages that supply a valid time zone give the model the person's current local
 date and UTC offset without adding that context to the saved conversation.
@@ -392,7 +394,7 @@ The export requires current personal-storage access through preparation and
 download; missing or unverified storage refuses the export without using legacy
 file folders.
 
-The Gateway can list files presented by a finished answer and attach an independent copy to another conversation you own. A repeated attachment with the same name and bytes reuses the existing file.
+The Gateway can list files presented by a finished answer and attach an independent copy to another conversation you own. A repeated attachment with the same name and bytes reuses the existing file. The agent Home attachment API requires explicit confirmation when the source is a personal conversation.
 
 ## Sister Projects
 

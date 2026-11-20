@@ -654,11 +654,11 @@ export function createEnUS(product: string): Translations {
         inspect: "Can see all work",
         manage: "Can manage",
         useHelp: (name) =>
-          `Start conversations with ${name} and attach files. Opening ${name}'s files needs “Can see all work”.`,
+          `Start conversations with ${name} and attach files. Opening ${name}'s files needs “Can see all work”. People who can chat with ${name} can ask ${name} about anything in its files.`,
         inspectHelp: (name) =>
           `Open ${name}'s files, and read every conversation, the Work tab and ${name}'s memory.`,
         chatOnlyNote: (person, name) =>
-          `With “Can chat” alone, ${person} can talk with ${name} and attach files, but cannot open the files ${name} produces, give assignments or see other people's conversations.`,
+          `With “Can chat” alone, ${person} can talk with ${name} and attach files, but cannot open the files ${name} produces, give assignments or see other people's conversations. People who can chat with ${name} can ask ${name} about anything in its files.`,
         manageHelp: (name) =>
           `Change the brief, access and files; pause, retire or delete ${name}.`,
         supervisorNote: (name) =>
@@ -1213,6 +1213,33 @@ export function createEnUS(product: string): Translations {
 
     // Input Box
     inputBox: {
+      conversationFile: {
+        menu: "From a conversation",
+        device: "Upload from device",
+        sources: "Choose a conversation",
+        noSources: "No other conversations on this page.",
+        noFiles: "No files were presented on this page.",
+        unavailable: "This file is no longer available.",
+        loadFailed: "Could not load this list.",
+        retry: "Try again",
+        previous: "Back to conversations",
+        give: "Give the file",
+        copying: "Copying the file…",
+        failed: "The file could not be attached.",
+        unconfirmedOwn:
+          "The copy could not be confirmed. Check this conversation’s uploads before selecting the file again.",
+        uncertain: "The copy has not been confirmed.",
+        check: "Check copy status",
+        refused: "Access changed or the file is unavailable.",
+        tooLarge: "The file exceeds the attachment limit.",
+        from: (title) => `From ${title}`,
+        giveTitle: (name) => `Give this file to ${name}?`,
+        disclosure: (file, name) =>
+          `${file} will be copied into ${name}’s files. ${name} can use it in any conversation. Anyone who can chat with ${name} can ask for it, and anyone who can see all of ${name}’s work can open it. Managers can see that you gave the file. The record does not identify your source conversation. Your own copy stays where it is.`,
+        needsInspect: (name) =>
+          `This conversation or its files are unavailable. Opening ${name}’s files requires “Can see all work”.`,
+        changed: (time) => `Changed ${time}`,
+      },
       agentFile: {
         attach: (name) => `Attach a file for ${name}`,
         hint: (name) =>

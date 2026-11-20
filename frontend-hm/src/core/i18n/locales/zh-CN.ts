@@ -619,11 +619,11 @@ export function createZhCN(product: string): Translations {
         inspect: "可查看所有工作",
         manage: "可管理",
         useHelp: (name) =>
-          `与 ${name} 开始对话并附加文件。打开 ${name} 的文件需要“可查看所有工作”权限。`,
+          `与 ${name} 开始对话并附加文件。打开 ${name} 的文件需要“可查看所有工作”权限。能与 ${name} 对话的人可以向其询问文件中的任何内容。`,
         inspectHelp: (name) =>
           `打开 ${name} 的文件，阅读所有对话、工作标签页和 ${name} 的记忆。`,
         chatOnlyNote: (person, name) =>
-          `只有“可对话”权限时，${person} 可与 ${name} 对话并附加文件，但无法打开 ${name} 生成的文件、分配任务或查看他人的对话。`,
+          `只有“可对话”权限时，${person} 可与 ${name} 对话并附加文件，但无法打开 ${name} 生成的文件、分配任务或查看他人的对话。能与 ${name} 对话的人可以向其询问文件中的任何内容。`,
         manageHelp: (name) =>
           `更改职责说明、访问权限和文件；暂停、停用或删除 ${name}。`,
         supervisorNote: (name) =>
@@ -1134,6 +1134,33 @@ export function createZhCN(product: string): Translations {
 
     // Input Box
     inputBox: {
+      conversationFile: {
+        menu: "从对话中选择",
+        device: "从设备上传",
+        sources: "选择对话",
+        noSources: "此页没有其他对话。",
+        noFiles: "此页没有交付的文件。",
+        unavailable: "此文件已不可用。",
+        loadFailed: "无法加载列表。",
+        retry: "重试",
+        previous: "返回对话列表",
+        give: "提供文件",
+        copying: "正在复制文件…",
+        failed: "无法添加文件。",
+        unconfirmedOwn:
+          "无法确认文件是否已复制。再次选择文件前，请先检查此对话的上传文件。",
+        uncertain: "尚未确认文件是否已复制。",
+        check: "检查复制状态",
+        refused: "访问权限已更改或文件不可用。",
+        tooLarge: "文件超过附件限制。",
+        from: (title) => `来自「${title}」`,
+        giveTitle: (name) => `要将此文件提供给 ${name} 吗？`,
+        disclosure: (file, name) =>
+          `「${file}」将复制到 ${name} 的文件中。${name} 可以在任何对话中使用它。任何能与 ${name} 对话的人都可以向其索取文件，任何能查看 ${name} 全部工作的人都可以打开文件。管理者可以看到文件由你提供，记录不会标明来源对话。你的原始文件仍保存在原处。`,
+        needsInspect: (name) =>
+          `此对话或其文件不可用。打开 ${name} 的文件需要“可查看所有工作”权限。`,
+        changed: (time) => `修改于 ${time}`,
+      },
       agentFile: {
         attach: (name) => `给 ${name} 附加文件`,
         hint: (name) =>

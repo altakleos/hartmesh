@@ -133,6 +133,7 @@ export const RUN_INPUT_SETTLE_POLL_MS = 120_000;
 export type SendMessageOptions = {
   /** Ordinary web composer submissions can request viewport alignment after admission. */
   keepSentMessageInView?: boolean;
+  savedFiles?: FileInMessage[];
   /** The composer's current catalog resolution, independent of settings effects. */
   modelContext?: Pick<
     LocalSettings["context"],
@@ -277,11 +278,13 @@ export function buildThreadSubmitMessages({
   text,
   additionalKwargs,
   additionalInputMessages = [],
+  savedFiles = [],
   filesForSubmit = [],
 }: {
   text: string;
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
+  savedFiles?: FileInMessage[];
   filesForSubmit?: FileInMessage[];
 }): Message[] {
   return [
@@ -296,7 +299,9 @@ export function buildThreadSubmitMessages({
       ],
       additional_kwargs: {
         ...additionalKwargs,
-        ...(filesForSubmit.length > 0 ? { files: filesForSubmit } : {}),
+        ...(savedFiles.length || filesForSubmit.length
+          ? { files: [...savedFiles, ...filesForSubmit] }
+          : {}),
       },
     } as Message,
   ];
@@ -2989,9 +2994,12 @@ export function useThreadStream({
       );
 
       const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
+      const savedFiles = options?.savedFiles ?? [];
       const optimisticAdditionalKwargs = {
         ...options?.additionalKwargs,
-        ...(optimisticFiles.length > 0 ? { files: optimisticFiles } : {}),
+        ...(savedFiles.length || optimisticFiles.length
+          ? { files: [...savedFiles, ...optimisticFiles] }
+          : {}),
       };
 
       const sendOwner = viewOwner.current;
@@ -3082,7 +3090,10 @@ export function useThreadStream({
                 }),
               );
               setOptimisticMessages((messages) =>
-                optimisticMessagesAfterUpload(messages, uploadedFiles),
+                optimisticMessagesAfterUpload(messages, [
+                  ...savedFiles,
+                  ...uploadedFiles,
+                ]),
               );
             }
           } catch (error) {
@@ -3117,6 +3128,7 @@ export function useThreadStream({
             text,
             additionalKwargs: options?.additionalKwargs,
             additionalInputMessages: options?.additionalInputMessages,
+            savedFiles,
             filesForSubmit,
           }),
         };

@@ -16,18 +16,16 @@ retirement fences pending upload results/findings; the server still drains
 admitted mutations. Public skills stay read-only; skill drafts can still be
 created as artifacts. Local MCP controls require effective delegation, remote
 preferences retain their existing behavior, and managed integration installation
-is provider-only. The bilingual notice uses only configured provider support links.
+is provider-only. EN/ZH notices use configured provider links.
 
 ## Project Overview
 
 `/workspace/assistants` and `/workspace/employees` list agents by type.
 `/workspace/instances` owns detail tabs. Apply current grants/provider ceilings,
 account/role caches and retired-action fences. Retry exact intents. A 202 stays pending.
-Chats search uses viewer-scoped, cancellable `/api/search` cursors. Static demos filter locally. Agent files use Spaces reads and audited writes.
-Chat attachments upload immediately and send saved references. After file recovery,
-verify the exact receipt, Home and execution readiness.
-Binding discovery hides ordinary artifacts without clearing restored selections;
-a positive agent binding retires that panel. Detail breadcrumbs use verified custody.
+Chats use viewer-scoped, cancellable `/api/search`; static demos filter locally. Agent files use Spaces reads/audited writes.
+Device uploads run on send in chats, immediately in instances. Pickers send destination references. Confirm Home copies, omit source titles and reconcile by ID. Verify receipt, Home and execution after recovery.
+Binding discovery hides ordinary artifacts and preserves selections; a confirmed binding retires the panel. Breadcrumbs use verified custody.
 Only Inspect opens produced files. Browser/sidecar/scheduling remain ordinary-chat
 controls. Memory uses instance APIs/all summaries only.
 Company targets start empty; transfer data explicitly through admitted APIs.

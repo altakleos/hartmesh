@@ -507,3 +507,80 @@ test.describe("Agent chat", () => {
     await expect(page.getByText("Hello from DeerFlow!")).toBeVisible();
   });
 });
+
+test("a refused first send with a saved conversation attachment preserves the custom chat draft", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, { agents: MOCK_AGENTS });
+  await page.route("**/api/threads/search", (route) =>
+    route.fulfill({
+      json: [
+        {
+          thread_id: "source",
+          owner_user_id: "default",
+          values: { title: "Planning" },
+          agent_instance: null,
+        },
+      ],
+    }),
+  );
+  await page.route("**/api/threads/source/presented-files?*", (route) =>
+    route.fulfill({
+      json: {
+        files: [
+          {
+            filename: "notes.txt",
+            path: "/mnt/user-data/outputs/notes.txt",
+            run_id: "answer",
+            size: 11,
+            modified: 1740000000,
+            available: true,
+          },
+        ],
+        has_more: false,
+        next_before_run_id: null,
+        next_before_created_at: null,
+      },
+    }),
+  );
+  let imports = 0;
+  await page.route("**/uploads/from-conversation", (route) => {
+    imports++;
+    return route.fulfill({
+      json: {
+        filename: "notes.txt",
+        size: 11,
+        virtual_path: "/mnt/user-data/uploads/notes.txt",
+        sha256: "a".repeat(64),
+      },
+    });
+  });
+  let sends = 0;
+  let submitted: unknown;
+  await page.route("**/api/langgraph/threads/*/runs/stream", (route) => {
+    sends++;
+    submitted = route.request().postDataJSON();
+    return route.fulfill({
+      status: 422,
+      json: { detail: "Conversation could not start" },
+    });
+  });
+  await page.goto("/workspace/agents/test-agent/chats/new");
+  const input = page.locator('textarea[name="message"]');
+  await input.fill("Review these notes");
+  await page.getByTestId("add-attachments-button").click();
+  await page.getByRole("menuitem", { name: "From a conversation" }).click();
+  await page.getByRole("button", { name: "Planning" }).click();
+  await page.getByRole("button", { name: /notes.txt/ }).click();
+  await expect(page.locator("form").getByText("From Planning")).toBeVisible();
+  await input.press("Enter");
+  await expect.poll(() => sends).toBe(1);
+  await expect(page.locator("[data-sonner-toast]").first()).toBeVisible();
+  expect(imports).toBe(1);
+  expect(JSON.stringify(submitted)).toContain(
+    "/mnt/user-data/uploads/notes.txt",
+  );
+  expect(JSON.stringify(submitted)).not.toContain("Planning");
+  await expect(input).toHaveValue("Review these notes");
+  await expect(page.locator("form").getByText("From Planning")).toBeVisible();
+});

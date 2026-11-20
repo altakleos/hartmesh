@@ -778,6 +778,10 @@ export default function ChatPage() {
                           allowStop={stop.allowed}
                           stopDisabled={stop.busy || stop.pending}
                           allowAttachments={legacyCapabilities || !!binding}
+                          conversationFilePicker={
+                            legacyCapabilities ||
+                            (!!binding && !!instance && !agentDisabled)
+                          }
                           attachmentsUnavailable={filesUnavailable}
                           storageRefusal={runRefusal}
                           agentRefusal={agentRunRefusal}
@@ -785,6 +789,13 @@ export default function ChatPage() {
                             binding
                               ? {
                                   name: binding.name,
+                                  id: binding.id,
+                                  homeScope: JSON.stringify([
+                                    instance?.home_id,
+                                    instance?.home_generation ??
+                                      instance?.generation,
+                                    instance?.permissions,
+                                  ]),
                                   uploading: attachedFiles.uploading,
                                   restoredCount: attachedFiles.restored.length,
                                   restoreFiles: attachedFiles.restoreFiles,
