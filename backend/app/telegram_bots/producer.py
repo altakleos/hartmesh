@@ -34,6 +34,7 @@ from app.telegram_bots.links import BotLink
 from app.telegram_bots.notifications import DELIVERY_CLASSES, ESSENTIAL_DELIVERY_CLASSES, budget_retry_at, preference_skip
 from app.telegram_bots.settings import SettingsRepository
 from app.telegram_bots.sql_readers import reader_session
+from app.telegram_bots.sql_writers import writer_session
 from app.telegram_bots.token_pattern import TOKEN_IN_TEXT
 from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramCallbackRow, TelegramOutboxRow
 from deerflow.runtime.runs.terminal import failure_chain
@@ -926,7 +927,7 @@ class Outbox:
             link = await session.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link_id).with_for_update().execution_options(populate_existing=True))
             yield session, link
             return
-        async with self.sessions() as owned, owned.begin():
+        async with writer_session(self.sessions) as owned:
             if owned.get_bind().dialect.name == "sqlite":
                 await owned.execute(text("BEGIN IMMEDIATE"))
             link = await owned.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link_id).with_for_update().execution_options(populate_existing=True))
