@@ -17,6 +17,10 @@ import type {
 rs.mock("@/core/i18n/hooks", () => ({
   useI18n: () => ({ t: enUS, locale: "en-US" }),
 }));
+let agentsEnabled = true;
+rs.mock("@/core/features", () => ({
+  useAgentInstances: () => ({ known: true, enabled: agentsEnabled }),
+}));
 const digest = "b".repeat(64);
 const home = { id: "a".repeat(32), name: "Library" };
 const note: PresentedFile = {
@@ -80,6 +84,7 @@ function page(files: PresentedFile[]) {
 function mount(
   destination: ImportDestination,
   handler: (url: string, init: RequestInit) => Promise<Response> | Response,
+  agentReadAllowed = true,
 ) {
   const calls: { url: string; init: RequestInit }[] = [];
   rs.spyOn(globalThis, "fetch").mockImplementation(async (input, init = {}) => {
@@ -99,6 +104,7 @@ function mount(
     <ConversationFilePicker
       destination={destination}
       account="reader"
+      agentReadAllowed={agentReadAllowed}
       onSaved={onSaved}
       close={close}
     />,
@@ -107,6 +113,7 @@ function mount(
 }
 afterEach(() => {
   cleanup();
+  agentsEnabled = true;
   rs.restoreAllMocks();
 });
 test("own chats page past empty deliveries; missing files stay disabled and a saved receipt has no source path", async () => {
@@ -170,7 +177,7 @@ test("a Home lists personal sources, discloses both audiences, and cancellation 
   await screen.findByRole("button", { name: "Planning" });
   expect(
     screen.queryByRole("button", {
-      name: /Indexing|Current chat|Other chat|Sidebar/,
+      name: /Indexing|Current chat|Other chat|Sidebar|Browse agent conversations/,
     }),
   ).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Planning" }));
@@ -383,4 +390,119 @@ test("closing a pending Home copy keeps its scoped receipt available without ano
   expect(calls.filter((x) => x.url.includes("from-conversation"))).toHaveLength(
     1,
   );
+});
+
+test("inspectors browse agents and older conversations on demand and attach a colleague’s presented file", async () => {
+  const { calls, onSaved } = mount({ threadId: "destination" }, (url) => {
+    const query = new URL(url, "http://localhost");
+    if (query.pathname.endsWith("/agent-instances")) {
+      const instances =
+        query.searchParams.get("offset") === "100"
+          ? [{ id: home.id, name: "Library", permissions: 3, status: "active" }]
+          : Array.from({ length: 100 }, (_, i) => ({
+              id: String(i),
+              name: "Chat only",
+              permissions: 1,
+              status: "active",
+            }));
+      return Response.json({ instances });
+    }
+    if (query.pathname.endsWith(`/${home.id}/conversations`)) {
+      const conversations =
+        query.searchParams.get("offset") === "50"
+          ? [
+              {
+                thread_id: "colleague",
+                title: "Team minutes",
+                requester_id: "person",
+              },
+            ]
+          : Array.from({ length: 50 }, (_, i) => ({
+              thread_id: String(i),
+              title: "Older meeting",
+              requester_id: "reader",
+            }));
+      return Response.json({ conversations });
+    }
+    if (query.pathname.endsWith("/colleague/presented-files"))
+      return Response.json(page([note]));
+    if (query.pathname.endsWith("/uploads/from-conversation"))
+      return Response.json(saved);
+    throw Error("Unexpected request");
+  });
+  await screen.findByRole("button", { name: "Planning" });
+  expect(calls.some(({ url }) => url.includes("agent-instances"))).toBe(false);
+  fireEvent.click(
+    screen.getByRole("button", { name: "Browse agent conversations" }),
+  );
+  expect(screen.queryByRole("button", { name: "Chat only" })).toBeNull();
+  fireEvent.click(await screen.findByRole("button", { name: "Load more" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Library" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Load more" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Team minutes" }));
+  fireEvent.click(await screen.findByRole("button", { name: /notes.txt/ }));
+  await waitFor(() =>
+    expect(onSaved).toHaveBeenCalledWith(receipt, "Team minutes"),
+  );
+  const post = calls.find(({ url }) =>
+    url.includes("/uploads/from-conversation"),
+  );
+  expect(JSON.parse(post!.init.body as string).source_thread_id).toBe(
+    "colleague",
+  );
+});
+
+test("a viewer without agent read access sees only personal conversations", async () => {
+  const { calls } = mount(
+    { threadId: "destination" },
+    () => {
+      throw Error("Unexpected agent read");
+    },
+    false,
+  );
+  await screen.findByRole("button", { name: "Planning" });
+  expect(
+    screen.queryByRole("button", { name: "Browse agent conversations" }),
+  ).toBeNull();
+  expect(screen.queryByRole("button", { name: /Indexing/ })).toBeNull();
+  expect(calls.some(({ url }) => url.includes("/agent-instances"))).toBe(false);
+});
+
+test("disabling agent access while a file copy is pending clears its source and ignores the late success", async () => {
+  let complete!: (response: Response) => void;
+  const destination = { threadId: "destination" };
+  const { view, onSaved, close, calls } = mount(destination, (url) => {
+    if (url.includes("presented-files")) return Response.json(page([note]));
+    return new Promise<Response>((resolve) => {
+      complete = resolve;
+    });
+  });
+  fireEvent.click(await screen.findByRole("button", { name: /Indexing/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /notes.txt/ }));
+  await waitFor(() =>
+    expect(calls.some((x) => x.url.endsWith("from-conversation"))).toBe(true),
+  );
+  agentsEnabled = false;
+  view.rerender(
+    <ConversationFilePicker
+      destination={destination}
+      account="reader"
+      agentReadAllowed
+      onSaved={onSaved}
+      close={close}
+    />,
+  );
+  await screen.findByRole("button", { name: "Planning" });
+  expect(
+    screen.queryByRole("button", {
+      name: /Browse agent conversations|Indexing/,
+    }),
+  ).toBeNull();
+  expect(
+    calls.find((x) => x.url.endsWith("from-conversation"))?.init.signal
+      ?.aborted,
+  ).toBe(true);
+  complete(Response.json(saved));
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  expect(onSaved).not.toHaveBeenCalled();
 });

@@ -70,6 +70,7 @@ export async function recentImportSources(
   account: string,
   offset: number,
   signal: AbortSignal,
+  agentSources: boolean,
 ) {
   const limit = 25;
   const rows = await write<
@@ -93,7 +94,7 @@ export async function recentImportSources(
           row.thread_id !== destination.threadId &&
           shouldShowInPrimaryThreadLists(row) &&
           (row.agent_instance
-            ? !destination.instance
+            ? !destination.instance && agentSources
             : row.owner_user_id === account),
       )
       .map((row) => ({

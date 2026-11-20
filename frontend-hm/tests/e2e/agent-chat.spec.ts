@@ -584,3 +584,108 @@ test("a refused first send with a saved conversation attachment preserves the cu
   await expect(input).toHaveValue("Review these notes");
   await expect(page.locator("form").getByText("From Planning")).toBeVisible();
 });
+
+test("a personal chat can attach a file from an inspectable agent conversation started by a colleague", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, { features: { agentInstancesEnabled: true } });
+  const instanceId = "b".repeat(32);
+  const requests: string[] = [];
+  await page.route("**/api/threads/search", (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.route("**/api/agent-instances?*", (route) => {
+    requests.push("agents");
+    return route.fulfill({
+      json: {
+        instances: [
+          { id: instanceId, name: "Library", permissions: 3, status: "active" },
+          {
+            id: "c".repeat(32),
+            name: "Chat only",
+            permissions: 1,
+            status: "active",
+          },
+        ],
+        unfinished: [],
+        ai_assistants: { per_user: 3, allowed: 8, in_use: 0, mine: 0 },
+      },
+    });
+  });
+  await page.route(
+    `**/api/agent-instances/${instanceId}/conversations?*`,
+    (route) => {
+      requests.push("conversations");
+      return route.fulfill({
+        json: {
+          conversations: [
+            {
+              thread_id: "meeting",
+              requester_id: "another-person",
+              title: "Team minutes",
+              updated_at: "2026-01-01T12:00:00Z",
+              running: false,
+            },
+          ],
+        },
+      });
+    },
+  );
+  await page.route("**/api/threads/meeting/presented-files?*", (route) =>
+    route.fulfill({
+      json: {
+        files: [
+          {
+            filename: "minutes.txt",
+            path: "/mnt/user-data/outputs/minutes.txt",
+            run_id: "meeting-answer",
+            size: 7,
+            modified: 1740000000,
+            available: true,
+          },
+        ],
+        has_more: false,
+        next_before_run_id: null,
+        next_before_created_at: null,
+      },
+    }),
+  );
+  let imported: unknown;
+  await page.route("**/uploads/from-conversation", (route) => {
+    imported = route.request().postDataJSON();
+    return route.fulfill({
+      json: {
+        filename: "minutes.txt",
+        size: 7,
+        virtual_path: "/mnt/user-data/uploads/minutes.txt",
+        sha256: "a".repeat(64),
+      },
+    });
+  });
+  await page.goto("/workspace/chats/new");
+  await page.getByTestId("add-attachments-button").click();
+  await page.getByRole("menuitem", { name: "From a conversation" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(
+    dialog.getByRole("button", { name: "Team minutes" }),
+  ).toHaveCount(0);
+  const browse = dialog.getByRole("button", {
+    name: "Browse agent conversations",
+  });
+  await expect(browse).toBeVisible();
+  expect(requests).toEqual([]);
+  await browse.click();
+  await dialog.getByRole("button", { name: "Library" }).click();
+  await dialog.getByRole("button", { name: "Team minutes" }).click();
+  await dialog.getByRole("button", { name: /minutes.txt/ }).click();
+  await expect(
+    page.locator("form").getByText("From Team minutes"),
+  ).toBeVisible();
+  expect(requests).toEqual(["agents", "conversations"]);
+  expect(imported).toEqual({
+    source_thread_id: "meeting",
+    source_run_id: "meeting-answer",
+    path: "/mnt/user-data/outputs/minutes.txt",
+    create_destination: true,
+  });
+});

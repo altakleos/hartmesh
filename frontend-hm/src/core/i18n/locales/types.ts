@@ -974,6 +974,9 @@ export interface Translations {
       menu: string;
       device: string;
       sources: string;
+      browseAgents: string;
+      backToAgents: string;
+      noAgents: string;
       noSources: string;
       noFiles: string;
       unavailable: string;

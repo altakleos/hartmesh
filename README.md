@@ -75,7 +75,9 @@ and AI employees provide role-based setup and separate Conversations, Files, Wor
 Memory, Access and Settings tabs. Conversations show the AI identity and supervisor;
 attachments save immediately in the agent's files. **From a conversation** in
 the attach menu copies a file presented in another chat. In a personal chat,
-the composer shows the source conversation beside the attachment. Giving a file
+you can also browse an agent’s conversations when you have **Can see all work**,
+including conversations a colleague started. The composer shows the source
+conversation beside the attachment. Giving a file
 to an AI assistant or employee asks for confirmation. The copy stays in the
 agent's files, and anyone who can chat with the agent can ask about it.
 Colleagues with Can chat alone see produced filenames; opening files requires

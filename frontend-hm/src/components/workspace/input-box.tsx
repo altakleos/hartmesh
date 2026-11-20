@@ -69,6 +69,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import { hasCeiling } from "@/core/agent-instances/presentation";
 import { fetch } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
@@ -2723,6 +2724,7 @@ export function InputBox({
                 <ConversationFilePicker
                   key={pickerScope}
                   account={user.id}
+                  agentReadAllowed={hasCeiling(user.permissions, "agents:read")}
                   openRequest={openPicker.request}
                   destination={destination}
                   maxBytes={

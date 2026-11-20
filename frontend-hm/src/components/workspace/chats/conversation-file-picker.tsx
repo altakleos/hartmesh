@@ -1,12 +1,6 @@
 "use client";
 
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -24,6 +18,7 @@ import {
   type CheckState,
   unansweredWrite,
 } from "@/core/agent-instances/file-status";
+import { useAgentInstances } from "@/core/features";
 import {
   readStorageRefusal,
   type StorageRefusal,
@@ -33,7 +28,6 @@ import {
   importedAttachment,
   importConversationFile,
   presentedImportFiles,
-  recentImportSources,
   type PresentedCursor,
   type PresentedFile,
   type ImportDestination,
@@ -42,146 +36,15 @@ import {
 } from "@/core/threads/conversation-file-import";
 import { formatUploadSize } from "@/core/uploads";
 
+
+import {
+  ConversationFileSources,
+  PageFooter,
+  usePickerPage,
+  type SourceBrowser,
+} from "./conversation-file-sources";
 import { FilesStateNotice } from "./files-state-notice";
 
-interface Page<T, C> {
-  items: T[];
-  next: C | null;
-}
-/** Do not interpret an empty result page as the end of a filtered listing. */
-function usePickerPage<T, C>(
-  initial: C,
-  load: (cursor: C, signal: AbortSignal) => Promise<Page<T, C>>,
-) {
-  const [page, setPage] = useState<Page<T, C>>({ items: [], next: initial });
-  const [request, setRequest] = useState({ cursor: initial });
-  const [error, setError] = useState<unknown>(null);
-  const [busy, setBusy] = useState(true);
-  useEffect(() => {
-    const owner = new AbortController();
-    setBusy(true);
-    setError(null);
-    void load(request.cursor, owner.signal)
-      .then((result) => {
-        if (!owner.signal.aborted)
-          setPage((prev) => ({
-            items: [...prev.items, ...result.items],
-            next: result.next,
-          }));
-      })
-      .catch((failure: unknown) => {
-        if (!owner.signal.aborted) setError(failure);
-      })
-      .finally(() => {
-        if (!owner.signal.aborted) setBusy(false);
-      });
-    return () => owner.abort();
-  }, [request, load]);
-  return {
-    page,
-    error,
-    busy,
-    more: () => {
-      if (page.next !== null) setRequest({ cursor: page.next });
-    },
-    retry: () => setRequest({ ...request }),
-  };
-}
-function PageFooter({
-  busy,
-  error,
-  more,
-  onMore,
-  onRetry,
-  empty,
-  emptyMessage,
-  denied,
-}: {
-  busy: boolean;
-  error: unknown;
-  more: boolean;
-  onMore: () => void;
-  onRetry: () => void;
-  empty: boolean;
-  emptyMessage: string;
-  denied?: string;
-}) {
-  const { t } = useI18n();
-  const restricted =
-    error instanceof InstanceApiError && [403, 404].includes(error.status);
-  const copy = t.inputBox.conversationFile;
-  if (busy) return <p role="status">{t.common.loading}</p>;
-  if (error)
-    return (
-      <div role="status">
-        <p>{restricted ? (denied ?? copy.refused) : copy.loadFailed}</p>
-        {!restricted && (
-          <Button type="button" variant="outline" onClick={onRetry}>
-            {copy.retry}
-          </Button>
-        )}
-      </div>
-    );
-  return (
-    <>
-      {empty && <p role="status">{emptyMessage}</p>}
-      {more && (
-        <Button type="button" variant="outline" onClick={onMore}>
-          {t.common.loadMore}
-        </Button>
-      )}
-    </>
-  );
-}
-function Conversations({
-  destination,
-  account,
-  select,
-}: {
-  destination: ImportDestination;
-  account: string;
-  select: (source: ImportSource) => void;
-}) {
-  const { t } = useI18n();
-  const load = useCallback(
-    (offset: number, signal: AbortSignal) =>
-      recentImportSources(destination, account, offset, signal),
-    [destination, account],
-  );
-  const { page, busy, error, more, retry } = usePickerPage(0, load);
-  return (
-    <>
-      <ul>
-        {page.items.map((source) => (
-          <li key={source.thread_id}>
-            <Button
-              className="h-auto w-full justify-start text-left whitespace-normal"
-              type="button"
-              variant="ghost"
-              onClick={() => select(source)}
-            >
-              {source.title ?? t.agentInstances.conversations.untitled}
-              {source.instanceName && (
-                <span className="text-muted-foreground">
-                  {source.instanceName}
-                </span>
-              )}
-            </Button>
-          </li>
-        ))}
-      </ul>
-      <PageFooter
-        busy={busy}
-        error={error}
-        empty={!page.items.length}
-        emptyMessage={t.inputBox.conversationFile.noSources}
-        more={page.next !== null}
-        onMore={more}
-        onRetry={retry}
-      />
-    </>
-  );
-}
 function Files({
   source,
   select,
@@ -203,35 +66,36 @@ function Files({
   return (
     <>
       <ul>
-        {page.items.map((file) => (
-          <li key={JSON.stringify([file.run_id, file.path])}>
-            <Button
-              type="button"
-              variant="ghost"
-              className="h-auto w-full flex-col items-start text-left whitespace-normal"
-              disabled={!file.available}
-              onClick={() => select(file)}
-            >
-              <span className="break-all">{file.filename}</span>
-              <span className="text-muted-foreground text-xs">
-                {!file.available
-                  ? copy.unavailable
-                  : [
-                      file.size !== null ? formatUploadSize(file.size) : null,
-                      file.modified !== null
-                        ? copy.changed(
-                            new Date(file.modified * 1000).toLocaleString(
-                              locale,
-                            ),
-                          )
-                        : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")}
-              </span>
-            </Button>
-          </li>
-        ))}
+        {!error &&
+          page.items.map((file) => (
+            <li key={JSON.stringify([file.run_id, file.path])}>
+              <Button
+                type="button"
+                variant="ghost"
+                className="h-auto w-full flex-col items-start text-left whitespace-normal"
+                disabled={!file.available}
+                onClick={() => select(file)}
+              >
+                <span className="break-all">{file.filename}</span>
+                <span className="text-muted-foreground text-xs">
+                  {!file.available
+                    ? copy.unavailable
+                    : [
+                        file.size !== null ? formatUploadSize(file.size) : null,
+                        file.modified !== null
+                          ? copy.changed(
+                              new Date(file.modified * 1000).toLocaleString(
+                                locale,
+                              ),
+                            )
+                          : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                </span>
+              </Button>
+            </li>
+          ))}
       </ul>
       <PageFooter
         busy={busy}
@@ -258,21 +122,37 @@ type Outcome =
   | "refused"
   | "large"
   | "busy";
-export function ConversationFilePicker({
+interface PickerProps {
+  account: string;
+  agentReadAllowed: boolean;
+  destination: ImportDestination;
+  close: () => void;
+  onSaved: (file: SavedAttachment, sourceTitle?: string) => void;
+  maxBytes?: number;
+  openRequest?: number;
+}
+export function ConversationFilePicker(props: PickerProps) {
+  return !props.destination.instance && props.agentReadAllowed ? (
+    <PersonalFilePicker {...props} />
+  ) : (
+    <FilePicker {...props} agentSources={false} />
+  );
+}
+function PersonalFilePicker(props: PickerProps) {
+  const feature = useAgentInstances();
+  const agentSources = feature.known && feature.enabled;
+  return <FilePicker {...props} agentSources={agentSources} />;
+}
+function FilePicker({
   account,
   destination,
   close,
   onSaved,
   maxBytes,
   openRequest = 0,
-}: {
-  account: string;
-  destination: ImportDestination;
-  close: () => void;
-  onSaved: (file: SavedAttachment, sourceTitle?: string) => void;
-  maxBytes?: number;
-  openRequest?: number;
-}) {
+  agentSources,
+}: PickerProps & { agentSources: boolean }) {
+  const [browse, setBrowse] = useState<SourceBrowser>("recent");
   const { t } = useI18n();
   const copy = t.inputBox.conversationFile;
   const [source, setSource] = useState<ImportSource | null>(null);
@@ -286,6 +166,20 @@ export function ConversationFilePicker({
   const [outcome, setOutcome] = useState<Outcome>("confirm");
   const owner = useRef<AbortController | null>(null);
   useLayoutEffect(() => () => owner.current?.abort(), []);
+
+  const lostAgentSource =
+    !agentSources && (browse !== "recent" || !!source?.instanceName);
+  useLayoutEffect(() => {
+    if (lostAgentSource) {
+      owner.current?.abort();
+      owner.current = null;
+      setBrowse("recent");
+      setSource(null);
+      setChoice(null);
+      setRefusal(null);
+      setOutcome("confirm");
+    }
+  }, [lostAgentSource]);
 
   const saved = (file: SavedAttachment) => {
     if (owner.current?.signal.aborted || !source) return;
@@ -519,7 +413,15 @@ export function ConversationFilePicker({
             </Button>
           </>
         ) : (
-          <Conversations
+          <ConversationFileSources
+            key={
+              typeof browse === "string"
+                ? browse + String(agentSources)
+                : browse.id
+            }
+            browse={browse}
+            setBrowse={setBrowse}
+            agentSources={agentSources}
             account={account}
             destination={destination}
             select={setSource}
