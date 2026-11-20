@@ -1,5 +1,10 @@
 # Persistent agent instances
 
+For a conversation file import, keep the redacted source and original requested name
+in the native put intent. Choose the actual upload name before persisting that
+intent, under exclusive writer ownership. A competing resident cannot redirect
+the write. Ordinary attachments retain their original request and naming rules.
+
 Definitions remain in `persistence/agents`; adopted documents, resident
 identities and delegated access live in `persistence/agent_instances`. Never
 substitute a resident principal for human `user_id`, create login users, or

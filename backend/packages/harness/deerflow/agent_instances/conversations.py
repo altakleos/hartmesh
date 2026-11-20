@@ -440,6 +440,33 @@ class AgentConversations:
 
         return _bridge(execution.owner_loop, self.context_admission(execution, mark_memory=True))
 
+    async def admit_file_export(self, session, inspection, home_generation):
+        """Fresh human inspection while the source Home's READ/EXPORT transaction is held."""
+        thread = await session.get(ThreadMetaRow, inspection.thread_id, with_for_update=True)
+        instance = await session.get(AgentInstanceRow, inspection.instance.id, with_for_update=True)
+        binding = await session.get(AgentConversationRow, inspection.thread_id)
+        grant = await session.get(AgentInstanceGrantRow, (inspection.instance.id, inspection.requester.subject_id))
+        if (
+            inspection.authority is not self
+            or thread is None
+            or thread.incarnation != inspection.thread_incarnation
+            or instance is None
+            or instance.generation != inspection.instance.generation
+            or instance.home_id != inspection.instance.home_id
+            or home_generation != inspection.home_generation
+            or instance.status not in {"active", "suspended", "archived"}
+            or binding is None
+            or binding.instance_id != instance.id
+            or grant is None
+            or type(grant.permissions) is not int
+            or not 1 <= grant.permissions <= 7
+            or not grant.permissions & int(AgentPermission.INSPECT)
+        ):
+            raise AgentDenied("Agent output is unavailable")
+        await self.instances._human(inspection.requester, session=session)
+        if instance.custody == "personal":
+            await self.instances._human(PrincipalRef("human", instance.owner_id), session=session)
+
     async def inspection(self, *, actor, thread_id):
         """Adopted graph projection for authorized readers; never a run grant."""
         from deerflow.persistence.spaces.model import SpaceRow

@@ -1,6 +1,7 @@
 """Direct, attributed host writes for composer uploads and agent Home files."""
 
 import hmac
+import io
 import json
 import tempfile
 import unicodedata
@@ -17,6 +18,7 @@ from starlette.formparsers import MultiPartException, MultiPartParser
 from app.gateway.agent_conversations import execution_for_run
 from app.gateway.auth.config import existing_signing_key, get_auth_config
 from app.gateway.authz import require_permission
+from app.gateway.conversation_file_import import PresentedFileSelection, SharedPublicationSource, capture_source
 from app.gateway.routers.agent_instances import _service
 from app.gateway.routers.spaces import StrictRequest, _actor
 from app.gateway.storage_spaces import require_execution
@@ -24,6 +26,7 @@ from deerflow.agent_instances.agent_files import AgentFileRefusal
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied, InstanceIdentity
 from deerflow.persistence.agent_instances.model import AgentInstanceRow
 from deerflow.spaces.contract import InvalidPrincipal, Permission, SpaceConflict, SpaceDenied, SpaceNotFound
+from deerflow.spaces.file_import import FileImport
 from deerflow.spaces.filesystem import FilesystemUnavailable
 from deerflow.spaces.service import MAX_TRANSFER_BYTES
 from deerflow.utils.file_io import await_drained, run_file_io
@@ -61,6 +64,11 @@ router = APIRouter(prefix="/api/agent-instances", tags=["agent-instances"], rout
 
 
 async def _receipt_id(instance, actor, nonce, *, conversation=None, read_only=False):
+    secret = await run_file_io(existing_signing_key) if read_only else (await run_file_io(get_auth_config)).jwt_secret
+    return _scoped_receipt(instance, actor, nonce, conversation=conversation, secret=secret) if secret else None
+
+
+def _scoped_receipt(instance, actor, nonce, *, conversation, secret):
     # The public handle must never be a raw storage ID: a legacy writer can
     # choose its own ID. Bind the original authenticated write to its surface.
     scope = ["agent-file-operation-v1", instance.id, instance.home_id, actor.subject_id, nonce]
@@ -68,9 +76,6 @@ async def _receipt_id(instance, actor, nonce, *, conversation=None, read_only=Fa
         scope.extend(["conversation", conversation.thread_id, conversation.thread_incarnation])
     else:
         scope.append("home")
-    secret = await run_file_io(existing_signing_key) if read_only else (await run_file_io(get_auth_config)).jwt_secret
-    if not secret:
-        return None
     message = json.dumps(scope, separators=(",", ":")).encode()
     return hmac.digest(secret.encode(), message, "sha256").hex()[:32]
 
@@ -231,6 +236,46 @@ async def conversation_file(instance_id: str, thread_id: ThreadId, request: Requ
             instance=execution.instance, requester=execution.requester, operation_id=operation_id, action="put", path="uploads/" + name, content=content, size=size, admission=_conversation_admission(execution, operation_id)
         )
         return {**asdict(result), "sandbox_path": "/mnt/user-data/" + result.path}
+
+
+class HomeFileSelection(PresentedFileSelection):
+    acknowledge_disclosure: bool = False
+
+
+@require_permission("threads", "write")
+@require_permission("agents", "read")
+async def import_into_home(*, request: Request, instance_id, thread_id, operation_id, source, acknowledge_disclosure=False):
+    await require_execution(request.app, instance_id)
+    service = await _service(request)
+    execution = await _conversation(request, instance_id, thread_id)
+    captured = await capture_source(request, source, maximum_bytes=MAX_TRANSFER_BYTES, home_destination=True, acknowledge_disclosure=acknowledge_disclosure)
+    name = _filename(captured.name)
+    if name != captured.name:
+        raise AgentFileRefusal("invalid-name")
+    secret = (await run_file_io(get_auth_config)).jwt_secret
+    scoped_id = _scoped_receipt(execution.instance, execution.requester, operation_id, conversation=execution, secret=secret)
+    # The destination's administrator may read the request. Only the selecting
+    # human knows the origin of a private attachment; keep its identity opaque
+    # and unique to this operation even where two imports select the same file.
+    secret_input = json.dumps(["home-file-import-v1", scoped_id, source.model_dump(mode="json")], sort_keys=True, separators=(",", ":"))
+    origin = FileImport(binding=hmac.digest(secret.encode(), secret_input.encode(), "sha256").hex(), publication_id=source.publication_id if isinstance(source, SharedPublicationSource) else None)
+    destination_admission = _conversation_admission(execution, scoped_id)
+
+    async def admit(session, rows):
+        await destination_admission(session, rows)
+        await captured.admit_home_publication(session)
+
+    result = await service.agent_files.apply(
+        instance=execution.instance, requester=execution.requester, operation_id=scoped_id, action="put", path="uploads/" + name, content=io.BytesIO(captured.content), size=len(captured.content), admission=admit, file_import=origin
+    )
+    return {"filename": result.path.rsplit("/", 1)[-1], "size": result.size, "sha256": result.sha256, "virtual_path": "/mnt/user-data/" + result.path}
+
+
+@router.post("/{instance_id}/conversations/{thread_id}/files/from-conversation", status_code=201)
+@require_permission("threads", "write")
+@require_permission("agents", "read")
+async def import_conversation_file(instance_id: str, thread_id: ThreadId, body: HomeFileSelection, request: Request, operation_id: str = Query(pattern=r"^[0-9a-f]{32}$")):
+    return await import_into_home(request=request, instance_id=instance_id, thread_id=thread_id, operation_id=operation_id, source=body.as_source(), acknowledge_disclosure=body.acknowledge_disclosure)
 
 
 @router.get("/{instance_id}/home/operations/{operation_id}")

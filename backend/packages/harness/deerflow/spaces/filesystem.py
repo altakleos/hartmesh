@@ -197,28 +197,54 @@ class ConfinedFilesystem:
             os.close(fd)
         return sorted(entries, key=lambda entry: entry.name), truncated
 
-    def read_bytes(self, path: str, *, max_bytes: int, follow_symlinks: bool = True) -> bytes:
+    @staticmethod
+    def _check_read_limit(max_bytes):
         if type(max_bytes) is not int or not 1 <= max_bytes <= 64 * 1024 * 1024:
             raise ValueError("Bounded read requires a positive limit up to64MiB")
+
+    @staticmethod
+    def _read_descriptor(fd, max_bytes, before):
+        if before.st_size > max_bytes:
+            raise FileTooLarge("File exceeds the preview limit; use streaming download")
+        chunks, remaining = [], max_bytes + 1
+        while remaining:
+            chunk = os.read(fd, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+        if len(content) > max_bytes:
+            raise FileTooLarge("File exceeds the preview limit; use streaming download")
+        after = os.fstat(fd)
+        if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns) or len(content) != after.st_size:
+            raise FileConflict("File changed during its bounded read; retry")
+        return content
+
+    def read_bytes(self, path: str, *, max_bytes: int, follow_symlinks: bool = True) -> bytes:
+        self._check_read_limit(max_bytes)
         fd = self.open_regular(path, follow_symlinks=follow_symlinks)
         try:
+            return self._read_descriptor(fd, max_bytes, os.fstat(fd))
+        finally:
+            os.close(fd)
+
+    def read_named_regular(self, path, maximum_bytes):
+        """Return metadata or bounded bytes for the same still-named, no-follow file."""
+        if maximum_bytes is not None:
+            self._check_read_limit(maximum_bytes)
+        fd = self.open_regular(path, follow_symlinks=False)
+        try:
             before = os.fstat(fd)
-            if before.st_size > max_bytes:
-                raise FileTooLarge("File exceeds the preview limit; use streaming download")
-            chunks, remaining = [], max_bytes + 1
-            while remaining:
-                chunk = os.read(fd, min(remaining, 64 * 1024))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            content = b"".join(chunks)
-            if len(content) > max_bytes:
-                raise FileTooLarge("File exceeds the preview limit; use streaming download")
-            after = os.fstat(fd)
-            if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns) or len(content) != after.st_size:
-                raise FileConflict("File changed during its bounded read; retry")
-            return content
+            value = before.st_size if maximum_bytes is None else self._read_descriptor(fd, maximum_bytes, before)
+            named = self._open(path, os.O_PATH, follow_symlinks=False)
+            try:
+                after = os.fstat(named)
+                if not os.path.samestat(before, after) or (before.st_size, before.st_ctime_ns, before.st_mtime_ns) != (after.st_size, after.st_ctime_ns, after.st_mtime_ns):
+                    raise FileConflict("The named file changed during export")
+            finally:
+                os.close(named)
+            return value, before.st_mtime
         finally:
             os.close(fd)
 

@@ -139,7 +139,9 @@ async def conversation_scope(request, thread_id, *, allow_new=False):
 async def admit_presented_source(request, thread_id, scope):
     """Authorize the source before discovering runs, including an empty page."""
     if scope[0] == "agent":
-        raise HTTPException(403, "The agent's files require export access")
+        from app.gateway.conversation_file_home import admit_agent_presented_source
+
+        await admit_agent_presented_source(request, thread_id)
 
 
 async def require_scope(request, thread_id, expected):
@@ -181,7 +183,9 @@ async def read_presented(request, thread_id, path, *, maximum_bytes=None):
     if relative is None:
         raise _missing()
     if await require_conversation(request, thread_id):
-        raise HTTPException(403, "The agent's files require export access")
+        from app.gateway.conversation_file_home import read_agent_presented_file
+
+        return await read_agent_presented_file(request, thread_id, path, maximum_bytes=maximum_bytes)
     if getattr(request.app.state, "storage_spaces_enabled", False):
         actor = await _actor(request)
         with storage_actor_scope(actor):
