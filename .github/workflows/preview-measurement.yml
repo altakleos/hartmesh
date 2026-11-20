@@ -1,0 +1,57 @@
+name: Candidate preview measurement
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend_image:
+        description: Candidate backend repository@sha256:digest
+        required: true
+        type: string
+      frontend_image:
+        description: Candidate frontend repository@sha256:digest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+  attestations: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install crane
+        uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+      - name: Prepare the headless browser
+        working-directory: frontend-hm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.26.2 --activate
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install chromium --with-deps
+      - name: Measure candidate previews
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BACKEND_IMAGE: ${{ inputs.backend_image }}
+          FRONTEND_IMAGE: ${{ inputs.frontend_image }}
+        run: |
+          prefix="ghcr.io/${GITHUB_REPOSITORY,,}"
+          [[ "${BACKEND_IMAGE%@*}" == "$prefix-backend" ]]
+          [[ "${FRONTEND_IMAGE%@*}" == "$prefix-frontend" ]]
+          python3 scripts/docker_acceptance.py --measure-previews \
+            --backend-image "$BACKEND_IMAGE" --frontend-image "$FRONTEND_IMAGE" \
+            --artifacts "$RUNNER_TEMP/preview-measurement"
+      - name: Upload measurement evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: preview-measurement-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/preview-measurement
+          if-no-files-found: error
+          retention-days: 90

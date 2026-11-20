@@ -34,10 +34,11 @@ def remove_owned_loop(control, number, sysfs, *, expected, retiring_binding=None
                 raise RuntimeError("Owned loop device is still bound; no removal attempted")
             try:
                 facts = {name: (binding / name).read_text(encoding="utf-8").strip() for name in ("backing_file", "offset", "sizelimit", "autoclear")}
-            except FileNotFoundError:
-                # sysfs removes attributes before the directory. Only a fresh
-                # observation of an unbound owned device permits removal.
-                pass
+            except OSError as exc:
+                # An attribute may disappear or its read may lose the backing
+                # device during autoclear. Reobserve identity and binding below.
+                if exc.errno not in (errno.ENOENT, errno.ENODEV):
+                    raise
             else:
                 if facts != retiring_binding or any(facts[name] != value for name, value in (("offset", "0"), ("sizelimit", "0"), ("autoclear", "1"))):
                     raise RuntimeError("Owned loop binding changed during retirement")

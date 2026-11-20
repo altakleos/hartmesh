@@ -8,6 +8,10 @@ services:
     networks: [acceptance]
   gateway:
     image: ${ACCEPTANCE_BACKEND_IMAGE:?runner supplies its unique image}
+    mem_limit: 1088m
+    memswap_limit: 1088m
+    pids_limit: 2048
+    cpus: 2
     command:
       - sh
       - -ec

@@ -1,0 +1,12 @@
+plugins:
+  - name: legacy-report
+    package: hartmesh-legacy-report
+    use: hartmesh_legacy_report:install
+    required: true
+  - name: sample-projector
+    use: sample_projector:install
+    required: true
+  - name: office-preview
+    package: hartmesh-office-preview
+    use: hartmesh_office_preview:install
+    required: true
