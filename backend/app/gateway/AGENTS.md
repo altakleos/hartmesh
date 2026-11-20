@@ -217,7 +217,10 @@ legacy shadow root when a qualified storage adapter is unavailable.
 Trials require explicit manual dispatch on `/workspace/scheduled-tasks`; chat tool prose never authorizes execution.
 
 Search (`/api/search`, message `around`) qualifies current instance Inspect after
-history/provider I/O, including title-only hits. Search providers consume only
+history/provider I/O. Rank title candidates within the store scope, then recheck
+returned hits and the pagination boundary. Expose only the IM provider label
+from channel metadata. Features and search use the same ready-provider and
+`runs:read` predicate (absent `ready` supports older providers). Search providers consume only
 the owner-scoped visible corpus. Public conversation shares and approval runtime
 remain unregistered. Project memory requires explicit enablement; its legacy SQL
 API passes `hm.projects` storage admission and returns 501 for plugin-owned

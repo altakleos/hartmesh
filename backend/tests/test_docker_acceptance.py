@@ -322,11 +322,12 @@ def test_hosted_measurement_rejects_other_image_sources_and_commits():
             runner.check_preview_image(name, ref, "example/HartMesh", "a" * 40, revision)
 
 
-def test_preview_measurement_checks_each_candidate_before_starting_services(monkeypatch, tmp_path):
+@pytest.mark.parametrize(("mode", "receipt_name"), [(["--measure-previews"], "preview-result.json"), (["--measure-titles", "--stores", "postgres-redis"], "title-search-result.json")])
+def test_measurement_checks_each_candidate_before_starting_services(monkeypatch, tmp_path, mode, receipt_name):
     runner = load(ROOT / "scripts/docker_acceptance.py")
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     refs = [f"ghcr.io/example/hartmesh-{name}@sha256:" + "b" * 64 for name in ("backend", "frontend")]
-    args = runner.parse_args(["--measure-previews", "--backend-image", refs[0], "--frontend-image", refs[1], "--artifacts", str(tmp_path)])
+    args = runner.parse_args([*mode, "--backend-image", refs[0], "--frontend-image", refs[1], "--artifacts", str(tmp_path)])
     for key, value in {"GITHUB_REPOSITORY": "example/HartMesh", "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_SHA": revision, "GITHUB_RUN_ID": "7", "GITHUB_RUN_ATTEMPT": "1", "GH_TOKEN": "fixture"}.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(runner, "inspect_image", lambda ref, **kwargs: {"requested": ref, "source_revision": revision})
@@ -345,7 +346,7 @@ def test_preview_measurement_checks_each_candidate_before_starting_services(monk
 
     monkeypatch.setattr(runner, "run", record)
     assert runner.run_profile(args) == 1
-    receipt = json.loads((tmp_path / "preview-result.json").read_text())
+    receipt = json.loads((tmp_path / receipt_name).read_text())
     assert receipt["error"] == "candidate was built for another version"
     for command, name, ref in zip(verified, ("backend", "frontend"), refs, strict=True):
         for option, expected in (("--component", name), ("--image", ref), ("--revision", revision), ("--version", receipt["release_version"]), ("--repository", "example/HartMesh")):
@@ -467,3 +468,47 @@ def test_both_source_profiles_build_once_verify_identity_and_clean_owned_images(
     assert len([command for command in commands if command[:3] == ["docker", "image", "rm"]]) == 2
     if failure is None:
         assert profiles[0][1] == profiles[1][1]
+
+
+def test_title_measurement_uses_bundle_postgres_and_binds_source_or_candidate(tmp_path, monkeypatch):
+    runner = load(ROOT / "scripts/docker_acceptance.py")
+    args = ["--measure-titles", "--stores", "postgres-redis"]
+    assert runner.parse_args(args).measure_titles
+    refs = ["--backend-image", "example/backend@sha256:" + "a" * 64, "--frontend-image", "example/frontend@sha256:" + "b" * 64]
+    assert runner.parse_args([*args, *refs]).measure_titles
+    for invalid in (["--measure-titles"], [*args, "--measure-previews", *refs]):
+        with pytest.raises(SystemExit):
+            runner.parse_args(invalid)
+    bundle = yaml.safe_load((ROOT / "deploy/compose/compose.yaml").read_text())["services"]
+    base = yaml.safe_load((ROOT / "docker/acceptance/compose.yaml").read_text())["services"]["gateway"]
+    overlay = yaml.safe_load((ROOT / "docker/acceptance/title-search/compose.yaml").read_text())["services"]
+    for key in ("mem_limit", "memswap_limit", "pids_limit", "cpus"):
+        assert base[key] == bundle["gateway"][key]
+    for key in ("image", "command", "mem_limit", "memswap_limit", "pids_limit"):
+        assert overlay["postgres"][key] == bundle["postgres"][key]
+    db_config = yaml.safe_load((ROOT / "docker/acceptance/title-search/event-storage.yaml").read_text())
+    assert db_config["run_events"] == yaml.safe_load((ROOT / "deploy/compose/config.yaml").read_text())["run_events"]
+    monkeypatch.setattr(runner, "TITLE_SEARCH_PATHS", ("missing-title-search-fixture",))
+    assert runner.run_profile(runner.parse_args([*args, *refs, "--artifacts", str(tmp_path)])) == 1
+    receipt = json.loads((tmp_path / "title-search-result.json").read_text())
+    assert receipt["status"] == "failed"
+    assert "missing-title-search-fixture" in receipt["error"]
+
+
+def test_title_source_checkout_contains_the_overlay_used_in_the_gateway_config(tmp_path, monkeypatch):
+    runner = load(ROOT / "scripts/docker_acceptance.py")
+    args = runner.parse_args(["--measure-titles", "--stores", "postgres-redis", "--artifacts", str(tmp_path)])
+
+    def before_docker(command, *, env, **kwargs):
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 1)
+        assert command == ["docker", "info"]
+        generated = yaml.safe_load(Path(env["ACCEPTANCE_TITLE_CONFIG"]).read_text())
+        assert generated["run_events"] == {"backend": "db"}
+        raise RuntimeError("checked generated fixture")
+
+    monkeypatch.setattr(runner, "run", before_docker)
+    assert runner.run_profile(args) == 1
+    assert json.loads((tmp_path / "title-search-result.json").read_text())["error"] == "checked generated fixture"
+    overlay = "docker/acceptance/title-search/event-storage.yaml"
+    assert subprocess.run(["git", "ls-files", "--error-unmatch", "--", overlay], cwd=ROOT, capture_output=True).returncode == 0

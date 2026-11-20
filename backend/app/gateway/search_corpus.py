@@ -27,6 +27,16 @@ def visible_search_text(row: dict, *, thread_id: str):
     return visible
 
 
+def available_message_search_provider(request):
+    """Return the registered provider when both caller and service are ready."""
+    providers = getattr(getattr(request.app.state, "extensions", None), "workspace_search_providers", ())
+    auth = getattr(request.state, "auth", None)
+    if not providers or auth is None or not auth.has_permission("runs", "read"):
+        return None
+    provider = providers[0][1]
+    return provider if getattr(provider, "ready", True) is True else None
+
+
 class GatewaySearchCorpus:
     def __init__(self, thread_store, event_store, run_manager, user_id: str, *, request=None):
         self.thread_store = thread_store
@@ -36,7 +46,10 @@ class GatewaySearchCorpus:
         self.request = request
 
     async def threads(self) -> tuple[SearchThread, ...]:
-        result = []
+        return tuple([thread async for thread in self.listed_threads() if await self.owns(thread)])
+
+    async def listed_threads(self):
+        """List store-scoped candidates. The caller checks selected hits before disclosure."""
         offset = 0
         while True:
             rows = await self.thread_store.search(user_id=self.user_id, limit=200, offset=offset)
@@ -44,12 +57,10 @@ class GatewaySearchCorpus:
                 metadata = row.get("metadata") or {}
                 if metadata.get("deerflow_sidecar") is True:
                     continue
-                candidate = self.project_thread(row)
-                if await self.owns(candidate):
-                    result.append(candidate)
+                yield self.project_thread(row)
             offset += len(rows)
             if len(rows) < 200:
-                return tuple(result)
+                return
 
     @staticmethod
     def project_thread(row) -> SearchThread:
@@ -100,9 +111,14 @@ class GatewaySearchCorpus:
 
         await ensure_checkpoint_history_seeded(self.request, thread_id=thread.thread_id, assistant_id=row.get("assistant_id"))
 
-    async def owns(self, thread: SearchThread) -> bool:
+    async def admitted_row(self, thread: SearchThread) -> dict | None:
         row = await self.thread_store.get(thread.thread_id, user_id=self.user_id)
-        return bool(row and str(row.get("incarnation") or row.get("created_at") or "") == thread.incarnation and (row.get("metadata") or {}).get("deerflow_sidecar") is not True and await self._inspect(thread.thread_id))
+        if row and str(row.get("incarnation") or row.get("created_at") or "") == thread.incarnation and (row.get("metadata") or {}).get("deerflow_sidecar") is not True and await self._inspect(thread.thread_id):
+            return row
+        return None
+
+    async def owns(self, thread: SearchThread) -> bool:
+        return await self.admitted_row(thread) is not None
 
     async def revision(self, thread: SearchThread) -> str | None:
         if not await self.owns(thread):

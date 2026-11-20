@@ -23,6 +23,7 @@ from app.gateway.deps import get_config, get_current_user_from_request
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.routers.thread_activity import thread_activity_available
 from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
+from app.gateway.search_corpus import available_message_search_provider
 from app.telegram_bots.router import telegram_feature
 from deerflow.config.app_config import AppConfig
 from deerflow.config.tenant_bundle import MAX_COMPANY_NAME_CHARS, MAX_SUPPORT_URL_CHARS, TenantBundle, configured_tenant_bundle
@@ -242,6 +243,7 @@ class FeaturesResponse(BaseModel):
     scheduled_tasks: ScheduledTasksFeature
     thread_activity: ThreadActivityFeature
     run_inputs: bool = False
+    message_search: bool = False
 
 
 @router.get(
@@ -284,6 +286,7 @@ async def list_features(request: Request, response: Response, config: AppConfig 
         accounts=accounts,
         agent_instances=instances,
         people_search=people_search,
+        message_search=available_message_search_provider(request) is not None,
         customer_administration=await _customer_administration_feature(request, config),
         run_inputs=getattr(getattr(request.app.state, "run_manager", None), "input_store", None) is not None,
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),

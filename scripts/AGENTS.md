@@ -449,6 +449,11 @@ signed candidate provenance, version, source revision and running image IDs. Kee
 journey, observations and receipt distinct from ordinary release acceptance.
 Only the disposable measurement stack loads its finite sample projector.
 
+Title measurement uses PostgreSQL with the distribution image, settings and
+limits. Pull requests measure source builds, and dispatch verifies signed
+candidate digests. Seed the disposable database with the image's ORM; exercise
+the real signed-in search route through ingress. Persist timing samples on failure.
+
 ## Storage preparation
 
 `storage_spaces_volume.py` imports the harness `prepare_volumes` implementation

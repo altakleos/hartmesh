@@ -119,6 +119,7 @@ def test_features_reports_agents_api_enabled(monkeypatch) -> None:
         "accounts": {"seats": {"allowed": 0, "in_use": 0}},
         "agent_instances": {"enabled": False, "execution": "unavailable", "reason": None, "ai_assistants": {"per_user": 0, "allowed": 0, "in_use": 0, "mine": 0}, "ai_employees": {"allowed": 0, "in_use": 0}},
         "people_search": "prefix",
+        "message_search": False,
         "customer_administration": {"plugin_management": False, "local_skill_management": False, "local_mcp_management": False, "provider_operations": False},
         "agents_api": {"enabled": True},
         "run_inputs": False,
@@ -309,6 +310,7 @@ def test_features_reports_agents_api_disabled(monkeypatch) -> None:
         "accounts": {"seats": {"allowed": 0, "in_use": 0}},
         "agent_instances": {"enabled": False, "execution": "unavailable", "reason": None, "ai_assistants": {"per_user": 0, "allowed": 0, "in_use": 0, "mine": 0}, "ai_employees": {"allowed": 0, "in_use": 0}},
         "people_search": "prefix",
+        "message_search": False,
         "customer_administration": {"plugin_management": False, "local_skill_management": False, "local_mcp_management": False, "provider_operations": False},
         "agents_api": {"enabled": False},
         "run_inputs": False,
@@ -618,3 +620,37 @@ def test_features_reports_thread_activity_only_with_sql_persistence(run_store, r
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json()["thread_activity"] == {"available": available}
+
+
+@pytest.mark.parametrize(
+    ("provider", "read_runs", "expected"),
+    [(None, True, False), (SimpleNamespace(), True, True), (SimpleNamespace(ready=True), True, True), (SimpleNamespace(ready=False), True, False), (SimpleNamespace(ready=1), True, False), (SimpleNamespace(), False, False)],
+)
+def test_message_search_feature_uses_the_same_caller_and_ready_provider_as_search(provider, read_runs, expected):
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.auth.models import User
+    from app.gateway.authz import AuthContext
+    from app.gateway.routers import search
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
+    user = User(email="reader@example.com")
+    app = _app_with_config(agents_api_enabled=True)
+    app.include_router(search.router)
+    app.state.extensions = SimpleNamespace(workspace_search_providers=(("test", provider),) if provider else ())
+    app.state.thread_store = MemoryThreadMetaStore(InMemoryStore())
+    app.state.run_event_store = MemoryRunEventStore()
+    app.state.run_manager = object()
+
+    @app.middleware("http")
+    async def authenticate(request, call_next):
+        request.state.auth = AuthContext(user=user, permissions=["threads:read", *(["runs:read"] if read_runs else [])])
+        return await call_next(request)
+
+    with TestClient(app) as client:
+        assert client.get("/api/features").json()["message_search"] is expected
+        query = {"query": "example", "types": ["thread"] if expected else ["thread", "message"]}
+        result = client.post("/api/search", json=query)
+        assert result.status_code == 200
+        assert result.json()["messages_available"] is expected

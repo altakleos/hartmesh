@@ -287,6 +287,28 @@ Rebuild and remeasure if an image input changes. Repeat the measurement if
 its harness changes. A bundle-only evidence or presentation configuration
 commit can reuse the measured images when all image and harness inputs match.
 
+### Conversation title search measurements
+
+Pull requests changing the title search measurement or its search handler build
+the production images from tracked source and exercise a disposable PostgreSQL
+stack. For release delivery, dispatch the same journey on the candidate
+build commit after signed image verification is available:
+
+```sh
+gh workflow run title-search-measurement.yml --repo altakleos/hartmesh --ref <candidate-branch> \
+  -f backend_image=<backend-repository>@sha256:<digest> \
+  -f frontend_image=<frontend-repository>@sha256:<digest>
+```
+
+The signed-in reader has 2,000 conversations. The browser opens an older
+matching title, and the runner measures 60 search requests through nginx after
+warmup. Record the nearest-rank p95, the 300 ms limit, the actual container
+limits, both running image digests, the source commit and workflow attempt
+from `title-search-result.json` and `title-search-observations.json`. A miss
+requires fixing and remeasuring the title path before the release. These
+measurements use hosted runner hardware. Continue normal two-store
+qualification after pinning the measured images.
+
 ### The sandbox base image
 
 `docker/sandbox/Dockerfile` builds on upstream's all-in-one sandbox image,
