@@ -49,26 +49,41 @@ class RunInputs:
             raise InputConflict("Run input application requires its owning worker")
         return await self.store.mutate_run_inputs(self.run_id, change, user_id=self.user_id, owner_worker_id=self.worker_id if owned else None)
 
-    async def submit(self, request_id: str, text: str, mode: Literal["queue", "steer"], *, context: dict | None = None, source: Literal["user", "extension"] = "user") -> dict:
+    async def submit(self, request_id: str, text: str, mode: Literal["queue", "steer"], *, context: dict | None = None, source: Literal["user", "extension"] = "user", source_package: str | None = None) -> dict:
         if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > MAX_INPUT_BYTES:
             raise InputConflict("Input must contain text of at most 16 KiB")
         if mode not in ("queue", "steer") or not isinstance(request_id, str) or not 1 <= len(request_id) <= 96:
             raise InputConflict("Invalid input mode or request ID")
+        if source_package is not None:
+            from deerflow.runtime.run_origin import admit_origin
+
+            if source != "extension" or admit_origin({"kind": "extension", "namespace": source_package}) is None:
+                raise InputConflict("Invalid package input source")
         context = copy.deepcopy(context or {}) if mode == "queue" else {}
 
         def change(state, row):
             old = next((x for x in state["items"] if x["id"] == request_id), None)
             if old is not None:
-                if (old["text"], old["mode"], old.get("context", {}), old.get("source", "user")) != (text, mode, context, source):
+                if (old["text"], old["mode"], old.get("context", {}), old.get("source", "user"), old.get("source_package")) != (text, mode, context, source, source_package):
                     raise InputConflict("Request ID already belongs to different input")
                 return
             if state["closed"] or row.get("status") not in ("pending", "running") or row.get("operation_kind", "run") != "run" or row.get("cancel_action"):
                 raise InputConflict("Run is finishing or stopped; this input was not accepted")
             if len(state["items"]) >= MAX_INPUTS or sum(len(x["text"].encode("utf-8")) for x in state["items"]) + len(text.encode("utf-8")) > MAX_TOTAL_BYTES:
                 raise InputConflict("Too many inputs for this Run; wait for it to finish")
-            state["items"].append(
-                {"id": request_id, "text": text, "mode": mode, "context": context, "source": source, "status": "pending", "message_id": str(uuid5(NAMESPACE_URL, f"deerflow-input:{self.run_id}:{request_id}")), "created_at": now_iso()}
-            )
+            entry = {
+                "id": request_id,
+                "text": text,
+                "mode": mode,
+                "context": context,
+                "source": source,
+                "status": "pending",
+                "message_id": str(uuid5(NAMESPACE_URL, f"deerflow-input:{self.run_id}:{request_id}")),
+                "created_at": now_iso(),
+            }
+            if source_package is not None:
+                entry["source_package"] = source_package
+            state["items"].append(entry)
 
         state = await self._change(change)
         return next(x for x in state["items"] if x["id"] == request_id)

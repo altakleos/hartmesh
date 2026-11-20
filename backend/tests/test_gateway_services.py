@@ -3206,7 +3206,7 @@ def test_inject_authenticated_user_context_strips_internal_spoofed_attribution()
     assert "oauth_id" not in config["context"]
 
 
-async def _capture_start_run_graph_input(body, *, auth_source=None):
+async def _capture_start_run_graph_input(body, *, auth_source=None, captured_context=None):
     from types import SimpleNamespace
     from unittest.mock import patch
 
@@ -3237,6 +3237,9 @@ async def _capture_start_run_graph_input(body, *, auth_source=None):
 
     async def fake_run_agent(*args, **kwargs):
         captured["graph_input"] = kwargs["graph_input"]
+        if captured_context is not None:
+            captured_context["execution"] = kwargs["ctx"].agent_execution
+            captured_context["metadata"] = kwargs["config"]["metadata"]
 
     with (
         patch("app.gateway.services.resolve_agent_factory", return_value=object()),
@@ -6411,3 +6414,126 @@ async def test_start_run_forwards_sanitized_client_context_to_runtime_context_on
     assert stored["kwargs"]["config"] == expected_stored_config
     assert record.kwargs["config"] == expected_stored_config
     assert body.config == original_config
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("listed", [True, False])
+async def test_package_employee_turn_binds_its_human_and_durable_run_at_admission(monkeypatch, _stub_app_config, listed):
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    from test_agent_execution_runtime import execution
+
+    from app.gateway import agent_conversations, services
+    from app.gateway.run_models import RunCreateRequest
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    bound = replace(execution(), authority=SimpleNamespace(instances=SimpleNamespace(residents=None), validate=AsyncMock(), admit=AsyncMock()), thread_id="thread-command-test")
+    monkeypatch.setattr(agent_conversations, "execution_for_run", AsyncMock(return_value=bound))
+    get_context = services.get_run_context
+
+    def fixture_context(request):
+        ctx = get_context(request)
+        cfg = ctx.app_config.model_copy(update={"agent_connections": SimpleNamespace(packages=["calendar"] if listed else [])})
+        return replace(ctx, app_config=cfg)
+
+    monkeypatch.setattr(services, "get_run_context", fixture_context)
+    start = services.start_run
+    admitted = {}
+
+    async def with_package(body, thread_id, request):
+        request.state.run_origin = {"kind": "extension", "namespace": "calendar"}
+        request.app.state.extensions = SimpleNamespace(plugins=[(None, SimpleNamespace(namespace="calendar"))])
+        request.state.user = SimpleNamespace(id=bound.requester.subject_id, system_role="user")
+        await request.app.state.thread_store.create(thread_id, user_id=bound.requester.subject_id)
+        result = await start(body, thread_id, request, idempotency_key="example-package-submission")
+        await result.task
+        retry = await start(body, thread_id, request, idempotency_key="example-package-submission")
+        assert retry.run_id == result.run_id
+        admitted["record"] = result
+        return result
+
+    monkeypatch.setattr(services, "start_run", with_package)
+    msg = {"role": "user", "id": "prior-message", "content": "Review an example appointment"}
+    context = {}
+    graph = await _capture_start_run_graph_input(RunCreateRequest(input={"messages": [msg]}, config={"metadata": {"deerflow_package_turn": {"example": "discard"}}}), auth_source="session", captured_context=context)
+    origin = context["execution"].connection_origin
+    assert (origin.package if origin else None) == ("calendar" if listed else None)
+    record = admitted["record"]
+    human = graph["messages"][0]
+    assert human.id != "prior-message"
+    assert record.kwargs["input"]["messages"][0]["id"] == human.id
+    assert context["metadata"]["deerflow_package_turn"] == record.metadata["deerflow_package_turn"]
+    assert "deerflow_package_turn" not in record.kwargs["config"]["metadata"]
+    assert record.metadata[DEERFLOW_ORIGIN_KEY] == {"kind": "extension", "namespace": "calendar"}
+    assert record.metadata["deerflow_package_turn"] == {"run_id": record.run_id, "message_ids": [human.id]}
+    assert human.additional_kwargs["deerflow_package_origin"] == {"package": "calendar", "user_id": bound.requester.subject_id, "run_id": record.run_id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [("web", "message"), ("assignment", "assignment"), ("telegram", "message"), ("internal", None), ("schedule", 501), ("batch", 422)],
+)
+async def test_employee_worker_receives_only_its_host_admitted_connection_origin(monkeypatch, _stub_app_config, source, expected):
+    from dataclasses import replace
+    from unittest.mock import AsyncMock, Mock
+
+    from fastapi import HTTPException, Request
+    from test_agent_execution_runtime import execution
+
+    from app.gateway import agent_conversations, services
+    from app.gateway.routers import thread_runs
+    from app.gateway.run_models import RunCreateRequest
+    from deerflow.agent_instances.conversations import AgentConversations
+    from deerflow.agent_instances.work_execution import WorkAttempt
+
+    bound = execution()
+    owner = bound.requester.subject_id
+    authority = Mock(spec=AgentConversations)
+    authority.instances = SimpleNamespace(residents=None)
+    authority.binding = AsyncMock(return_value=("fixture", "fixture"))
+    authority.allowed = AsyncMock(return_value=True)
+    bound = replace(bound, authority=authority, thread_id="thread-command-test")
+    monkeypatch.setattr(agent_conversations, "execution_for_run", AsyncMock(return_value=bound))
+    start = services.start_run
+    context = {}
+
+    async def admit(body, thread_id, fixture_request):
+        route = next(route for route in thread_runs.router.routes if route.name == "create_run")
+        app = fixture_request.app
+        request = Request({"type": "http", "app": app, "headers": [], "state": {}, "route": route, "path": "/", "method": "POST"})
+        request.state.auth_source = "internal" if source in {"telegram", "internal", "schedule"} else "session"
+        request.state.user = SimpleNamespace(id=owner, system_role="user")
+        if source == "telegram":
+            request.state.user = SimpleNamespace(id="channel", system_role=services.INTERNAL_SYSTEM_ROLE)
+            app.state.agent_conversations = authority
+            monkeypatch.setattr(services, "live_channel_human", AsyncMock(return_value=owner))
+            monkeypatch.setattr(services, "resolve_trusted_internal_owner_for_attribution", AsyncMock(return_value=None))
+        if source == "batch":
+            request.state.durable_batch_followup = True
+            request.state.run_origin = {"kind": "subagent_batch"}
+        attempt = WorkAttempt(AsyncMock(), "work", "attempt") if source == "assignment" else None
+        await app.state.thread_store.create(thread_id, user_id=owner)
+        return await start(body, thread_id, request, work_attempt=attempt)
+
+    monkeypatch.setattr(services, "start_run", admit)
+    metadata = {"deerflow_origin": {"kind": "im_channel", "provider": "telegram"}} if source == "telegram" else {}
+    if source == "schedule":
+        metadata = {"scheduled_task_id": "sample", "deerflow_origin": {"kind": "schedule"}}
+    body = RunCreateRequest(
+        metadata=metadata,
+        input={"messages": [{"role": "user", "content": "Review a fixture"}]},
+        context={"channel_name": "telegram"} if source == "telegram" else {},
+        channel_execution={"version": 1, "publication_id": "b" * 32} if source == "telegram" else None,
+        on_disconnect="continue",
+    )
+    if isinstance(expected, int):
+        with pytest.raises(HTTPException) as error:
+            await _capture_start_run_graph_input(body, captured_context=context)
+        assert error.value.status_code == expected
+        assert context == {}
+    else:
+        await _capture_start_run_graph_input(body, captured_context=context)
+        origin = context["execution"].connection_origin
+        assert (origin.kind if origin else None) == expected

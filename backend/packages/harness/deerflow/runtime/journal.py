@@ -1899,6 +1899,45 @@ class RunJournal(BaseCallbackHandler):
         self._first_human_message_captured = True
         self._first_human_msg = content[:2000] if content else None
 
+    async def record_connection_call(self, changes: dict) -> None:
+        """Confirm this call event committed before the caller may continue."""
+        loop = self._owner_loop
+        if loop is None or loop.is_closed() or not loop.is_running():
+            raise RuntimeError("The connection call journal is unavailable")
+        if asyncio.get_running_loop() is not loop:
+            operation = self.record_connection_call(dict(changes))
+            try:
+                future = asyncio.run_coroutine_threadsafe(operation, loop)
+            except RuntimeError:
+                operation.close()
+                raise
+            await asyncio.wrap_future(future)
+            return
+        store = self._store
+        if self._closed or self._owned_producers_closed() or not self._accepting_evidence or getattr(store, "supports_durable_output_evidence", False) is not True:
+            raise RuntimeError("The connection call journal is unavailable")
+        from deerflow.runtime.events.producer import producer_scope
+
+        event_type = MIDDLEWARE_EVENT_PATTERN.event_type("connection_call")
+        content = {"name": "CompanyConnection", "hook": "tool_call", "action": changes["outcome"], "changes": dict(changes)}
+        event = self._make_event(event_type=event_type, category=MIDDLEWARE_EVENT_PATTERN.category, content=content)
+        with producer_scope(self._event_producer):
+            receipts = await self._put_batch(store, [event])
+        if len(receipts) != 1 or any(receipts[0].get(key) != event[key] for key in ("thread_id", "run_id", "event_type", "category", "content", "user_id") if key in event) or type(receipts[0].get("seq")) is not int:
+            raise RuntimeError("The connection call journal did not confirm the event")
+        self._feed_generation += 1
+        # Use only the receipt's identifiers and classified outcome. The model
+        # arguments, transport configuration and raw errors never reach logs.
+        correlation = {key: changes.get(key) for key in ("connection_id", "connection_name", "instance_id", "call_id", "origin", "package", "outcome", "reason")}
+        correlation.update(run_id=self.run_id, thread_id=self.thread_id, user_id=receipts[0].get("user_id"))
+        correlation = {key: "".join(c if c.isprintable() else " " for c in value[:192]) if isinstance(value, str) else None for key, value in correlation.items()}
+        logger.info(
+            "Company connection call recorded run=%(run_id)s thread=%(thread_id)s user=%(user_id)s connection=%(connection_id)s name=%(connection_name)s "
+            "instance=%(instance_id)s call=%(call_id)s origin=%(origin)s package=%(package)s outcome=%(outcome)s reason=%(reason)s",
+            correlation,
+            extra=correlation,
+        )
+
     def record_middleware(self, tag: str, *, name: str, hook: str, action: str, changes: dict) -> None:
         """Record a middleware state-change event.
 

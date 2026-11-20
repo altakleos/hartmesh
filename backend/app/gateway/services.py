@@ -33,6 +33,7 @@ from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNA
 from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
 from app.gateway.channel_execution import CHANNEL_TURN_ID_KEY, ChannelExecutionProofError, ChannelExecutionReceipt, ChannelExecutionRequest, receipt_from_run_kwargs
 from app.gateway.channel_execution_reads import channel_lookup_unavailable, live_channel_human
+from app.gateway.company_connection_runs import PACKAGE_MESSAGE_KEY, PACKAGE_TURN_KEY, admitted_connection_origin, package_name_for_turn, stamp_package_turn
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.internal_auth import (
@@ -196,6 +197,7 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             # Only the scheduler's internal launch may mark a message as a
             # scheduled run prompt.
             SCHEDULED_ORIGIN_KEY,
+            PACKAGE_MESSAGE_KEY,
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
@@ -644,7 +646,7 @@ def _normalize_input_messages(
         # A publication marker is stamped only after validated channel
         # admission. Even trusted internal callers cannot bring one through
         # the ordinary message input or reuse an old anchor's marker.
-        reserved = _OUTPUT_PROOF_CLAIM_KEYS | {CHANNEL_TURN_ID_KEY}
+        reserved = _OUTPUT_PROOF_CLAIM_KEYS | {CHANNEL_TURN_ID_KEY, PACKAGE_MESSAGE_KEY}
         if reserved & message.additional_kwargs.keys():
             message = message.model_copy(update={"additional_kwargs": {key: value for key, value in message.additional_kwargs.items() if key not in reserved}})
         if not trusted_internal:
@@ -2699,6 +2701,7 @@ async def _start_run(
     if publication is not None:
         owner_user_id = publication_owner
         require_existing_thread = True
+    origin = resolve_request_origin(request, body.metadata)
     instance_execution = await execution_for_run(request, thread_id, require_ready=work_attempt is None)
     if instance_execution is not None and getattr(request.state, "durable_batch_followup", False) is True:
         raise HTTPException(422, "Automatic batch follow-ups are unavailable for instance conversations")
@@ -2715,6 +2718,16 @@ async def _start_run(
             raise HTTPException(409, "An instance conversation uses its adopted lead definition")
         require_existing_thread = True
         owner_user_id = instance_execution.requester.subject_id
+        connection_origin = admitted_connection_origin(
+            request,
+            body.metadata,
+            origin,
+            assignment=work_attempt is not None,
+            config=run_ctx.app_config,
+            extensions=getattr(request.app.state, "extensions", None),
+            telegram=publication is not None and (body.context or {}).get("channel_name") == "telegram",
+        )
+        instance_execution = replace(instance_execution, connection_origin=connection_origin)
         run_ctx = replace(run_ctx, agent_execution=instance_execution, mcp_task_repo=None, on_run_completed=None)
         if body.multitask_strategy != "reject":
             from app.gateway.agent_conversations import require_conversation
@@ -2788,8 +2801,8 @@ async def _start_run(
         # and both metadata forks drop any client copy. build_run_config merges
         # body.config["metadata"] into the live config, so the second pop below
         # is what keeps a forged value out of the live run config.
-        origin = resolve_request_origin(request, body.metadata)
         run_metadata = _admit_scheduler_metadata(_without_output_proof_claims(_without_channel_marker(body.metadata)), trusted=scheduled_task_runtime is not None)
+        run_metadata.pop(PACKAGE_TURN_KEY, None)
         run_metadata.pop(DEERFLOW_ORIGIN_KEY, None)
         if origin is not None:
             run_metadata[DEERFLOW_ORIGIN_KEY] = origin
@@ -2804,6 +2817,8 @@ async def _start_run(
         request_config = _without_output_proof_config(body.config)
         if isinstance(request_config, dict) and "metadata" in request_config:
             request_config["metadata"] = _without_channel_marker(request_config["metadata"])
+            if isinstance(request_config["metadata"], dict):
+                request_config["metadata"].pop(PACKAGE_TURN_KEY, None)
         try:
             config = await await_drained(run_file_io(build_run_config, thread_id, request_config, run_metadata, assistant_id=body.assistant_id, app_config=app_config))
         except ValueError as exc:
@@ -2811,6 +2826,7 @@ async def _start_run(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if isinstance(config.get("metadata"), dict):
             config["metadata"] = _admit_scheduler_metadata(config["metadata"], trusted=scheduled_task_runtime is not None)
+            config["metadata"].pop(PACKAGE_TURN_KEY, None)
             config["metadata"].pop(DEERFLOW_ORIGIN_KEY, None)
             if origin is not None:
                 config["metadata"][DEERFLOW_ORIGIN_KEY] = origin
@@ -2928,6 +2944,12 @@ async def _start_run(
                 thread_id=thread_id,
                 assistant_id=body.assistant_id,
             )
+        admission_run_id = str(uuid.uuid4())
+        package = package_name_for_turn(request, origin) if instance_execution is not None else None
+        if package:
+            stamp_package_turn(graph_input, run_metadata, package=package, user_id=instance_execution.requester.subject_id, run_id=admission_run_id)
+            if PACKAGE_TURN_KEY in run_metadata:
+                config.setdefault("metadata", {})[PACKAGE_TURN_KEY] = run_metadata[PACKAGE_TURN_KEY]
         run_record_input = _canonical_run_record_input(body.input, graph_input)
 
         internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
@@ -3269,7 +3291,6 @@ async def _start_run(
                     # cannot both succeed across Gateway workers.
                     if require_existing_thread and not await thread_access_allowed():
                         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
-                    admission_run_id = str(uuid.uuid4())
                     start_producer_lease = _declared_bridge_method(
                         bridge,
                         "start_producer_lease",
@@ -3304,6 +3325,7 @@ async def _start_run(
                             # config built above keeps the secrets for the actual run.
                             kwargs={
                                 "input": run_record_input,
+                                **({"package_input_hash": knowledge_default_request_hash} if package and idempotency_key else {}),
                                 **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
                                 "config": redact_config_secrets(request_config),
                                 **({OUTPUT_CAPTURE_KEY: capture_intent_to_dict(capture_intent)} if capture_intent is not None else {}),
@@ -3369,7 +3391,8 @@ async def _start_run(
                         # today's default; explicit scopes and recovery do not use
                         # this compatibility path.
                         matches_legacy_default_request = accepts_knowledge_default and "knowledge_default_request_hash" not in stored and stored_input == request_input
-                        matches_input = matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == request_input or stored_input == run_record_input
+                        matches_package_request = package and knowledge_default_request_hash and stored.get("package_input_hash") == knowledge_default_request_hash
+                        matches_input = matches_package_request or matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == request_input or stored_input == run_record_input
                     if not matches_idempotency_request or not matches_input or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
                         raise HTTPException(
                             status_code=409,
