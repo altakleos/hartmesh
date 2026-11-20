@@ -86,19 +86,22 @@ def test_assignment_waits_for_each_new_address_and_for_a_confirmed_refusal(monke
     nonce = "c" * 32
     context = json.dumps({"work": {"id": "a" * 32, "attempt": {"id": "b" * 32}, "revision": 2, "objective": "acceptance:work:notices:" + nonce}})
 
-    def next_tool(*results):
+    def next_tool(*results, last_name="notices_read_notice", last_id=None):
+        from langchain_core.messages import AIMessage, ToolMessage
+        from langchain_openai.chat_models.base import _convert_message_to_dict
+
         names = ["read_work_context", "report_work", "notices_read_notice"]
-        reply_data = reply(
-            {
-                "tools": [{"function": {"name": name}} for name in names],
-                "messages": [
-                    {"role": "system", "content": "- This run works on an assignment, and no person is waiting in this conversation."},
-                    {"role": "user", "content": "Execute the work."},
-                    {"role": "tool", "name": "read_work_context", "content": context},
-                    *({"role": "tool", "name": "notices_read_notice", "content": data} for data in results),
-                ],
-            }
-        )
+        messages = [
+            {"role": "system", "content": "- This run works on an assignment, and no person is waiting in this conversation."},
+            {"role": "user", "content": "Execute the work."},
+        ]
+        for index, content in enumerate((context, *results)):
+            name = "read_work_context" if index == 0 else last_name if index == len(results) else "notices_read_notice"
+            call_id = f"call_work_{index}"
+            assistant = AIMessage(content="", tool_calls=[{"id": call_id, "name": name, "args": {}}])
+            tool = ToolMessage(name=name, content=content, tool_call_id=last_id if last_id and index == len(results) else call_id)
+            messages.extend((_convert_message_to_dict(assistant), _convert_message_to_dict(tool)))
+        reply_data = reply({"tools": [{"function": {"name": name}} for name in names], "messages": messages})
         return reply_data["tool_calls"][0]["function"]["name"]
 
     first = "Notice from notices-a."
@@ -108,6 +111,18 @@ def test_assignment_waits_for_each_new_address_and_for_a_confirmed_refusal(monke
     assert waits == [nonce + "-edit"]
     assert next_tool(first, second) == "notices_read_notice"
     assert waits == [nonce + "-edit", nonce + "-revoke"]
+    def envelope(text, status="error", source="exception"):
+        return json.dumps({"deerflow_tool_meta": {"status": status, "source": source}, "content": text})
+
+    guidance = "Error: Tool 'notices_read_notice' failed: A manager took away this connection. Ask a manager if it is needed again."
+    assert next_tool(first, second, envelope(guidance)) == "report_work"
+    for unrelated in (guidance, "Server responded normally.", envelope(guidance, "success", "tool_return"), envelope("Some other dependency timed out.")):
+        with pytest.raises(ValueError):
+            next_tool(first, second, unrelated)
+    with pytest.raises(ValueError):
+        next_tool(first, second, envelope(guidance), last_name="report_work")
+    with pytest.raises(ValueError):
+        next_tool(first, second, envelope(guidance), last_id="other-call")
     with pytest.raises(ValueError):
         next_tool(first, first)
     with pytest.raises(ValueError):

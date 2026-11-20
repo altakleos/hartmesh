@@ -60,6 +60,23 @@ def tool_result_content(value: object, *, allow_preflight_failure: bool = False)
     return envelope["content"]
 
 
+def confirms_notice_revocation(assistant, result):
+    call_id = result.get("tool_call_id")
+    if call_id != "call_work_3" or assistant.get("role") != "assistant":
+        return False
+    if not any(call.get("id") == call_id and call.get("function", {}).get("name") == "notices_read_notice" for call in assistant.get("tool_calls", [])):
+        return False
+    try:
+        envelope = json.loads(result["content"])
+    except (TypeError, ValueError):
+        return False
+    return (
+        isinstance(envelope, dict)
+        and envelope.get("deerflow_tool_meta") == {"status": "error", "source": "exception"}
+        and envelope.get("content") == "Error: Tool 'notices_read_notice' failed: A manager took away this connection. Ask a manager if it is needed again."
+    )
+
+
 def reply(body: dict[str, Any]) -> dict[str, Any]:
     messages = body.get("messages", [])
     if not body.get("tools"):
@@ -90,17 +107,19 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
     file_turn = not work_turn and skill_match is None and "acceptance:file" in str(turn[0].get("content"))
     normalized = []
     tool_index = 0
+    notice_revoked = False
     for message in turn:
         if message.get("role") == "tool":
-            # Only this real read is optional. Never promote a failed upload,
-            # actual write or presentation to successful fixture progression.
-            expected_refusal = work_turn and tool_index == 3 and message.get("name") == "notices_read_notice"
-            message = {**message, "content": tool_result_content(message.get("content"), allow_preflight_failure=(file_turn and tool_index == 1) or expected_refusal)}
+            # The OpenAI tool reply identifies its assistant-issued call by ID.
+            # Allow an error only for the final scripted revocation observation.
+            if work_turn and tool_index == 3:
+                notice_revoked = confirms_notice_revocation(normalized[-1], message)
+            message = {**message, "content": tool_result_content(message.get("content"), allow_preflight_failure=(file_turn and tool_index == 1) or (tool_index == 3 and notice_revoked))}
             tool_index += 1
         normalized.append(message)
     turn = normalized
     if work_turn:
-        return work_reply(body, turn)
+        return work_reply(body, turn, notice_revoked=notice_revoked)
     if "acceptance:notice:" in str(turn[0].get("content")):
         return notice_reply(body, turn)
     if skill_match:
@@ -187,7 +206,7 @@ def notice_reply(body, turn):
     return {"tool_calls": [{"id": "call_notice", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}]}
 
 
-def work_reply(body, turn):
+def work_reply(body, turn, *, notice_revoked):
     """Stateless script of real Work tools; no application inference bypass."""
     offered = {tool.get("function", {}).get("name") for tool in body["tools"]}
     system = " ".join(str(message.get("content", "")) for message in body.get("messages", []) if message.get("role") == "system")
@@ -243,9 +262,8 @@ def work_reply(body, turn):
             if len(results) == 3:
                 final_observation(notices[1] + "-revoke")
             elif len(results) == 4:
-                refusal = results[3]["content"]
-                if not refusal.strip() or "Notice from notices-" in refusal:
-                    raise ValueError("The retired connection returned a successful notice")
+                if not notice_revoked:
+                    raise ValueError("The notice call did not confirm the manager’s revocation")
                 name, arguments = "report_work", {"report": {
                     "operation_id": hashlib.sha256((work_id + ":" + attempt_id).encode()).hexdigest()[:32], "expected_revision": revision,
                     "action": "outcome", "statement": "Read the updated notice before the connection was taken away.",
