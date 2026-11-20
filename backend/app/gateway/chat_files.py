@@ -17,7 +17,7 @@ from fastapi import HTTPException
 from app.gateway import chat_storage
 from app.gateway.routers._file_http import DescriptorFileResponse
 from deerflow.spaces.chat_paths import ChatFilesFull
-from deerflow.spaces.filesystem import FilesystemUnavailable, UnsafeSpacePath, _path
+from deerflow.spaces.filesystem import ConfinedFilesystem, FilesystemUnavailable, UnsafeSpacePath, _path
 from deerflow.utils.file_io import await_drained, run_file_io
 
 
@@ -295,6 +295,22 @@ class ChatFileResponse(DescriptorFileResponse):
                 await await_drained(run_file_io(filesystem.close))
 
 
+def settle_rollback_entry(parent_fd, name, control_fd, private, expected_fd):
+    """Remove the pinned upload from private control, or restore the competing version."""
+    current = os.stat(private, dir_fd=control_fd, follow_symlinks=False)
+    expected = os.fstat(expected_fd)
+    if (current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino):
+        os.unlink(private, dir_fd=control_fd)
+        return True
+    try:
+        ConfinedFilesystem._rename_no_replace(control_fd, private, parent_fd, name)
+        return False
+    except BaseException:
+        # Preserve the competing writer's bytes in control if another
+        # writer claimed the name during restoration. Never erase them.
+        raise FilesystemUnavailable("Upload rollback requires reconciliation; replacement bytes were preserved") from None
+
+
 class QualifiedUploadStage:
     """Private, quota-counted staging with publication through pinned parents.
 
@@ -387,18 +403,7 @@ class QualifiedUploadStage:
             self.published_name = None
             return True
         self.published_name = None
-        current = os.stat(private, dir_fd=self.filesystem._control_fd, follow_symlinks=False)
-        expected = os.fstat(self.fd)
-        if (current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino):
-            os.unlink(private, dir_fd=self.filesystem._control_fd)
-            return True
-        try:
-            self.filesystem._rename_no_replace(self.filesystem._control_fd, private, self.parent_fd, name)
-            return False
-        except BaseException:
-            # Preserve the competing writer's bytes in control if another
-            # writer claimed the name during restoration. Never erase them.
-            raise FilesystemUnavailable("Upload rollback requires reconciliation; replacement bytes were preserved") from None
+        return settle_rollback_entry(self.parent_fd, name, self.filesystem._control_fd, private, self.fd)
 
     @property
     def private_path(self):

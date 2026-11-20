@@ -68,14 +68,16 @@ class ChatUploadSession:
 
         return await await_drained(run_file_io(create))
 
-    async def _publish(self, stage, name, uploads):
+    async def _publish(self, stage, name, uploads, *, original):
         while True:
             self.access = await self.access.refresh(self.owner._request)
             try:
+                if self.owner.before_publish is not None:
+                    await self.owner.before_publish()
                 await await_drained(run_file_io(stage.publish, name))
                 return name
             except FileExistsError:
-                name = uploads.claim_unique_filename(name, self.owner._seen_filenames)
+                name = uploads.claim_unique_filename(original if self.owner.before_publish else name, self.owner._seen_filenames)
 
     async def ingest(self, chunks, *, display_name, expected_size, uploads):
         from app.gateway.upload_ingestion import UnsafeFilenameError
@@ -117,13 +119,14 @@ class ChatUploadSession:
             if markdown is not None:
                 companion = await self._stage(expected_bytes=len(markdown))
                 await await_drained(run_file_io(companion.write, markdown))
-            name = await self._publish(stage, name, uploads)
+            name = await self._publish(stage, name, uploads, original=original)
             info = {"filename": name, "size": size, "path": str(self.owner._uploads_dir / name), "virtual_path": uploads.upload_virtual_path(name), "artifact_url": uploads.upload_artifact_url(self.owner._thread_id, name)}
             if name != original:
                 info["original_filename"] = original
             if companion is not None:
-                md_name = uploads.claim_unique_filename(Path(name).with_suffix(".md").name, self.owner._seen_filenames)
-                md_name = await self._publish(companion, md_name, uploads)
+                md_original = Path(name).with_suffix(".md").name
+                md_name = uploads.claim_unique_filename(md_original, self.owner._seen_filenames)
+                md_name = await self._publish(companion, md_name, uploads, original=md_original)
                 info.update(
                     markdown_file=md_name,
                     markdown_path=str(self.owner._uploads_dir / md_name),

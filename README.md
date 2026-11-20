@@ -389,6 +389,8 @@ The export requires current personal-storage access through preparation and
 download; missing or unverified storage refuses the export without using legacy
 file folders.
 
+The Gateway can list files presented by a finished answer and attach an independent copy to another conversation you own. A repeated attachment with the same name and bytes reuses the existing file.
+
 ## Sister Projects
 
 <img width="446" height="280" alt="image" align="middle" src="https://github.com/user-attachments/assets/077edef4-d560-41af-bb0d-d0a5f14fcc20" />
