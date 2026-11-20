@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_run_event_store, get_run_manager, get_thread_store
-from app.gateway.search_corpus import GatewaySearchCorpus
+from app.gateway.search_corpus import GatewaySearchCorpus, available_message_search_provider
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,37 @@ def _encode_cursor(scope: str, phase: str, position) -> str:
     return base64.urlsafe_b64encode(json.dumps([scope, phase, position]).encode()).decode()
 
 
+def _channel_provider(row):
+    source = (row.get("metadata") or {}).get("channel_source")
+    if not isinstance(source, dict) or source.get("type") != "im_channel":
+        return None
+    provider = source.get("provider")
+    return (provider.strip().lower() or None) if isinstance(provider, str) else None
+
+
+async def _admitted_title_page(corpus, matches, limit):
+    remaining = iter(matches)
+    page = []
+    while True:
+        exhausted = True
+        for candidate in remaining:
+            if await corpus.owns(candidate):
+                page.append(candidate)
+                if len(page) > limit:
+                    exhausted = False
+                    break
+        # Finding the lookahead can yield while access, title or routing data
+        # changes. Only disclose hits and a cursor for current, matching rows.
+        confirmed = []
+        for thread in page:
+            row = await corpus.admitted_row(thread)
+            if row is not None and corpus.project_thread(row) == thread:
+                confirmed.append((thread, _channel_provider(row)))
+        if exhausted or len(confirmed) > limit:
+            return confirmed
+        page = [thread for thread, _ in confirmed]
+
+
 @router.post("/search")
 @require_permission("threads", "read")
 async def search_workspace(body: WorkspaceSearchRequest, request: Request):
@@ -72,11 +103,12 @@ async def search_workspace(body: WorkspaceSearchRequest, request: Request):
                 raise ValueError
         except (ValueError, TypeError) as exc:
             raise HTTPException(400, "Invalid search cursor") from exc
-    all_threads = await corpus.threads()
-    threads = tuple(t for t in all_threads if (body.archived is None or t.archived == body.archived) and ("project_id" not in body.model_fields_set or t.project_id == body.project_id))
-    lookup = {t.thread_id: t for t in threads}
-    providers = getattr(getattr(request.app.state, "extensions", None), "workspace_search_providers", ())
-    messages_available = bool(providers) and request.state.auth.has_permission("runs", "read")
+
+    def in_scope(thread):
+        return (body.archived is None or thread.archived == body.archived) and ("project_id" not in body.model_fields_set or thread.project_id == body.project_id)
+
+    provider = available_message_search_provider(request)
+    messages_available = provider is not None
     response = {"items": [], "cursor": None, "indexing": False, "messages_available": messages_available}
 
     async def admitted_response():
@@ -97,15 +129,31 @@ async def search_workspace(body: WorkspaceSearchRequest, request: Request):
             "snippet": snippet(thread.title, query),
         }
 
+    needle = query.casefold()
+
+    def key(thread):
+        return (2 if needle and thread.title.casefold() == needle else 1, thread.updated_at, thread.thread_id)
+
+    def matches_title(thread):
+        return needle in thread.title.casefold() and (position is None or key(thread) < tuple(position))
+
+    if "message" not in body.types:
+        if phase != "thread":
+            return response
+        # Rank the matching, store-scoped titles first. Never pass these
+        # candidates to a provider; only current admitted hits may leave.
+        matches = [thread async for thread in corpus.listed_threads() if in_scope(thread) and matches_title(thread)]
+        matches.sort(key=key, reverse=True)
+        page = await _admitted_title_page(corpus, matches, body.limit)
+        response["items"] = [{**thread_hit(thread), "channel_provider": channel} for thread, channel in page[: body.limit]]
+        if len(page) > body.limit:
+            response["cursor"] = _encode_cursor(scope, "thread", key(page[body.limit - 1][0]))
+        return response
+
+    threads = tuple(thread for thread in await corpus.threads() if in_scope(thread))
+    lookup = {t.thread_id: t for t in threads}
     if phase == "thread" and "thread" in body.types:
-
-        def key(thread):
-            title = thread.title.casefold()
-            return (2 if query and title == query.casefold() else 1, thread.updated_at, thread.thread_id)
-
-        matches = sorted((t for t in threads if not query or query.casefold() in t.title.casefold()), key=key, reverse=True)
-        if position is not None:
-            matches = [t for t in matches if key(t) < tuple(position)]
+        matches = sorted((t for t in threads if matches_title(t)), key=key, reverse=True)
         selected = matches[: body.limit]
         response["items"].extend(thread_hit(t) for t in selected)
         if len(matches) > body.limit:
@@ -116,7 +164,6 @@ async def search_workspace(body: WorkspaceSearchRequest, request: Request):
     if len(response["items"]) == body.limit:
         response["cursor"] = _encode_cursor(scope, "message", None)
         return await admitted_response()
-    provider = providers[0][1]
     provider_cursor = position if phase == "message" else None
     # Invalidated candidates must not consume a visible result slot. Keep a
     # bounded amount of work per HTTP page and expose continuation when needed.

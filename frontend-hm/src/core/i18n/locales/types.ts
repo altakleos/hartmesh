@@ -1516,9 +1516,14 @@ export interface Translations {
     deleteConfirm: (title: string) => string;
     deleteFailed: string;
     deleting: string;
-    searchChats: string;
+    searchTitles: string;
     branchLabel: (title: string, parentTitle: string) => string;
-    loadMoreToSearch: string;
+    moreResults: string;
+    moreResultsFailed: string;
+    searchFailed: string;
+    retrySearch: string;
+    searching: string;
+    noMatchingTitle: (query: string) => string;
     loadingMore: string;
     loadOlderChats: string;
     pinChat: string;

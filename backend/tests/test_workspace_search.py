@@ -395,3 +395,56 @@ async def test_search_rechecks_instance_inspect_after_transcript_reads(monkeypat
 
         monkeypatch.setattr(events, "list_messages", revoked_list)
         assert await corpus.revision(thread) is None
+
+
+@pytest.mark.anyio
+async def test_title_search_fills_page_after_revocation_and_only_rechecks_hits(monkeypatch):
+    from types import SimpleNamespace
+
+    from _router_auth_helpers import make_authed_test_app
+    from fastapi import HTTPException
+    from httpx import ASGITransport, AsyncClient
+
+    from app.gateway.auth.models import User
+    from app.gateway.routers import search
+
+    user = User(email="reader@example.com")
+    app = make_authed_test_app(user_factory=lambda: user, bind_current_user=True)
+    app.include_router(search.router)
+    store = app.state.thread_store = MemoryThreadMetaStore(InMemoryStore())
+    app.state.run_event_store = MemoryRunEventStore()
+    app.state.run_manager = manager()
+    app.state.extensions = SimpleNamespace(workspace_search_providers=())
+    seen = []
+    revoked = False
+
+    async def inspect(_request, thread_id):
+        nonlocal revoked
+        seen.append(thread_id)
+        if thread_id == "next":
+            revoked = True  # A grant changes while the route is finding the next page.
+        if thread_id == "revoked" and revoked:
+            raise HTTPException(404)
+        return True
+
+    monkeypatch.setattr("app.gateway.agent_conversations.require_conversation", inspect)
+    sources = {
+        "next": {"type": "im_channel", "provider": " Telegram ", "connection_id": "private-connection"},
+        "old": {"type": "other", "provider": "private-provider"},
+    }
+    for tid, title in (("old", "Archive needle one"), ("next", "Archive needle two"), ("revoked", "needle"), ("unrelated", "Unrelated")):
+        await store.create(tid, user_id=str(user.id), display_name=title, metadata={"channel_source": sources.get(tid)})
+    await store.create("foreign", user_id="someone-else", display_name="needle")
+    await store.create("sidecar", user_id=str(user.id), display_name="needle", metadata={"deerflow_sidecar": True})
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        query = {"query": "needle", "types": ["thread"], "limit": 1}
+        first = (await client.post("/api/search", json=query)).json()
+        assert [hit["thread_id"] for hit in first["items"]] == ["next"]
+        assert first["items"][0]["channel_provider"] == "telegram"
+        assert "private-connection" not in str(first)
+        assert first["cursor"]
+        second = (await client.post("/api/search", json={**query, "cursor": first["cursor"]})).json()
+        assert [hit["thread_id"] for hit in second["items"]] == ["old"]
+        assert second["items"][0]["channel_provider"] is None
+        assert second["cursor"] is None
+        assert "unrelated" not in seen

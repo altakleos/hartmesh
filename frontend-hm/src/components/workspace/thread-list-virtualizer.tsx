@@ -9,8 +9,6 @@ import {
   type ReactNode,
 } from "react";
 
-import type { AgentThread } from "@/core/threads/types";
-
 const VIRTUALIZATION_THRESHOLD = 60;
 
 export function calculateScrollMargin(
@@ -21,7 +19,7 @@ export function calculateScrollMargin(
   return Math.max(0, rootTop - scrollParentTop + scrollTop);
 }
 
-export function VirtualThreadList({
+export function VirtualThreadList<T extends { thread_id: string }>({
   estimateSize,
   gap = 0,
   items,
@@ -30,8 +28,8 @@ export function VirtualThreadList({
 }: {
   estimateSize: number;
   gap?: number;
-  items: readonly AgentThread[];
-  renderItem: (thread: AgentThread, index: number) => ReactNode;
+  items: readonly T[];
+  renderItem: (thread: T, index: number) => ReactNode;
   scrollParentSelector: string;
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);

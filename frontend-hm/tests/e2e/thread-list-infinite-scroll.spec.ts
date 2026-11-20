@@ -80,50 +80,97 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
     });
   });
 
-  test("chats list page does NOT auto-paginate while a search filter is active", async ({
+  for (const availability of [true, false, "missing", "unavailable"] as const) {
+    test(`search describes the title results when message search availability is ${availability}`, async ({
+      page,
+    }) => {
+      mockLangGraphAPI(page, { threads: THREADS });
+      await page.route("**/api/features", (route) =>
+        route.fulfill({
+          status: availability === "unavailable" ? 503 : 200,
+          json:
+            typeof availability === "boolean"
+              ? { message_search: availability }
+              : {},
+        }),
+      );
+      const discovered = page.waitForResponse(
+        (response) => new URL(response.url()).pathname === "/api/features",
+      );
+      await page.goto("/workspace/chats");
+      await discovered;
+      await expect(
+        page.getByRole("searchbox", { name: "Search conversation titles" }),
+      ).toBeVisible();
+      await expect(
+        page.locator("main").getByText(/message search/i),
+      ).toHaveCount(0);
+    });
+  }
+
+  test("title search finds older conversations and pages through matches without loading the chat list", async ({
     page,
   }) => {
-    // Count search requests via a passive request observer.  Using
-    // page.route() here would race with mockLangGraphAPI's fulfill route
-    // (Playwright matches routes in reverse registration order), so the
-    // counter could miss real requests.  page.on('request') is a pure
-    // observer and never interferes with routing.
-    let searchRequestCount = 0;
-    page.on("request", (request) => {
-      if (request.url().includes("/api/langgraph/threads/search")) {
-        searchRequestCount += 1;
-      }
-    });
-
     mockLangGraphAPI(page, { threads: THREADS });
-
-    await page.goto("/workspace/chats");
-
-    // Wait for the first page to render so we have a baseline count.
-    await expect(page.locator("main").getByText(FIRST_PAGE_LAST)).toBeVisible({
-      timeout: 15_000,
+    let listRequests = 0;
+    page.on("request", (request) => {
+      if (request.url().includes("/api/langgraph/threads/search"))
+        listRequests++;
     });
-    const baselineRequests = searchRequestCount;
-
-    // Type a query that matches nothing in the first page (and nothing at
-    // all, since titles are deterministic).
+    const bodies: unknown[] = [];
+    await page.route("**/api/search", async (route) => {
+      const body = route.request().postDataJSON() as { cursor?: string };
+      bodies.push(body);
+      const hit = THREADS[body.cursor ? 110 : 105]!;
+      await route.fulfill({
+        json: {
+          items: [
+            {
+              type: "thread",
+              ...hit,
+              agent_name: null,
+              channel_provider: body.cursor ? null : "telegram",
+            },
+          ],
+          cursor: body.cursor ? null : "more-matches",
+          messages_available: false,
+          indexing: false,
+        },
+      });
+    });
+    await page.goto("/workspace/chats");
+    const main = page.locator("main");
+    await expect(main.getByText(FIRST_PAGE_LAST)).toBeVisible();
+    const before = listRequests;
     await page
-      .getByPlaceholder("Search chats")
-      .fill("zzz-no-such-conversation");
-
-    // The auto-sentinel must be gone; an explicit button takes its place.
+      .getByRole("searchbox", { name: "Search conversation titles" })
+      .fill("Conversation");
     await expect(page.getByTestId("chats-page-sentinel")).toHaveCount(0);
-    await expect(page.getByTestId("chats-page-load-more")).toBeVisible();
-
-    // Give the IntersectionObserver a couple of frames to misbehave if the
-    // guard regresses.  No additional /threads/search calls should fire.
-    await page.waitForTimeout(500);
-    expect(searchRequestCount).toBe(baselineRequests);
-
-    // The explicit button still works as an escape hatch.
-    await page.getByTestId("chats-page-load-more").click();
-    await expect
-      .poll(() => searchRequestCount, { timeout: 10_000 })
-      .toBeGreaterThan(baselineRequests);
+    await expect(
+      main.getByRole("link", { name: /Conversation 106/ }),
+    ).toHaveAttribute("href", `/workspace/chats/${THREADS[105]!.thread_id}`);
+    await expect(
+      main.getByRole("link", { name: /Conversation 106/ }),
+    ).toContainText("Telegram");
+    await test.info().attach("Search conversation titles", {
+      contentType: "image/png",
+      body: await page.screenshot(),
+    });
+    await main.getByRole("button", { name: "More results" }).click();
+    await expect(
+      main.getByRole("link", { name: /Conversation 111/ }),
+    ).toBeVisible();
+    expect(bodies).toEqual([
+      { query: "Conversation", types: ["thread"], limit: 20 },
+      {
+        query: "Conversation",
+        types: ["thread"],
+        limit: 20,
+        cursor: "more-matches",
+      },
+    ]);
+    expect(listRequests).toBe(before);
+    await page.getByRole("searchbox").fill("");
+    await expect(main.getByText(FIRST_PAGE_LAST)).toBeVisible();
   });
 });

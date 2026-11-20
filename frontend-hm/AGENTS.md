@@ -23,7 +23,7 @@ is provider-only. The bilingual notice uses only configured provider support lin
 `/workspace/assistants` and `/workspace/employees` list agents by type.
 `/workspace/instances` owns detail tabs. Apply current grants/provider ceilings,
 account/role caches and retired-action fences. Retry exact intents. A 202 stays pending.
-Thread rows identify chats. Agent files use Spaces reads and audited writes.
+Chats search uses viewer-scoped, cancellable `/api/search` cursors. Static demos filter locally. Agent files use Spaces reads and audited writes.
 Chat attachments upload immediately and send saved references. After file recovery,
 verify the exact receipt, Home and execution readiness.
 Binding discovery hides ordinary artifacts without clearing restored selections;

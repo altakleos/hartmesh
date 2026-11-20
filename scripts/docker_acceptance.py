@@ -37,6 +37,14 @@ HARNESS_PATHS = (
     "frontend-hm/.npmrc",
     "frontend-hm/pnpm-workspace.yaml",
 )
+TITLE_SEARCH_PATHS = (
+    ".github/workflows/title-search-measurement.yml",
+    "scripts/release_artifacts.py",
+    "scripts/release_acceptance.py",
+    "docker/acceptance/title-search",
+    "frontend-hm/playwright.title-search-measurement.config.ts",
+    "frontend-hm/tests/e2e-title-search-measurement",
+)
 PREVIEW_PATHS = (
     ".github/workflows/preview-measurement.yml",
     "scripts/release_artifacts.py",
@@ -135,7 +143,9 @@ def immutable_image(value: str) -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--measure-previews", action="store_true", help="Collect separate preview measurements on supplied candidate digests")
+    measurements = parser.add_mutually_exclusive_group()
+    measurements.add_argument("--measure-titles", action="store_true", help="Measure title search under the PostgreSQL distribution limits")
+    measurements.add_argument("--measure-previews", action="store_true", help="Collect separate preview measurements on supplied candidate digests")
     parser.add_argument(
         "--artifacts",
         type=Path,
@@ -160,6 +170,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if bool(args.backend_image) != bool(args.frontend_image):
         parser.error("--backend-image and --frontend-image must be supplied together")
+    if args.measure_titles and args.stores != "postgres-redis":
+        parser.error("Title search measurement requires the postgres-redis profile")
     if args.measure_previews and (not args.backend_image or args.stores != "sqlite"):
         parser.error("Preview measurement requires both image digests and the sqlite profile")
     if args.stores == "both" and args.backend_image:
@@ -295,6 +307,8 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
     ).resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     project = f"hm-acceptance-{uuid.uuid4().hex[:12]}"
+    title_measurement = args.measure_titles
+    measurement = title_measurement or args.measure_previews
     supplied = bool(args.backend_image)
     backend, frontend = (
         (source_build["backend"], source_build["frontend"])
@@ -326,7 +340,7 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
         "schema": 2,
         "project": project,
         "status": "failed",
-        "mode": "preview-measurement" if args.measure_previews else "images" if supplied else "source",
+        "mode": "title-search-measurement" if title_measurement else "preview-measurement" if args.measure_previews else "images" if supplied else "source",
         "stores": args.stores,
         "workflow": workflow_identity(),
     }
@@ -338,17 +352,26 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
         summary["harness_commit"] = commit
         summary["source_commit"] = None if supplied else commit
-        summary["harness_sha256"] = harness_fingerprint(PREVIEW_PATHS) if args.measure_previews else harness_fingerprint()
-        if args.measure_previews:
+        paths = TITLE_SEARCH_PATHS if title_measurement else PREVIEW_PATHS if args.measure_previews else ()
+        summary["harness_sha256"] = harness_fingerprint(paths)
+        if measurement:
             verifier_env = env.copy()
             env.pop("GH_TOKEN", None)
             fixture = ROOT / "docker/acceptance"
             config = (fixture / "acceptance-config.yaml").read_text(encoding="utf-8")
-            config = config.replace("log_level: warning\n", "log_level: info\n", 1)
-            generated = artifacts / "preview-config.yaml"
-            generated.write_text(config + "\n" + (fixture / "preview/plugins.yaml").read_text(encoding="utf-8"), encoding="utf-8")
-            env["ACCEPTANCE_PREVIEW_CONFIG"] = str(generated)
-            compose += ["-f", str(fixture / "preview/compose.yaml")]
+            if title_measurement:
+                overlay = fixture / "title-search"
+                extra = overlay / "config.yaml"
+                generated = artifacts / "title-search-config.yaml"
+                env["ACCEPTANCE_TITLE_CONFIG"] = str(generated)
+            else:
+                overlay = fixture / "preview"
+                extra = overlay / "plugins.yaml"
+                generated = artifacts / "preview-config.yaml"
+                env["ACCEPTANCE_PREVIEW_CONFIG"] = str(generated)
+                config = config.replace("log_level: warning\n", "log_level: info\n", 1)
+            generated.write_text(config + "\n" + extra.read_text(encoding="utf-8"), encoding="utf-8")
+            compose += ["-f", str(overlay / "compose.yaml")]
         # Verify local prerequisites without downloading or installing anything.
         run(
             ["docker", "info"], env=env, log=artifacts / "prerequisites.log", timeout=30
@@ -394,10 +417,10 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
             name: inspect_image(image, env=env)
             for name, image in (("backend", backend), ("frontend", frontend))
         }
-        if args.measure_previews:
+        if measurement and supplied:
             identity = summary["workflow"]
             if not identity or identity["event"] != "workflow_dispatch" or identity["head_sha"] != commit:
-                raise ValueError("Preview measurement requires an exact-commit workflow dispatch")
+                raise ValueError("Candidate measurement requires an exact-commit workflow dispatch")
             version = json.loads((ROOT / "frontend-hm/package.json").read_text(encoding="utf-8"))["version"]
             summary["release_version"] = version
             for name, image in summary["images"].items():
@@ -409,6 +432,7 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
                     env=verifier_env, log=artifacts / "provenance.log", timeout=180,
                 )
                 image["verified_candidate"] = True
+        if args.measure_previews:
             summary["activation_evidence"] = {
                 "complete": False,
                 "unverified": ["container-wide OOM victim selection", "adversarial document and projector workloads"],
@@ -442,6 +466,8 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
             identity["running_image_id"] = actual
             if args.measure_previews and name == "backend":
                 env["HARTMESH_PREVIEW_GATEWAY_ID"] = container
+            if title_measurement and name == "backend":
+                env["HARTMESH_TITLE_GATEWAY_ID"] = container
         fixture_images = {}
         for service in [
             "provider",
@@ -469,6 +495,8 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
                 text=True,
                 timeout=30,
             ).strip()
+            if title_measurement and service == "postgres":
+                env["HARTMESH_TITLE_POSTGRES_ID"] = container
             fixture_images[service] = {
                 **inspect_image(image_id, env=env),
                 "configured": configured,
@@ -508,6 +536,11 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
             HARTMESH_ACCEPTANCE_ARTIFACTS=str(artifacts / "browser"),
             HARTMESH_ACCEPTANCE_PYTHON=sys.executable,
         )
+        browser_config = "playwright.docker-acceptance.config.ts"
+        if args.measure_previews:
+            browser_config = "playwright.preview-measurement.config.ts"
+        elif title_measurement:
+            browser_config = "playwright.title-search-measurement.config.ts"
         browser = run(
             [
                 sys.executable,
@@ -519,11 +552,11 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
                 "playwright",
                 "test",
                 "--config",
-                "playwright.preview-measurement.config.ts" if args.measure_previews else "playwright.docker-acceptance.config.ts",
+                browser_config,
             ],
             env=env,
             log=artifacts / "browser.log",
-            timeout=360 if args.measure_previews else 300,
+            timeout=360 if measurement else 300,
             check=not args.measure_previews,
         )
         if args.measure_previews:
@@ -610,7 +643,7 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
             summary["status"] = "failed"
         signal.signal(signal.SIGTERM, previous_term)
         signal.signal(signal.SIGINT, previous_int)
-        receipt = "preview-result.json" if args.measure_previews else "result.json"
+        receipt = "title-search-result.json" if title_measurement else "preview-result.json" if args.measure_previews else "result.json"
         (artifacts / receipt).write_text(
             json.dumps(summary, indent=2) + "\n", encoding="utf-8"
         )
@@ -669,6 +702,7 @@ def run_both_source(args: argparse.Namespace) -> int:
                 backend_image=None,
                 frontend_image=None,
                 measure_previews=False,
+                measure_titles=False,
             )
             run_profile(profile, source_build=source)
             result = json.loads(

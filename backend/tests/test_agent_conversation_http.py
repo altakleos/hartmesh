@@ -303,3 +303,26 @@ async def test_registered_instance_outputs_recheck_human_read_export_and_revocat
         await files.registry.set_grant(actor=ALICE, space_id=home.id, subject=BOB, permissions=Permission(0), expected_generation=home.generation)
         assert (await client.get(endpoint + "result.txt")).status_code == 404
         assert registered.update["artifacts"][0] == reference
+
+
+@pytest.mark.asyncio
+async def test_title_search_uses_current_inspect_grants_for_another_requesters_conversation(instances, monkeypatch):
+    from app.gateway.routers import search
+
+    agents, authority, threads, sf = await conversations(instances)
+    employee = await create(agents, custody="company", supervisor=BOB)
+    chat = await authority.create(actor=ALICE, instance_id=employee.id, thread_id=operation())
+    await threads.update_display_name(chat["thread_id"], "Quarterly plan", user_id=ALICE.subject_id)
+    await threads.create("private", display_name="Quarterly plan", user_id=ALICE.subject_id)
+    app = app_for(agents, authority, threads, monkeypatch)
+    app.include_router(search.router)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", cookies={"access_token": "fixture"}) as client:
+        query = {"query": "quarterly", "types": ["thread"]}
+        response = await client.post("/api/search", json=query)
+        assert response.status_code == 200, response.text
+        assert [row["thread_id"] for row in response.json()["items"]] == [chat["thread_id"]]
+        async with sf() as session, session.begin():
+            await session.delete(await session.get(AgentInstanceGrantRow, (employee.id, BOB.subject_id)))
+        response = await client.post("/api/search", json=query)
+        assert response.status_code == 200
+        assert response.json()["items"] == []

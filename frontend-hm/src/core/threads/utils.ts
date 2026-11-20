@@ -95,10 +95,6 @@ const CHANNEL_PROVIDER_LABELS: Record<string, string> = {
   wecom: "WeCom",
 };
 
-function labelOfChannelProvider(provider: string) {
-  return CHANNEL_PROVIDER_LABELS[provider] ?? provider;
-}
-
 export function channelSourceOfThread(
   thread: Pick<AgentThread, "metadata">,
 ): ChannelThreadSource | null {
@@ -111,7 +107,12 @@ export function channelSourceOfThread(
     return null;
   }
 
-  const provider = Reflect.get(source, "provider");
+  return channelSourceForProvider(Reflect.get(source, "provider"));
+}
+
+export function channelSourceForProvider(
+  provider: unknown,
+): ChannelThreadSource | null {
   if (typeof provider !== "string" || provider.trim().length === 0) {
     return null;
   }
@@ -120,6 +121,6 @@ export function channelSourceOfThread(
   return {
     type: "im_channel",
     provider: normalizedProvider,
-    label: labelOfChannelProvider(normalizedProvider),
+    label: CHANNEL_PROVIDER_LABELS[normalizedProvider] ?? normalizedProvider,
   };
 }

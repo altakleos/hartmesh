@@ -1,15 +1,13 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
-  ThreadChannelBadge,
-  ThreadChannelIcon,
-} from "@/components/workspace/thread-channel-source";
+  ConversationLink,
+  ConversationTitleResults,
+} from "@/components/workspace/conversation-title-results";
 import { VirtualThreadList } from "@/components/workspace/thread-list-virtualizer";
 import {
   WorkspaceBody,
@@ -18,6 +16,7 @@ import {
 } from "@/components/workspace/workspace-container";
 import { useDocumentTitle } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { useInfiniteThreads } from "@/core/threads/hooks";
 import { buildThreadListModel } from "@/core/threads/thread-list-model";
 import {
@@ -25,7 +24,6 @@ import {
   pathOfThread,
   titleOfThread,
 } from "@/core/threads/utils";
-import { formatTimeAgo } from "@/core/utils/datetime";
 
 export default function ChatsPage() {
   const { t } = useI18n();
@@ -41,21 +39,22 @@ export default function ChatsPage() {
   );
   const { threads } = threadListModel;
   const [search, setSearch] = useState("");
-  const isSearching = search.trim().length > 0;
+  const query = search.trim();
+  const isSearching = query.length > 0;
+  const staticDemo = isStaticWebsiteOnly();
 
   useDocumentTitle(t.pages.chats, t.pages.appName);
 
-  const filteredThreads = useMemo(() => {
-    return threads.filter((thread) => {
-      return titleOfThread(thread).toLowerCase().includes(search.toLowerCase());
-    });
-  }, [threads, search]);
+  const listedThreads = useMemo(
+    () =>
+      staticDemo && query
+        ? threads.filter((thread) =>
+            titleOfThread(thread).toLowerCase().includes(query.toLowerCase()),
+          )
+        : threads,
+    [threads, query, staticDemo],
+  );
 
-  // Sentinel-based auto load-more for the unfiltered list (issue #3482).
-  // In search mode we deliberately do NOT auto-paginate, otherwise an empty
-  // filtered view would keep the sentinel in the viewport and drain the
-  // entire backend list one page at a time.  Searching falls back to an
-  // explicit button so users can still reach older conversations on demand.
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const element = sentinelRef.current;
@@ -83,7 +82,9 @@ export default function ChatsPage() {
             <Input
               type="search"
               className="h-12 w-full max-w-(--container-width-md) text-xl"
-              placeholder={t.chats.searchChats}
+              aria-label={t.chats.searchTitles}
+              placeholder={t.chats.searchTitles}
+              maxLength={256}
               autoFocus
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -92,35 +93,28 @@ export default function ChatsPage() {
           <main className="min-h-0 flex-1">
             <ScrollArea className="size-full py-4">
               <div className="mx-auto flex size-full max-w-(--container-width-md) flex-col">
-                <VirtualThreadList
-                  estimateSize={76}
-                  items={filteredThreads}
-                  scrollParentSelector='[data-slot="scroll-area-viewport"]'
-                  renderItem={(thread) => {
-                    const channelSource = channelSourceOfThread(thread);
-                    return (
-                      <Link key={thread.thread_id} href={pathOfThread(thread)}>
-                        <div className="flex flex-col gap-2 border-b p-4">
-                          <div className="flex min-w-0 items-center gap-2">
-                            <ThreadChannelIcon source={channelSource} />
-                            <div className="min-w-0 flex-1 truncate">
-                              {titleOfThread(thread)}
-                            </div>
-                            <ThreadChannelBadge
-                              source={channelSource}
-                              className="hidden sm:inline-flex"
-                            />
-                          </div>
-                          {thread.updated_at && (
-                            <div className="text-muted-foreground text-sm">
-                              {formatTimeAgo(thread.updated_at)}
-                            </div>
-                          )}
-                        </div>
-                      </Link>
-                    );
-                  }}
-                />
+                {isSearching && !staticDemo ? (
+                  <ConversationTitleResults
+                    key={query}
+                    query={query}
+                    knownThreads={threadListModel.byId}
+                  />
+                ) : (
+                  <VirtualThreadList
+                    estimateSize={76}
+                    items={listedThreads}
+                    scrollParentSelector='[data-slot="scroll-area-viewport"]'
+                    renderItem={(thread) => (
+                      <ConversationLink
+                        key={thread.thread_id}
+                        href={pathOfThread(thread)}
+                        title={titleOfThread(thread)}
+                        updatedAt={thread.updated_at}
+                        source={channelSourceOfThread(thread)}
+                      />
+                    )}
+                  />
+                )}
                 {hasNextPage && !isSearching && (
                   <div
                     ref={sentinelRef}
@@ -128,20 +122,6 @@ export default function ChatsPage() {
                     className="h-px w-full"
                     data-testid="chats-page-sentinel"
                   />
-                )}
-                {hasNextPage && isSearching && (
-                  <div className="flex justify-center p-4">
-                    <Button
-                      variant="outline"
-                      onClick={() => void fetchNextPage()}
-                      disabled={isFetchingNextPage}
-                      data-testid="chats-page-load-more"
-                    >
-                      {isFetchingNextPage
-                        ? t.chats.loadingMore
-                        : t.chats.loadMoreToSearch}
-                    </Button>
-                  </div>
                 )}
               </div>
             </ScrollArea>
