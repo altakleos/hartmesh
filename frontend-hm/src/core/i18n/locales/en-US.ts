@@ -398,7 +398,7 @@ export function createEnUS(product: string): Translations {
           "Could not confirm the change. Check the current connection before trying again.",
         giveTitle: (name, connection) => `Give ${connection} to ${name}?`,
         giveScope: (name) =>
-          `${name} can use this connection without asking anyone first in conversations, assignments, the last step of a large job and work started by an approved package.`,
+          `${name} can use this connection without asking anyone first in conversations, assignments and work started by an approved package.`,
         giveData: (name) =>
           `Anything ${name} can read can be sent to the service, including its conversations, attachments, files and your company’s Shared folder. It can act on someone’s request or on what it reads, including information returned by people outside your company. You choose who can chat and which connections it has. The outside service controls what it returns.`,
         giveAccount:

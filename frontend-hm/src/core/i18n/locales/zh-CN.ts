@@ -378,7 +378,7 @@ export function createZhCN(product: string): Translations {
         writeFailed: "无法确认更改。请先检查当前连接，再决定是否重试。",
         giveTitle: (name, connection) => `将「${connection}」分配给${name}？`,
         giveScope: (name) =>
-          `${name}可以在对话、任务、大型作业的最后一步以及获准软件包发起的工作中使用此连接，无需事先询问。`,
+          `${name}可以在对话、任务以及获准软件包发起的工作中使用此连接，无需事先询问。`,
         giveData: (name) =>
           `${name}可以读取的任何内容，包括对话、附件、文件和公司「共享」文件夹里的内容，都可能被发送到该服务。它可能根据他人的请求或读到的内容采取行动，包括公司外部人员通过连接返回的信息。你决定谁能聊天以及分配哪些连接，外部服务决定返回什么内容。`,
         giveAccount:
