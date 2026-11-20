@@ -35,11 +35,12 @@ def remove_owned_loop(control, number, sysfs, *, expected, retiring_binding=None
             try:
                 facts = {name: (binding / name).read_text(encoding="utf-8").strip() for name in ("backing_file", "offset", "sizelimit", "autoclear")}
             except FileNotFoundError:
-                if binding.exists():
-                    raise
-                continue  # Autoclear completed during this read; recheck identity.
-            if facts != retiring_binding or any(facts[name] != value for name, value in (("offset", "0"), ("sizelimit", "0"), ("autoclear", "1"))):
-                raise RuntimeError("Owned loop binding changed during retirement")
+                # sysfs removes attributes before the directory. Only a fresh
+                # observation of an unbound owned device permits removal.
+                pass
+            else:
+                if facts != retiring_binding or any(facts[name] != value for name, value in (("offset", "0"), ("sizelimit", "0"), ("autoclear", "1"))):
+                    raise RuntimeError("Owned loop binding changed during retirement")
             if clock() >= deadline:
                 raise TimeoutError("Owned autoclear loop binding did not retire")
             # umount can return before a temporary opener releases the old
