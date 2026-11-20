@@ -1,0 +1,18 @@
+{
+  "format": "hartmesh.artifact-view",
+  "version": 1,
+  "title": "Slide deck",
+  "blocks": [
+    {
+      "type": "text",
+      "heading": "Slide 1: Overview",
+      "paragraphs": ["Milestones", "Speaker notes", "Discuss the schedule."]
+    },
+    {
+      "type": "notice",
+      "tone": "neutral",
+      "text": "Pictures, charts, embedded objects and slide layout are outside this preview. Download the original file for the complete content."
+    }
+  ],
+  "exports": []
+}

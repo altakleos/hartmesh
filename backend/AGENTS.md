@@ -265,5 +265,7 @@ For models with `supports_vision: true`: `ViewImageMiddleware` processes images 
 Detailed backend documentation lives in `docs/`; [details](docs/backend-guidance-details.md#documentation)
 lists the main guides.
 
+Installed Office presentations live in `extensions/sources/hartmesh-office-preview`.
+Their module-level projectors stream internal OOXML parts into passive views.
 Historical report compatibility is installed from `extensions/sources/hartmesh-legacy-report`;
 the generic host owns authorization, limits, source SHA and drained I/O.
