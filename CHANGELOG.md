@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.64] - 2026-11-20
+
+### Changed
+
+- The Gateway runs installed server-side preview projectors in a separate process. On Linux it limits memory, CPU time, elapsed time and output size. This includes the compatibility preview for source-only `.report.json` business reports. Reports with a prebuilt view continue to use that view. If previews are busy, the file panel offers **Retry** and **Download**. The original file stays available.
+- The Gateway rechecks access before returning a preview. If a tracked conversation was deleted or replaced, or the reader lost access during the request, it withholds the result, including cached results.
+- The HartMesh web application now uses Next.js 16.4.5.
+
+### Added
+
+- The Gateway image includes an optional package for Excel (`.xlsx`), Word (`.docx`) and PowerPoint (`.pptx`) files produced in ordinary conversations. It shows stored cell values, document text and tables, and slide text and notes. The original download preserves pictures, charts and other content that the preview omits.
+
+### Operations
+
+- Upgrading the standard Compose bundle leaves the Office reader off. The candidate rendered all three Office formats and returned the original download bytes. During preview work, five-trial median file-list latency rose from 6.618 to 8.401 ms, exceeding the 10% allowance. Chat latency rose 8.83%, within the allowance.
+- Custom server-side projectors must be synchronous module-level functions that the child process can import. Make their modules readable by the worker identity. An incompatible entry can prevent a required extension from loading.
+- An in-place downgrade to v2.2.0+hartmesh.63 needs no data conversion. It restores in-process rendering for source-only business reports. To withdraw an Office presenter that was enabled explicitly, remove its plugin entry and restart the Gateway.
+
+### Schema changes
+
+- No database schema changes since v2.2.0+hartmesh.63.
+
 ## [2.2.0+hartmesh.63] - 2026-11-20
 
 ### Fixed

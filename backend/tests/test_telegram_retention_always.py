@@ -13,13 +13,14 @@ import pytest_asyncio
 from _telegram_bot_test_support import ManualClock
 from _telegram_repository_test_support import add_link, rows
 from _telegram_repository_test_support import db as db
+from sqlalchemy.exc import OperationalError
 from test_telegram_copy_guard_supervisor import environment, stop_environment
 from test_telegram_supervisor import Health, credential
 
 from app.channels.message_bus import MessageBus
 from app.telegram_bots import supervisor as module
 from app.telegram_bots.config import TelegramBotsConfig
-from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow, TelegramPendingFileRow
+from deerflow.persistence.telegram_bots.model import TelegramCallbackRow, TelegramDeploymentRow, TelegramInboundMarkRow, TelegramOutboxRow, TelegramPendingFileRow
 
 pytestmark = pytest.mark.asyncio
 
@@ -217,7 +218,34 @@ async def test_a_copy_found_while_running_stops_the_bots_and_not_the_sweeps(db, 
         retention_wait_diagnostics.name = "start"
         await e.supervisor.start()
         retention_wait_diagnostics.name = "latch"
-        await e.supervisor._latch_copy_conflict()
+        persist = e.supervisor.copy_guard.stop_for_broad_conflict
+        attempts = 0
+
+        async def fail_first_write():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OperationalError("latch write", {}, OSError("temporary test write failure"))
+            await persist()
+
+        async def latch_sleep(seconds):
+            # The latch owns its retries. Advance only their one-second wait
+            # after registration; leave the hour-long sweeps on the manual clock.
+            if attempts and seconds == 1:
+                asyncio.get_running_loop().call_soon(e.clock.advance, seconds)
+            await e.clock.sleep(seconds)
+
+        monkeypatch.setattr(e.supervisor.copy_guard, "stop_for_broad_conflict", fail_first_write)
+        monkeypatch.setattr(e.supervisor, "_sleep", latch_sleep)
+        try:
+            await asyncio.wait_for(e.supervisor._latch_copy_conflict(), 5)
+        except TimeoutError:
+            # The waiter is shielded. Retire its owner before fixture teardown.
+            await e.supervisor.drain_after_stop_timeout()
+            raise
+        assert attempts >= 2
+        async with db.sessions() as session:
+            assert (await session.get(TelegramDeploymentRow, 1)).polling_state == "polled_elsewhere"
         retention_wait_diagnostics.name = "sweep"
         assert e.supervisor.cause() == "polled-elsewhere"
         e.clock.advance(3600)
