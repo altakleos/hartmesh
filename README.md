@@ -1999,7 +1999,7 @@ Capability Center groups plugins by office collaboration, documents and knowledg
 Personal MCP connections configured in the web interface are persisted per user.
 Personal MCP HTTP/SSE connections admitted under the public-network policy load TLS trust off the Gateway event loop, while retaining public-address checks, certificate verification and per-origin connection isolation.
 Unexpected failures when changing deployment or personal MCP configuration return fixed error messages; exception details stay in server logs.
-Deployment tools remain shared. Administrators can add, edit, enable, disable and delete shared MCP servers under **Platform provided**; ordinary users see their status without controls. Personal plugin switches affect only the signed-in user's connections. See [connection ownership](docs/capability-center.md#personal-and-deployment-mcp-configuration).
+Deployment tools remain shared. Administrators can add, edit, enable, disable and delete shared MCP servers under **Platform provided**; ordinary users see their status without controls. An administrator can check a saved, enabled HTTP or SSE connection to see how many tools it currently offers. The check has a 20-second limit and uses the deployment’s usual address restrictions. Personal plugin switches affect only the signed-in user's connections. See [connection ownership](docs/capability-center.md#personal-and-deployment-mcp-configuration).
 
 For plugin manifests, adapter registration, and Agent capability selection, see
 [Capability Center integration contract](docs/capability-center.md).

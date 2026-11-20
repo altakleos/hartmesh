@@ -7,7 +7,8 @@ import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, NoReturn
+from typing import Annotated, Any, Literal, NamedTuple, NoReturn
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -576,6 +577,19 @@ class McpServerConfigUpdateRequest(BaseModel):
         ...,
         description="Complete replacement configuration for the selected MCP server",
     )
+
+
+class McpCheckConnected(BaseModel):
+    status: Literal["connected"] = "connected"
+    tool_count: int
+
+
+class McpCheckFailed(BaseModel):
+    status: Literal["failed"] = "failed"
+    reason: Literal["unreachable", "refused", "not-mcp", "timeout", "bad-token-format", "address-not-public"]
+
+
+McpCheckResponse = Annotated[McpCheckConnected | McpCheckFailed, Field(discriminator="status")]
 
 
 class McpCacheResetResponse(BaseModel):
@@ -1514,8 +1528,17 @@ def _apply_mcp_servers_create(body: McpConfigUpdateRequest, *, policy=None) -> d
 
         for name, incoming in body.mcp_servers.items():
             _ensure_no_masked_secrets(incoming)
-            _admit_mcp_definition(policy, incoming.model_dump(), server_name=name)
-            raw_servers[name] = incoming.model_dump()
+            definition = incoming.model_dump()
+            _admit_mcp_definition(policy, definition, server_name=name)
+            if incoming.type in {"http", "sse"}:
+                if incoming.tool_name_prefix and not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+                    raise HTTPException(400, "A prefixed remote server name may contain only ASCII letters, digits, hyphens and underscores.")
+                metadata = definition.setdefault("capability", {})
+                if not isinstance(metadata, dict) or ("id" in metadata and not isinstance(metadata["id"], str)):
+                    raise HTTPException(400, "Remote connection installation metadata requires a string ID.")
+                if not metadata.get("id"):
+                    metadata["id"] = str(uuid4())
+            raw_servers[name] = definition
         raw_data["mcpServers"] = raw_servers
         _ensure_skills_key(raw_data)
         pending = _commit_mcp_config_write(config_path, raw_data, previous_raw=previous_raw)
@@ -1701,6 +1724,46 @@ async def create_mcp_servers(request: Request, body: McpConfigUpdateRequest) -> 
     except Exception as e:
         logger.error("Failed to add MCP servers: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to add MCP servers")
+
+
+@router.post(
+    "/mcp/config/servers/{server_name:path}/check",
+    response_model=McpCheckResponse,
+    summary="Check a saved remote MCP server",
+)
+async def check_mcp_server(request: Request, server_name: str) -> McpCheckResponse:
+    """Test fresh discovery for this saved connection without calling any offered tool."""
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+
+    from deerflow.mcp.cache import get_company_server_tools
+
+    def resolve():
+        server = ExtensionsConfig.from_file().mcp_servers.get(server_name)
+        if server is None:
+            raise HTTPException(404, "MCP server not found.")
+        if server.enabled and server.type in {"http", "sse"}:
+            require_tenant_written_definition(None, server.model_dump(), deployment_connection=True)
+        return server
+
+    try:
+        async with asyncio.timeout(20):
+            server = await asyncio.to_thread(resolve)
+            if not server.enabled or server.type not in {"http", "sse"}:
+                return McpCheckFailed(reason="refused")
+            result = await get_company_server_tools(server_name, expected_definition=server, fresh=True)
+    except TenantWrittenDefinitionRefused as exc:
+        return McpCheckFailed(reason="address-not-public" if exc.reason == "address-not-public" else "refused")
+    except TimeoutError:
+        return McpCheckFailed(reason="timeout")
+    except (OSError, ValueError, RuntimeError) as exc:
+        logger.warning("Saved MCP configuration could not be checked (%s)", type(exc).__name__)
+        raise HTTPException(503, "MCP configuration is unavailable.") from None
+
+    if result.reason == "changed":
+        raise HTTPException(409, "MCP server configuration changed. Check again.")
+    if result.reason is not None:
+        return McpCheckFailed(reason=result.reason)
+    return McpCheckConnected(tool_count=len(result.tools))
 
 
 @router.put(
