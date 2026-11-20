@@ -8,13 +8,14 @@ import sys
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import pytest
 
 if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("HARTMESH_VERIFY_CONNECTIONS") not in {"explicit", "bundle-default"}:
     pytest.skip("requires the hosted connection qualification", allow_module_level=True)
 
+from _compose_connection_evidence import confirmed_browser_notice
 from _compose_gateway_restart import start_gateway, stop_gateway
 from playwright.sync_api import expect, sync_playwright
 from test_compose_instance_acceptance import Bundle, activate, await_attempt, await_execution_ready, delegate, eventually, new_conversation, required
@@ -143,12 +144,35 @@ def connect_from_browser(page, compose):
     expect(page.get_by_text("Saved. Connected. 1 tool.", exact=True)).to_be_visible(timeout=30000)
 
 
-def read_from_browser(page, compose, agent):
-    page.goto(f"{compose.url}/workspace/chats/{agent['thread_id']}", wait_until="domcontentloaded")
+def read_from_browser(page, compose, session, agent):
+    thread_id = agent["thread_id"]
+    expected = "Notice from notices-a."
+    page.goto(f"{compose.url}/workspace/chats/{thread_id}", wait_until="domcontentloaded")
     field = page.get_by_placeholder(re.compile(r"how can i assist", re.I))
     field.fill("acceptance:notice:read")
-    page.get_by_role("button", name="Submit", exact=True).click()
-    expect(page.get_by_text("Notice from notices-a.", exact=True).last).to_be_visible(timeout=90000)
+    with page.expect_response(lambda reply: reply.request.method == "POST" and urlsplit(reply.url).path.endswith(f"/threads/{thread_id}/runs/stream"), timeout=30000) as streamed:
+        page.get_by_role("button", name="Submit", exact=True).click()
+    response = streamed.value
+    assert response.ok
+    match = re.fullmatch(rf"/api/threads/{re.escape(thread_id)}/runs/([0-9a-f-]{{36}})", response.headers.get("content-location", ""))
+    assert match, "Browser stream did not identify its thread and run"
+    run_id = match[1]
+    expect(page.locator("[data-assistant-turn]").last.get_by_text(expected, exact=True)).to_be_visible(timeout=90000)
+    thread_path = f"/api/langgraph/threads/{thread_id}"
+    run_path = f"{thread_path}/runs/{run_id}"
+
+    def persisted_answer():
+        run = session.request("GET", run_path).json()
+        assert run["run_id"] == run_id and run["thread_id"] == thread_id
+        assert run["status"] not in {"error", "timeout", "interrupted"}, run["status"]
+        if run["status"] != "success":
+            return None
+        messages = session.request("GET", thread_path + "/state").json()["values"]["messages"]
+        events = session.request("GET", run_path + "/messages").json()["data"]
+        return confirmed_browser_notice(thread_id, run_id, expected, messages, events)
+
+    message_id = eventually(persisted_answer, timeout=90, interval=1)
+    return {"thread_id": thread_id, "run_id": run_id, "message_id": message_id}
 
 
 def observed_chat(session, agent, *, assigned, helpers=False):
@@ -325,15 +349,16 @@ def test_company_connection_calls_switch_and_rollback(compose, session):
             assert baseline["notices-a"]["discoveries"] > 0 and baseline["notices-a"]["calls"] == 0
             assert baseline["notices-b"]["requests"] == baseline["notices-unlisted"]["requests"] == 0
             set_grant(session, primary, "notices", True)
-            read_from_browser(page, compose, primary)
+            record["chat"] = read_from_browser(page, compose, session, primary)
+            record["chat"]["after_check"] = baseline
             after_chat = counts()
             assert after_chat["notices-a"]["calls"] == 1 and after_chat["notices-b"]["calls"] == 0
             page.screenshot(path=output.parent / "notice-conversation.png", animations="disabled")
             record["after_web_reply"] = after_chat
             page.reload(wait_until="domcontentloaded")
-            expect(page.get_by_text("Notice from notices-a.", exact=True).last).to_be_visible(timeout=30000)
+            expect(page.locator("[data-assistant-turn]").last.get_by_text("Notice from notices-a.", exact=True)).to_be_visible(timeout=30000)
             assert counts() == after_chat
-            record["chat"] = {"after_check": baseline, "after_reply": after_chat, "unchanged_after_history": True}
+            record["chat"].update(after_reply=after_chat, unchanged_after_history=True)
             record["helper"] = observed_chat(session, new_conversation(session, primary), assigned=True, helpers=True)
             assert counts()["notices-a"]["calls"] == after_chat["notices-a"]["calls"]
             exercise_assignment(compose, session, primary, counts, record)

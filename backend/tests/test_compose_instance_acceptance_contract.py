@@ -458,3 +458,22 @@ def test_released_account_proof_uses_authenticated_allowlist_chats_and_actual_pa
     assert source.index("person.run(") < source.index("compose.accounts('disable'")
     assert "paired_absent" in source and "paired_resources" in source
     assert any(isinstance(node, ast.Try) and node.finalbody for node in ast.walk(release))
+
+
+def test_browser_notice_receipt_requires_the_final_checkpoint_and_its_exact_run_event():
+    from _compose_connection_evidence import confirmed_browser_notice
+
+    text = "Notice from notices-a."
+    answer = {"type": "ai", "id": "final", "content": text}
+    event = {"thread_id": "thread", "run_id": "run", "category": "message", "event_type": "llm.ai.response", "content": answer}
+
+    def confirm(messages, row):
+        return confirmed_browser_notice("thread", "run", text, messages, [row])
+
+    assert confirm([answer], event) == "final"
+    assert confirm([{**answer, "content": [{"type": "text", "text": text}]}], event) == "final"
+    assert confirm([{**answer, "type": "tool"}], event) is None
+    assert confirm([answer, {**answer, "id": "later", "content": "Still working."}], event) is None
+    assert confirm([answer], {**event, "run_id": "other"}) is None
+    assert confirm([answer], {**event, "thread_id": "other"}) is None
+    assert confirm([answer], {**event, "content": {**answer, "id": "different"}}) is None
