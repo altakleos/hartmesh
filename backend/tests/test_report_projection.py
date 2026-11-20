@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+from _projection_support import legacy_report_package as legacy_report_package
 from _projection_support import ready_projection_host
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
@@ -17,11 +18,6 @@ from deerflow.runtime.user_context import get_effective_user_id
 
 URL = "/api/threads/report-thread/artifacts/mnt/user-data/outputs/month.report.json"
 FIXTURE = Path(__file__).resolve().parents[2] / "frontend-hm/tests/fixtures/business-report/2026-08-business-review.report.json"
-
-
-@pytest.fixture(autouse=True)
-def package_source(monkeypatch):
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "extensions/sources/hartmesh-legacy-report"))
 
 
 @pytest.fixture
