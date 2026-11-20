@@ -1587,8 +1587,9 @@ class DeerFlowClient:
             Dict with "mcp_servers" key mapping server name to config,
             matching the Gateway API ``McpConfigResponse`` schema.
         """
-        config = get_extensions_config()
-        return {"mcp_servers": {name: server.model_dump() for name, server in config.mcp_servers.items()}}
+        from deerflow.agent_instances.connections import sdk_server_definitions
+
+        return {"mcp_servers": sdk_server_definitions(get_extensions_config())}
 
     def update_mcp_config(self, mcp_servers: dict[str, dict]) -> dict:
         """Update MCP server configurations.
@@ -1636,6 +1637,10 @@ class DeerFlowClient:
             previous_servers = previous_raw.get("mcpServers", {})
             config_data = copy.deepcopy(previous_raw)
             config_data["mcpServers"] = copy.deepcopy(mcp_servers)
+            from deerflow.agent_instances.connections import preserve_registry_bindings, sdk_server_definitions
+
+            next_servers = config_data["mcpServers"]
+            preserve_registry_bindings(previous_servers, next_servers)
             config_data[LIFECYCLE_KEY] = plan_mcp_lifecycle(previous_raw, config_data)
 
             candidate = validate_raw_extensions_config(config_data)
@@ -1644,10 +1649,10 @@ class DeerFlowClient:
             from deerflow.runtime.customer_administration import require_mcp_management_transition
 
             # In name order, so the same request is always refused for the same definition.
-            for name in sorted(previous_servers.keys() | mcp_servers.keys()):
-                require_mcp_management_transition(getattr(self, "_customer_administration_policy", None), previous_servers.get(name), mcp_servers.get(name), resolve_environment=True)
+            for name in sorted(previous_servers.keys() | next_servers.keys()):
+                require_mcp_management_transition(getattr(self, "_customer_administration_policy", None), previous_servers.get(name), next_servers.get(name), resolve_environment=True)
                 # The same write-time rules as the Gateway routes; a refusal is a ValueError that names the definition.
-                require_tenant_written_definition(previous_servers.get(name), mcp_servers.get(name), deployment_connection=True, server_name=name)
+                require_tenant_written_definition(previous_servers.get(name), next_servers.get(name), deployment_connection=True, server_name=name)
             self._atomic_write_json(config_path, config_data)
             try:
                 reloaded = reload_extensions_config()
@@ -1673,7 +1678,7 @@ class DeerFlowClient:
         if committed_failure is not None:
             _failed_pending, failure = committed_failure
             raise RuntimeError("MCP configuration was saved, but local cache reconciliation failed; retry or restart DeerFlow before relying on the changed server.") from failure
-        return {"mcp_servers": {name: server.model_dump() for name, server in reloaded.mcp_servers.items()}}
+        return {"mcp_servers": sdk_server_definitions(reloaded)}
 
     # ------------------------------------------------------------------
     # Public API — skills management

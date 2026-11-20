@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal, NamedTuple, NoReturn
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.gateway.customer_administration import request_customer_administration_policy, require_provider_operation
 from app.gateway.deps import require_admin_user
@@ -547,10 +547,29 @@ class McpConfigResponse(BaseModel):
     )
 
 
+class McpAdminConfigResponse(McpConfigResponse):
+    given_agent_counts: dict[str, int] = Field(default_factory=dict, description="Current employee and assistant grants by connection name")
+
+
+def _omit_client_binding(value):
+    from deerflow.agent_instances.connections import BINDING_SECRET
+
+    metadata = value.get("capability") if isinstance(value, dict) else getattr(value, "capability", None)
+    if not isinstance(metadata, dict) or BINDING_SECRET not in metadata:
+        return value
+    retained = {key: item for key, item in metadata.items() if key != BINDING_SECRET}
+    if isinstance(value, dict):
+        return {**value, "capability": retained}
+    return value.model_copy(update={"capability": retained})
+
+
+_McpServerInput = Annotated[McpServerConfigResponse, BeforeValidator(_omit_client_binding)]
+
+
 class McpConfigUpdateRequest(BaseModel):
     """Request model for updating MCP configuration."""
 
-    mcp_servers: dict[str, McpServerConfigResponse] = Field(
+    mcp_servers: dict[str, _McpServerInput] = Field(
         ...,
         description="Map of MCP server name to configuration",
     )
@@ -573,7 +592,7 @@ class McpServerConfigUpdateRequest(BaseModel):
         ...,
         description="Name of the existing MCP server to update",
     )
-    server: McpServerConfigResponse = Field(
+    server: _McpServerInput = Field(
         ...,
         description="Complete replacement configuration for the selected MCP server",
     )
@@ -1187,11 +1206,11 @@ def _merge_preserving_secrets(
 
 @router.get(
     "/mcp/config",
-    response_model=McpConfigResponse,
+    response_model=McpAdminConfigResponse,
     summary="Get MCP Configuration",
     description="Retrieve the current Model Context Protocol (MCP) server configurations.",
 )
-async def get_mcp_configuration(request: Request) -> McpConfigResponse:
+async def get_mcp_configuration(request: Request) -> McpAdminConfigResponse:
     """Get the current MCP configuration.
 
     Returns:
@@ -1214,9 +1233,25 @@ async def get_mcp_configuration(request: Request) -> McpConfigResponse:
     """
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
 
-    raw_servers = await asyncio.to_thread(_load_raw_mcp_server_responses)
+    from deerflow.config.app_config import agent_connections_enabled
+
+    service = getattr(getattr(getattr(request, "app", None), "state", None), "agent_instances", None)
+    include_counts = service is not None and await asyncio.to_thread(agent_connections_enabled)
+    raw_servers, recipients = await asyncio.to_thread(_load_admin_connection_snapshot, include_counts)
     servers = {name: _mask_server_config(server) for name, server in raw_servers.items()}
-    return McpConfigResponse(mcp_servers=servers)
+    counts = {}
+    if include_counts:
+        from sqlalchemy import select
+
+        from deerflow.persistence.agent_instances.model import AgentInstanceRow
+
+        ids = sorted(set().union(*recipients.values()))
+        active = set()
+        async with service._sf() as session:
+            for offset in range(0, len(ids), 500):
+                active.update(await session.scalars(select(AgentInstanceRow.id).where(AgentInstanceRow.id.in_(ids[offset : offset + 500]), AgentInstanceRow.status != "deleted")))
+        counts = {name: len(recipients.get(name, set()) & active) for name in servers}
+    return McpAdminConfigResponse(mcp_servers=servers, given_agent_counts=counts)
 
 
 def _raise_invalid_mcp_configuration(detail: str, *, cause: Exception | None = None) -> NoReturn:
@@ -1283,6 +1318,9 @@ def _commit_mcp_config_write(
     The parsed candidate and the bytes on disk therefore describe the same
     transition even if another writer is waiting to re-add an identical server.
     """
+    from deerflow.agent_instances.connections import preserve_registry_bindings
+
+    preserve_registry_bindings(_raw_mcp_servers(previous_raw), _raw_mcp_servers(raw_data))
     candidate = _validate_extensions_config_candidate(
         raw_data,
         check_installation_ids=check_installation_ids,
@@ -1494,15 +1532,26 @@ def _mcp_server_responses_from_committed_raw(raw_data: dict) -> dict[str, McpSer
         ) from exc
 
 
-def _load_raw_mcp_server_responses() -> dict[str, McpServerConfigResponse]:
-    """Read editable MCP server definitions under the shared config lock."""
+def _load_admin_connection_snapshot(include_counts: bool):
+    """Read the editable registry and its grants from the same atomic file generation."""
+    from deerflow.agent_instances.connections import connection_recipients
+    from deerflow.agent_instances.contract import AgentConflict
+
     config_path = ExtensionsConfig.resolve_config_path()
     if config_path is None:
-        return {}
-
+        return {}, {}
     with extensions_config_write_lock, extensions_config_file_lock(config_path):
-        raw_data = _load_raw_extensions_config(config_path, create=False)
-        return _mcp_server_responses_from_raw(raw_data)
+        raw = _load_raw_extensions_config(config_path, create=False)
+    servers = _mcp_server_responses_from_raw(raw)
+    try:
+        return servers, connection_recipients(raw) if include_counts else {}
+    except AgentConflict:
+        raise HTTPException(503, "Company connection grants are unavailable.") from None
+
+
+def _load_raw_mcp_server_responses() -> dict[str, McpServerConfigResponse]:
+    servers, _ = _load_admin_connection_snapshot(False)
+    return servers
 
 
 def _ensure_skills_key(raw_data: dict) -> None:

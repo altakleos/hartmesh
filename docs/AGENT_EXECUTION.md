@@ -186,7 +186,13 @@ it, and the child prompt states this scope.
 The requester supplies attribution and current provider ceilings, rather than
 My Files, private memory, private skills or personal credentials. Instance
 definitions may reference currently enabled public skills. Private/legacy
-skill packages and MCP credentials have no instance adapter yet. Composer
+skill packages and personal MCP credentials stay outside the instance. With
+`agent_connections.enabled` on, managers can give or remove an eligible company
+HTTP/SSE connection through `PUT` or `DELETE` on
+`/api/agent-instances/{id}/connections/{selector}`. Obtain the opaque selector
+from the same instance’s `GET /connections` response. A person with Use or
+Inspect sees effective names and hosts. Switching a connection off preserves
+its grant; deleting and recreating the connection requires a fresh grant. Composer
 uploads use the direct agent file routes below.
 Public package bytes are captured with bounded readers, copied and verified in
 a content-addressed Space cache; they count against Space quotas. Run evidence

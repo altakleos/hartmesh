@@ -3347,3 +3347,43 @@ def test_validate_mcp_update_enforces_stdio_transport_alias(monkeypatch):
 
     assert exc_info.value.status_code == 400
     assert "custom-mcp-server" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_hosted_registry_writes_keep_grants_only_for_the_same_installation(monkeypatch, tmp_path):
+    from deerflow.agent_instances import connections
+    from deerflow.agent_instances.contract import AgentConflict
+
+    file = tmp_path / "extensions.json"
+    file.write_text(json.dumps({"mcpServers": {}, "skills": {}, "future": {"kept": True}}))
+    monkeypatch.setattr(ExtensionsConfig, "resolve_config_path", lambda: file)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: ExtensionsConfig.model_validate_json(file.read_bytes()))
+    _track_mcp_reconciliation_handoff(monkeypatch)
+    request = _request_with_role("admin")
+    name = "notices"
+    definition = {"type": "http", "url": "https://notices.example.com/mcp", "capability": {"id": "stable-catalog-id", connections.BINDING_SECRET: "***"}}
+    body = McpConfigUpdateRequest(mcp_servers={name: definition})
+    added = await create_mcp_servers(request, body)
+    original = json.loads(file.read_text())["mcpServers"][name]
+    first = connections.binding_id(original)
+    assert first and added.mcp_servers[name].model_dump()["capability"][connections.BINDING_SECRET] == "***"
+    [row] = connections.list_connections("employee", manager=True)
+    connections.change_grant("employee", row["id"], "manager", give=True)
+    for enabled in (False, True):
+        incoming = {**definition, "enabled": enabled}
+        if enabled:
+            response = await mcp_router.update_mcp_configuration(request, McpConfigUpdateRequest(mcp_servers={name: incoming}))
+        else:
+            response = await mcp_router.update_mcp_server(request, McpServerConfigUpdateRequest(server_name=name, server=incoming))
+        assert original["capability"][connections.BINDING_SECRET] not in response.model_dump_json()
+        assert connections.binding_id(json.loads(file.read_text())["mcpServers"][name]) == first
+        assert bool(connections.granted_connections("employee")) == enabled
+    await mcp_router.delete_mcp_server(request, name)
+    assert not connections.granted_connections("employee")
+    await create_mcp_servers(request, McpConfigUpdateRequest(mcp_servers={name: original}))
+    replaced = json.loads(file.read_text())
+    assert replaced["future"] == {"kept": True}
+    assert connections.binding_id(replaced["mcpServers"][name]) != first
+    assert not connections.list_connections("employee", manager=False)
+    with pytest.raises(AgentConflict):
+        connections.change_grant("employee", row["id"], "manager", give=True)

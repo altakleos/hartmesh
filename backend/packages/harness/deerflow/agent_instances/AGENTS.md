@@ -1,5 +1,12 @@
 # Persistent agent instances
 
+`connections.py` stores instance grants in the same locked extensions-config
+write as the registry-owned installation binding. Re-read grants and eligibility
+from the current file. Keep catalog selections independent; edits and disable
+preserve a grant, and a recreated installation needs a new grant. The embedded
+client omits the private binding. A manager sees the registry and grants; a
+viewer with Use or Inspect sees only active connection names and hosts.
+
 For a conversation file import, keep the redacted source and original requested name
 in the native put intent. Choose the actual upload name before persisting that
 intent, under exclusive writer ownership. A competing resident cannot redirect

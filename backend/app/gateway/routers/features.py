@@ -71,6 +71,7 @@ class AssistantAllowance(SeatCount):
 
 
 class AgentInstancesFeature(BaseModel):
+    connections: bool = False
     enabled: bool = False
     execution: Literal["ready", "unavailable"] = "unavailable"
     reason: str | None = None
@@ -382,6 +383,7 @@ async def _storage_features(request, config):
         accounts = AccountsFeature(seats=SeatCount(allowed=counts["user"].allowed, in_use=counts["user"].in_use))
         instances = AgentInstancesFeature(
             enabled=config.agents_api.enabled,
+            connections=config.agents_api.enabled and getattr(getattr(config, "agent_connections", None), "enabled", False) is True,
             execution=execution.execution,
             reason=execution.reason,
             ai_assistants=AssistantAllowance(per_user=getattr(config.agents_api, "ai_assistants_per_user", 1), allowed=counts["assistant"].allowed, in_use=counts["assistant"].in_use, mine=mine),

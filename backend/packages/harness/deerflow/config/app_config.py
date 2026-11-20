@@ -228,6 +228,23 @@ def apply_logging_level(name: str | None) -> None:
             handler.setLevel(level)
 
 
+class AgentConnectionsConfig(BaseModel):
+    """Host controls for company connections in persistent instance runs."""
+
+    enabled: bool = False
+    packages: list[str] = Field(default_factory=list)
+
+    @field_validator("packages", mode="before")
+    @classmethod
+    def _ignore_unknown_list(cls, value):
+        return value if isinstance(value, list) and all(isinstance(name, str) for name in value) else []
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _explicit_enablement(cls, value):
+        return value is True
+
+
 class AppConfig(BaseModel):
     """Config for the DeerFlow application"""
 
@@ -276,6 +293,11 @@ class AppConfig(BaseModel):
         description="Hard server-side ceiling for configured defaults and client-supplied run recursion_limit values. Values above this are clamped; prevents runaway LangGraph super-steps (LLM cost / DoS).",
     )
 
+    @field_validator("agent_connections", mode="before")
+    @classmethod
+    def _valid_connection_section(cls, value):
+        return value if isinstance(value, (Mapping, AgentConnectionsConfig)) else {}
+
     @field_validator("recursion_limit", "max_recursion_limit", mode="before")
     @classmethod
     def _reject_boolean_recursion_limits(cls, value: object, info: ValidationInfo) -> object:
@@ -323,6 +345,7 @@ class AppConfig(BaseModel):
         default_factory=KnowledgeBaseConfig,
         description="Provider-agnostic knowledge capability and custom-agent scope-selection configuration",
     )
+    agent_connections: AgentConnectionsConfig = Field(default_factory=AgentConnectionsConfig)
     agents_api: AgentsApiConfig = Field(default_factory=AgentsApiConfig, description="Custom-agent management API configuration")
     acp_agents: dict[str, ACPAgentConfig] = Field(default_factory=dict, description="ACP-compatible agent configuration")
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
@@ -925,6 +948,11 @@ def reload_app_config(config_path: str | None = None) -> AppConfig:
         # pin the resolved path.
         _app_config_source = str(_app_config_path) if config_path else None
     return merge_managed_models(loaded)
+
+
+def agent_connections_enabled() -> bool:
+    """Read the operator's live switch even while a run uses its own config snapshot."""
+    return get_app_config(use_runtime_override=False).agent_connections.enabled
 
 
 def reset_app_config() -> None:
