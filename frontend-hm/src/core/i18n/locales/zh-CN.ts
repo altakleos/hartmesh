@@ -1063,7 +1063,7 @@ export function createZhCN(product: string): Translations {
       loadFullFile: "加载完整文件",
       loadingFullFile: "正在加载完整文件...",
       retry: "重试",
-    busy: "预览服务繁忙，请稍后重试。",
+      busy: "预览服务繁忙，请稍后重试。",
       previewFailed: "无法预览此文件，但仍可下载原始文件。",
       viewSource: "查看原始文件",
       missingTarget: "该链接没有指明要展示哪个文件。",
