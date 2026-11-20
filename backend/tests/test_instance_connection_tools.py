@@ -24,7 +24,7 @@ async def test_redirected_and_revoked_company_connection(tmp_path, monkeypatch):
     file = tmp_path / "extensions.json"
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(file))
     monkeypatch.delenv("DEER_FLOW_TENANT_WRITTEN_ENDPOINTS", raising=False)
-    bound = replace(execution(), connection_origin=ConnectionOrigin("interactive"))
+    bound = replace(execution(), connection_origin=ConnectionOrigin("message"))
     monkeypatch.setattr(type(bound), "validate", AsyncMock())
     monkeypatch.setattr(runtime, "connections_enabled", lambda: True)
     events = []
@@ -75,7 +75,7 @@ def test_compiled_graph_contacts_only_a_granted_connection(tmp_path, monkeypatch
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(file))
     monkeypatch.delenv("DEER_FLOW_TENANT_WRITTEN_ENDPOINTS", raising=False)
     monkeypatch.setattr(runtime, "connections_enabled", lambda: True)
-    bound = replace(execution(), connection_origin=ConnectionOrigin("interactive") if marked else None)
+    bound = replace(execution(), connection_origin=ConnectionOrigin("message") if marked else None)
     reset_extensions_config()
     try:
         with EndpointStub() as selected, EndpointStub() as other:
@@ -101,7 +101,7 @@ async def test_change_while_sending_receipt_is_persisted(tmp_path, monkeypatch):
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(file))
     monkeypatch.delenv("DEER_FLOW_TENANT_WRITTEN_ENDPOINTS", raising=False)
     monkeypatch.setattr(runtime, "connections_enabled", lambda: True)
-    bound = replace(execution(), connection_origin=ConnectionOrigin("interactive"))
+    bound = replace(execution(), connection_origin=ConnectionOrigin("message"))
     monkeypatch.setattr(type(bound), "validate", AsyncMock())
     outcomes = []
 
@@ -130,7 +130,7 @@ def test_final_inventory_rejects_an_unissued_tool(monkeypatch):
     from deerflow.agent_instances import connection_tools as runtime
     from deerflow.tools.mcp_metadata import tag_mcp_tool
 
-    bound = replace(execution(), connection_origin=ConnectionOrigin("interactive"))
+    bound = replace(execution(), connection_origin=ConnectionOrigin("message"))
     wrong = tag_mcp_tool(format_heading.model_copy(deep=True), server_name="unselected", transport="http")
     monkeypatch.setattr(runtime, "build_connection_inventory", lambda _: ([wrong], [("unselected", True)]))
     with pytest.raises(RuntimeError, match="company connection"):
@@ -170,7 +170,7 @@ def test_compiled_graph_retains_host_tool_and_defers_only_company_tool(tmp_path,
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(file))
     monkeypatch.delenv("DEER_FLOW_TENANT_WRITTEN_ENDPOINTS", raising=False)
     monkeypatch.setattr(runtime, "connections_enabled", lambda: True)
-    bound = replace(execution(), connection_origin=ConnectionOrigin("interactive"))
+    bound = replace(execution(), connection_origin=ConnectionOrigin("message"))
     cfg = _app_config()
     cfg.tool_search.enabled = deferred
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [read_file_tool])
@@ -223,7 +223,7 @@ async def test_live_tool_rejects_changed_authority_without_another_request(tmp_p
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(file))
     monkeypatch.delenv("DEER_FLOW_TENANT_WRITTEN_ENDPOINTS", raising=False)
     monkeypatch.setattr(runtime, "connections_enabled", lambda: True)
-    bound = replace(execution(), connection_origin=ConnectionOrigin("interactive"))
+    bound = replace(execution(), connection_origin=ConnectionOrigin("message"))
     monkeypatch.setattr(type(bound), "validate", AsyncMock())
     events = []
 
@@ -355,7 +355,7 @@ def test_an_inventory_from_a_prior_grant_cannot_be_bound_again(tmp_path, monkeyp
     from deerflow.agent_instances import connection_tools as runtime
     from deerflow.tools.mcp_metadata import tag_mcp_tool
 
-    bound = replace(execution(), connection_origin=ConnectionOrigin("interactive"))
+    bound = replace(execution(), connection_origin=ConnectionOrigin("message"))
     monkeypatch.setattr(runtime, "connections_enabled", lambda: True)
     file = tmp_path / "extensions.json"
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(file))
@@ -460,7 +460,7 @@ async def test_same_definition_relocated_during_receipt_refuses_the_old_tool(tmp
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(file))
     monkeypatch.delenv("DEER_FLOW_TENANT_WRITTEN_ENDPOINTS", raising=False)
     monkeypatch.setattr(runtime, "connections_enabled", lambda: True)
-    bound = replace(execution(), connection_origin=ConnectionOrigin("interactive"))
+    bound = replace(execution(), connection_origin=ConnectionOrigin("message"))
     monkeypatch.setattr(type(bound), "validate", AsyncMock())
     outcomes = []
 
