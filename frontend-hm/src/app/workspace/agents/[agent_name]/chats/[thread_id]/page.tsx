@@ -198,7 +198,7 @@ export default function AgentChatPage() {
         { agent_name },
         { ...options, keepSentMessageInView: true },
       );
-      if (message.files.length > 0) {
+      if (message.files.length > 0 || options?.savedFiles?.length) {
         return sendPromise;
       }
       void sendPromise;
@@ -449,6 +449,7 @@ export default function AgentChatPage() {
                     isRunning={thread.isLoading}
                   />
                   <InputBox
+                    conversationFilePicker
                     className={cn(
                       "bg-background/5 w-full",
                       isWelcomeMode && "-translate-y-2 sm:-translate-y-4",

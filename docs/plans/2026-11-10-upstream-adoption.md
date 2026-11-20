@@ -97,7 +97,7 @@ behavior. Ancestry alone is not adoption evidence.
 
 | Upstream commit | Decision | Intention / compatibility |
 | --- | --- | --- |
-| [`3f9a78e02`](https://github.com/bytedance/deer-flow/commit/3f9a78e02e719896dab7b48e7f856d0cd717b24d) | Adapt | Verify Goal completion; defer legacy cross-thread file handoff until storage authority and receipts are integrated. |
+| [`3f9a78e02`](https://github.com/bytedance/deer-flow/commit/3f9a78e02e719896dab7b48e7f856d0cd717b24d) | Adapt | Verify Goal completion. The Gateway can copy files from a finished answer into a personal conversation using current access and a delivery receipt. Model-initiated imports remain deferred. [#570](https://github.com/altakleos/hartmesh/pull/570) |
 | [`a99cd299f`](https://github.com/bytedance/deer-flow/commit/a99cd299f9633caeacd15e772dae640e87be59ed) | Adopt | trim inherited guidance below hard limit (#7976) |
 | [`2bd60d1e6`](https://github.com/bytedance/deer-flow/commit/2bd60d1e6f5167b95da035e2b57605d90d9237ca) | Adopt | build the chat model off the event loop (#7967) |
 | [`372baf762`](https://github.com/bytedance/deer-flow/commit/372baf762f69ca05a8bc6de843dea10252ca40f0) | Adopt | prevent todo reminders from resuming runs after hard stops (#7955) |

@@ -69,6 +69,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import { hasCeiling } from "@/core/agent-instances/presentation";
 import { fetch } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
@@ -100,7 +101,9 @@ import {
   type ComposerDraft,
   writeComposerDraft,
 } from "@/core/threads/composer-draft";
+import { useComposerImports } from "@/core/threads/composer-imports";
 import { useComposerStorageRefusal } from "@/core/threads/composer-storage";
+import type { ImportDestination } from "@/core/threads/conversation-file-import";
 import type {
   AgentThreadRunRefusal,
   SendMessageOptions,
@@ -152,6 +155,7 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import { ConversationFilePicker } from "./chats/conversation-file-picker";
 import { FilesStateNotice } from "./chats/files-state-notice";
 import { ComposerFocusProvider } from "./composer-focus";
 import {
@@ -288,6 +292,7 @@ function buildHiddenConversationQuoteMessage({
 export function InputBox({
   className,
   allowAttachments = true,
+  conversationFilePicker = false,
   attachmentsUnavailable = false,
   storageRefusal,
   agentRefusal,
@@ -317,10 +322,13 @@ export function InputBox({
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
   assistantId?: string | null;
   allowAttachments?: boolean;
+  conversationFilePicker?: boolean;
   attachmentsUnavailable?: boolean;
   storageRefusal?: ThreadRunRefusal | null;
   agentRefusal?: AgentThreadRunRefusal | null;
   agentFiles?: {
+    id: string;
+    homeScope: string;
     name: string;
     content: React.ReactNode;
     uploading: boolean;
@@ -438,21 +446,64 @@ export function InputBox({
   const { skills, isLoading: skillsLoading } = useSkills();
   const { data: configuredUploadLimits } = useUploadLimits(threadId);
   const agentAttachments = !!agentFiles;
-  const restoredFileCount = agentFiles?.restoredCount ?? 0;
+  const pickerScope = JSON.stringify([
+    user?.id,
+    user?.system_role,
+    threadId,
+    agentFiles?.id,
+    agentFiles?.homeScope,
+    conversationFilePicker,
+  ]);
+  const [openPicker, setOpenPicker] = useState<{
+    owner: { scope: string };
+    request: number;
+  } | null>(null);
+  const imports = useComposerImports(pickerScope);
+  const importedBytes = imports.chips.reduce(
+    (sum, chip) => sum + chip.file.size,
+    0,
+  );
+  const instanceId = agentFiles?.id;
+  const instanceName = agentFiles?.name;
+  const destination = useMemo<ImportDestination>(
+    () => ({
+      threadId,
+      newThread: draftThreadId === "new",
+      instance:
+        instanceId && instanceName
+          ? { id: instanceId, name: instanceName }
+          : undefined,
+    }),
+    [threadId, draftThreadId, instanceId, instanceName],
+  );
+  const restoredFileCount =
+    (agentFiles?.restoredCount ?? 0) + imports.chips.length;
   const uploadLimits = useMemo(
     () =>
-      configuredUploadLimits && agentAttachments
+      configuredUploadLimits && (agentAttachments || restoredFileCount > 0)
         ? {
             ...configuredUploadLimits,
             max_files: Math.max(
               0,
               configuredUploadLimits.max_files - restoredFileCount,
             ),
-            max_file_size: Number.MAX_SAFE_INTEGER,
-            max_total_size: Number.MAX_SAFE_INTEGER,
+            max_file_size: agentAttachments
+              ? Number.MAX_SAFE_INTEGER
+              : configuredUploadLimits.max_file_size,
+            max_total_size: agentAttachments
+              ? Number.MAX_SAFE_INTEGER
+              : Math.max(
+                  0,
+                  configuredUploadLimits.max_total_size - importedBytes,
+                ),
           }
         : configuredUploadLimits,
-    [configuredUploadLimits, agentAttachments, restoredFileCount],
+    [
+      configuredUploadLimits,
+      agentAttachments,
+      restoredFileCount,
+      importedBytes,
+    ],
   );
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -1207,6 +1258,20 @@ export function InputBox({
       const files = message.files.flatMap((file) =>
         file.file instanceof File ? [file.file] : [],
       );
+      if (
+        !agentAttachments &&
+        imports.chips.length &&
+        configuredUploadLimits &&
+        importedBytes > configuredUploadLimits.max_total_size
+      ) {
+        toast.error(
+          t.uploads.totalSizeTooLarge(
+            imports.chips.length,
+            formatUploadSize(configuredUploadLimits.max_total_size),
+          ),
+        );
+        return Promise.reject(new Error("Attachment limits exceeded."));
+      }
       const uploadValidation = validateUploadLimits([], files, uploadLimits);
       if (uploadValidation.violations.length > 0) {
         reportUploadLimitViolations(uploadValidation.violations);
@@ -1238,6 +1303,9 @@ export function InputBox({
       const quoteContexts = quotes.map((quote) => quote.context);
       pendingDraftSubmissionKeyRef.current = draftKey;
       const submitOptions: InputBoxSubmitOptions = {
+        ...(imports.chips.length
+          ? { savedFiles: imports.chips.map((chip) => chip.file) }
+          : {}),
         ...(selectedModel
           ? {
               modelContext: {
@@ -1266,6 +1334,7 @@ export function InputBox({
             invalidateDraftSaveTimer();
             clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
           }
+          if (imports.chips.length) imports.remove(imports.chips);
           sidecar?.clearConversationQuotes(quoteIds);
         },
       };
@@ -1285,6 +1354,11 @@ export function InputBox({
       draftKey,
       invalidateDraftSaveTimer,
       onSubmit,
+      agentAttachments,
+      configuredUploadLimits,
+      importedBytes,
+      t.uploads,
+      imports,
       refused,
       agentRefused,
       textInput.value,
@@ -2486,6 +2560,28 @@ export function InputBox({
               )}
             </div>
           )}
+          {imports.chips.map((chip) => (
+            <div
+              key={chip.file.path}
+              className="flex max-w-72 items-center gap-2 rounded border px-2 py-1 text-sm"
+            >
+              <div className="min-w-0">
+                <div className="truncate">{chip.file.filename}</div>
+                <div className="text-muted-foreground truncate text-xs">
+                  {t.inputBox.conversationFile.from(chip.sourceTitle)}
+                </div>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label={t.agentInstances.remove + " " + chip.file.filename}
+                onClick={() => imports.remove([chip])}
+              >
+                <XIcon />
+              </Button>
+            </div>
+          ))}
           {agentFiles ? (
             agentFiles.content
           ) : (
@@ -2603,8 +2699,59 @@ export function InputBox({
                 unavailable={attachmentsUnavailable}
                 uploadLimits={uploadLimits}
                 agentName={agentFiles?.name}
+                openPicker={
+                  conversationFilePicker && user?.id && !isMockThread
+                    ? () =>
+                        setOpenPicker((previous) => ({
+                          owner: imports.owner,
+                          request: (previous?.request ?? 0) + 1,
+                        }))
+                    : undefined
+                }
+                pickerFull={
+                  configuredUploadLimits !== undefined &&
+                  restoredFileCount + attachmentParts.length >=
+                    configuredUploadLimits.max_files
+                }
               />
             )}
+            {conversationFilePicker &&
+              user?.id &&
+              !isMockThread &&
+              openPicker?.owner === imports.owner &&
+              (!!agentFiles ||
+                (!composerLocked && !attachmentsUnavailable)) && (
+                <ConversationFilePicker
+                  key={pickerScope}
+                  account={user.id}
+                  agentReadAllowed={hasCeiling(user.permissions, "agents:read")}
+                  openRequest={openPicker.request}
+                  destination={destination}
+                  maxBytes={
+                    !agentFiles && uploadLimits
+                      ? Math.min(
+                          uploadLimits.max_file_size,
+                          Math.max(
+                            0,
+                            uploadLimits.max_total_size -
+                              attachmentParts.reduce(
+                                (total, part) => total + (part.file?.size ?? 0),
+                                0,
+                              ),
+                          ),
+                        )
+                      : undefined
+                  }
+                  close={() => setOpenPicker(null)}
+                  onSaved={(file, sourceTitle) => {
+                    if (agentFiles) {
+                      agentFiles.restoreFiles([file]);
+                    } else if (sourceTitle !== undefined) {
+                      imports.add(file, sourceTitle);
+                    }
+                  }}
+                />
+              )}
             <VoiceInputButton
               disabled={composerLocked}
               listening={voiceListening}
@@ -3264,12 +3411,16 @@ function AddAttachmentsButton({
   uploadLimits,
   unavailable,
   agentName,
+  openPicker,
+  pickerFull,
 }: {
   className?: string;
   disabled?: boolean;
   uploadLimits?: UploadLimits;
   unavailable?: boolean;
   agentName?: string;
+  openPicker?: () => void;
+  pickerFull?: boolean;
 }) {
   const { t } = useI18n();
   const attachments = usePromptInputAttachments();
@@ -3284,22 +3435,40 @@ function AddAttachmentsButton({
             formatUploadSize(uploadLimits.max_total_size),
           )
         : t.inputBox.addAttachments;
+  const button = (
+    <PromptInputButton
+      type="button"
+      aria-label={
+        agentName
+          ? t.inputBox.agentFile.attach(agentName)
+          : t.inputBox.addAttachments
+      }
+      className={cn("px-2!", className)}
+      data-testid="add-attachments-button"
+      disabled={disabled}
+      onClick={openPicker ? undefined : () => attachments.openFileDialog()}
+    >
+      <PaperclipIcon className="size-3" />
+    </PromptInputButton>
+  );
   return (
     <Tooltip content={<span className="block max-w-80">{tooltipContent}</span>}>
       <span>
-        <PromptInputButton
-          aria-label={
-            agentName
-              ? t.inputBox.agentFile.attach(agentName)
-              : t.inputBox.addAttachments
-          }
-          className={cn("px-2!", className)}
-          data-testid="add-attachments-button"
-          disabled={disabled}
-          onClick={() => attachments.openFileDialog()}
-        >
-          <PaperclipIcon className="size-3" />
-        </PromptInputButton>
+        {openPicker ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>{button}</DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              <DropdownMenuItem onSelect={() => attachments.openFileDialog()}>
+                {t.inputBox.conversationFile.device}
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={pickerFull} onSelect={openPicker}>
+                {t.inputBox.conversationFile.menu}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : (
+          button
+        )}
       </span>
     </Tooltip>
   );

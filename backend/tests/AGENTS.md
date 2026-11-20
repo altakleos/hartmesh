@@ -710,7 +710,7 @@ The mandatory native tier's scheduled-trim regression: [details](../docs/tests-g
 `test_compose_instance_acceptance.py` (opt-in live, `HARTMESH_REQUIRE_BUNDLE_INSTANCES=1`, all 27 cases, zero skips):
 [details](../docs/tests-guidance-details.md#compose-instance-acceptance).
 
-Cases 18–27 prove direct live/closed uploads, streamed 40 MiB digest equality,
+Cases 18–27 prove live/closed uploads, presented-file transfers in both directions, 40 MiB digest equality,
 Stop without assignment cancellation, count refusals and same-kind slot reuse,
 denied-site artifacts, supervisor requests and operator/container-loss settlement.
 The scripted Work branch rejects `ask_clarification` or a missing system question

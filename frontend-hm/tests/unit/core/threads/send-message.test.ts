@@ -96,3 +96,25 @@ test("keeps human input response metadata on the hidden user message", () => {
     },
   ]);
 });
+
+test("sends saved and freshly uploaded attachments together on a files-only turn", () => {
+  const saved = {
+    filename: "notes.txt",
+    path: "/mnt/user-data/uploads/notes.txt",
+    size: 5,
+    status: "uploaded" as const,
+  };
+  const fresh = {
+    filename: "table.csv",
+    path: "/mnt/user-data/uploads/table.csv",
+    size: 11,
+    status: "uploaded" as const,
+  };
+  expect(
+    buildThreadSubmitMessages({
+      text: "",
+      savedFiles: [saved],
+      filesForSubmit: [fresh],
+    })[0]?.additional_kwargs?.files,
+  ).toEqual([saved, fresh]);
+});

@@ -970,6 +970,33 @@ export interface Translations {
 
   // Input Box
   inputBox: {
+    conversationFile: {
+      menu: string;
+      device: string;
+      sources: string;
+      browseAgents: string;
+      backToAgents: string;
+      noAgents: string;
+      noSources: string;
+      noFiles: string;
+      unavailable: string;
+      loadFailed: string;
+      retry: string;
+      previous: string;
+      give: string;
+      copying: string;
+      failed: string;
+      unconfirmedOwn: string;
+      uncertain: string;
+      check: string;
+      refused: string;
+      tooLarge: string;
+      from: (title: string) => string;
+      giveTitle: (name: string) => string;
+      disclosure: (file: string, name: string) => string;
+      needsInspect: (name: string) => string;
+      changed: (time: string) => string;
+    };
     agentFile: {
       attach: (name: string) => string;
       hint: (name: string) => string;

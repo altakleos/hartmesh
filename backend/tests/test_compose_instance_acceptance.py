@@ -1412,8 +1412,45 @@ def test_file_given_while_the_workspace_runs_is_read_by_the_running_agent(compos
     assert compose.invoke(["docker", "exec", identity["container_id"], "cat", "/mnt/user-data/uploads/input.txt"], timeout=2).stdout.encode() == content
     assert time.monotonic() - answered < 2
     assert workspace(compose, employee)[0] == identity
-    session.run(employee["thread_id"], files=files)
+    run = session.run(employee["thread_id"], files=files)
     assert workspace(compose, employee)[0] == identity
+
+    # Export the actual run's presented bytes from this Home into a personal chat.
+    output_path = "/mnt/user-data/outputs/acceptance.txt"
+    agent_thread = employee["thread_id"]
+    produced = session.request("GET", f"/api/threads/{agent_thread}/presented-files").json()["files"]
+    assert any(item["run_id"] == run["run_id"] and item["path"] == output_path and item["available"] for item in produced)
+    ordinary_digest = hashlib.sha256(ARTIFACT).hexdigest()
+    home_bytes = b"The Home's updated file.\n"
+    home_digest = hashlib.sha256(home_bytes).hexdigest()
+    revised = session.request(
+        "PUT",
+        f"/api/agent-instances/{employee['instance']['id']}/home/operations/content",
+        params={"path": "outputs/acceptance.txt", "expected_sha256": ordinary_digest, "operation_id": uuid.uuid4().hex},
+        headers={"Content-Type": "application/octet-stream", "Content-Length": str(len(home_bytes))},
+        content=home_bytes,
+    ).json()
+    assert revised["sha256"] == home_digest
+    personal = session.thread()
+    source = {"source_thread_id": agent_thread, "source_run_id": run["run_id"], "path": output_path}
+    exported = session.request("POST", f"/api/threads/{personal}/uploads/from-conversation", json=source).json()
+    assert exported["sha256"] == home_digest
+    assert session.request("GET", f"/api/threads/{personal}/artifacts/mnt/user-data/uploads/acceptance.txt").content == home_bytes
+
+    # Give the ordinary chat's independently produced file to the running Home.
+    ordinary = compose.state["admin_thread"]
+    delivered = session.request("GET", f"/api/threads/{ordinary}/presented-files").json()["files"]
+    item = next(item for item in delivered if item["path"] == output_path and item["available"])
+    source = {"source_thread_id": ordinary, "source_run_id": item["run_id"], "path": item["path"]}
+    home_url = f"/api/agent-instances/{employee['instance']['id']}/conversations/{agent_thread}/files"
+    nonce = uuid.uuid4().hex
+    session.request("POST", home_url + "/from-conversation", params={"operation_id": nonce}, json={**source, "acknowledge_disclosure": False}, expected=409)
+    saved = session.request("POST", home_url + "/from-conversation", params={"operation_id": nonce}, json={**source, "acknowledge_disclosure": True}, expected=201).json()
+    assert saved["virtual_path"] == "/mnt/user-data/uploads/acceptance.txt"
+    assert saved["sha256"] == ordinary_digest and saved["size"] == len(ARTIFACT)
+    assert compose.invoke(["docker", "exec", identity["container_id"], "cat", saved["virtual_path"]]).stdout.encode() == ARTIFACT
+    status = session.request("GET", home_url + "/operations/" + nonce, params={"filename": "acceptance.txt"}).json()
+    assert status["status"] == "complete" and status["file"]["sandbox_path"] == saved["virtual_path"]
 
 
 def test_file_given_while_no_workspace_runs_is_present_at_the_next_run(compose, session, employee):

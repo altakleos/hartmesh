@@ -507,3 +507,185 @@ test.describe("Agent chat", () => {
     await expect(page.getByText("Hello from DeerFlow!")).toBeVisible();
   });
 });
+
+test("a refused first send with a saved conversation attachment preserves the custom chat draft", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, { agents: MOCK_AGENTS });
+  await page.route("**/api/threads/search", (route) =>
+    route.fulfill({
+      json: [
+        {
+          thread_id: "source",
+          owner_user_id: "default",
+          values: { title: "Planning" },
+          agent_instance: null,
+        },
+      ],
+    }),
+  );
+  await page.route("**/api/threads/source/presented-files?*", (route) =>
+    route.fulfill({
+      json: {
+        files: [
+          {
+            filename: "notes.txt",
+            path: "/mnt/user-data/outputs/notes.txt",
+            run_id: "answer",
+            size: 11,
+            modified: 1740000000,
+            available: true,
+          },
+        ],
+        has_more: false,
+        next_before_run_id: null,
+        next_before_created_at: null,
+      },
+    }),
+  );
+  let imports = 0;
+  await page.route("**/uploads/from-conversation", (route) => {
+    imports++;
+    return route.fulfill({
+      json: {
+        filename: "notes.txt",
+        size: 11,
+        virtual_path: "/mnt/user-data/uploads/notes.txt",
+        sha256: "a".repeat(64),
+      },
+    });
+  });
+  let sends = 0;
+  let submitted: unknown;
+  await page.route("**/api/langgraph/threads/*/runs/stream", (route) => {
+    sends++;
+    submitted = route.request().postDataJSON();
+    return route.fulfill({
+      status: 422,
+      json: { detail: "Conversation could not start" },
+    });
+  });
+  await page.goto("/workspace/agents/test-agent/chats/new");
+  const input = page.locator('textarea[name="message"]');
+  await input.fill("Review these notes");
+  await page.getByTestId("add-attachments-button").click();
+  await page.getByRole("menuitem", { name: "From a conversation" }).click();
+  await page.getByRole("button", { name: "Planning" }).click();
+  await page.getByRole("button", { name: /notes.txt/ }).click();
+  await expect(page.locator("form").getByText("From Planning")).toBeVisible();
+  await input.press("Enter");
+  await expect.poll(() => sends).toBe(1);
+  await expect(page.locator("[data-sonner-toast]").first()).toBeVisible();
+  expect(imports).toBe(1);
+  expect(JSON.stringify(submitted)).toContain(
+    "/mnt/user-data/uploads/notes.txt",
+  );
+  expect(JSON.stringify(submitted)).not.toContain("Planning");
+  await expect(input).toHaveValue("Review these notes");
+  await expect(page.locator("form").getByText("From Planning")).toBeVisible();
+});
+
+test("a personal chat can attach a file from an inspectable agent conversation started by a colleague", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, { features: { agentInstancesEnabled: true } });
+  const instanceId = "b".repeat(32);
+  const requests: string[] = [];
+  await page.route("**/api/threads/search", (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.route("**/api/agent-instances?*", (route) => {
+    requests.push("agents");
+    return route.fulfill({
+      json: {
+        instances: [
+          { id: instanceId, name: "Library", permissions: 3, status: "active" },
+          {
+            id: "c".repeat(32),
+            name: "Chat only",
+            permissions: 1,
+            status: "active",
+          },
+        ],
+        unfinished: [],
+        ai_assistants: { per_user: 3, allowed: 8, in_use: 0, mine: 0 },
+      },
+    });
+  });
+  await page.route(
+    `**/api/agent-instances/${instanceId}/conversations?*`,
+    (route) => {
+      requests.push("conversations");
+      return route.fulfill({
+        json: {
+          conversations: [
+            {
+              thread_id: "meeting",
+              requester_id: "another-person",
+              title: "Team minutes",
+              updated_at: "2026-01-01T12:00:00Z",
+              running: false,
+            },
+          ],
+        },
+      });
+    },
+  );
+  await page.route("**/api/threads/meeting/presented-files?*", (route) =>
+    route.fulfill({
+      json: {
+        files: [
+          {
+            filename: "minutes.txt",
+            path: "/mnt/user-data/outputs/minutes.txt",
+            run_id: "meeting-answer",
+            size: 7,
+            modified: 1740000000,
+            available: true,
+          },
+        ],
+        has_more: false,
+        next_before_run_id: null,
+        next_before_created_at: null,
+      },
+    }),
+  );
+  let imported: unknown;
+  await page.route("**/uploads/from-conversation", (route) => {
+    imported = route.request().postDataJSON();
+    return route.fulfill({
+      json: {
+        filename: "minutes.txt",
+        size: 7,
+        virtual_path: "/mnt/user-data/uploads/minutes.txt",
+        sha256: "a".repeat(64),
+      },
+    });
+  });
+  await page.goto("/workspace/chats/new");
+  await page.getByTestId("add-attachments-button").click();
+  await page.getByRole("menuitem", { name: "From a conversation" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(
+    dialog.getByRole("button", { name: "Team minutes" }),
+  ).toHaveCount(0);
+  const browse = dialog.getByRole("button", {
+    name: "Browse agent conversations",
+  });
+  await expect(browse).toBeVisible();
+  expect(requests).toEqual([]);
+  await browse.click();
+  await dialog.getByRole("button", { name: "Library" }).click();
+  await dialog.getByRole("button", { name: "Team minutes" }).click();
+  await dialog.getByRole("button", { name: /minutes.txt/ }).click();
+  await expect(
+    page.locator("form").getByText("From Team minutes"),
+  ).toBeVisible();
+  expect(requests).toEqual(["agents", "conversations"]);
+  expect(imported).toEqual({
+    source_thread_id: "meeting",
+    source_run_id: "meeting-answer",
+    path: "/mnt/user-data/outputs/minutes.txt",
+    create_destination: true,
+  });
+});
