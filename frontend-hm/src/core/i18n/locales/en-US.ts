@@ -2271,9 +2271,50 @@ export function createEnUS(product: string): Translations {
         languageDescription: "Switch between languages.",
       },
       tools: {
+        connection: {
+          discardJson: "Discard form changes and open JSON",
+          changed:
+            "This connection changed while you were editing. Open it again to see its current settings.",
+          add: "Add connection",
+          edit: "Edit connection",
+          formDescription: "Connect an outside service using its MCP address.",
+          name: "Name",
+          url: "Address",
+          token: "Token (optional)",
+          description: "Description (optional)",
+          tokenHelp:
+            "The service sees actions as the account this token belongs to. Use a service account.",
+          more: "More options",
+          transport: "Transport",
+          http: "Standard (HTTP)",
+          sse: "Server-sent events (SSE)",
+          json: "Paste a JSON definition instead",
+          saveCheck: "Save and check",
+          check: "Check",
+          checking: "Checking the connection…",
+          saved: "Saved.",
+          unavailable: "Could not complete the check.",
+          nameRule: "Use 1–48 letters, digits, hyphens or underscores.",
+          duplicate: "This connection name is already in use.",
+          secureAddress: "Enter an HTTPS address without embedded credentials.",
+          tokenFormat:
+            "Use plain ASCII without line breaks, control characters or spaces at either end.",
+          literal: "Enter a literal value without a leading $.",
+          reasons: {
+            unreachable: "Nothing answered at this address.",
+            refused:
+              "The connection was refused. Check that it is enabled and that its credentials are accepted.",
+            "not-mcp": "The service did not return an MCP response.",
+            timeout: "The service did not answer in time.",
+            "bad-token-format": "The stored token has an unsupported format.",
+            "address-not-public":
+              "The service address is unavailable under the deployment’s connection policy.",
+          },
+          connected: (n) =>
+            n === 1 ? "Connected. 1 tool." : `Connected. ${n} tools.`,
+        },
         title: "Tools",
-        description:
-          "Manage the configuration and enabled status of MCP tools.",
+        description: "Connect outside systems for your company’s chats.",
         adminRequired: "Admin privileges are required to manage MCP tools.",
         empty: "No MCP tools configured.",
         addServer: "Add server",

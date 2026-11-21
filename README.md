@@ -1890,6 +1890,12 @@ still retain their error or partial-result status.
 
 #### MCP Server
 
+Administrators can open **Settings → Tools → Add connection** to enter a
+remote MCP service’s HTTPS address and optional service-account token.
+**Save and check** reports how many tools the service offers. A failed check
+leaves the connection saved for editing. Use **Check** to try again, or
+**Paste a JSON definition instead** for advanced configurations.
+
 Tool steps mark explicit execution failures. Scheduled-task steps show completed
 operations only after a valid response, rather than when the request is issued.
 
@@ -1999,7 +2005,7 @@ Capability Center groups plugins by office collaboration, documents and knowledg
 Personal MCP connections configured in the web interface are persisted per user.
 Personal MCP HTTP/SSE connections admitted under the public-network policy load TLS trust off the Gateway event loop, while retaining public-address checks, certificate verification and per-origin connection isolation.
 Unexpected failures when changing deployment or personal MCP configuration return fixed error messages; exception details stay in server logs.
-Deployment tools remain shared. Administrators can add, edit, enable, disable and delete shared MCP servers under **Platform provided**; ordinary users see their status without controls. Personal plugin switches affect only the signed-in user's connections. See [connection ownership](docs/capability-center.md#personal-and-deployment-mcp-configuration).
+Deployment tools remain shared. Administrators can add, edit, enable, disable and delete shared MCP servers under **Platform provided**; ordinary users see their status without controls. An administrator can check a saved, enabled HTTP or SSE connection to see how many tools it currently offers. The check has a 20-second limit and uses the deployment’s usual address restrictions. Personal plugin switches affect only the signed-in user's connections. See [connection ownership](docs/capability-center.md#personal-and-deployment-mcp-configuration).
 
 For plugin manifests, adapter registration, and Agent capability selection, see
 [Capability Center integration contract](docs/capability-center.md).

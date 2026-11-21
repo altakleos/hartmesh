@@ -31,6 +31,7 @@ Keep the key across restarts. Rotation makes old nonces unknown. Check the Home
 or its managed recovery record before starting a new operation after rotation.
 Hold source access through the destination effect using the borrowed writer.
 Declare `GET /roles` before `GET /{instance_id}`.
+MCP diagnostics admit an administrator before resolving a saved connection. Use fresh bounded discovery of the named remote only and project typed outcomes.
 
 `chat_cleanup.py` admits purpose-bound deletion, including unsupported credentials,
 without general User scope. Durable deletion and the owner/thread gate fence

@@ -73,7 +73,9 @@ no customer-facing storage notice exposes byte capacities or pool terminology.
    `PUT /api/mcp/config/server`, and bodyless
    `DELETE /api/mcp/config/servers/{server_name}` mutations. Delete names are
    percent-encoded, including legacy empty and slash-containing names; every
-   successful mutation invalidates `["mcpConfig"]` only after the response.
+   successful mutation invalidates the account/role-scoped `["mcpConfig", …]` after the response.
+   The remote form edits the complete masked definition. Preserve existing header
+   spelling and the exact mask. Check only a saved name and render fixed result codes.
    Current-chat MCP background tasks use `core/background-tasks`: the header
    trigger is hidden for new/mock/static-demo threads and unless `/api/features`
    reports the startup-scoped `mcp_tasks` capability; the list query is disabled

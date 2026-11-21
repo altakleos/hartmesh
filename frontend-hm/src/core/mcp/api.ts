@@ -125,3 +125,53 @@ export async function updateMCPServerState(
   }
   return response.json() as Promise<MCPConfig>;
 }
+
+const checkReasons = [
+  "unreachable",
+  "refused",
+  "not-mcp",
+  "timeout",
+  "bad-token-format",
+  "address-not-public",
+] as const;
+type ConnectionCheckReason = (typeof checkReasons)[number];
+export type ConnectionCheck =
+  | { status: "connected"; tool_count: number }
+  | { status: "failed"; reason: ConnectionCheckReason };
+
+export async function checkMCPConnection(
+  name: string,
+  signal: AbortSignal,
+): Promise<ConnectionCheck> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/mcp/config/servers/${encodeURIComponent(name)}/check`,
+    {
+      method: "POST",
+      signal: AbortSignal.any([signal, AbortSignal.timeout(25_000)]),
+      cache: "no-store",
+    },
+  );
+  if (!response.ok)
+    throw new MCPConfigRequestError(
+      response.status,
+      "Connection check unavailable",
+    );
+  const data: unknown = await response.json();
+  if (typeof data === "object" && data !== null && "status" in data) {
+    if (
+      data.status === "connected" &&
+      "tool_count" in data &&
+      typeof data.tool_count === "number" &&
+      Number.isSafeInteger(data.tool_count) &&
+      data.tool_count >= 0
+    )
+      return { status: "connected", tool_count: data.tool_count };
+    if (data.status === "failed" && "reason" in data) {
+      const reason = checkReasons.find(
+        (candidate) => candidate === data.reason,
+      );
+      if (reason) return { status: "failed", reason };
+    }
+  }
+  throw new Error("Connection check unavailable");
+}
