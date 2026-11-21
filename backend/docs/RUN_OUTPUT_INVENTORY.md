@@ -22,7 +22,10 @@ presence advertises protocol support, not a particular run's routing decision.
 
 The actual first-party SDK assembly issues a host-only profile bound to its
 graph, state schema, normalized middleware and standard `StructuredTool`
-adapters. Unknown middleware, state roles or tool adapters refuse qualification
+adapters. An instance graph also qualifies the exact `InstanceConnectionTool`
+alongside its authority and connection inventory middleware. Its final
+`ToolMessage` can witness a rich result or a structured artifact in the root
+checkpoint. Unknown middleware, state roles or tool adapters refuse qualification
 before model execution, and so does an extension that contributes middleware
 (`extensions.middleware_contributors` in `agent.py`). No observers are required, and unused assembly
 descriptors still skip their expensive hashes. Refusal after startup records

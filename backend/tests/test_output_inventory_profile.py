@@ -319,3 +319,64 @@ def test_only_a_middleware_contributor_refuses_a_profile(monkeypatch, field, qua
         extensions=extensions,
     )
     assert (profile is not None) is qualifies
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize("granted", [False, True])
+def test_company_connections_preserve_the_host_terminal_profile(monkeypatch, tmp_path, mode, granted):
+    import json
+    from dataclasses import replace
+
+    from support.mcp_endpoint_stubs import EndpointStub
+    from test_agent_execution_runtime import execution
+
+    from deerflow.agent_instances import connection_tools, connections
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, ConnectionOrigin
+    from deerflow.config.extensions_config import reset_extensions_config
+
+    file = tmp_path / "extensions.json"
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(file))
+    monkeypatch.delenv("DEER_FLOW_TENANT_WRITTEN_ENDPOINTS", raising=False)
+    monkeypatch.setattr(connection_tools, "connections_enabled", lambda: True)
+    bound = replace(execution(), connection_origin=ConnectionOrigin("message"))
+    try:
+        with EndpointStub() as endpoint:
+            file.write_text(json.dumps({"mcpServers": {"records": {"type": "http", "url": endpoint.url("/mcp")}}}))
+            if granted:
+                [item] = connections.list_connections(bound.instance.id, manager=True)
+                connections.change_grant(bound.instance.id, item["id"], "manager", give=True)
+            assembly, built, _model = assemble_offline(monkeypatch, mode=mode, runtime_context={AGENT_EXECUTION_CONTEXT_KEY: bound})
+            assert any(type(item) is connection_tools.ConnectionInventoryMiddleware for item in built["middleware"])
+            assert any(type(tool) is connection_tools.InstanceConnectionTool for tool in built["tools"]) is granted
+            assert assembly.inventory_profile is not None
+            assert assembly.inventory_profile.accepts(assembly.graph)
+    finally:
+        reset_extensions_config()
+
+
+@pytest.mark.parametrize("case", ["unpaired", "outside_instance", "tool_subclass", "middleware_subclass", "middleware_tool"])
+def test_only_host_connection_adapters_in_the_instance_stack_qualify(monkeypatch, case):
+    from deerflow.agent_instances.connection_tools import ConnectionInventoryMiddleware, InstanceConnectionTool
+    from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
+
+    class OtherConnectionTool(InstanceConnectionTool):
+        pass
+
+    class OtherConnectionInventory(ConnectionInventoryMiddleware):
+        pass
+
+    tool_type = OtherConnectionTool if case == "tool_subclass" else InstanceConnectionTool
+    tool = tool_type(name="example_echo", description="Echo a value", args_schema={}, instance_id="example", connection_id="sample", connection_name="records", remote_name="echo")
+    inventory_type = OtherConnectionInventory if case == "middleware_subclass" else ConnectionInventoryMiddleware
+    inventory = inventory_type([("records", True)])
+
+    def select_stack(middlewares):
+        if case != "outside_instance":
+            middlewares.insert(0, InstanceAuthorityMiddleware(require_memory_audience=False))
+        if case != "unpaired":
+            middlewares.append(inventory)
+        if case == "middleware_tool":
+            inventory.tools = [tool]
+
+    assembly, _, _ = assemble_offline(monkeypatch, tools=() if case == "middleware_tool" else (tool,), transform_middlewares=select_stack)
+    assert assembly.inventory_profile is None
