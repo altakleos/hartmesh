@@ -15,7 +15,7 @@ import pytest
 if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("HARTMESH_VERIFY_CONNECTIONS") not in {"explicit", "bundle-default"}:
     pytest.skip("requires the hosted connection qualification", allow_module_level=True)
 
-from _compose_connection_evidence import confirmed_browser_notice
+from _compose_connection_evidence import confirmed_browser_notice, observe_initial_thread_reads
 from _compose_gateway_restart import start_gateway, stop_gateway
 from playwright.sync_api import expect, sync_playwright
 from test_compose_instance_acceptance import Bundle, activate, await_attempt, await_execution_ready, delegate, eventually, new_conversation, required
@@ -148,9 +148,10 @@ def read_from_browser(page, compose, session, agent, evidence):
     thread_id = agent["thread_id"]
     evidence["thread_id"] = thread_id
     expected = "Notice from notices-a."
-    page.goto(f"{compose.url}/workspace/chats/{thread_id}", wait_until="domcontentloaded")
-    field = page.get_by_placeholder(re.compile(r"how can i assist", re.I))
-    field.fill("acceptance:notice:read")
+    with observe_initial_thread_reads(page, f"{compose.url}/api/langgraph/threads/{thread_id}", evidence):
+        page.goto(f"{compose.url}/workspace/chats/{thread_id}", wait_until="domcontentloaded")
+        field = page.get_by_placeholder(re.compile(r"how can i assist", re.I))
+        field.fill("acceptance:notice:read")
     with page.expect_response(lambda reply: reply.request.method == "POST" and urlsplit(reply.url).path.endswith(f"/threads/{thread_id}/runs/stream"), timeout=30000) as streamed:
         page.get_by_role("button", name="Submit", exact=True).click()
     response = streamed.value

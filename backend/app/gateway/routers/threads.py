@@ -61,6 +61,7 @@ from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIV
 from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
+from deerflow.runtime.checkpointer.thread_spans import root_checkpoint_exists
 from deerflow.runtime.context_compaction import (
     ContextCompactionDisabled,
     ContextCompactionFailed,
@@ -1051,7 +1052,7 @@ async def _resolve_existing_thread(
     return existing_record
 
 
-def _existing_thread_response(thread_id: str, record: dict) -> ThreadResponse:
+def _existing_thread_response(thread_id: str, record: dict, *, agent_instance: dict | None = None) -> ThreadResponse:
     return ThreadResponse(
         thread_id=thread_id,
         owner_user_id=record.get("user_id"),
@@ -1059,6 +1060,7 @@ def _existing_thread_response(thread_id: str, record: dict) -> ThreadResponse:
         created_at=coerce_iso(record.get("created_at", "")),
         updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=record.get("metadata", {}),
+        agent_instance=agent_instance,
     )
 
 
@@ -1626,6 +1628,34 @@ async def move_thread(thread_id: ThreadId, body: ThreadMoveRequest, request: Req
     )
 
 
+async def _empty_bound_conversation(request: Request, thread_id: str, checkpointer: Any) -> bool:
+    # The request middleware stamps the exact thread only after authorizing its
+    # binding. Keep unbound and legacy reads on their existing paths.
+    if getattr(request.state, "agent_conversation_thread_id", None) != thread_id:
+        return False
+    try:
+        if await root_checkpoint_exists(checkpointer, thread_id) is not False:
+            return False
+        # Delta reads require a restart if the live snapshot cadence changed.
+        # Let the normal accessor report the exact error in that case.
+        if getattr(request.app.state, "checkpoint_channel_mode", "full") == "delta":
+            from app.gateway.deps import get_config
+            from deerflow.runtime.checkpoint_mode import frozen_checkpoint_snapshot_frequency
+
+            frequency = frozen_checkpoint_snapshot_frequency()
+            if frequency is not None and (await asyncio.to_thread(get_config)).database.checkpoint_delta.snapshot_frequency != frequency:
+                return False
+    except Exception:
+        # Failure to prove absence falls back to ordinary read/error handling.
+        return False
+
+    # Recheck the same read authority as graph-backed materialization. A later
+    # write is visible on the next read; absence here is never cached.
+    from app.gateway.agent_conversations import inspection_for_read
+
+    return await inspection_for_read(request, thread_id) is not None
+
+
 @router.get("/{thread_id}", response_model=ThreadResponse)
 @require_permission("threads", "read", owner_check=True)
 async def get_thread(thread_id: ThreadId, request: Request, require_thread_binding: Annotated[bool, Header(alias=THREAD_BINDING_HEADER_NAME)] = False) -> ThreadResponse:
@@ -1636,6 +1666,9 @@ async def get_thread(thread_id: ThreadId, request: Request, require_thread_bindi
     thread_store = get_thread_store(request)
     checkpointer = get_checkpointer(request)
     record: dict | None = await thread_store.get(thread_id)
+    if record is not None and await _empty_bound_conversation(request, thread_id, checkpointer):
+        bindings = await thread_bindings(request.app, [thread_id], require_authority=require_thread_binding)
+        return _existing_thread_response(thread_id, record, agent_instance=bindings.get(thread_id))
     try:
         accessor, config = await abuild_checkpoint_state_accessor(
             request,
@@ -2228,6 +2261,8 @@ async def get_thread_history(
     ``useStream`` rebuilds thread values from this head after every run.
     """
     checkpointer = get_checkpointer(request)
+    if body.before is None and await _empty_bound_conversation(request, thread_id, checkpointer):
+        return []
     try:
         accessor, config = await build_thread_checkpoint_state_accessor(
             request,

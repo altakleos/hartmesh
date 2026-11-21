@@ -74,8 +74,9 @@ compatibility. Create's default null binding proves nothing about actual binding
 
 `POST /api/threads/{id}/history` returns the newest checkpoint’s title/messages
 and rendered `artifacts`, `todos` and non-null `goal`. Keep the API channel
-serializer and explicit projection; expose no internal sandbox state. Empty lists
-are meaningful; omit absent/null goals to preserve frontend local overrides.
+serializer and explicit projection; expose no internal sandbox state. Omit absent/null goals; preserve empty lists.
+Admitted employee metadata and unpinned history can use a freshly proved empty
+root checkpoint. Preserve the binding and inspection, and materialize populated reads.
 
 Artifacts, Files and Shared stream MIME sniffing/metadata/ranges from one safely
 opened descriptor. Preflight paths determine HTTP errors, never permission to
