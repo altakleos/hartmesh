@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Gateway shutdown now waits for a committed Telegram writer to return its database connection.
+- New employee and personal assistant conversations can open and accept their first message while the Gateway is still preparing the agent’s tools.
 
 ### Operations
 
