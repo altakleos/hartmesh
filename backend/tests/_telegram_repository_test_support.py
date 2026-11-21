@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.links import BotLinkRepository
 from app.telegram_bots.settings import SettingsRepository
+from deerflow.agent_instances.contract import DefinitionSnapshot
+from deerflow.persistence.agent_instances.model import AgentDefinitionRevisionRow
 from deerflow.persistence.base import Base
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow, ChannelConversationRow, ChannelCredentialRow, ChannelOAuthStateRow
 from deerflow.persistence.channel_connections.sql import ChannelConnectionRepository
@@ -99,6 +101,11 @@ async def add_link(db, *, owner="owner-a", bot=9_000_000_001, target=None, **kwa
 async def rows(db, cls):
     async with db.sessions() as session:
         return list((await session.execute(select(cls))).scalars())
+
+
+def employee_definition_row(owner_id):
+    snapshot = DefinitionSnapshot.capture(owner_id=owner_id, config={"name": "telegram-employee"}, soul="")
+    return AgentDefinitionRevisionRow(revision=snapshot.revision, owner_id=snapshot.owner_id, config=snapshot.config, soul=snapshot.soul)
 
 
 def code_of(connect):
