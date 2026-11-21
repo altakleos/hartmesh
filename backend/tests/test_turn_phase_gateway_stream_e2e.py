@@ -50,6 +50,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -57,7 +58,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -500,6 +501,27 @@ def test_text_is_delivered_incrementally_and_the_phases_line_up(gateway: _Gatewa
     )
 
 
+def _assert_stream_text_offset(wire: dict[str, Any], message: str) -> None:
+    stream_text_ms = _phase_at(wire, "first_stream_text")
+    printed = re.search(r"\bfirst_stream_text@(\d+)ms\b", message)
+    assert stream_text_ms is not None and printed is not None, message
+    # Both outputs round the original offset. A wire value ending in .500
+    # can come from either side of the text formatter's half-millisecond boundary.
+    assert abs(int(printed[1]) - stream_text_ms) <= 0.5, (message, stream_text_ms)
+
+
+@pytest.mark.parametrize(("offset_ms", "incorrect_ms"), [(730.499, 731), (730.4999, 729), (730.5001, 732), (730.501, 730)])
+def test_stream_text_offset_at_a_rounding_boundary(offset_ms: float, incorrect_ms: int) -> None:
+    from deerflow.runtime.turn_phases import PhaseRecord, TurnPhase, TurnPhaseJournal
+
+    journal = TurnPhaseJournal(correlation_id="precision")
+    snapshot = replace(journal.snapshot(), phases=(PhaseRecord(TurnPhase.FIRST_STREAM_TEXT, offset_ms),))
+    wire = snapshot.to_wire()
+    _assert_stream_text_offset(wire, snapshot.to_log_line())
+    with pytest.raises(AssertionError):
+        _assert_stream_text_offset(wire, f"first_stream_text@{incorrect_ms}ms")
+
+
 def test_the_emitted_line_carries_the_turn_timing_a_deployment_can_read(gateway: _Gateway) -> None:
     """One line, one turn: the offsets an operator needs without a second source.
 
@@ -520,8 +542,7 @@ def test_the_emitted_line_carries_the_turn_timing_a_deployment_can_read(gateway:
     assert "outcome=success" in message
     for phase in ("admission", "model_request", "first_provider_text", "first_stream_text", "model_completion", "terminal"):
         assert f"{phase}@" in message, message
-    stream_text_ms = _phase_at(wire, "first_stream_text")
-    assert f"first_stream_text@{round(stream_text_ms)}ms" in message
+    _assert_stream_text_offset(wire, message)
     assert "unobservable=browser_first_text(" in message
 
 
