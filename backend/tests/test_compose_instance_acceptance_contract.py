@@ -477,3 +477,64 @@ def test_browser_notice_receipt_requires_the_final_checkpoint_and_its_exact_run_
     assert confirm([answer], {**event, "run_id": "other"}) is None
     assert confirm([answer], {**event, "thread_id": "other"}) is None
     assert confirm([answer], {**event, "content": {**answer, "id": "different"}}) is None
+
+
+def test_initial_browser_read_evidence_survives_timeout_and_keeps_only_expected_reads(monkeypatch):
+    from unittest.mock import Mock
+
+    import _compose_connection_evidence as receipt
+    import pytest
+
+    now = 5
+    monkeypatch.setattr(receipt, "monotonic", lambda: now)
+    page = Mock()
+    handlers = {}
+    page.on.side_effect = handlers.__setitem__
+    evidence = {}
+    url = "http://localhost:2026/api/langgraph/threads/existing"
+
+    def start(method, address):
+        request = Mock(method=method, url=address)
+        handlers["request"](request)
+        return request
+
+    with pytest.raises(TimeoutError), receipt.observe_initial_thread_reads(page, url, evidence):
+        start("GET", url.replace("localhost", "other.test"))
+        start("GET", url + "/elsewhere")
+        start("GET", url + "/history")
+        now = 6
+        first = start("GET", url)
+        now = 8
+        handlers["requestfailed"](first)
+        now = 9
+        second = start("GET", url)
+        handlers["response"](Mock(request=second, status=503))
+        now = 12
+        handlers["requestfinished"](second)
+        pending = start("GET", url + "?value=fixture")
+        handlers["response"](Mock(request=pending, status=200))
+        now = 15
+        raise TimeoutError
+
+    assert evidence == {
+        "initial_reads": {
+            "observation_ms": 10000,
+            "metadata": {
+                "state": "pending",
+                "attempts": [
+                    {"started_ms": 1000, "elapsed_ms": 2000, "state": "failed"},
+                    {"started_ms": 4000, "elapsed_ms": 3000, "state": "completed", "http_status": 503},
+                    {"started_ms": 7000, "elapsed_ms": 3000, "state": "pending", "http_status": 200},
+                ],
+            },
+            "history": {"state": "not-issued", "attempts": []},
+        }
+    }
+    for event, handler in handlers.items():
+        page.remove_listener.assert_any_call(event, handler)
+
+    with receipt.observe_initial_thread_reads(page, url, evidence):
+        history = start("POST", url + "/history")
+        handlers["response"](Mock(request=history, status=200))
+        handlers["requestfinished"](history)
+    assert evidence["initial_reads"]["history"] == {"state": "completed", "attempts": [{"state": "completed", "http_status": 200, "started_ms": 0, "elapsed_ms": 0}]}
