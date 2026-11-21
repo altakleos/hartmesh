@@ -129,6 +129,7 @@ def interrupt(compose, session, shared, *, name, body, publication, sibling, dig
             operation = row["operation"]
             receipt["operation"] = operation
             if removing:
+                assert "publication_order" not in facts
                 assert facts["removal"]["path"] == name and facts["removal"]["publication_id"] == publication
                 journal = facts["removal"]["journal"]
                 assert re.fullmatch("remove-[a-f0-9]{32}", journal)
@@ -136,12 +137,23 @@ def interrupt(compose, session, shared, *, name, body, publication, sibling, dig
                 host(compose, "test", "!", "-e", path)
                 assert host(compose, "sha256sum", staged).split()[0] == digest
             else:
-                device, inode = map(int, host(compose, "stat", "-c", "%d %i", path).split())
+                device, inode, size = map(int, host(compose, "stat", "-c", "%d %i %s", path).split())
+                assert facts["publication_order"] == "fact-before-name"
                 assert facts["publication_identity"] == {"device": device, "inode": inode}
-                assert facts["publication"]["path"] == name and facts["publication"]["sha256"] == digest
+                publication_id = facts["publication"]["publication_id"]
+                assert str(uuid.UUID(publication_id)) == publication_id
+                assert facts["publication"] == {
+                    "publication_id": publication_id,
+                    "path": name,
+                    "size": size,
+                    "sha256": digest,
+                    "published_by": session.user["id"],
+                    "from_path": body["path"],
+                    "from_thread_id": body["thread_id"],
+                }
                 assert host(compose, "sha256sum", path).split()[0] == digest
                 assert compose.psql("SELECT count(*) FROM shared_publications WHERE path=" + sql(name)) == "0"
-                receipt.update(native_identity=facts["publication_identity"], publication_id=facts["publication"]["publication_id"])
+                receipt.update(native_identity=facts["publication_identity"], publication_id=publication_id, publication_order=facts["publication_order"])
             compose.run("kill", "-s", "KILL", "gateway")
         receipt["http_cutoff"] = reply.result(timeout=30)
     with pending_read_window(shared["control"]):
@@ -166,6 +178,10 @@ def interrupt(compose, session, shared, *, name, body, publication, sibling, dig
     receipt["restart_to_terminal_seconds"] = observed - restart_started
     receipt["reader_release_to_terminal_seconds"] = observed - eligible
     assert 0 <= receipt["reader_release_to_terminal_seconds"] < 150
+    if not removing:
+        stored_facts = compose.psql("SELECT result->'facts' FROM storage_space_file_operations WHERE space_id=" + sql(shared["space"]) + " AND operation_id=" + sql(operation))
+        assert json.loads(stored_facts) == facts
+        receipt["settlement_retained_publication_facts"] = True
     receipt["settled"] = expected
     receipt["chat_read_after"] = read_from_chat(compose, shared, sibling_name, sibling_bytes)
     receipt["attachments_after_settlement"] = attachment_counts(compose, shared)

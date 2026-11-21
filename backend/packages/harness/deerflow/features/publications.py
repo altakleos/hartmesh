@@ -11,16 +11,33 @@ from deerflow.utils.file_io import run_file_io
 
 FACT_BEFORE_NAME = "fact-before-name"
 
+# Reserved host provenance is not a path the member publish route can open.
+_GENERATED_DOCUMENTS = {
+    "/conversation-snapshot/manifest": "conversation.json",
+    "/conversation-snapshot/transcript": "transcript.md",
+}
+
 
 class PublicationUnavailable(Exception):
     pass
 
 
-async def copy_and_record(repo, source, *, name, folder, user_id, thread_id, source_path, copy, remove, copy_async=None, rollback_async=None):
+async def copy_and_record(repo, source, *, name, folder, user_id, thread_id, source_path, copy, remove, copy_async=None, rollback_async=None, ordered_copy=None):
     publication_id = str(uuid.uuid4())
-    published = await copy_async(source, name=name, folder=folder) if copy_async is not None else await run_file_io(copy, source, name=name, folder=folder)
-    fact = {"publication_id": publication_id, "path": published.path, "size": published.size, "sha256": published.sha256 or "", "published_by": user_id, "from_thread_id": thread_id, "from_path": source_path}
-    await run_file_io(record_fact, "publication", fact)
+    fact = None
+
+    def remember(path, size, digest):
+        nonlocal fact
+        fact = {"publication_id": publication_id, "path": path, "size": size, "sha256": digest, "published_by": user_id, "from_thread_id": thread_id, "from_path": source_path}
+        record_fact("publication", fact)
+
+    if ordered_copy is not None:
+        published = await ordered_copy(source, name=name, folder=folder, before_name=remember)
+        if fact is None or (fact["path"], fact["size"], fact["sha256"]) != (published.path, published.size, published.sha256):
+            raise PublicationUnavailable("The published file differs from its recorded candidate")
+    else:
+        published = await copy_async(source, name=name, folder=folder) if copy_async is not None else await run_file_io(copy, source, name=name, folder=folder)
+        await run_file_io(remember, published.path, published.size, published.sha256 or "")
     try:
         record = await repo.record_publication(**fact)
     except Exception as exc:
@@ -113,8 +130,15 @@ async def _settle_recorded_copy(repo, facts, intent, identity, holding):
         raise PublicationUnavailable("The exact publication receipt is unavailable; retain unknown bytes") from None
     folder, name = publication_destination(intent.request)
     source = intent.request["source"]
+    if source["path"] in _GENERATED_DOCUMENTS and facts.get("publication_order") == FACT_BEFORE_NAME:
+        from deerflow.utils.thread_id import validate_thread_id
+
+        name = _GENERATED_DOCUMENTS[source["path"]]
+        source_thread = validate_thread_id(source.get("thread_id"))
+    else:
+        source_thread = _publication_source_thread(source)
     parent, _, leaf = fact.path.rpartition("/")
-    if fact.published_by != intent.actor_id or fact.from_path != source["path"] or fact.from_thread_id != _publication_source_thread(source):
+    if fact.published_by != intent.actor_id or fact.from_path != source["path"] or fact.from_thread_id != source_thread:
         raise PublicationUnavailable("The publication actor or source does not match the intent")
     if parent != folder or not is_publication_name(name, leaf):
         raise PublicationUnavailable("The publication destination does not match the intent")

@@ -556,6 +556,7 @@ def test_mounted_qualification_keeps_distinct_shared_and_device_receipts():
     assert "tests/test_compose_shared_settlement.py" in measure["run"] and "shared-settlement.json" in measure["run"]
     assert "mounted-devices-before.json" in measure["run"] and "mounted-devices-after-gateway.json" in measure["run"]
     assert all(field in measure["run"] for field in ("restart_to_terminal_seconds", "reader_release_to_terminal_seconds", "subsequent_remove_seconds", "subsequent_publish_seconds"))
+    assert 'publication_order == "fact-before-name"' in measure["run"] and "settlement_retained_publication_facts" in measure["run"]
     stop = next(step for step in steps if step.get("name") == "14 Check that the stack stops cleanly")["run"]
     assert stop.index("storage-init quiesce") < stop.index("storage-init mount-all") < stop.index("mounted-devices-after-remount.json")
     assert stop.rindex("storage-init quiesce") > stop.index("mounted-devices-after-remount.json")

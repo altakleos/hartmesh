@@ -273,7 +273,7 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
                 folder=body.folder,
                 thread_id=thread_id,
                 source_path=normalized,
-                **({"copy_async": native.copy_async, "holding_async": native.holding_async, "rollback_async": native.rollback_async} if native is not None else {}),
+                **({"copy_async": native.copy_async, "ordered_copy": native.ordered_copy, "holding_async": native.holding_async, "rollback_async": native.rollback_async} if native is not None else {}),
             )
         except SharedFileError as exc:
             raise HTTPException(400, str(exc)) from None

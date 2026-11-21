@@ -45,9 +45,10 @@ output completeness. Interrupted provider-key
 updates settle their database and active configuration changes before accepting
 another edit; refresh settings to see whether the interrupted update completed.
 Files saved to My Files or Shared become available only after the copy finishes;
-new copies never overwrite existing files. Managed storage checks interrupted
-Shares against the recorded file identity and bytes. A Share that stopped
-before recording its identity can leave a file for an operator to inspect.
+new copies never overwrite existing files. On managed storage, Shared records
+the staged file’s identity and each proposed name before making the file visible.
+After an interruption, the Gateway can finish recording the copy or confirm that
+it never landed. Older interruptions can still require operator inspection.
 
 Shared Remove and Undo carry the publication ID they displayed, so a stale action
 cannot remove a newer publication at the same path. Removals hold private staging

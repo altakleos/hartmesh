@@ -122,6 +122,8 @@ def storage_feature(namespace, *, write=False):
                                 ):
                                     raise SpaceDenied("The host publication requires the assigned company Space")
 
+                        ordered_publish = native is not None and service.host_written and function.__name__ == "publish"
+
                         async def invoke(volumes):
                             paths = FeaturePaths(get_paths(), actor.subject_id, {name: volumes[identifier] for name, identifier in associations.items()})
                             with paths_scope(paths):
@@ -160,11 +162,10 @@ def storage_feature(namespace, *, write=False):
 
                                         stage_async = commit_async = None
                                         shared_owner = None
-                                        if service.host_written and function.__name__ == "publish":
+                                        if ordered_publish:
                                             from app.gateway.native_shared_publications import NativeSharedCopy
 
                                             shared_owner = NativeSharedCopy(sources, volumes[space.id], admission)
-                                            copy_async = shared_owner.copy
                                         if function.__name__ == "promote_thread_file_to_shelf":
                                             from app.gateway.native_project_documents import stage_native_document
                                             from deerflow.projects.documents import add_staged_document
@@ -190,6 +191,7 @@ def storage_feature(namespace, *, write=False):
                                             commit_async=commit_async,
                                             holding_async=shared_owner.holding if shared_owner is not None else None,
                                             rollback_async=shared_owner.rollback if shared_owner is not None else None,
+                                            ordered_copy=shared_owner.copy if shared_owner is not None else None,
                                         ):
                                             try:
                                                 result = await function(*args, **kwargs)
@@ -214,6 +216,8 @@ def storage_feature(namespace, *, write=False):
                                 return result
 
                         if write:
+                            from deerflow.features.publications import FACT_BEFORE_NAME
+
                             return await files.run_workflow(
                                 actor=actor,
                                 requests=requests,
@@ -229,6 +233,7 @@ def storage_feature(namespace, *, write=False):
                                 controller_admission=controller,
                                 call=invoke,
                                 host_write=service.host_written,
+                                initial_facts={"publication_order": FACT_BEFORE_NAME} if ordered_publish else None,
                             )
                         return await files.run_read_workflow(actor=actor, requests=requests, controller_admission=controller, call=invoke)
                 except BackingUnavailable:

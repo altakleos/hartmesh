@@ -272,6 +272,13 @@ async def test_native_keep_and_share_copy_user_conversation_without_legacy_roots
     kept = await client.post(f"/api/threads/{THREAD}/files", json={"path": "/mnt/user-data/outputs/native.txt"})
     assert kept.status_code == 201, kept.text
     assert (volume.data_path / "files/native.txt").read_bytes() == b"native conversation"
+    from sqlalchemy import select
+
+    from deerflow.persistence.spaces.files import SpaceFileOperationRow
+
+    async with files.registry._sf() as session:
+        keep = (await session.scalars(select(SpaceFileOperationRow).where(SpaceFileOperationRow.space_id == user.id))).one()
+    assert keep.phase == "complete" and keep.result["facts"] == {}
     published = await client.post("/api/shared/publish", json={"path": kept.json()["virtual_path"]})
     assert published.status_code == 201, published.text
     assert published.json()["from_thread_id"] is None

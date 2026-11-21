@@ -62,6 +62,7 @@ class SharedBehavior:
                     copy=shared.publish_file,
                     remove=shared.remove_shared_file,
                     copy_async=values.get("copy_async"),
+                    ordered_copy=values.get("ordered_copy"),
                     rollback_async=values.get("rollback_async"),
                 )
                 return published, record, True

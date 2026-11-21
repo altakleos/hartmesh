@@ -721,7 +721,7 @@ class SpaceFiles:
 
         return await await_drained(perform())
 
-    async def run_workflow(self, *, actor, requests, destination_id, operation_id, request, call, controller_admission=None, reconcile=False, host_write=False):
+    async def run_workflow(self, *, actor, requests, destination_id, operation_id, request, call, controller_admission=None, reconcile=False, host_write=False, initial_facts=None):
         """Host-only domain work spanning its own SQL sessions and file publication.
 
         Private process-held filesystem locks prevent accepting/replaying a live
@@ -775,6 +775,8 @@ class SpaceFiles:
                     if reconcile:
                         await run_file_io(receipt.load)
                     else:
+                        if initial_facts is not None:
+                            receipt.value["facts"].update(initial_facts)
                         await run_file_io(receipt.save)
                     receipt_token = _receipt.set(receipt)
                     result = await call(volumes)
