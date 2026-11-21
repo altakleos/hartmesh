@@ -5,6 +5,7 @@ from typing import Any
 
 from deerflow.community.endpoint_policy import tenant_written
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
+from deerflow.mcp.discovery_errors import InvalidCredentialHeader
 from deerflow.mcp.headers import illegal_header_value_reason
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,7 @@ def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, 
             for header_name, header_value in config.headers.items():
                 reason = illegal_header_value_reason(header_value)
                 if reason is not None:
-                    raise ValueError(f"MCP server '{server_name}' has a header '{header_name}' that cannot be sent as an HTTP header value: it {reason}")
+                    raise InvalidCredentialHeader(f"MCP server '{server_name}' has a header '{header_name}' that cannot be sent as an HTTP header value: it {reason}")
             params["headers"] = config.headers
     else:
         raise ValueError(f"MCP server '{server_name}' has unsupported transport type: {transport_type}")

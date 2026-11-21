@@ -522,3 +522,37 @@ async def test_personal_connection_continues_its_rotated_chain_on_the_next_run(t
     assert rotating_server.refresh_requests == ["personal-seed", "refresh-1"]
     assert rotating_server.calls[-1][1] == "Bearer access-2"
     assert _stored_keys(shared_token_store) == [("personal", "user-1", name)]
+
+
+@pytest.mark.asyncio
+async def test_cold_company_discoveries_share_a_rotating_non_task_grant(task_config, rotating_server):
+    _path, config = task_config
+    config.mcp_servers["reports"].task_toolsets = []
+    set_mcp_task_config_snapshot(config)
+    first = task_runtime.get_mcp_task_oauth_token_manager(config)
+    second = task_runtime.get_mcp_task_oauth_token_manager(config.model_copy(deep=True))
+    assert await asyncio.gather(first.get_authorization_header("reports"), second.get_authorization_header("reports")) == ["Bearer access-1"] * 2
+    assert rotating_server.refresh_requests == ["refresh-0"]
+    _Clock.current += timedelta(seconds=300)
+    third = task_runtime.get_mcp_task_oauth_token_manager(config)
+    assert await third.get_authorization_header("reports") == "Bearer access-2"
+    assert rotating_server.refresh_requests == ["refresh-0", "refresh-1"]
+    assert config.mcp_servers["reports"].oauth.refresh_token == "refresh-0"
+
+
+@pytest.mark.asyncio
+async def test_company_oauth_state_is_scoped_to_loaded_config_file(task_config, rotating_server, monkeypatch, tmp_path):
+    path, first_config = task_config
+    first_config.mcp_servers["reports"].task_toolsets = []
+    set_mcp_task_config_snapshot(first_config)
+    first = task_runtime.get_mcp_task_oauth_token_manager(first_config)
+    assert await first.get_authorization_header("reports") == "Bearer access-1"
+    other = tmp_path / "second-company.json"
+    other.write_bytes(path.read_bytes())
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(other))
+    second_config = ExtensionsConfig.from_file()
+    second_config.mcp_servers["reports"].task_toolsets = []
+    rotating_server.refresh_token = "refresh-0"
+    second = task_runtime.get_mcp_task_oauth_token_manager(second_config)
+    assert await second.get_authorization_header("reports") == "Bearer access-2"
+    assert rotating_server.refresh_requests == ["refresh-0", "refresh-0"]

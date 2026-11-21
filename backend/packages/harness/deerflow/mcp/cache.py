@@ -11,10 +11,12 @@ from typing import TYPE_CHECKING
 
 from langchain_core.tools import BaseTool
 
+from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
 from deerflow.config.shared_reset_marker import SharedResetMarker
 from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths, normalize_mcp_server_config
+from deerflow.mcp.discovery_errors import DiscoveryReason
 from deerflow.mcp.lifecycle import (
     InvalidMcpLifecycle,
     _stdio_fingerprints,
@@ -112,6 +114,8 @@ class _ServerToolCacheEntry:
     snapshot: str = field(repr=False)
     interceptors: str = field(repr=False)
     result: ServerDiscoveryResult = field(repr=False)
+    marker: _ConfigSignature | None = None
+    path: Path | None = field(default=None, repr=False)
 
 
 _mcp_tools_cache: list[BaseTool] | None = None
@@ -120,6 +124,11 @@ _mcp_tools_cache: list[BaseTool] | None = None
 # ``BaseTool`` objects can be reused without re-running discovery. The
 # reconciliation and initialization paths populate and selectively evict it.
 _server_tool_cache: dict[str, _ServerToolCacheEntry] = {}
+# A selected lookup owns no stdio pool/epochs. Before an ordinary initializer
+# claims its baseline, keep such entries apart from previously published pooled
+# state so the first ordinary chat need not retire or rediscover them.
+_company_pending: dict[str, _ServerToolCacheEntry] = {}
+_company_reset_epoch = 0
 _cache_initialized = False
 _init_lock = threading.RLock()  # Guards cache state transitions.
 _init_condition = threading.Condition(_init_lock)
@@ -135,7 +144,8 @@ _cache_generation = 0
 # mounts, ``git checkout``, ``cp -p`` / backup restore, ``tar`` / ``rsync`` that
 # preserve timestamps), and tracking no path at all makes a switch to a
 # different config file with an equal-or-older mtime structurally invisible.
-_config_path: Path | None = None  # Resolved extensions config path at init time
+_config_path: Path | None = None  # Config location used to observe subsequent changes
+_published_origin: Path | None = None  # Physical file that produced the ordinary cache
 _config_signature: _ConfigSignature | None = None  # (mtime, size, sha256) at init time
 
 # JSON snapshot of the effective MCP slice (enabled servers in declaration
@@ -273,6 +283,14 @@ def _interceptors_snapshot(config) -> str:
         sort_keys=True,
         ensure_ascii=False,
     )
+
+
+def _matching_server_entry(name: str, snapshot: str | None, interceptors: str, marker: _ConfigSignature | None, path: Path | None) -> _ServerToolCacheEntry | None:
+    for entries in (_company_pending, _server_tool_cache):
+        entry = entries.get(name)
+        if entry and (entry.snapshot, entry.interceptors, entry.marker, entry.path) == (snapshot, interceptors, marker, path):
+            return entry
+    return None
 
 
 def _server_config_snapshot(server) -> str:
@@ -900,7 +918,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     Returns:
         List of LangChain tools from all enabled MCP servers.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
+    global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature, _published_origin
     global _initializing_generation, _cache_generation, _mcp_config_snapshot, _initialized_without_config
     global _cache_reset_marker_signature, _applied_mcp_revision, _server_tool_cache
 
@@ -969,7 +987,9 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 retired_for_invalid.close_all_sync()
             logger.warning("Extensions config mcpLifecycle is invalid; aborting MCP tool discovery")
             raise RuntimeError("Extensions config contains an invalid mcpLifecycle; fix or remove it before using MCP tools") from None
-        loaded_reset_signature = _current_cache_reset_marker_signature(_resolve_config_path())
+        loaded_path = _resolve_config_path()
+        loaded_reset_signature = _current_cache_reset_marker_signature(loaded_path)
+        loaded_origin = loaded_path.resolve() if loaded_path else None
         # Claim the exact pool this generation owns under the same lock the
         # reset path takes, so verify-generation + capture-pool is one atomic
         # ownership handoff. A superseded initializer must never resolve the
@@ -1042,13 +1062,8 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 # and a failed claim already advanced that baseline on retry.
                 if loaded_revision is not None:
                     for name in loaded_config.get_enabled_mcp_servers():
-                        entry = _server_tool_cache.get(name)
-                        if (
-                            entry is not None
-                            and loaded_revision.server_snapshots.get(name) == entry.snapshot
-                            and loaded_revision.interceptors == entry.interceptors
-                            and _binding_matches(entry.result, name, loaded_fingerprints.get(name), claimed_pool)
-                        ):
+                        entry = _matching_server_entry(name, loaded_revision.server_snapshots.get(name), loaded_revision.interceptors, loaded_reset_signature, loaded_origin)
+                        if entry and _binding_matches(entry.result, name, loaded_fingerprints.get(name), claimed_pool):
                             reusable_entries[name] = entry
         finally:
             if retired_before_claim is not None:
@@ -1088,7 +1103,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
             for name, result in discovered_groups.items():
                 snapshot = loaded_revision.server_snapshots.get(name)
                 if snapshot is not None:
-                    pending_entries[name] = _ServerToolCacheEntry(snapshot=snapshot, interceptors=loaded_revision.interceptors, result=result)
+                    pending_entries[name] = _ServerToolCacheEntry(snapshot=snapshot, interceptors=loaded_revision.interceptors, result=result, marker=loaded_reset_signature, path=loaded_origin)
         if enabled_names and not candidate_groups:
             # No enabled server produced a successful discovery result: this is
             # a total discovery failure, not a legitimately empty configuration
@@ -1167,9 +1182,11 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                     retired_pool = _apply_mcp_reconciliation_locked(plan)
             else:
                 _server_tool_cache = pending_entries
+                _company_pending.clear()
                 _mcp_tools_cache = loaded_tools
                 _cache_initialized = True
                 _config_path, _config_signature = post_path, post_sig
+                _published_origin = loaded_origin
                 _mcp_config_snapshot = post_snapshot
                 _initialized_without_config = post_path is None
                 _cache_reset_marker_signature = post_reset_signature
@@ -1183,6 +1200,154 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     if retired_pool is not None:
         retired_pool.close_all_sync()
     return []
+
+
+MAX_COMPANY_DISCOVERY_SECONDS = 20.0
+_company_cleanup_lock = threading.Lock()
+_company_cleanup: dict[str, set[asyncio.Task]] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class CompanyServerTools:
+    """Tools and their verified effective company definition, or a safe failure."""
+
+    tools: tuple[BaseTool, ...] = field(default=(), repr=False)
+    definition: McpServerConfig | None = field(default=None, repr=False)
+    reason: DiscoveryReason | None = None
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _CompanyServerIdentity:
+    path: Path
+    snapshot: str
+    interceptors: str
+    marker: _ConfigSignature | None
+    generation: int
+
+
+@dataclass(slots=True, repr=False)
+class _CompanyServerRead:
+    config: ExtensionsConfig
+    server: McpServerConfig
+    identity: _CompanyServerIdentity
+    cached: ServerDiscoveryResult | None
+
+
+def _read_company_server(name: str, expected_snapshot: str) -> _CompanyServerRead | None:
+    try:
+        path = _resolve_config_path()
+        if path is None:
+            return None
+        path = path.resolve()
+        config = ExtensionsConfig.from_file(str(path))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    server = config.mcp_servers.get(name)
+    if server is None or _server_config_snapshot(server) != expected_snapshot:
+        return None
+    marker = _current_cache_reset_marker_signature(path)
+    with _init_condition:
+        for obsolete in _company_pending.keys() - config.mcp_servers.keys():
+            del _company_pending[obsolete]
+        identity = _CompanyServerIdentity(path, expected_snapshot, _interceptors_snapshot(config), marker, _company_reset_epoch)
+        entry = _matching_server_entry(name, identity.snapshot, identity.interceptors, marker, path)
+        cached = entry.result if entry else None
+    return _CompanyServerRead(config, server, identity, cached)
+
+
+def _publish_company_server(name: str, identity: _CompanyServerIdentity, result: ServerDiscoveryResult, stopped: threading.Event) -> bool:
+    from deerflow.mcp.tools import _flatten_server_tool_groups
+
+    global _mcp_tools_cache
+    with _init_condition:
+        if stopped.is_set() or _company_reset_epoch != identity.generation:
+            return False
+        revision = _applied_mcp_revision
+        matches_applied = (
+            revision is not None and identity.path == _published_origin and revision.interceptors == identity.interceptors and revision.server_snapshots.get(name) == identity.snapshot and identity.marker == _cache_reset_marker_signature
+        )
+        entries = _server_tool_cache if matches_applied else _company_pending
+        entries[name] = _ServerToolCacheEntry(identity.snapshot, identity.interceptors, result, identity.marker, identity.path)
+        if _cache_initialized and matches_applied:
+            _mcp_tools_cache = _flatten_server_tool_groups(list(revision.server_snapshots), {key: entry.result for key, entry in _server_tool_cache.items()})
+        return True
+
+
+async def _company_lookup(name: str, expected_snapshot: str, fresh: bool, stopped: threading.Event) -> CompanyServerTools:
+    from deerflow.community import endpoint_policy
+    from deerflow.mcp.client import build_server_params
+    from deerflow.mcp.tasks.runtime import validate_mcp_task_config_snapshot
+    from deerflow.mcp.tools import get_mcp_tools_by_server
+
+    observed = await asyncio.to_thread(_read_company_server, name, expected_snapshot)
+    if observed is None:
+        return CompanyServerTools(reason="changed")
+    server = observed.server
+    result = observed.cached
+    if not server.enabled or server.type not in ("http", "sse"):
+        return CompanyServerTools(reason="refused")
+    validate_mcp_task_config_snapshot(observed.config)
+    build_server_params(name, server)
+    if endpoint_policy.tenant_written():
+        addresses = [server.url]
+        if server.oauth and server.oauth.enabled:
+            addresses.append(server.oauth.token_url)
+        for address in addresses:
+            if await asyncio.to_thread(endpoint_policy.address_problem, address):
+                return CompanyServerTools(reason="address-not-public")
+    if result is None or fresh:
+        groups = await get_mcp_tools_by_server(observed.config, server_names={name}, raise_on_error=True, deployment_path=observed.identity.path)
+        result = groups.get(name)
+        if result is None:
+            return CompanyServerTools(reason="not-mcp")
+    latest = await asyncio.to_thread(_read_company_server, name, expected_snapshot)
+    if latest is None or latest.identity != observed.identity:
+        return CompanyServerTools(reason="changed")
+    if fresh or observed.cached is None:
+        if not await asyncio.to_thread(_publish_company_server, name, observed.identity, result, stopped):
+            return CompanyServerTools(reason="changed")
+    return CompanyServerTools(tools=result.tools, definition=server)
+
+
+async def get_company_server_tools(server_name: str, *, expected_definition: McpServerConfig, fresh: bool = False) -> CompanyServerTools:
+    """Read one stored remote connection; a fresh probe also bypasses successful cache entries."""
+    from deerflow.mcp.discovery_errors import discovery_failure
+
+    # A cancelled session may need asynchronous cleanup. Retain it and avoid
+    # opening further sessions for this server until its cleanup has finished.
+    with _company_cleanup_lock:
+        if server_name in _company_cleanup:
+            return CompanyServerTools(reason="timeout")
+    stopped = threading.Event()
+    budget = expected_definition.session_init_timeout
+    timeout = MAX_COMPANY_DISCOVERY_SECONDS if budget is None else min(MAX_COMPANY_DISCOVERY_SECONDS, budget)
+    work = asyncio.create_task(_company_lookup(server_name, _server_config_snapshot(expected_definition), fresh, stopped))
+    try:
+        # A transport may take time to unwind after cancellation. The caller's
+        # entire budget includes credential acquisition, listing and validation.
+        done, _ = await asyncio.wait({work}, timeout=timeout)
+        if done:
+            return work.result()
+        return CompanyServerTools(reason="timeout")
+    except Exception as exc:
+        return CompanyServerTools(reason=discovery_failure(exc))
+    finally:
+        stopped.set()
+        if not work.done():
+            with _company_cleanup_lock:
+                _company_cleanup.setdefault(server_name, set()).add(work)
+            work.cancel()
+            work.add_done_callback(lambda task: _finish_company_lookup(server_name, task))
+
+
+def _finish_company_lookup(name: str, work: asyncio.Task) -> None:
+    with _company_cleanup_lock:
+        pending = _company_cleanup[name]
+        pending.remove(work)
+        if not pending:
+            del _company_cleanup[name]
+    if not work.cancelled():
+        work.exception()
 
 
 def get_cached_mcp_tools() -> list[BaseTool]:
@@ -1303,14 +1468,17 @@ def refresh_mcp_cache_if_active() -> bool:
 
 def _reset_mcp_tools_cache_state() -> None:
     """Reset cache state under ``_init_condition`` / ``_init_lock``."""
-    global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
+    global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature, _published_origin
     global _cache_generation, _mcp_config_snapshot, _initialized_without_config
-    global _cache_reset_marker_signature, _applied_mcp_revision
+    global _cache_reset_marker_signature, _applied_mcp_revision, _company_reset_epoch
 
     _mcp_tools_cache = None
+    _company_reset_epoch += 1
+    _company_pending.clear()
     _server_tool_cache.clear()
     _cache_initialized = False
     _config_path = None
+    _published_origin = None
     _config_signature = None
     _mcp_config_snapshot = None
     _initialized_without_config = False

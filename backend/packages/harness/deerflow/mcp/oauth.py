@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import threading
 import time
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
+from weakref import WeakValueDictionary
 
 from deerflow.community.endpoint_policy import tenant_written
 from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig
 from deerflow.mcp import oauth_store
+from deerflow.mcp.discovery_errors import InvalidCredentialHeader
 from deerflow.mcp.headers import apply_header_overrides, header_spellings, illegal_header_value_reason
 from deerflow.mcp.oauth_store import (
     McpOAuthTokenKey,
@@ -429,7 +434,7 @@ class OAuthTokenManager:
         if reason is not None:
             # Names the server and the reason, never the token: this message
             # travels to the model on the interceptor path.
-            raise ValueError(f"OAuth token for MCP server '{server_name}' cannot be sent as an HTTP header value: the Authorization value {reason}. Check what the token endpoint returned for this server.")
+            raise InvalidCredentialHeader(f"OAuth token for MCP server '{server_name}' cannot be sent as an HTTP header value: the Authorization value {reason}. Check what the token endpoint returned for this server.")
         return value
 
     @staticmethod
@@ -476,7 +481,9 @@ class OAuthTokenManager:
 
             token_client = tenant_written_httpx_client_factory(timeout=15.0)
         else:
-            token_client = httpx.AsyncClient(timeout=15.0)
+            # The default HTTPX transport loads TLS trust during construction.
+            # A slow trust store must not block the refresh lease heartbeat.
+            token_client = await asyncio.to_thread(httpx.AsyncClient, timeout=15.0)
         async with token_client as client:
             response = await client.post(oauth.token_url, data=data)
             if oauth.grant_type == "refresh_token" and _is_invalid_grant(response):
@@ -523,6 +530,41 @@ class OAuthTokenManager:
         return _OAuthToken(access_token=access_token, token_type=token_type, expires_at=expires_at)
 
 
+class DeploymentOAuthManagers:
+    """Share matching rotating credentials across discoveries, including concurrent ones."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._states = WeakValueDictionary()
+        self._latest: OAuthTokenManager | None = None
+
+    def clear(self) -> None:
+        with self._lock:
+            self._states.clear()
+            self._latest = None
+
+    def manager(self, config: ExtensionsConfig, frozen: OAuthTokenManager | None, source_path: Path | None) -> OAuthTokenManager:
+        manager = OAuthTokenManager.from_extensions_config(config, shared_manager=frozen)
+        with self._lock:
+            for name, state in manager._states.items():
+                if frozen and name in frozen._states:
+                    continue
+                server = config.mcp_servers[name]
+                if not isinstance(server.oauth, McpOAuthConfig):
+                    # Only a validated deployment definition can own shared state.
+                    continue
+                # Compare the original settings, never the live state.config:
+                # its rotating refresh token changes after a successful exchange.
+                identity = [server.url, server.oauth.model_dump(mode="json")]
+                digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).digest()
+                key = (source_path, name, digest)
+                manager._states[name] = self._states.setdefault(key, state)
+            # Retain active states even if the server currently lists zero tools.
+            # Older wrappers still share their own state's lock until released.
+            self._latest = manager
+        return manager
+
+
 def build_oauth_tool_interceptor(
     extensions_config: ExtensionsConfig,
     *,
@@ -561,6 +603,7 @@ async def get_initial_oauth_headers(
     *,
     token_manager: OAuthTokenManager | None = None,
     server_names: Collection[str] | None = None,
+    raise_on_error: bool = False,
 ) -> dict[str, str]:
     """Get initial OAuth Authorization headers for MCP server connections."""
     token_manager = token_manager or OAuthTokenManager.from_extensions_config(extensions_config)
@@ -575,6 +618,8 @@ async def get_initial_oauth_headers(
         try:
             value = await token_manager.get_authorization_header(server_name)
         except Exception:
+            if raise_on_error:
+                raise
             logger.warning(
                 "Skipping initial OAuth header for MCP server '%s' after token fetch failed",
                 server_name,

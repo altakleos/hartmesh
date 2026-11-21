@@ -1159,6 +1159,7 @@ async def _discover_server_tools(
     prepared_client: _PreparedServerClient,
     *,
     load_mcp_tools_fn: Any,
+    raise_on_error: bool = False,
 ) -> tuple[str, _RawServerDiscovery | None]:
     """Run only the discovery await for one selected MCP server."""
     server_name = prepared_client.server_name
@@ -1186,6 +1187,8 @@ async def _discover_server_tools(
             try:
                 server_tools = await asyncio.wait_for(discovery, timeout=prepared_client.session_init_timeout)
             except TimeoutError:
+                if raise_on_error:
+                    raise
                 logger.warning(
                     "Skipping MCP server '%s' after tool discovery timed out (%.1fs)",
                     server_name,
@@ -1202,6 +1205,8 @@ async def _discover_server_tools(
     except (asyncio.CancelledError, StaleMCPBindingError, McpTaskConfigurationError):
         raise
     except Exception as e:
+        if raise_on_error:
+            raise
         # Never interpolate ``e`` nor attach its traceback: ``ExtensionsConfig``
         # resolves ``$VAR`` before validation, so a discovery error message can
         # embed a resolved-credential request URL. Keep the server name and the
@@ -1393,11 +1398,19 @@ def _prepare_server_discovery(
 async def _discover_and_wrap_prepared(
     adapter_symbols: tuple[Any, Any],
     prepared: _PreparedServerDiscovery,
+    *,
+    raise_on_error: bool = False,
+    deployment_path: Path | None = None,
 ) -> dict[str, ServerDiscoveryResult]:
     """Run the OAuth/discovery phase, then wrap successful results in order."""
     client_cls, load_mcp_tools_fn = adapter_symbols
     extensions_config = prepared.config
-    oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config, owner_user_id=prepared.personal_user_id) if prepared.connection_scope == "personal" else get_mcp_task_oauth_token_manager(extensions_config)
+    if prepared.connection_scope == "personal":
+        oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config, owner_user_id=prepared.personal_user_id)
+    elif deployment_path is not None:
+        oauth_token_manager = get_mcp_task_oauth_token_manager(extensions_config, deployment_path=deployment_path)
+    else:
+        oauth_token_manager = get_mcp_task_oauth_token_manager(extensions_config)
 
     # Only selected, valid connections reach this point. Selected-but-invalid
     # servers are intentionally not contacted for OAuth headers (F1 contract).
@@ -1405,7 +1418,11 @@ async def _discover_and_wrap_prepared(
         extensions_config,
         token_manager=oauth_token_manager,
         server_names=set(prepared.connections),
+        **({"raise_on_error": True} if raise_on_error else {}),
     )
+
+    if raise_on_error and asyncio.current_task().cancelling():
+        raise asyncio.CancelledError
 
     prepared_clients = [
         _prepare_server_client(
@@ -1425,6 +1442,7 @@ async def _discover_and_wrap_prepared(
             _discover_server_tools(
                 prepared_client,
                 load_mcp_tools_fn=load_mcp_tools_fn,
+                raise_on_error=raise_on_error,
             )
             for prepared_client in prepared_clients
         )
@@ -1465,6 +1483,8 @@ async def get_mcp_tools_by_server(
     server_names: Collection[str] | None = None,
     personal_user_id: str | None = None,
     session_pool: MCPSessionPool | None = None,
+    raise_on_error: bool = False,
+    deployment_path: Path | None = None,
 ) -> dict[str, ServerDiscoveryResult]:
     """Discover selected enabled MCP servers independently.
 
@@ -1479,6 +1499,8 @@ async def get_mcp_tools_by_server(
             ``None`` selects every enabled server.
         personal_user_id: When set, the caller's personal MCP configuration is
             authorized and used instead of the deployment configuration.
+        deployment_path: Config file the selected deployment credentials belong to.
+        raise_on_error: Propagate discovery and OAuth failures for a diagnostic caller.
         session_pool: Optional session pool captured by the caller. Cache
             initializers pass the exact pool their generation owns so a
             superseded claim cannot install bindings into a replacement pool;
@@ -1502,6 +1524,11 @@ async def get_mcp_tools_by_server(
     )
     if prepared is None:
         return {}
+    if raise_on_error:
+        from deerflow.mcp.discovery_errors import check_discovery_media
+
+        with check_discovery_media(prepared.connections):
+            return await _discover_and_wrap_prepared(adapter_symbols, prepared, raise_on_error=True, deployment_path=deployment_path)
     return await _discover_and_wrap_prepared(adapter_symbols, prepared)
 
 
