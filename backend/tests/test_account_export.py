@@ -1116,20 +1116,29 @@ async def test_discarding_mid_copy_stops_the_copy_before_its_files_are_removed(t
     deployment = _Deployment(tmp_path, monkeypatch)
     await _two_people(deployment)
     copying = threading.Event()
+    release_copy = threading.Event()
     stopped: list[bool] = []
 
     def _slow_copy(archive, path, entry, *, cancel_event, **kwargs):
         copying.set()
         stopped.append(cancel_event.wait(5))
+        assert release_copy.wait(5)
         return copy_file(archive, path, entry, cancel_event=cancel_event, **kwargs)
 
     monkeypatch.setattr(account_export, "copy_file", _slow_copy)
     job = deployment.service.start(PERSON_A)
-    await asyncio.to_thread(copying.wait, 5)
+    assert await asyncio.to_thread(copying.wait, 5)
     deployment.service.discard(A_ID)
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(job.task, 5)
-    await deployment.service.settled()
+    settled = asyncio.create_task(deployment.service.settled())
+    try:
+        await asyncio.sleep(0)  # Let settlement start while the copy worker is still held.
+        assert deployment.service.status(A_ID) is None
+        assert job.directory.is_dir() and not settled.done()
+    finally:
+        release_copy.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(job.task, 5)
+        await asyncio.wait_for(settled, 5)
 
     # The worker thread saw the discard and had stopped before the files went.
     assert stopped == [True]

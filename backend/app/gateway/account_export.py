@@ -723,11 +723,8 @@ class AccountExportService:
         if job.expiry is not None:
             job.expiry.cancel()
         if job.task is not None and not job.task.done():
-            # Its directory goes once the task is over, and with it any worker thread writing to it.
             job.task.cancel()
-            job.task.add_done_callback(lambda _: self._remove_later(job.directory))
-        else:
-            self._remove_later(job.directory)
+        self._remove_later(job.directory, after=job.task)
         logger.info("Account export for user %s removed (%s)", user_id, job.state)
         return True
 
@@ -791,8 +788,14 @@ class AccountExportService:
         while self._removals:
             await asyncio.wait(list(self._removals), timeout=10)
 
-    def _remove_later(self, path: Path) -> None:
-        removal = asyncio.ensure_future(asyncio.to_thread(_remove, path))
+    def _remove_later(self, path: Path, *, after: asyncio.Task | None = None) -> None:
+        async def remove():
+            if after is not None and not after.done():
+                # The builder drains any worker thread still writing to this directory.
+                await asyncio.wait({after})
+            await asyncio.to_thread(_remove, path)
+
+        removal = asyncio.create_task(remove())
         self._removals.add(removal)
         removal.add_done_callback(self._removals.discard)
 
