@@ -15,6 +15,7 @@ import pytest
 import pytest_asyncio
 from _telegram_recovery_test_support import issue_restart_epoch
 from _telegram_repository_test_support import db as db
+from sqlalchemy import select
 from test_telegram_publication_authority import attempt_environment as attempt_environment
 from test_telegram_publication_coordinator import coordinator_environment as coordinator_environment
 from test_telegram_publication_coordinator import saved_marks
@@ -60,6 +61,37 @@ async def test_actual_marked_group_tick_plans_exact_v2_primary_without_new_dispa
         assert primary.payload["reply_basis"]["version"] == 2
     again = await e.service.tick()
     assert again.started == 0 and e.bus.inbound_queue.qsize() == before
+    assert not any(method == "POST" for method, _, _ in e.requests)
+
+
+@pytest.mark.parametrize("already_owned", [True, False], ids=["live-turn", "reattached-before-commit"])
+async def test_periodic_recovery_yields_final_delivery_to_the_foreground_owner(recovery_environment, monkeypatch, already_owned):
+    e = recovery_environment
+    record = await marked(e)
+    await serve(e, record, output=output_projection(record))
+    owned = already_owned
+    e.service._owned = lambda saved, link: owned and saved.publication_id == record.publication_id and link.id == e.link.id
+    seal = e.outbox.inbox.seal_publication
+    staged = False
+
+    async def reattach_after_seal(*args, **kwargs):
+        nonlocal staged, owned
+        result = await seal(*args, **kwargs)
+        staged = owned = True
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(e.outbox.inbox, "seal_publication", reattach_after_seal)
+        result = await e.service.tick()
+    assert result.planned == 0
+    assert staged == (not already_owned)
+    assert all(not mark.route_complete and mark.outbox_id is None for mark in await saved_marks(e))
+    async with e.db.sessions() as session:
+        assert await session.scalar(select(TelegramOutboxRow.id).where(TelegramOutboxRow.dedupe_key == "reply:" + record.turn_id)) is None
+
+    owned = False
+    assert (await e.service.tick()).planned == 1
+    assert all(mark.route_complete and mark.outbox_id for mark in await saved_marks(e))
     assert not any(method == "POST" for method, _, _ in e.requests)
 
 

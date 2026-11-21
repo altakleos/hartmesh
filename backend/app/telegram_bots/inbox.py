@@ -1104,7 +1104,7 @@ class InboxRepository:
         await session.flush()
         return _callback_owner(row.payload, callback_id)[1]
 
-    async def read_callback_input(self, link: BotLink, callback_id: str, *, guard: PublicationGuard) -> CallbackInputStage:
+    async def read_callback_input(self, link: BotLink, callback_id: str, *, guard: PublicationGuard, claim_open: Callable[[PublicationRecord], None] | None = None) -> CallbackInputStage:
         from app.telegram_bots.links import prepare_publication_guard
         from deerflow.utils.file_io import await_drained
 
@@ -1116,6 +1116,8 @@ class InboxRepository:
                 await guard.check(session)
                 stage = await self.lock_callback_input(link, callback_id, session=session)
                 await guard.check(session)
+                if claim_open is not None and stage.record is not None and not stage.route_complete:
+                    claim_open(stage.record)
                 return stage
 
         return await await_drained(perform())
@@ -1497,7 +1499,7 @@ class InboxRepository:
         record = self._publication_record([row]) if row.turn_id is not None else None
         return SubmissionInputStage((row,), document["text"], deepcopy(document["human_message_kwargs"]), document["parent_publication"]["scope"]["thread_id"], deepcopy(document["parent_publication"]), None, record, row.route_complete)
 
-    async def read_submission(self, link, stage: SubmissionInputStage, *, guard):
+    async def read_submission(self, link, stage: SubmissionInputStage, *, guard, claim_open: Callable[[PublicationRecord], None] | None = None):
         """Read the actual durable locator before queue or execution effects."""
         from app.telegram_bots.links import prepare_publication_guard
         from deerflow.utils.file_io import await_drained
@@ -1519,6 +1521,8 @@ class InboxRepository:
                 if (result.text, result.human_message_kwargs, result.thread_id, result.parent_publication) != (stage.text, stage.human_message_kwargs, stage.thread_id, stage.parent_publication):
                     raise ValueError("submission-conflict") from None
                 await guard.check(reader)
+                if claim_open is not None and result.record is not None and not result.route_complete:
+                    claim_open(result.record)
                 return result
 
         return await await_drained(perform())

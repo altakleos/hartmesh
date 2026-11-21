@@ -115,6 +115,7 @@ class _Turn:
     inbound: InboundMessage
     origins: tuple
     record: object = None
+    rejoining_record: object = None
     done: asyncio.Event = field(default_factory=asyncio.Event)
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     refusal: object = None
@@ -902,6 +903,24 @@ class ChatTurns:
                 pass
         return False
 
+    async def _read_rejoining_stage(self, turn, guard):
+        def claim_open(record):
+            # Only recovery sees this provisional claim while the read releases
+            # the link lock. Stop and preview require the confirmed turn.record.
+            turn.rejoining_record = record
+
+        inbox = self.services.outbox.inbox
+        try:
+            if turn.callback_id is None:
+                stage = await inbox.read_submission(turn.link, turn.submission, guard=guard, claim_open=claim_open)
+            else:
+                stage = await inbox.read_callback_input(turn.link, turn.callback_id, guard=guard, claim_open=claim_open)
+            guard.current()
+            turn.record = None if stage.route_complete else stage.record
+            return stage
+        finally:
+            turn.rejoining_record = None
+
     async def _prepare_once(self, turn):
         from app.telegram_bots.threads import ThreadPreparationFailure
 
@@ -912,34 +931,30 @@ class ChatTurns:
             await self._input_outcome(turn, "busy.cancelled")
             self._drop_waiting(turn)
             return False
+
         try:
-            if turn.callback_id is None:
-                if turn.submission is not None:
-                    stage = await self.services.outbox.inbox.read_submission(turn.link, turn.submission, guard=guard)
+            if turn.callback_id is None and turn.submission is None:
+                turn.origins = await self.services.outbox.inbox.group_prepublication(turn.origins, guard=guard)
+                guard.current()
+                human_inputs = getattr(self.services, "human_inputs", None)
+                before = getattr(human_inputs, "before_plain_publication", None)
+                if before is not None:
+                    await before(turn.channel, turn.link, turn.origins)
                     guard.current()
-                    turn.origins = stage.origins
-                    if stage.record is not None:
-                        turn.record = stage.record
-                        return True
+                thread = await self.services.threads.ensure_thread(turn.link, turn.inbound, origin=turn.origins[0])
+            else:
+                stage = await self._read_rejoining_stage(turn, guard)
+                turn.origins = stage.origins
+                if stage.route_complete:
+                    turn.input_closed = True
+                    return False
+                if stage.record is not None:
+                    return True
+                if turn.callback_id is None:
                     turn.origins = await self.services.outbox.inbox.group_prepublication(turn.origins, guard=guard)
                     thread = await self.services.threads.ensure_submission_thread(turn.link, stage)
                 else:
-                    turn.origins = await self.services.outbox.inbox.group_prepublication(turn.origins, guard=guard)
-                    guard.current()
-                    human_inputs = getattr(self.services, "human_inputs", None)
-                    before = getattr(human_inputs, "before_plain_publication", None)
-                    if before is not None:
-                        await before(turn.channel, turn.link, turn.origins)
-                        guard.current()
-                    thread = await self.services.threads.ensure_thread(turn.link, turn.inbound, origin=turn.origins[0])
-            else:
-                stage = await self.services.outbox.inbox.read_callback_input(turn.link, turn.callback_id, guard=guard)
-                guard.current()
-                turn.origins = stage.origins
-                if stage.record is not None:
-                    turn.record = stage.record
-                    return True
-                thread = await self.services.threads.ensure_callback_thread(turn.link, callback_id=turn.callback_id)
+                    thread = await self.services.threads.ensure_callback_thread(turn.link, callback_id=turn.callback_id)
         except ThreadPreparationFailure as failure:
             if not self._current(turn):
                 return False
@@ -1555,12 +1570,13 @@ class ChatTurns:
 
     def owns_publication(self, record, link):
         """Defer recovery presentation while this original live owner can freeze UI."""
-        for turn in self._turns.values():
-            # The identity only: a poll rewrites the link's stamps, and a whole-row compare would lapse after a minute.
-            # A closing turn has let go, so what it plans is not held back for it.
-            if self._current(turn) and not turn.closing and turn.record is not None and turn.record.scope == record.scope and turn.record.publication_id == record.publication_id and turn.link.id == link.id:
-                return True
-        return False
+        # A poll can change link timestamps. Ownership follows this exact publication
+        # until the turn begins closing, including while its streamed final is planned.
+        turn = self._turns.get((link.id, record.scope.message_thread_id))
+        if turn is None or not self._current(turn) or turn.closing:
+            return False
+        claimed = turn.record or turn.rejoining_record
+        return claimed is not None and claimed.scope == record.scope and claimed.publication_id == record.publication_id
 
     async def _spend_buttons(self, channel, link, row):
         from app.telegram_bots.producer import keyboard_cleanup_row
