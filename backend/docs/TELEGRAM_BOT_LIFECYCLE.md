@@ -33,6 +33,10 @@ attempt. That correlation is evidence, never a renewed write ticket. A retired
 epoch must refuse each startup leaf before a metadata backend is called.
 Known model declarations and malformed bases cannot gain fixed privilege.
 
+Periodic recovery leaves an active publication to its foreground turn, including
+the final edit of a visible preview. It rechecks foreground ownership before
+committing a recovered reply.
+
 Service slots include native/codec/response cleanup. An absolute pass deadline
 shortens coordinator control before its child is queued. Logical expiry admits
 no fresh work; a previously authorized COMMIT can settle late. The startup page
