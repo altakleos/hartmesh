@@ -30,7 +30,7 @@ import {
   fileOutcome,
   unansweredWrite,
 } from "@/core/agent-instances/file-status";
-import { useAgentFileTransfers } from "@/core/agent-instances/file-transfers";
+import { useHomeFileTransfers } from "@/core/agent-instances/home-transfers";
 import {
   agentBlock,
   hasCeiling,
@@ -255,11 +255,13 @@ function FileBrowser({
     void client.invalidateQueries({ queryKey: key });
     changed?.();
   }
-  const transfers = useAgentFileTransfers({
-    instanceId: instance.id,
+  const transfers = useHomeFileTransfers({
+    instance,
+    homeGeneration: generation,
+    homePermissions: space.data?.permissions,
+    accessDenied: lostAccess(space.error),
     folder: path,
     enabled: writable,
-    changed: refresh,
   });
   const failedBusy = transfers.rows.some(
     (row) =>

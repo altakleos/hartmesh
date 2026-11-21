@@ -24,7 +24,7 @@ is provider-only. EN/ZH notices use configured provider links.
 `/workspace/instances` owns detail tabs. Apply current grants/provider ceilings,
 account/role caches and retired-action fences. Retry exact intents; 202 is pending.
 Viewer-scoped `/api/search` is cancellable; demos filter locally. Agent files use Spaces and audited writes.
-Device uploads run on send in chats, immediately in instances. Pickers send destination references. Browse inspectable agents on demand. Confirm Home copies, omit source titles, reconcile by ID; verify receipt, Home and execution.
+Conversation attachments stay local to chat. The account workspace owns Home uploads and rechecks grants, incarnation and receipts across routes. Pickers send destination references. Browse inspectable agents on demand. Confirm Home copies, omit source titles, reconcile by ID; verify receipt, Home and execution.
 Binding discovery hides ordinary artifacts, preserving selections; confirmed bindings retire the panel. Use verified custody in breadcrumbs.
 Only Inspect opens produced files. Browser/sidecar/scheduling remain ordinary-chat
 controls. Memory uses instance APIs/all summaries only.

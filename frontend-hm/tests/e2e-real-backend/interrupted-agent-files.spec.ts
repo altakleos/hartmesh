@@ -392,7 +392,7 @@ test("an in-flight first rename or delete cannot be repeated by checking its mis
   }
 });
 
-test("the open Files tab recovers its upload across a Gateway process restart", async ({
+test("a Home upload survives leaving Files and a Gateway process restart", async ({
   page,
   request,
 }) => {
@@ -435,10 +435,15 @@ test("the open Files tab recovers its upload across a Gateway process restart", 
   await expect(
     page.getByText("The result is currently unavailable."),
   ).toBeVisible();
+  // Use the actual workspace link so the route unmounts while the account remains signed in.
+  await page.locator('a[href="/workspace/files"]').first().click();
+  await expect(page).toHaveURL(/\/workspace\/files/);
   await startGateway();
   down = false;
   expect(gateway.home).toBe(before.home);
   expect(gateway.instance).toBe(before.instance);
+  await page.goBack();
+  await expect(page).toHaveURL(/tab=files/);
   await page.getByRole("button", { name: "Check again" }).click();
   await expect(page.getByText("Saved in Researcher's files")).toBeVisible();
   expect(writes).toBe(1);
