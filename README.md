@@ -123,6 +123,9 @@ includes stopped containers and historical prefixes; missing or ambiguous facts
 prevent it from reporting complete accounting.
 The staged startup coordinator retains work across timeouts and retries, checks
 complete accounting before opening admission, and drains shutdown in order.
+After a Gateway restart, idle sandbox checks leave recovered chat sandboxes
+available for startup accounting once their previous ownership leases and
+recovery grace periods expire.
 The run API distinguishes a Gateway shutdown from a human Stop. Shutdown records
 its reason before cancelling active runs; a run that finishes during shutdown
 keeps its outcome.

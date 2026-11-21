@@ -64,6 +64,12 @@ Lease binding and existing-holder return also check the capability; those checks
 are memory-only and never acquire the provider metadata lock under the holder lock.
 Regressions: `test_provider_lifecycle_admission.py`.
 
+Ordinary orphan adoption checks publication eligibility before claiming ownership
+and again under the provider lock before parking. While admission is closed, keep
+the unowned observation available to bootstrap accounting. A lease whose checks
+change in flight must expire naturally if untracked, since a concurrent local
+acquisition can share the same owner identity.
+
 Gateway bootstrap accounting uses an opaque permit pinned to the exact
 provider, admission transition revision, pool owner and native bridge. It is
 valid only while that lifecycle stays closed and the native binding remains

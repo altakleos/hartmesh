@@ -1649,6 +1649,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                         deferred += 1
                         logger.debug("Deferring container %s during reconciliation: owned, or not yet past the recovery grace", info.sandbox_id)
                         continue
+                    # A closed Gateway accounts for this primary separately. Claiming it
+                    # before ordinary publication is allowed leaves an untracked lease
+                    # that can keep that accounting from finishing on every retry.
+                    with self._lock:
+                        self._assert_managed_publication(info)
                     # Claim second: a successful claim proves the container is not a
                     # peer's and locks peers out. It says nothing about *us* — it
                     # succeeds against our own lease by design — so it is not a substitute
