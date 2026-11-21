@@ -18,7 +18,7 @@ from deerflow.spaces.attachments import RetainedAttachment, SpaceAttachments
 from deerflow.spaces.filesystem import FileConflict, UnsafeSpacePath, _path
 from deerflow.spaces.incarnations import BoundVolume, validate_marker
 from deerflow.spaces.settlement import host_settlement_result
-from deerflow.spaces.workflows import WorkflowLockMissing, WorkflowReceipt, _owner, _read_only, _receipt, acquire, close
+from deerflow.spaces.workflows import MissingWorkflowReceipt, WorkflowLockMissing, WorkflowReceipt, WorkflowResolution, _owner, _read_only, _receipt, acquire, close
 from deerflow.utils.file_io import run_file_io
 
 logger = logging.getLogger(__name__)
@@ -282,12 +282,19 @@ async def _settle(files, candidate, *, discard=False, raise_errors=False, operat
                 if handler is None:
                     return False
                 receipt = WorkflowReceipt(volume, current.operation_id, request, control_fd=filesystem._control_fd)
-                await run_file_io(receipt.load)
-                tokens.append((_receipt, _receipt.set(receipt)))
-                resolution = await handler(current, session=session)
-                if resolution not in ("host-settled", "host-reconciled"):
-                    raise ValueError("Workflow settlement did not confirm an outcome")
-                current.phase, current.result = "complete", {"resolution": resolution, "value": None, "facts": receipt.value["facts"]}
+                try:
+                    await run_file_io(receipt.load)
+                except MissingWorkflowReceipt:
+                    # The host records its intent before saving a receipt and starting domain work.
+                    receipt = None
+                    resolution = WorkflowResolution.FAILED
+                else:
+                    tokens.append((_receipt, _receipt.set(receipt)))
+                    resolution = WorkflowResolution(await handler(current, session=session))
+                if resolution is WorkflowResolution.FAILED:
+                    current.phase, current.result = "failed", {"resolution": "host-settled"}
+                else:
+                    current.phase, current.result = "complete", {"resolution": resolution.value, "value": None, "facts": receipt.value["facts"]}
             elif request["action"] == "mkdir" and current.result is not None:
                 current.phase, current.result = await run_file_io(directory_creation.settle, filesystem, _path(request["path"]), current.result)
             else:

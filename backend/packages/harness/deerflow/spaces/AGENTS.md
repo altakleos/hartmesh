@@ -369,7 +369,7 @@ can require READ/EXPORT; ordinary chat projection keeps READ/WRITE.
 `settle_publication(intent, session=...)` requires an owned workflow, exact pending
 intent snapshot, verified company receipt and fenced attachments. Borrowed
 publication repositories flush without committing/closing the caller; completion
-and receipt cleanup belong to the caller after confirmed commit. Drain workers
+and receipt cleanup belong to the caller after confirmed commit. Feature effects follow receipt creation: confirmed absence means failure, damaged evidence stays pending. Shared matches inode/content in its selected folder and uses the exact journal, record and path for removal. Read-only admissions leave recovery to writers. Drain workers
 before cancellation releases the host transaction. `maintenance.py` owns actorless
 settlement: qualify outside SQL, retain nonblocking locks before `host_locked`,
 compare exact intent/binding snapshots and require fenced attachments. Pin roots

@@ -7,7 +7,7 @@ from app.gateway.agent_operator_contract import CommandRefused
 from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
 from deerflow.persistence.spaces.model import SpaceRow
 from deerflow.spaces.backings import BackingUnavailable
-from deerflow.spaces.filesystem import UnsafeSpacePath
+from deerflow.spaces.filesystem import FilesystemUnavailable, UnsafeSpacePath
 from deerflow.spaces.service import SpaceOperationPending
 from deerflow.utils.file_io import await_drained, run_file_io
 
@@ -24,6 +24,7 @@ def _describe(files, candidate, binding, *, managed_home):
     if not isinstance(request, dict):
         raise ValueError("The pending file operation request is invalid")
     namespace = request.get("namespace")
+    shared_target = None
     folder = {"hm.shared": "shared", "hm.my-files": "files", "hm.projects": "projects"}.get(namespace, "")
     receipt = None
     with volume.filesystem() as filesystem:
@@ -36,10 +37,29 @@ def _describe(files, candidate, binding, *, managed_home):
         except (OSError, ValueError):
             pass  # Retain malformed evidence; discard needs no receipt assertion.
         path = request.get("path")
-        if namespace == "hm.shared" and receipt is not None:
-            facts = receipt.get("facts", {})
+        if namespace == "hm.shared":
+            from deerflow.features.publications import publication_destination
+            from deerflow.files.store import StoreError, normalize_relative_path
+
+            facts = receipt["facts"] if receipt else {}
             fact = facts.get("publication") or facts.get("removal")
-            path = fact.get("path") if isinstance(fact, dict) else None
+            path = None
+            try:
+                if request.get("operation") == "publish":
+                    selected, requested = publication_destination(request)
+                else:
+                    requested_path = request["parameters"]["path"]
+                    if not isinstance(requested_path, str):
+                        raise ValueError("Invalid removal path")
+                    selected, _, requested = normalize_relative_path(requested_path).rpartition("/")
+                if isinstance(fact, dict):
+                    if not isinstance(fact.get("path"), str):
+                        raise ValueError("Invalid receipt path")
+                    selected = normalize_relative_path(fact["path"]).rpartition("/")[0]
+                shared_target = volume, selected, requested
+                folder = "shared/" + selected if selected else "shared"
+            except (KeyError, TypeError, StoreError, ValueError):
+                pass  # The provider can still inspect or discard a malformed intent.
         if isinstance(path, str):
             for prefix, relative in ((SHARED_VIRTUAL_PREFIX, "shared"), (USER_FILES_VIRTUAL_PREFIX, "files")):
                 if path.startswith(prefix + "/"):
@@ -61,10 +81,39 @@ def _describe(files, candidate, binding, *, managed_home):
                 os.close(descriptor)
         except FileNotFoundError:
             names = []
-        except (PermissionError, UnsafeSpacePath):
+        except (OSError, FilesystemUnavailable, UnsafeSpacePath):
             # This optional directory listing is not evidence for settlement.
             names = None
-    return receipt, sorted(names) if names is not None else None, getattr(volume.spec, "kind", None)
+    return receipt, sorted(names) if names is not None else None, getattr(volume.spec, "kind", None), shared_target
+
+
+async def _publication_matches(files, space_id, target, names):
+    from deerflow.features.qualified_publications import is_publication_name, shared_file_holding
+    from deerflow.features.resources import StorageFeatureLinkRow
+    from deerflow.files.store import StoreError
+    from deerflow.persistence.shared_publications.sql import SharedPublicationRepository
+
+    volume, folder, requested = target
+    matches = {}
+    async with files.registry._sf() as session, session.begin():
+        link = await session.get(StorageFeatureLinkRow, ("hm.company-space", "company"))
+        if link is None or link.space_id != space_id:
+            return None
+        repo = SharedPublicationRepository(files.registry._sf, session=session)
+        for name in names:
+            if not is_publication_name(requested, name):
+                continue
+            relative = folder + "/" + name if folder else name
+            record = await repo.live_publication(relative)
+            if record is None:
+                matches[name] = False
+                continue
+            try:
+                held = await run_file_io(shared_file_holding, volume, relative, record["sha256"], settling=True)
+                matches[name] = held is not None and held.size == record["size"]
+            except (OSError, FilesystemUnavailable, UnsafeSpacePath, StoreError):
+                matches[name] = None
+    return matches
 
 
 def _settlers(files):
@@ -103,13 +152,21 @@ class OperatorSettlement:
         try:
             if binding is None or binding.space_id != space_id:
                 raise BackingUnavailable("The resource has no qualified filesystem binding")
-            receipt, names, kind = await run_file_io(_describe, self.files, candidate, binding, managed_home=managed_home)
+            receipt, names, kind, shared_target = await run_file_io(_describe, self.files, candidate, binding, managed_home=managed_home)
         except SpaceOperationPending:
             raise CommandRefused(f"another workflow holds the lock of space {space_id}; run the command again in a moment") from None
         except BackingUnavailable as exc:
             raise CommandRefused(f"space {space_id} is unverified: {exc}; see storage-init verify") from None
         request = candidate.request
         fields = dict(space_id=space_id, operation_id=operation_id, kind=kind, namespace=request.get("namespace"), action=request.get("action"), on_behalf_of=request.get("on_behalf_of"), request=request, receipt=receipt, files=names)
+        if shared_target is not None:
+            fields["shared_folder"] = shared_target[1]
+            from sqlalchemy.exc import SQLAlchemyError
+
+            try:
+                fields["publication_matches"] = await _publication_matches(self.files, space_id, shared_target, names) if names is not None else None
+            except SQLAlchemyError:
+                fields["publication_matches"] = None  # Optional evidence must not prevent operator recovery.
         _settlers(self.files)
 
         async def perform():

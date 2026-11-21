@@ -79,6 +79,20 @@ class SharedMutationState:
         assert self.state_fd is not None
         return sorted(name for name in os.listdir(self.state_fd) if name.startswith("remove-"))
 
+    def file_present(self, path: str) -> bool:
+        relative = Path(normalize_relative_path(path))
+        try:
+            parent = open_directory_source(self.root / relative.parent)
+            try:
+                metadata = os.stat(relative.name, dir_fd=parent, follow_symlinks=False)
+            finally:
+                os.close(parent)
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(metadata.st_mode):
+            raise StoreError("The removal target is not a regular Shared file")
+        return True
+
     def open_removal(self, name: str) -> PendingRemoval:
         return PendingRemoval(self, name)
 
@@ -202,6 +216,12 @@ class PendingRemoval:
                 os.fsync(parent)
             finally:
                 os.close(parent)
+        self.finish()
+
+    def finish_empty(self) -> None:
+        assert self.fd is not None
+        if set(os.listdir(self.fd)) - {"journal.tmp"}:
+            raise StoreError("Unrecognized content in a Shared removal without its journal")
         self.finish()
 
     def finish(self) -> None:
