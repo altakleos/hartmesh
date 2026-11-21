@@ -1211,7 +1211,7 @@ export function createZhCN(product: string): Translations {
         from: (title) => `来自「${title}」`,
         giveTitle: (name) => `要将此文件提供给 ${name} 吗？`,
         disclosure: (file, name) =>
-          `「${file}」将复制到 ${name} 的文件中。${name} 可以在任何对话中使用它。任何能与 ${name} 对话的人都可以向其索取文件，任何能查看 ${name} 全部工作的人都可以打开文件。管理者可以看到文件由你提供，记录不会标明来源对话。你的原始文件仍保存在原处。`,
+          `「${file}」将复制到 ${name} 的文件中。${name} 可以在任何对话中使用它。任何能与 ${name} 对话的人都可以向其索取文件，任何能查看 ${name} 全部工作的人都可以打开文件。如果管理者给 ${name} 分配了公司连接，它就可以将此文件发送到相应的服务，无需事先询问你。管理者可以看到文件由你提供，记录不会标明来源对话。你的原始文件仍保存在原处。`,
         needsInspect: (name) =>
           `此对话或其文件不可用。打开 ${name} 的文件需要“可查看所有工作”权限。`,
         changed: (time) => `修改于 ${time}`,
