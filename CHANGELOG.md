@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.70] - 2026-11-21
+
+### Workspace files
+
+- **Files** opens your personal files, Company shared and the homes of assistants and employees you can inspect. In the new view, Gateways that advertise folder browsing return the direct entries of a personal or Shared folder. Searching loads the available files across that location. Partial results are labeled. A file’s actions show its full path and audience. Publishing from chat and Files uses the same access checks and Undo eligibility.
+- A Home upload continues when you leave the Files pane. On returning to the same signed-in workspace, you can check its original result and see the saved name, including a suffix added because the name was taken. Losing access or changing accounts removes the old transfer information.
+- In managed Company Shared, eligible people can remove a freshly selected file or undo a copy they just published. The Gateway checks the file revision and its publication identity, so a replacement at that path is preserved. Undo requires a newly created, eligible copy. Ordinary storage continues to offer browsing and publishing. Personal files and agent homes omit rename and delete where a concurrent replacement cannot be guarded.
+
+### Operations
+
+- The desktop browser is available on qualified fine-pointer devices. Touch devices open the classic view by default. On a supported Gateway, **Use file browser** opens the new view and **Use classic file view** switches back. Both views share in-progress Home uploads. Nested links opened by an older client return to the authorized location.
+- The normal rollback target is `2.2.0+hartmesh.69`. Before replacing the web client, check the results and saved names of in-flight uploads. Saved files remain available after replacement. The previous Gateway can settle interrupted managed Shared removals using its existing ledger, and the new client can browse the bounded lists served by that Gateway. After rolling the client back, the older client’s original file actions are available again.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.69.
+
 ## [2.2.0+hartmesh.69] - 2026-11-21
 
 ### Fixed
