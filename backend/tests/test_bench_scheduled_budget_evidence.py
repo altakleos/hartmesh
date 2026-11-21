@@ -1,11 +1,10 @@
 """Model-free reproduction of the public history projection and native counters."""
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from _router_auth_helpers import call_unwrapped
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, FastAPI, Request
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from app.gateway.routers import threads
@@ -35,7 +34,7 @@ async def test_public_history_projection_omits_older_goals_but_native_accessor_r
         monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", AsyncMock(return_value=(accessor, config)))
 
         async def public_history():
-            projected = await call_unwrapped(threads.get_thread_history, thread_id="budget-thread", body=threads.ThreadHistoryRequest(limit=100), request=SimpleNamespace(), background_tasks=BackgroundTasks())
+            projected = await call_unwrapped(threads.get_thread_history, thread_id="budget-thread", body=threads.ThreadHistoryRequest(limit=100), request=Request({"type": "http", "app": FastAPI()}), background_tasks=BackgroundTasks())
             return [entry.model_dump(mode="json") for entry in projected]
 
         active_shape = await public_history()
