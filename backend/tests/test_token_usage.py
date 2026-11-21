@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.client import DeerFlowClient
 
@@ -156,7 +157,7 @@ class TestStreamUsageIntegration:
 
     def _make_client(self):
         with patch("deerflow.client.get_app_config", return_value=_mock_app_config()):
-            return DeerFlowClient()
+            return DeerFlowClient(checkpointer=InMemorySaver())
 
     def test_stream_emits_usage_in_messages_tuple(self):
         """messages-tuple AI event should include usage_metadata when present."""
