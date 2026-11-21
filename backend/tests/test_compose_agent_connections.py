@@ -144,8 +144,9 @@ def connect_from_browser(page, compose):
     expect(page.get_by_text("Saved. Connected. 1 tool.", exact=True)).to_be_visible(timeout=30000)
 
 
-def read_from_browser(page, compose, session, agent):
+def read_from_browser(page, compose, session, agent, evidence):
     thread_id = agent["thread_id"]
+    evidence["thread_id"] = thread_id
     expected = "Notice from notices-a."
     page.goto(f"{compose.url}/workspace/chats/{thread_id}", wait_until="domcontentloaded")
     field = page.get_by_placeholder(re.compile(r"how can i assist", re.I))
@@ -157,6 +158,7 @@ def read_from_browser(page, compose, session, agent):
     match = re.fullmatch(rf"/api/threads/{re.escape(thread_id)}/runs/([0-9a-f-]{{36}})", response.headers.get("content-location", ""))
     assert match, "Browser stream did not identify its thread and run"
     run_id = match[1]
+    evidence["run_id"] = run_id
     expect(page.locator("[data-assistant-turn]").last.get_by_text(expected, exact=True)).to_be_visible(timeout=90000)
     thread_path = f"/api/langgraph/threads/{thread_id}"
     run_path = f"{thread_path}/runs/{run_id}"
@@ -171,8 +173,7 @@ def read_from_browser(page, compose, session, agent):
         events = session.request("GET", run_path + "/messages").json()["data"]
         return confirmed_browser_notice(thread_id, run_id, expected, messages, events)
 
-    message_id = eventually(persisted_answer, timeout=90, interval=1)
-    return {"thread_id": thread_id, "run_id": run_id, "message_id": message_id}
+    evidence["message_id"] = eventually(persisted_answer, timeout=90, interval=1)
 
 
 def observed_chat(session, agent, *, assigned, helpers=False):
@@ -349,8 +350,8 @@ def test_company_connection_calls_switch_and_rollback(compose, session):
             assert baseline["notices-a"]["discoveries"] > 0 and baseline["notices-a"]["calls"] == 0
             assert baseline["notices-b"]["requests"] == baseline["notices-unlisted"]["requests"] == 0
             set_grant(session, primary, "notices", True)
-            record["chat"] = read_from_browser(page, compose, session, primary)
-            record["chat"]["after_check"] = baseline
+            record["chat"] = {"after_check": baseline}
+            read_from_browser(page, compose, session, primary, record["chat"])
             after_chat = counts()
             assert after_chat["notices-a"]["calls"] == 1 and after_chat["notices-b"]["calls"] == 0
             page.screenshot(path=output.parent / "notice-conversation.png", animations="disabled")

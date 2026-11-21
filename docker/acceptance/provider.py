@@ -60,26 +60,56 @@ def tool_result_content(value: object, *, allow_preflight_failure: bool = False)
     return envelope["content"]
 
 
-def confirms_notice_revocation(assistant, result):
-    call_id = result.get("tool_call_id")
-    if call_id != "call_work_3" or assistant.get("role") != "assistant":
-        return False
-    if not any(call.get("id") == call_id and call.get("function", {}).get("name") == "notices_read_notice" for call in assistant.get("tool_calls", [])):
-        return False
+NOTICE_STATEMENT = "Read the updated notice before the connection was taken away."
+WORK_ACTIVATION = (
+    "--- BEGIN USER INPUT ---\nWork on the explicitly activated assignment. Read current Work context, "
+    "follow the adopted mandate, and report progress, blockers or an outcome.\n--- END USER INPUT ---"
+)
+
+
+def scripted_tool(assistant, result, call_id):
+    calls = assistant.get("tool_calls", [])
+    if result.get("tool_call_id") != call_id or assistant.get("role") != "assistant" or len(calls) != 1 or calls[0].get("id") != call_id:
+        return None
+    return calls[0].get("function", {}).get("name")
+
+
+def notice_result_block(assistant, result, expected_id, expected_name):
+    """Read the one native MCP text block emitted by the scripted notice services."""
+    if scripted_tool(assistant, result, expected_id) != expected_name:
+        raise ValueError("Unexpected notice result identity")
+    for text in ("Notice from notices-a.", "Notice from notices-b."):
+        if result["content"] == [{"type": "text", "text": text}]:
+            return text
+    raise ValueError("Unexpected notice result block")
+
+
+def receipt_text(assistant, result, call_id, name, status, source):
+    if scripted_tool(assistant, result, call_id) != name:
+        return None
     try:
         envelope = json.loads(result["content"])
     except (TypeError, ValueError):
+        return None
+    if isinstance(envelope, dict) and envelope.get("deerflow_tool_meta") == {"status": status, "source": source}:
+        return envelope.get("content")
+    return None
+
+
+def is_notice_assignment(context):
+    try:
+        objective = json.loads(context)["work"]["objective"]
+    except (TypeError, KeyError, ValueError):
         return False
-    return (
-        isinstance(envelope, dict)
-        and envelope.get("deerflow_tool_meta") == {"status": "error", "source": "exception"}
-        and envelope.get("content") == "Error: Tool 'notices_read_notice' failed: A manager took away this connection. Ask a manager if it is needed again."
-    )
+    return isinstance(objective, str) and re.fullmatch(r"acceptance:work:notices:[0-9a-f]{32}", objective) is not None
 
 
 def reply(body: dict[str, Any]) -> dict[str, Any]:
     messages = body.get("messages", [])
     if not body.get("tools"):
+        latest_user = next((message.get("content") for message in reversed(messages) if message.get("role") == "user"), None)
+        if latest_user in ("acceptance:notice:helper", "--- BEGIN USER INPUT ---\nacceptance:notice:helper\n--- END USER INPUT ---"):
+            return {"content": "Helper saw no notice connection."}
         system = " ".join(str(message.get("content", "")) for message in messages if message.get("role") == "system")
         if "You are a security reviewer for AI agent skills." in system:
             content = " ".join(str(message.get("content", "")) for message in messages if message.get("role") == "user")
@@ -99,12 +129,23 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
         (i for i, message in enumerate(messages) if message.get("role") == "user"),
         default=0,
     )
+    offered = {tool.get("function", {}).get("name") for tool in body["tools"]}
+    work_turn = "report_work" in offered
+    wrap_up = False
+    if work_turn and messages and str(messages[latest].get("content", "")).startswith("[LOOP DETECTED] You are repeating the same tool calls. Stop repeating them and wrap up now."):
+        previous = next((n for n in range(latest - 1, -1, -1) if messages[n].get("role") == "user"), None)
+        if previous is not None and messages[previous].get("content") == WORK_ACTIVATION:
+            latest = previous
+            wrap_up = True
     turn = messages[latest:]
     if not turn:
         raise ValueError("missing acceptance turn")
-    work_turn = any(tool.get("function", {}).get("name") == "report_work" for tool in body["tools"])
     skill_match = re.search(r"acceptance:skill:(supplier-comparison|procedure-summary)(?:\s|$)", str(turn[0].get("content")))
     file_turn = not work_turn and skill_match is None and "acceptance:file" in str(turn[0].get("content"))
+    notice_read = "acceptance:notice:read" in str(turn[0].get("content"))
+    notice_delegate = "acceptance:notice:delegate" in str(turn[0].get("content"))
+    notice_work = False
+    notice_report = None
     normalized = []
     tool_index = 0
     notice_revoked = False
@@ -112,14 +153,33 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
         if message.get("role") == "tool":
             # The OpenAI tool reply identifies its assistant-issued call by ID.
             # Allow an error only for the final scripted revocation observation.
-            if work_turn and tool_index == 3:
-                notice_revoked = confirms_notice_revocation(normalized[-1], message)
-            message = {**message, "content": tool_result_content(message.get("content"), allow_preflight_failure=(file_turn and tool_index == 1) or (tool_index == 3 and notice_revoked))}
+            previous = normalized[-1]
+            content = message.get("content")
+            if notice_delegate:
+                completed = receipt_text(previous, message, "call_notice", "task", "success", "tool_return")
+                if tool_index != 0 or "task" not in offered or completed != "Task Succeeded. Result: Helper saw no notice connection.":
+                    raise ValueError("Missing confirmed result from the helper")
+            if notice_work and tool_index == 3:
+                refused = receipt_text(previous, message, "call_work_3", "notices_read_notice", "error", "exception")
+                notice_revoked = refused == "Error: Tool 'notices_read_notice' failed: A manager took away this connection. Ask a manager if it is needed again."
+            if notice_work and tool_index == 4:
+                notice_report = receipt_text(previous, message, "call_work_4", "report_work", "success", "tool_return")
+            if isinstance(content, list) and notice_work and tool_index in (1, 2) and "notices_read_notice" in offered:
+                content = notice_result_block(previous, message, f"call_work_{tool_index}", "notices_read_notice")
+            elif isinstance(content, list) and notice_read and tool_index == 0:
+                assigned = offered.intersection({"notices_read_notice", "bulletins_read_notice"})
+                if len(assigned) != 1:
+                    raise ValueError("Expected exactly one granted notice tool")
+                content = notice_result_block(previous, message, "call_notice", assigned.pop())
+            content = tool_result_content(content, allow_preflight_failure=(file_turn and tool_index == 1) or (tool_index == 3 and notice_revoked))
+            if work_turn and tool_index == 0:
+                notice_work = is_notice_assignment(content)
+            message = {**message, "content": content}
             tool_index += 1
         normalized.append(message)
     turn = normalized
     if work_turn:
-        return work_reply(body, turn, notice_revoked=notice_revoked)
+        return work_reply(body, turn, notice_revoked=notice_revoked, notice_report=notice_report, wrap_up=wrap_up)
     if "acceptance:notice:" in str(turn[0].get("content")):
         return notice_reply(body, turn)
     if skill_match:
@@ -206,7 +266,7 @@ def notice_reply(body, turn):
     return {"tool_calls": [{"id": "call_notice", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}]}
 
 
-def work_reply(body, turn, *, notice_revoked):
+def work_reply(body, turn, *, notice_revoked, notice_report, wrap_up):
     """Stateless script of real Work tools; no application inference bypass."""
     offered = {tool.get("function", {}).get("name") for tool in body["tools"]}
     system = " ".join(str(message.get("content", "")) for message in body.get("messages", []) if message.get("role") == "system")
@@ -250,6 +310,8 @@ def work_reply(body, turn, *, notice_revoked):
             else:
                 return {"content": "Work acceptance complete."}
         elif notices := re.fullmatch(r"acceptance:work:notices:([a-f0-9]{32})", objective):
+            if wrap_up and len(results) < 4:
+                raise ValueError("The host stopped the repeated calls before the notice sequence was observed")
             # The test driver changes the registry between real tool responses.
             # Distinct call IDs are supplied below for each turn of the model.
             name, arguments = "notices_read_notice", {}
@@ -266,9 +328,20 @@ def work_reply(body, turn, *, notice_revoked):
                     raise ValueError("The notice call did not confirm the manager’s revocation")
                 name, arguments = "report_work", {"report": {
                     "operation_id": hashlib.sha256((work_id + ":" + attempt_id).encode()).hexdigest()[:32], "expected_revision": revision,
-                    "action": "outcome", "statement": "Read the updated notice before the connection was taken away.",
+                    "action": "outcome", "statement": NOTICE_STATEMENT,
                 }}
             elif len(results) > 4:
+                try:
+                    work = json.loads(notice_report)
+                    attempt = work["attempt"]
+                    candidate = attempt["candidate"]
+                    complete = (len(results) == 5 and notice_revoked and work["id"] == work_id and attempt["id"] == attempt_id
+                                and candidate["attempt_id"] == attempt_id and candidate["statement"] == NOTICE_STATEMENT
+                                and re.fullmatch(r"[a-f0-9]{32}", candidate["id"]))
+                except (TypeError, KeyError, ValueError):
+                    complete = False
+                if not complete:
+                    raise ValueError("Missing the notice outcome receipt for this Work attempt")
                 return {"content": "Notice assignment complete."}
         elif observed := re.fullmatch(r"acceptance:work:final:([a-f0-9]{32})", objective):
             return final_observation(observed[1])
