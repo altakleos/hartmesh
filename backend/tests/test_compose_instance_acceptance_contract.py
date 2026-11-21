@@ -547,3 +547,34 @@ def test_initial_browser_read_evidence_survives_timeout_and_keeps_only_expected_
             handlers["response"](Mock(request=attempt, status=200))
             handlers["requestfailed"](attempt)
     assert evidence["initial_reads"]["history"]["attempts"] == [{"started_ms": 0, "elapsed_ms": 0, "state": "failed", "http_status": 200, "failure_kind": kind} for kind in ("connection-reset", "other", "other")]
+
+
+def test_mounted_qualification_keeps_distinct_shared_and_device_receipts():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/compose-instances.yml").read_text(encoding="utf-8"))
+    steps = next(iter(workflow["jobs"].values()))["steps"]
+    measure = next(step for step in steps if step.get("name") == "Qualify interrupted Shared operations")
+    assert "tests/test_compose_shared_settlement.py" in measure["run"] and "shared-settlement.json" in measure["run"]
+    assert "mounted-devices-before.json" in measure["run"] and "mounted-devices-after-gateway.json" in measure["run"]
+    assert all(field in measure["run"] for field in ("restart_to_terminal_seconds", "reader_release_to_terminal_seconds", "subsequent_remove_seconds", "subsequent_publish_seconds"))
+    stop = next(step for step in steps if step.get("name") == "14 Check that the stack stops cleanly")["run"]
+    assert stop.index("storage-init quiesce") < stop.index("storage-init mount-all") < stop.index("mounted-devices-after-remount.json")
+    assert stop.rindex("storage-init quiesce") > stop.index("mounted-devices-after-remount.json")
+
+
+def test_mounted_device_evidence_preserves_volume_identity_when_kernel_numbers_change():
+    from runpy import run_path
+
+    import pytest
+
+    compare = run_path(str(ROOT / "docker/acceptance/mounted_devices.py"))["compare"]
+    previous = {"slot": {"kind": "company", "filesystem_uuid": "one", "data_inode": 10, "control_inode": 20, "device": 50}}
+    same = {"slot": dict(previous["slot"])}
+    changed = {"slot": dict(previous["slot"], device=51)}
+    assert compare(previous, same, remounted=False) == []
+    assert compare(previous, same, remounted=True) == []
+    assert compare(previous, changed, remounted=True) == ["slot"]
+    with pytest.raises(AssertionError, match="restart"):
+        compare(previous, changed, remounted=False)
+    for field in ("filesystem_uuid", "data_inode", "control_inode"):
+        with pytest.raises(AssertionError):
+            compare(previous, {"slot": dict(changed["slot"], **{field: "another"})}, remounted=True)

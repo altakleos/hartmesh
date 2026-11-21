@@ -364,27 +364,32 @@ def digest_and_stat(source: Path) -> tuple[str, os.stat_result]:
     """*source*'s SHA-256 and the metadata of the very file that was hashed, from one descriptor."""
     fd = open_regular_source(source)
     try:
-        digest = hashlib.sha256()
-        initial = os.fstat(fd) if isinstance(source, DescriptorSource) else None
-        with os.fdopen(fd, "rb", closefd=False) as reader:
-            if initial is None:
-                while chunk := reader.read(_COPY_CHUNK_BYTES):
-                    digest.update(chunk)
-            else:
-                remaining = initial.st_size
-                while remaining:
-                    chunk = reader.read(min(_COPY_CHUNK_BYTES, remaining))
-                    if not chunk:
-                        raise StoreError("The pinned source changed while hashing")
-                    digest.update(chunk)
-                    remaining -= len(chunk)
-                if reader.read(1):
-                    raise StoreError("The pinned source changed while hashing")
-        metadata = os.fstat(fd)
-        if initial is not None and (metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns) != (initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns):
-            raise StoreError("The pinned source changed while hashing")
+        return digest_open_file(fd, require_stable=isinstance(source, DescriptorSource))
     finally:
         os.close(fd)
+
+
+def digest_open_file(fd: int, *, require_stable: bool = True) -> tuple[str, os.stat_result]:
+    """Read an owned regular-file descriptor at offset zero; the caller closes it."""
+    digest = hashlib.sha256()
+    initial = os.fstat(fd) if require_stable else None
+    with os.fdopen(fd, "rb", closefd=False) as reader:
+        if initial is None:
+            while chunk := reader.read(_COPY_CHUNK_BYTES):
+                digest.update(chunk)
+        else:
+            remaining = initial.st_size
+            while remaining:
+                chunk = reader.read(min(_COPY_CHUNK_BYTES, remaining))
+                if not chunk:
+                    raise StoreError("The pinned source changed while hashing")
+                digest.update(chunk)
+                remaining -= len(chunk)
+            if reader.read(1):
+                raise StoreError("The pinned source changed while hashing")
+    metadata = os.fstat(fd)
+    if initial is not None and (metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns) != (initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns):
+        raise StoreError("The pinned source changed while hashing")
     return digest.hexdigest(), metadata
 
 

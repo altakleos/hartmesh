@@ -79,6 +79,20 @@ class SharedMutationState:
         assert self.state_fd is not None
         return sorted(name for name in os.listdir(self.state_fd) if name.startswith("remove-"))
 
+    def file_present(self, path: str) -> bool:
+        relative = Path(normalize_relative_path(path))
+        try:
+            parent = open_directory_source(self.root / relative.parent)
+            try:
+                metadata = os.stat(relative.name, dir_fd=parent, follow_symlinks=False)
+            finally:
+                os.close(parent)
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(metadata.st_mode):
+            raise StoreError("The removal target is not a regular Shared file")
+        return True
+
     def open_removal(self, name: str) -> PendingRemoval:
         return PendingRemoval(self, name)
 
@@ -183,6 +197,20 @@ class PendingRemoval:
             raise StoreError("Invalid Shared removal payload")
         return True
 
+    def open_payload(self) -> int:
+        """Return the staged regular file. The caller owns the descriptor."""
+        assert self.fd is not None
+        if not self.has_payload():
+            raise FileNotFoundError("The staged Shared file is unavailable")
+        fd = os.open("payload", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise StoreError("Invalid Shared removal payload")
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
     def mark_removed(self) -> None:
         self.journal["removed"] = True
         self.write_journal()
@@ -202,6 +230,12 @@ class PendingRemoval:
                 os.fsync(parent)
             finally:
                 os.close(parent)
+        self.finish()
+
+    def finish_empty(self) -> None:
+        assert self.fd is not None
+        if set(os.listdir(self.fd)) - {"journal.tmp"}:
+            raise StoreError("Unrecognized content in a Shared removal without its journal")
         self.finish()
 
     def finish(self) -> None:

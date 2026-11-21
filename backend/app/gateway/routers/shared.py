@@ -37,6 +37,7 @@ from app.gateway.storage_features import current_feature_service, storage_featur
 from deerflow.config.paths import USER_FILES_VIRTUAL_PREFIX, VIRTUAL_PATH_PREFIX
 from deerflow.files import SharedFile, SharedFileError, digest_of, list_shared_files, normalize_relative_path, publish_file, remove_shared_file, resolve_shared_file, resolve_user_file, shared_file_holding
 from deerflow.files.shared import shared_mutation_state
+from deerflow.files.shared_attribution import SharedPublicationChanged, observed_file, stage_observed, visible_records
 from deerflow.files.store import SafeFileAccessUnavailable
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import validate_thread_id
@@ -198,9 +199,9 @@ async def list_shared(request: Request) -> SharedFileListResponse:
     if service:
         entries, truncated, records = await service.execute("list", repo=repo)
     else:
-        async with _shared_mutation(repo):
+        async with _shared_mutation(repo) as state:
             entries, truncated = await asyncio.to_thread(list_shared_files)
-            records = await repo.live_publications()
+            records = await asyncio.to_thread(visible_records, state, entries, await repo.live_publications())
     names = await _publisher_names([records.get(entry.path) for entry in entries])
     files = []
     for entry in entries:
@@ -359,18 +360,30 @@ async def remove_shared(path: str, request: Request, expected_publication_id: An
     async with _shared_mutation(repo) as state:
 
         async def remove_and_record():
-            await asyncio.to_thread(_published_file, path)
+            source = await asyncio.to_thread(_published_file, path)
+            try:
+                observed = await asyncio.to_thread(observed_file, source, use_cache=True)
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail="Shared file is unavailable") from None
+            except SharedFileError:
+                raise HTTPException(status_code=409, detail="This Shared publication changed; refresh before removing it") from None
+            except OSError:
+                raise HTTPException(status_code=503, detail="Could not verify this Shared file; nothing was removed") from None
             try:
                 record = await repo.live_publication(relative)
             except Exception:
                 raise HTTPException(status_code=503, detail="Could not read the publication record; nothing was removed") from None
+            if not observed.matches(record):
+                record = None
             current_id = "" if record is None else record["publication_id"]
             if expected_publication_id is not None and expected_publication_id != current_id:
                 raise HTTPException(status_code=409, detail="This Shared publication changed; refresh before removing it")
             if not _may_remove(record, user_id=user_id, admin=await is_admin_user(request)):
                 raise HTTPException(status_code=403, detail="Only the person who published this, or an admin, can remove it")
             try:
-                pending = await asyncio.to_thread(state.stage, relative, current_id or None)
+                pending = await asyncio.to_thread(stage_observed, state, relative, current_id or None, observed)
+            except SharedPublicationChanged as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from None
             except FileNotFoundError:
                 raise HTTPException(status_code=404, detail=f"File not found: {path}") from None
             except Exception:

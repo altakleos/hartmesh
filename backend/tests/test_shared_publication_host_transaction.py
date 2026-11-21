@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import update
+from test_storage_feature_routes import THREAD
 from test_storage_feature_routes import feature_app as feature_app
 
 from deerflow.features.plugins import FeatureServices
@@ -109,7 +110,7 @@ async def host_settlement(files, space_id, operation_id, *, receipt_override=Non
 async def seed_publication(feature_app):
     _client, app, files, _catalog, _paths, alice, _bob, _current = feature_app
     operation_id, publication_id = uuid4().hex, str(uuid4())
-    request = {"action": "feature-workflow", "namespace": "hm.shared", "operation": "publish", "by": "host", "source": {"path": "/mnt/user-data/outputs/pending.txt"}, "parameters": {}}
+    request = {"action": "feature-workflow", "namespace": "hm.shared", "operation": "publish", "by": "host", "source": {"path": "/mnt/user-data/outputs/pending.txt", "thread_id": THREAD}, "parameters": {}}
     async with files.registry._sf() as session:
         space_id = (await session.get(StorageFeatureLinkRow, ("hm.company-space", "company"))).space_id
         row = await session.get(SpaceRow, space_id)
@@ -126,7 +127,7 @@ async def seed_publication(feature_app):
         "size": target.stat().st_size,
         "sha256": sha256(target.read_bytes()).hexdigest(),
         "published_by": str(alice.id),
-        "from_thread_id": None,
+        "from_thread_id": THREAD,
         "from_path": request["source"]["path"],
     }
     receipt.save()
