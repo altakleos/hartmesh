@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from deerflow.features.publications import PublicationUnavailable, copy_and_record, recover_removals
 from deerflow.files import manager, shared
 from deerflow.files.shared_attribution import observed_file, stage_observed, visible_records
-from deerflow.files.store import normalize_relative_path
+from deerflow.files.store import normalize_relative_path, selected_revision
 from deerflow.spaces.backings import BackingUnavailable
 from deerflow.spaces.contract import SpaceConflict, SpaceDenied
 from deerflow.utils.file_io import await_drained, run_file_io
@@ -76,6 +76,9 @@ class SharedBehavior:
                 except OSError as exc:
                     raise BackingUnavailable("Could not verify the selected Shared file") from exc
                 record = await repo.live_publication(path)
+                revision = values.get("expected_revision")
+                if revision is not None and (selected_revision(path, observed.metadata) != revision or (record is not None and not observed.matches(record))):
+                    raise SpaceConflict("This Shared file changed; refresh before removing it")
                 if not observed.matches(record):
                     record = None
                 publication_id = "" if record is None else record["publication_id"]
@@ -84,7 +87,12 @@ class SharedBehavior:
                     raise SpaceConflict("This Shared publication changed; refresh before removing it")
                 if not values.get("admin", False) and (record is None or record.get("published_by") != user_id):
                     raise SpaceDenied("Only the publisher or an administrator can remove this publication")
-                pending = await run_file_io(stage_observed, state, path, publication_id or None, observed)
+                stage_admission = values.get("stage_admission")
+                if stage_admission is None:
+                    pending = await run_file_io(stage_observed, state, path, publication_id or None, observed)
+                else:
+                    async with stage_admission():
+                        pending = await await_drained(run_file_io(stage_observed, state, path, publication_id or None, observed))
                 try:
                     if record is not None:
                         if await repo.record_removal(publication_id, removed_by=user_id) is None:

@@ -1,10 +1,18 @@
 # Gateway routers
 
-The `file_browser` field in `GET /api/features` lists versioned reads by source.
+Personal and Shared folder pages scan direct children on an admitted directory
+descriptor. A visible regular descendant establishes each virtual group.
+Stop on the work or row limit and expose truncation. Shared loads attribution
+for the returned files and checks their contents under its normal read lock.
+
+The `file_browser` field in `GET /api/features` lists versioned operations by source.
 `/api/file-browser/v1` selects fresh file metadata under the collection’s current
 admission. Agent folder, text and content reads also require current instance inspection,
 a matching Home and descriptor-relative opens without links. Entry revisions are
-observations. Unknown operations stay unavailable on older workers.
+observations. Managed Shared removes require a selected revision, an explicit
+publication ID (null for an unrecorded operator file) and a fresh operation ID.
+Exact confirmed replays recheck access. Only a new managed publish can return the
+original descriptor’s revision for Undo. Unknown operations stay unavailable on older workers.
 
 Bootstrap counts are global except `mine`. Own-file status closes SQL before
 kernel proof, uses assignable slots rather than seat vacancy, and projects failures

@@ -2,7 +2,7 @@
 
 import os
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import Lock
 
 from deerflow.files.store import MAX_LISTED_FILES, StoreError, digest_open_file, open_regular_source
@@ -20,6 +20,7 @@ class SharedFileProof:
     inode: int
     size: int
     digest: str
+    metadata: os.stat_result = field(compare=False, repr=False)
 
     def matches(self, record):
         return record is not None and self.size == record["size"] and self.digest == record["sha256"]
@@ -29,7 +30,7 @@ def _revision(metadata):
     return metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns
 
 
-def _proof(fd, *, use_cache):
+def observed_descriptor(fd, *, use_cache=False):
     metadata = os.fstat(fd)
     revision = _revision(metadata)
     digest = None
@@ -47,13 +48,13 @@ def _proof(fd, *, use_cache):
                 _digests.move_to_end(revision)
                 if len(_digests) > MAX_LISTED_FILES:
                     _digests.popitem(last=False)
-    return SharedFileProof(metadata.st_dev, metadata.st_ino, metadata.st_size, digest)
+    return SharedFileProof(metadata.st_dev, metadata.st_ino, metadata.st_size, digest, metadata)
 
 
 def observed_file(path, *, use_cache=False):
     fd = open_regular_source(path)
     try:
-        return _proof(fd, use_cache=use_cache)
+        return observed_descriptor(fd, use_cache=use_cache)
     finally:
         os.close(fd)
 
@@ -77,7 +78,7 @@ def visible_records(state, entries, records):
 def _stage_matches(pending, observed):
     fd = pending.open_payload()
     try:
-        return _proof(fd, use_cache=False) == observed
+        return observed_descriptor(fd, use_cache=False) == observed
     finally:
         os.close(fd)
 

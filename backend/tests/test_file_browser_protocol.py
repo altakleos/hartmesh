@@ -211,3 +211,139 @@ def test_legacy_full_page_stops_before_inspecting_next_native_name(tmp_path, mon
         assert [row.name for row in ordinary] == ["report.txt"] and truncated
         browser, truncated = filesystem.list_directory(limit=1, follow_symlinks=False)
         assert [row.name for row in browser] == ["report.txt"] and truncated
+
+
+@pytest.mark.anyio
+async def test_direct_folder_pages_show_only_witnessed_file_groups(paths, repo, monkeypatch):
+    monkeypatch.setattr("deerflow.files.folders.get_paths", lambda: paths)
+    client, user = _client(repo)
+    client.app.include_router(file_browser.router)
+    personal = paths.ensure_user_files_dir(str(user.id))
+    for area, root in [("personal", personal), ("shared", paths.ensure_shared_dir())]:
+        (root / "books" / "archive").mkdir(parents=True)
+        (root / "books" / "archive" / "notes.txt").write_text("owned", encoding="utf-8")
+        (root / "empty").mkdir()
+        (root / "hidden-only").mkdir()
+        (root / "hidden-only" / ".private").touch()
+        (root / "plain.txt").touch()
+        endpoint = f"{PREFIX}/{area}/folder"
+        page = client.get(endpoint)
+        assert page.status_code == 200, page.text
+        assert page.headers["cache-control"] == "private, no-store"
+        assert {row["path"]: row["kind"] for row in page.json()["files"]} == {"books": "directory", "plain.txt": "file"}
+        assert page.json()["truncated"] is False
+        assert client.get(endpoint, params={"path": "books"}).json()["files"][0]["path"] == "books/archive"
+        item = client.get(endpoint, params={"path": "books/archive"}).json()["files"][0]
+        assert item["name"] == "notes.txt" and item["size"] == 5 and item["url"].endswith("books/archive/notes.txt")
+        assert client.get(endpoint, params={"limit": 1}).json()["truncated"] is True
+        assert client.get(endpoint, params={"path": "empty"}).status_code == 404
+        assert client.get(endpoint, params={"path": "missing"}).status_code == 404
+        assert client.get(endpoint, params={"path": "plain.txt"}).status_code == 404
+        if area == "shared":
+            assert item["can_remove"] is False
+
+
+@pytest.mark.asyncio
+async def test_managed_folder_rows_retain_current_source_and_provenance(feature_app):
+    client, app, _, _, paths, alice, bob, current = feature_app
+    app.include_router(file_browser.router)
+    outputs = paths.sandbox_outputs_dir(THREAD, user_id=str(alice.id))
+    outputs.mkdir(parents=True)
+    (outputs / "report.txt").write_bytes(b"draft")
+    keep = await client.post(f"/api/threads/{THREAD}/files", json={"path": "/mnt/user-data/outputs/report.txt", "folder": "meeting"})
+    assert keep.status_code == 201
+    share = await client.post("/api/shared/publish", json={"path": keep.json()["virtual_path"], "folder": "company"})
+    assert share.status_code == 201
+    for area, group in [("personal", "meeting"), ("shared", "company")]:
+        result = await client.get(f"{PREFIX}/{area}/folder", params={"path": group})
+        assert result.status_code == 200, result.text
+        row = result.json()["files"][0]
+        assert row["path"] == group + "/report.txt" and row["kind"] == "file"
+        if area == "shared":
+            assert row["publication_id"] == share.json()["publication_id"] and row["can_remove"]
+    current[0] = bob
+    assert (await client.get(PREFIX + "/personal/folder", params={"path": "meeting"})).status_code != 200
+
+
+def test_exhausted_folder_evidence_stays_partial_without_naming_an_unobserved_group(tmp_path, monkeypatch):
+    from deerflow.config.paths import Paths, paths_scope
+    from deerflow.files import folders
+
+    local = Paths(tmp_path)
+    root = local.ensure_shared_dir()
+    hidden = root / "example"
+    hidden.mkdir()
+    (hidden / ".ignored").touch()
+    (hidden / "ordinary.txt").touch()
+    monkeypatch.setattr(folders, "MAX_FOLDER_SCAN", 1)
+    with paths_scope(local):
+        response = folders.read_folder(None, "", 500)
+        assert response.files == response.folders == [] and response.truncated
+        partial = folders.read_folder(None, "example", 500)
+        assert partial.truncated
+
+
+def test_ordinary_inaccessible_group_preserves_readable_siblings(tmp_path, monkeypatch):
+    import errno
+
+    from deerflow.config.paths import Paths, paths_scope
+    from deerflow.files import folders
+
+    local = Paths(tmp_path)
+    root = local.ensure_shared_dir()
+    (root / "blocked").mkdir()
+    (root / "visible.txt").touch()
+    native_open = os.open
+
+    def refuse_group(path, flags, *args, **kwargs):
+        if path == "blocked":
+            raise PermissionError(errno.EACCES, "unreadable directory")
+        return native_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", refuse_group)
+    with paths_scope(local):
+        page = folders.read_folder(None, "", 500)
+        assert [file.name for file in page.files] == ["visible.txt"] and not page.folders and not page.truncated
+        with pytest.raises(PermissionError):
+            folders.read_folder(None, "blocked", 500)
+
+
+@pytest.mark.asyncio
+async def test_managed_missing_collection_root_is_an_outage_for_nested_folder(feature_app):
+    client, app, _, catalog, *_ = feature_app
+    app.include_router(file_browser.router)
+    assert (await client.get(PREFIX + "/shared/folder")).status_code == 200
+    root = next(vol.data_path / "shared" for vol in catalog.verified.values() if (vol.data_path / "shared").is_dir())
+    root.rename(root.with_name("held"))
+    for path in ("", "meeting"):
+        response = await client.get(PREFIX + "/shared/folder", params={"path": path})
+        assert response.status_code == 503, response.text
+
+
+@pytest.mark.parametrize("missing_shelf", (True, False))
+def test_managed_directory_probe_preserves_backing_failures(tmp_path, missing_shelf):
+    from types import SimpleNamespace
+
+    from deerflow.config.paths import Paths, paths_scope
+    from deerflow.features.paths import FeaturePaths
+    from deerflow.files.folders import read_folder
+    from deerflow.spaces.backings import BackingUnavailable
+    from deerflow.spaces.filesystem import ConfinedFilesystem
+
+    data = tmp_path / "data"
+    control = tmp_path / "control"
+    data.mkdir()
+    control.mkdir(mode=0o700)
+    (data / "shared" / "notes").mkdir(parents=True)
+    (data / "shared" / "notes" / "one.txt").touch()
+    volume = SimpleNamespace(filesystem=lambda: ConfinedFilesystem(data, control))
+    paths = FeaturePaths(Paths(tmp_path), "reader", {"hm.shared": volume})
+    with paths_scope(paths):
+        assert read_folder(None, "notes", 500).files[0].name == "one.txt"
+        if missing_shelf:
+            (data / "shared").rename(data / "held")
+        else:
+            control.chmod(0o755)
+        for path in ("", "notes"):
+            with pytest.raises(BackingUnavailable):
+                read_folder(None, path, 500)
