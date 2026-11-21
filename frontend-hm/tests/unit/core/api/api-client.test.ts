@@ -1049,3 +1049,68 @@ test("short-circuits reconnect to an interrupted (user-cancelled) run", async ()
   expect(fetchFn).toHaveBeenCalledTimes(1);
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
 });
+
+test.each(["metadata", "history"])(
+  "recovers a read of %s interrupted before response headers",
+  async (kind) => {
+    rs.stubGlobal("window", { location: { origin: "http://localhost:2026" } });
+    let attempts = 0;
+    const fetchFn = rs.fn(async () => {
+      if (++attempts === 1) throw new TypeError("Failed to fetch");
+      return Response.json(kind === "metadata" ? { thread_id: "case" } : []);
+    });
+    rs.stubGlobal("fetch", fetchFn);
+    const client = getAPIClient();
+    const value =
+      kind === "metadata"
+        ? await client.threads.get("case")
+        : await client.threads.getHistory("case", { limit: 1 });
+    expect(value).toEqual(kind === "metadata" ? { thread_id: "case" } : []);
+    expect(attempts).toBe(2);
+  },
+);
+
+test("a persistent thread read outage has a bounded retry", async () => {
+  const fetchFn = rs.fn(async () => {
+    throw new TypeError("Failed to fetch");
+  });
+  rs.stubGlobal("fetch", fetchFn);
+  await expect(getAPIClient().threads.get("case")).rejects.toMatchObject({
+    name: "ConnectionError",
+  });
+  expect(fetchFn).toHaveBeenCalledTimes(2);
+});
+
+test("a refused thread history response is not a transport retry", async () => {
+  // The SDK can label even an HTTP error a ConnectionError based on the server's text.
+  const fetchFn = rs.fn(async () =>
+    Response.json({ detail: "Failed to fetch" }, { status: 403 }),
+  );
+  rs.stubGlobal("fetch", fetchFn);
+  await expect(getAPIClient().threads.getHistory("case")).rejects.toThrow();
+  expect(fetchFn).toHaveBeenCalledTimes(1);
+});
+
+test("a caller aborting during the retry delay prevents another thread read", async () => {
+  const controller = new AbortController();
+  const fetchFn = rs.fn(async () => {
+    setTimeout(() => controller.abort(), 0);
+    throw new TypeError("Failed to fetch");
+  });
+  rs.stubGlobal("fetch", fetchFn);
+  await expect(
+    getAPIClient().threads.get("case", { signal: controller.signal }),
+  ).rejects.toThrow();
+  expect(fetchFn).toHaveBeenCalledTimes(1);
+});
+
+test("a transport failure during thread creation does not repeat the write", async () => {
+  const fetchFn = rs.fn(async () => {
+    throw new TypeError("Failed to fetch");
+  });
+  rs.stubGlobal("fetch", fetchFn);
+  await expect(
+    getAPIClient().threads.create({ threadId: "case" }),
+  ).rejects.toThrow();
+  expect(fetchFn).toHaveBeenCalledTimes(1);
+});
