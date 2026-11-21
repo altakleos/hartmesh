@@ -82,6 +82,8 @@ including conversations a colleague started. The composer shows the source
 conversation beside the attachment. Giving a file
 to an AI assistant or employee asks for confirmation. The copy stays in the
 agent's files, and anyone who can chat with the agent can ask about it.
+If a manager gives the agent a company connection, it can send the copy to that
+service without asking you first.
 Colleagues with Can chat alone see produced filenames; opening files requires
 Can see all work. Managers can
 update the brief and access, pause, retire or delete the AI assistant or AI employee.
