@@ -29,6 +29,9 @@ rs.mock("@/core/auth/AuthProvider", () => ({
     },
   }),
 }));
+rs.mock("@/core/agent-instances/home-transfer-access", () => ({
+  checkHomeTransferAccess: rs.fn(async () => true),
+}));
 rs.mock("@/core/features", () => ({
   useAgentInstances: () => state.feature,
   useStorage: () => null,
@@ -56,6 +59,7 @@ import {
   InstanceApiError,
   type AgentInstanceDetail,
 } from "@/core/agent-instances/api";
+import { HomeFileTransferProvider } from "@/core/agent-instances/home-transfers";
 import { fetch as fetcher } from "@/core/api/fetcher";
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 import { I18nProvider } from "@/core/i18n/context";
@@ -81,6 +85,7 @@ const instance: AgentInstanceDetail = {
   supervisor: { kind: "human", subject_id: "reader" },
   definition_revision: "d".repeat(64),
   home_id: home,
+  home_generation: 1,
   status: "active",
   permissions: 7,
   generation: 1,
@@ -100,11 +105,13 @@ function show(change: Partial<AgentInstanceDetail> = {}, initialFolder = "") {
     <QueryClientProvider client={client}>
       <I18nProvider initialLocale="en-US">
         <FileActionLifetimeProvider>
-          <FilesTab
-            instance={{ ...instance, ...current }}
-            initialFolder={initialFolder}
-            changed={state.changed}
-          />
+          <HomeFileTransferProvider>
+            <FilesTab
+              instance={{ ...instance, ...current }}
+              initialFolder={initialFolder}
+              changed={state.changed}
+            />
+          </HomeFileTransferProvider>
         </FileActionLifetimeProvider>
       </I18nProvider>
     </QueryClientProvider>
@@ -133,6 +140,8 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue({
       id: home,
+      generation: 1,
+      status: "active",
       permissions: 19,
       quota: { max_bytes: 999999999, max_inodes: 5000 },
     } as spaces.StorageSpace);

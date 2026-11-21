@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 
 import { awaitAbortable } from "@/core/api/abort";
 import { useSpaceActionSignal } from "@/core/spaces/lifetime";
@@ -20,7 +20,7 @@ import {
 export const MAX_AGENT_FILE_BYTES = 64 * 1024 * 1024;
 export interface AgentTransfer {
   id: string;
-  file: File;
+  file: Pick<File, "name" | "size">;
   folder: string;
   status: "uploading" | "failed" | "saved";
   percentage: number;
@@ -33,50 +33,62 @@ export interface AgentTransfer {
   checkController?: AbortController;
 }
 
-/** Both file tabs and conversation attachments own their exact write identity. */
-export function useAgentFileTransfers({
+export function isFinalTransfer(row: AgentTransfer) {
+  return (
+    row.status === "saved" ||
+    (row.status === "failed" &&
+      !row.retryable &&
+      (!row.check || row.check === "denied" || row.check === "unconfirmed"))
+  );
+}
+
+/** A single write and receipt owner. Only its mounting lifetime decides when to retire it. */
+export function createFileTransfers({
   instanceId,
   threadId,
-  folder,
-  scope = `${instanceId}:${threadId ?? "files"}`,
+  captureSignal,
   enabled,
   changed,
+  confirmAccess,
 }: {
   instanceId: string;
   threadId?: string;
-  folder: string;
-  scope?: string;
-  enabled: boolean;
+  captureSignal: () => AbortSignal;
+  enabled: () => boolean;
   changed: () => void;
+  confirmAccess?: () => Promise<boolean>;
 }) {
-  const captureSignal = useSpaceActionSignal(scope);
-  const requests = useRef(new Map<string, AgentTransfer>());
-  const [rows, setRows] = useState<AgentTransfer[]>([]);
-  const owner = useRef(scope);
-  const currentRows = owner.current === scope ? rows : [];
-  useEffect(() => {
-    if (owner.current === scope) return;
-    owner.current = scope;
-    for (const row of requests.current.values()) {
+  const requests = new Map<string, AgentTransfer>();
+  const payloads = new Map<string, File>();
+  const listeners = new Set<() => void>();
+  let rows: AgentTransfer[] = [];
+  function publish(row?: AgentTransfer) {
+    if (row) {
+      if (isFinalTransfer(row)) payloads.delete(row.id);
+      requests.set(row.id, row);
+    }
+    rows = [...requests.values()];
+    listeners.forEach((listener) => listener());
+  }
+  function clear() {
+    for (const row of requests.values()) {
       row.controller?.abort();
       row.checkController?.abort();
     }
-    requests.current.clear();
-    setRows([]);
-  }, [scope]);
-  function publish(row?: AgentTransfer) {
-    if (row) requests.current.set(row.id, row);
-    setRows([...requests.current.values()]);
+    payloads.clear();
+    requests.clear();
+    publish();
   }
   function remove(id: string) {
-    const row = requests.current.get(id);
-    requests.current.delete(id);
+    const row = requests.get(id);
+    requests.delete(id);
+    payloads.delete(id);
     row?.controller?.abort();
     row?.checkController?.abort();
     publish();
   }
   async function check(id: string, automatic: boolean) {
-    const row = requests.current.get(id);
+    const row = requests.get(id);
     if (!row?.lookup) return;
     row.checkController?.abort();
     const controller = new AbortController();
@@ -92,8 +104,26 @@ export function useAgentFileTransfers({
       row.lookup,
       signal,
       automatic,
-      (state, result) => {
-        const current = requests.current.get(id);
+      async (state, result) => {
+        if (
+          state === "complete" &&
+          result &&
+          confirmAccess &&
+          !(await confirmAccess())
+        ) {
+          if (
+            !signal.aborted &&
+            requests.get(id)?.checkController === controller
+          )
+            publish({
+              ...requests.get(id)!,
+              check: "unavailable",
+              retryable: false,
+              checkController: undefined,
+            });
+          return;
+        }
+        const current = requests.get(id);
         if (signal.aborted || current?.checkController !== controller) return;
         if (state === "complete" && result) {
           publish({
@@ -133,9 +163,11 @@ export function useAgentFileTransfers({
     );
   }
   async function send(id: string) {
-    const row = requests.current.get(id);
+    const row = requests.get(id);
+    const payload = payloads.get(id);
     if (
-      !enabled ||
+      !payload ||
+      !enabled() ||
       !row ||
       row.controller ||
       row.check ||
@@ -168,7 +200,7 @@ export function useAgentFileTransfers({
       const options = {
         signal,
         onProgress: (percentage: number) => {
-          const current = requests.current.get(id);
+          const current = requests.get(id);
           if (!signal.aborted && current?.controller === controller)
             publish({ ...current, percentage });
         },
@@ -178,21 +210,31 @@ export function useAgentFileTransfers({
           ? uploadConversationFile(
               instanceId,
               threadId,
-              row.file,
+              payload,
               lookup.id,
               options,
             )
           : putAgentFile(
               instanceId,
               `${row.folder ? `${row.folder}/` : ""}${row.file.name}`,
-              row.file,
+              payload,
               lookup.id,
               options,
             ),
         signal,
       );
-      if (signal.aborted || requests.current.get(id)?.controller !== controller)
+      if (confirmAccess && !(await confirmAccess())) {
+        if (!signal.aborted && requests.get(id)?.controller === controller)
+          publish({
+            ...requests.get(id)!,
+            status: "failed",
+            check: "unavailable",
+            retryable: false,
+            controller: undefined,
+          });
         return;
+      }
+      if (signal.aborted || requests.get(id)?.controller !== controller) return;
       publish({
         ...row,
         status: "saved",
@@ -202,9 +244,8 @@ export function useAgentFileTransfers({
       });
       changed();
     } catch (error) {
-      if (signal.aborted || requests.current.get(id)?.controller !== controller)
-        return;
-      const current = requests.current.get(id)!;
+      if (signal.aborted || requests.get(id)?.controller !== controller) return;
+      const current = requests.get(id)!;
       const outcome = fileOutcome(error);
       const unanswered = unansweredWrite(error) && !!current.lookup;
       publish({
@@ -229,9 +270,9 @@ export function useAgentFileTransfers({
         changed();
     }
   }
-  function add(files: readonly File[]) {
+  function add(files: readonly File[], folder: string) {
     const added: string[] = [];
-    if (!enabled) return added;
+    if (!enabled()) return added;
     for (const file of files) {
       const id = operationID();
       added.push(id);
@@ -254,26 +295,24 @@ export function useAgentFileTransfers({
           : undefined;
       const row: AgentTransfer = {
         id,
-        file,
+        file: { name: file.name, size: file.size },
         folder,
         status: "failed",
         percentage: 0,
         retryable: !error,
         ...(error ? { error } : {}),
       };
+      if (!error) payloads.set(id, file);
       publish(row);
       if (!error) void send(id);
     }
     return added;
   }
-  const observeInterrupted = useRef(check);
-  observeInterrupted.current = check;
-  useEffect(() => {
-    if (enabled) return;
-    for (const row of requests.current.values())
+  function interrupt() {
+    for (const row of requests.values())
       if (row.controller) {
         row.controller.abort();
-        requests.current.set(row.id, {
+        requests.set(row.id, {
           ...row,
           status: "failed",
           controller: undefined,
@@ -281,20 +320,77 @@ export function useAgentFileTransfers({
           check: row.lookup ? "checking" : undefined,
           retryable: !row.lookup,
         });
-        if (row.lookup) void observeInterrupted.current(row.id, true);
+        if (row.lookup) void check(row.id, true);
       }
-    setRows([...requests.current.values()]);
-  }, [enabled]);
+    publish();
+  }
   return {
-    rows: currentRows,
+    snapshot: () => rows,
+    subscribe(this: void, listener: () => void) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    clear,
+    interrupt,
     add,
     retry: (id: string) => {
-      const row = requests.current.get(id);
+      const row = requests.get(id);
       if (row?.check && !["unconfirmed", "denied"].includes(row.check))
         void check(id, false);
       else if (row?.retryable) void send(id);
     },
     remove,
-    hasUnfinished: currentRows.some((row) => row.status !== "saved"),
+  };
+}
+
+/** A conversation owns its attachments until its grant, thread or component retires. */
+export function useAgentFileTransfers({
+  instanceId,
+  threadId,
+  folder,
+  scope = `${instanceId}:${threadId ?? "files"}`,
+  enabled,
+  changed,
+}: {
+  instanceId: string;
+  threadId?: string;
+  folder: string;
+  scope?: string;
+  enabled: boolean;
+  changed: () => void;
+}) {
+  const captureSignal = useSpaceActionSignal(scope);
+  const config = useRef({ enabled, changed, scope });
+  config.current = { enabled, changed, scope };
+  const queue = useMemo(
+    () =>
+      createFileTransfers({
+        instanceId,
+        threadId,
+        captureSignal,
+        enabled: () => config.current.scope === scope && config.current.enabled,
+        changed: () => {
+          if (config.current.scope === scope) config.current.changed();
+        },
+      }),
+    [instanceId, threadId, captureSignal, scope],
+  );
+  const rows = useSyncExternalStore(
+    queue.subscribe,
+    queue.snapshot,
+    queue.snapshot,
+  );
+  useEffect(() => () => queue.clear(), [queue]);
+  useEffect(() => {
+    if (!enabled) queue.interrupt();
+  }, [queue, enabled]);
+  return {
+    rows,
+    add: (files: readonly File[]) => queue.add(files, folder),
+    retry: queue.retry,
+    remove: queue.remove,
+    hasUnfinished: rows.some((row) => row.status !== "saved"),
   };
 }
