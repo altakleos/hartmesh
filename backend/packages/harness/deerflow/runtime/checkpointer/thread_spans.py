@@ -21,14 +21,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+from deerflow.runtime.capture_resources import OwnedCheckpointSaver
 from deerflow.runtime.checkpointer.cached_saver import CachedHistorySaver
 
 try:  # optional extra: deerflow-harness[postgres]
     from langgraph.checkpoint.postgres import PostgresSaver
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 except ImportError:  # pragma: no cover - exercised only without the extra
     PostgresSaver = None
+    AsyncPostgresSaver = None
 
 ThreadSpanOrder = Literal["first", "latest"]
 
@@ -50,6 +55,25 @@ class ThreadSpan:
     thread_id: str
     first_checkpoint_id: str
     latest_checkpoint_id: str
+
+
+async def root_checkpoint_exists(checkpointer: Any, thread_id: str) -> bool | None:
+    """Check the authoritative root index without decoding any saved channels.
+
+    A custom saver may implement different storage or visibility rules. Leave
+    its reads on the normal graph path.
+    """
+    saver = checkpointer.source_saver if type(checkpointer) in (OwnedCheckpointSaver, CachedHistorySaver) else checkpointer
+    if type(saver) is InMemorySaver:
+        return bool(saver.storage.get(thread_id, {}).get(""))
+    if type(saver) is AsyncSqliteSaver:
+        async with saver.lock, saver.conn.execute("SELECT 1 FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' LIMIT 1", (thread_id,)) as cursor:
+            return await cursor.fetchone() is not None
+    if type(saver) is AsyncPostgresSaver:
+        async with saver._cursor() as cursor:
+            await cursor.execute("SELECT 1 FROM checkpoints WHERE thread_id = %s AND checkpoint_ns = '' LIMIT 1", (thread_id,))
+            return await cursor.fetchone() is not None
+    return None
 
 
 def list_thread_spans(checkpointer: Any, *, order_by: ThreadSpanOrder, limit: int | None = None) -> list[ThreadSpan]:

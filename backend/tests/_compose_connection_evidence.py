@@ -1,4 +1,51 @@
-"""Correlate the browser's final notice with its thread checkpoint and durable run journal."""
+"""Measure initial browser reads and correlate its final notice with the durable run."""
+
+from contextlib import contextmanager
+from time import monotonic
+
+
+@contextmanager
+def observe_initial_thread_reads(page, thread_url, evidence):
+    """Observe only the two canonical reads between navigation and the first edit."""
+    endpoints = {("GET", thread_url): "metadata", ("POST", thread_url + "/history"): "history"}
+    attempts = {"metadata": [], "history": []}
+    tracked = {}
+    start = monotonic()
+
+    def elapsed_ms():
+        return round((monotonic() - start) * 1000)
+
+    def issued(request):
+        kind = endpoints.get((request.method, request.url.partition("?")[0]))
+        if kind is not None:
+            row = {"state": "pending", "started_ms": elapsed_ms()}
+            attempts[kind].append(row)
+            tracked[request] = row
+
+    def headers(response):
+        if response.request in tracked:
+            tracked[response.request]["http_status"] = response.status
+
+    def ended(request, state):
+        if request in tracked:
+            row = tracked.pop(request)
+            row.update(state=state, elapsed_ms=elapsed_ms() - row["started_ms"])
+
+    listeners = {"request": issued, "response": headers, "requestfinished": lambda req: ended(req, "completed"), "requestfailed": lambda req: ended(req, "failed")}
+    for event, handler in listeners.items():
+        page.on(event, handler)
+    try:
+        yield
+    finally:
+        duration = elapsed_ms()
+        for row in tracked.values():
+            row["elapsed_ms"] = duration - row["started_ms"]
+        evidence["initial_reads"] = {
+            "observation_ms": duration,
+            **{kind: {"state": rows[-1]["state"] if rows else "not-issued", "attempts": rows} for kind, rows in attempts.items()},
+        }
+        for event, handler in listeners.items():
+            page.remove_listener(event, handler)
 
 
 def _answer_text(message):
