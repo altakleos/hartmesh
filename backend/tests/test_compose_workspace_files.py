@@ -74,7 +74,11 @@ def location(agent, *, folder="uploads", view="browser"):
 
 def http_sample(user, path, params, count):
     result = user.request("GET", path, params=params, timeout=12).json()
-    assert result["truncated"] and len(result["files"]) == count
+    if count is None:
+        assert result["truncated"] is False
+        assert {"path": LIBRARY, "kind": "directory"} in [{"path": row["path"], "kind": row["kind"]} for row in result["files"]]
+    else:
+        assert result["truncated"] and len(result["files"]) == count
 
 
 def memory(bundle):
@@ -103,9 +107,23 @@ def measure(bundle, user, page, agent, evidence, record):
         try:
             fresh.add_cookies(page.context.cookies([bundle.url]))
             cold_page = fresh.new_page()
+            traversed = []
+            cold_page.on("request", lambda request: traversed.append(urlsplit(request.url).path))
             observe(record["ui"], key, lambda: browse(cold_page, bundle.url, path, title))
             record["ui"][key]["first_document_seconds"] = record["ui"][key].pop("seconds")[0]
             del record["ui"][key]["maximum_seconds"], record["ui"][key]["sample_count"]
+            if key in ("personal", "shared"):
+                direct = f"/api/file-browser/v1/{key}/folder"
+                flat = "/api/files" if key == "personal" else "/api/shared"
+                assert direct in traversed and flat not in traversed
+                scope = region(cold_page, title)
+                with cold_page.expect_response(lambda response: response.url.split("?", 1)[0] == bundle.url + flat) as pending:
+                    scope.get_by_role("searchbox").fill("entry-")
+                assert pending.value.status == 200
+                expect(scope.get_by_role("link", name=re.compile(r"^entry-\d+\.txt$")).first).to_be_visible(timeout=30000)
+                expect(scope.get_by_text(re.compile(r"only the first 10,?000 entries", re.I))).to_be_visible()
+                assert traversed.count(flat) == 1
+                record["ui"][key]["search_flat_requests"] = traversed.count(flat)
         finally:
             fresh.close()
 
@@ -139,14 +157,15 @@ def measure(bundle, user, page, agent, evidence, record):
     finally:
         window["elapsed_seconds"] = round(time.monotonic() - start, 5)
 
-    paths = (
+    controls = (
         ("personal-list", "/api/files", None, 10000),
         ("shared-list", "/api/shared", None, 10000),
         ("agent-legacy-folder", f"/api/spaces/{agent['home_id']}/files", {"path": "uploads/" + LIBRARY, "limit": 500}, 500),
         ("agent-current-folder", f"/api/file-browser/v1/agents/{agent['id']}/folder", {"path": "uploads/" + LIBRARY, "limit": 500}, 500),
     )
-    for key, path, params, count in paths:
-        record["http"][key] = {"returned": count}
+    folders = tuple((area + "-direct-" + label, f"/api/file-browser/v1/{area}/folder", {"path": folder}, count) for area in ("personal", "shared") for label, folder, count in (("root", "", None), ("child", LIBRARY, 500)))
+    for key, path, params, count in (*controls, *folders):
+        record["http"][key] = {"expected_folder": LIBRARY} if count is None else {"returned": count}
         for _ in range(20):
             observe(record["http"], key, lambda: http_sample(user, path, params, count))
     record["memory_after_browse"] = memory(bundle)
@@ -166,7 +185,7 @@ def measure(bundle, user, page, agent, evidence, record):
             eventually(lambda: waiting.is_file() or run.done(), timeout=120, interval=0.25)
             assert waiting.is_file() and not run.done(), "normal chat did not reach its final model call"
             overlap = time.monotonic()
-            for key, path, params, count in paths:
+            for key, path, params, count in (folders[0], folders[2], controls[0], controls[3]):
                 held["concurrent"][key] = {}
                 observe(held["concurrent"], key, lambda: http_sample(user, path, params, count))
                 assert not run.done() and time.monotonic() - overlap < 60
@@ -285,8 +304,8 @@ def check_upload(bundle, user, page, agent, evidence, result):
         result["gateway_restart"] = {"previous_started_at": started, "new_started_at": live["State"]["StartedAt"]}
         await_execution_ready(user)
         accepting = True
-        chip = page.get_by_role("article").filter(has_text=UPLOAD)
-        saved = chip.get_by_text("Saved as " + actual["path"].rsplit("/", 1)[-1], exact=True)
+        saved_name = "Saved as " + actual["path"].rsplit("/", 1)[-1]
+        saved = page.get_by_role("status").filter(has_text=re.compile("^" + re.escape(saved_name) + "$"))
         if not saved.is_visible():
             check = page.get_by_role("button", name="Check again", exact=True)
             try:
@@ -330,7 +349,7 @@ def test_installed_workspace_files(compose, session, member):
             assert record["access"]["distinct_users"]
         with signed_in_browser(compose, session) as page:
             feature = page.request.get(compose.url + "/api/features").json()["file_browser"]
-            assert feature["storage_mode"] == "spaces" and "folder" in feature["operations"]["agent"] and "remove" in feature["operations"]["shared"]
+            assert feature["storage_mode"] == "spaces" and all("folder" in feature["operations"][area] for area in ("agent", "personal", "shared")) and "remove" in feature["operations"]["shared"]
             measure(compose, session, page, agent, evidence, record)
             record["phone"] = phone_geometry(page, compose.url, evidence)
             record["shared"] = shared_cycle(session)
@@ -343,6 +362,7 @@ def test_installed_workspace_files(compose, session, member):
         record["ui_target_met"] = {key: value["p95_seconds"] <= 1 for key, value in record["ui"].items()}
         record["http_target_seconds"] = 1
         record["http_target_met"] = {key: value["p95_seconds"] <= 1 for key, value in record["http"].items()}
+        assert all(record["ui_target_met"].values()), record["ui_target_met"]
         record["complete"] = True
     finally:
         (evidence / "workspace-files.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
