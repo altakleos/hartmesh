@@ -492,6 +492,9 @@ class SpaceFiles:
     async def read(self, *, actor: PrincipalRef, space_id: str, path: str, max_bytes: int) -> bytes:
         return await self._bounded_read(actor=actor, space_id=space_id, permission=Permission.READ, path=path, max_bytes=max_bytes)
 
+    async def read_regular(self, *, actor, space_id, path, max_bytes, controller_admission):
+        return await self._read(actor=actor, space_id=space_id, permission=Permission.READ, call=lambda fs: fs.read_named_regular(path, max_bytes)[0], controller_admission=controller_admission)
+
     async def export_file(self, *, actor: PrincipalRef, space_id: str, path: str, max_bytes: int = MAX_TRANSFER_BYTES, controller_admission=None) -> bytes:
         return await self._bounded_read(actor=actor, space_id=space_id, permission=Permission.READ | Permission.EXPORT, path=path, max_bytes=max_bytes, controller_admission=controller_admission)
 
@@ -506,8 +509,17 @@ class SpaceFiles:
                 if attempt or str(exc) != "File changed during its bounded read; retry":
                     raise
 
-    async def list_directory(self, *, actor: PrincipalRef, space_id: str, path: str = "", limit: int = 200):
-        return await self._read(actor=actor, space_id=space_id, permission=Permission.READ, call=lambda fs: fs.list_directory(path, limit=limit))
+    async def list_directory(self, *, actor: PrincipalRef, space_id: str, path: str = "", limit: int = 200, follow_symlinks=True, excluded_names=frozenset(), controller_admission=None):
+        return await self._read(
+            actor=actor,
+            space_id=space_id,
+            permission=Permission.READ,
+            controller_admission=controller_admission,
+            call=lambda fs: fs.list_directory(path, limit=limit, follow_symlinks=follow_symlinks, excluded_names=excluded_names),
+        )
+
+    async def entry_stat(self, *, actor: PrincipalRef, space_id: str, path: str, controller_admission):
+        return await self._read(actor=actor, space_id=space_id, permission=Permission.READ, controller_admission=controller_admission, call=lambda fs: fs.entry_stat(path))
 
     async def quota(self, *, actor: PrincipalRef, space_id: str):
         async with self.registry.admitted(actor=actor, requests={space_id: (Permission.READ, None)}) as (session, rows):

@@ -158,29 +158,49 @@ class ConfinedFilesystem:
         finally:
             os.close(descriptor)
 
-    def list_directory(self, path: str = "", *, limit: int = 200) -> tuple[list[FileEntry], bool]:
+    def entry_stat(self, path: str) -> os.stat_result:
+        descriptor = self._open(path, os.O_PATH, follow_symlinks=False)
+        try:
+            return os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def list_directory(self, path: str = "", *, limit: int = 200, follow_symlinks: bool = True, excluded_names: frozenset[str] = frozenset()) -> tuple[list[FileEntry], bool]:
         if type(limit) is not int or not 1 <= limit <= 500:
             raise ValueError("Directory limit must be between1 and500")
-        fd = self._open(path, os.O_RDONLY | os.O_DIRECTORY, allow_root=True)
+        fd = self._open(path, os.O_RDONLY | os.O_DIRECTORY, allow_root=True, follow_symlinks=follow_symlinks)
         entries: list[FileEntry] = []
         truncated = False
         try:
             with os.scandir(fd) as directory:
-                for child in directory:
-                    if len(entries) == limit:
+                for index, child in enumerate(directory):
+                    # Preserve the legacy cutoff before inspecting the next native name.
+                    # Browser filtering may scan farther, up to two maximum pages.
+                    if (follow_symlinks and len(entries) == limit) or (not follow_symlinks and index >= 1000):
                         truncated = True
                         break
+                    if child.name in excluded_names:
+                        continue
                     relative = f"{path}/{child.name}" if path else child.name
                     try:
                         _path(relative)
                         metadata = child.stat(follow_symlinks=False)
+                    except UnsafeSpacePath:
+                        if follow_symlinks:
+                            raise
+                        continue  # The browser may return only representable paths.
                     except FileNotFoundError:
                         continue  # Native rename removed this observation.
+                    if len(entries) == limit:
+                        truncated = True
+                        break
                     mode = metadata.st_mode
                     kind = "symlink" if stat.S_ISLNK(mode) else "directory" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else "unsupported"
                     accessible = kind != "unsupported"
                     target_kind = None
-                    if kind == "symlink":
+                    if kind == "symlink" and not follow_symlinks:
+                        accessible = False
+                    elif kind == "symlink":
                         target = None
                         try:
                             target = self._open(relative, os.O_PATH)

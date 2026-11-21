@@ -63,6 +63,10 @@ class StoreError(ValueError):
     """A path that cannot name a file in this area."""
 
 
+def supports_descriptor_reads() -> bool:
+    return bool(_DIR_FD and _O_NOFOLLOW)
+
+
 class SafeFileAccessUnavailable(StoreError):
     """The host cannot provide the descriptor semantics required for safe reads."""
 
@@ -291,7 +295,7 @@ def delete_under(root: Path, path: str) -> None:
 
 def open_directory_source(source: Path) -> int:
     """Open a lexical directory through no-follow ancestors; caller owns it."""
-    if not _DIR_FD or not _O_NOFOLLOW:
+    if not supports_descriptor_reads():
         raise SafeFileAccessUnavailable("Safe file access requires directory descriptors and no-follow opens")
     absolute = source.absolute()
     if ".." in absolute.parts:
@@ -315,7 +319,7 @@ def open_regular_source(source: Path | DescriptorSource) -> int:
     """
     if isinstance(source, DescriptorSource):
         return source.open()
-    if not _DIR_FD or not _O_NOFOLLOW:
+    if not supports_descriptor_reads():
         raise SafeFileAccessUnavailable("Safe file access requires directory descriptors and no-follow opens")
     absolute = source.absolute()
     if ".." in absolute.parts:

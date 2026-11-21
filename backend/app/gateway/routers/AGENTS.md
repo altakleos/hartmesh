@@ -1,5 +1,11 @@
 # Gateway routers
 
+The `file_browser` field in `GET /api/features` lists versioned reads by source.
+`/api/file-browser/v1` selects fresh file metadata under the collection’s current
+admission. Agent folder, text and content reads also require current instance inspection,
+a matching Home and descriptor-relative opens without links. Entry revisions are
+observations. Unknown operations stay unavailable on older workers.
+
 Bootstrap counts are global except `mine`. Own-file status closes SQL before
 kernel proof, uses assignable slots rather than seat vacancy, and projects failures
 as unavailable. Public health exposes state words only; unsupported identities
