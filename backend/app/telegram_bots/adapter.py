@@ -1695,9 +1695,14 @@ class TelegramBotChannel(TelegramChannel):
         self._callback_locale = (link.owner_user_id, link.binding_generation, settings.locale)
         renderer = render_plain if plain else render
         try:
-            return renderer(source["key"], settings.locale, **{"product": self._services.product_name, **source["values"]})
+            text = renderer(source["key"], settings.locale, **{"product": self._services.product_name, **source["values"]})
         except (KeyError, TypeError, ValueError):
             raise PermanentDeliveryError("invalid-product-source") from None
+
+        from app.telegram_bots.presentation import connection_disclosure
+
+        disclosure = await connection_disclosure(self._services, link, source["key"], settings.locale, renderer)
+        return text + "\n\n" + disclosure if disclosure else text
 
     async def _forbidden(self, context: SendContext) -> None:
         if context.purpose == "bound_message" and context.chat_id is not None:
@@ -2138,7 +2143,10 @@ class TelegramBotChannel(TelegramChannel):
                 raise PermanentDeliveryError("invalid-url-button")
             button = validate_url_button(button)
             button_label = url_button_label(part["source_ref"], button)
+        from app.telegram_bots.presentation import CONNECTION_DISCLOSURE_KEYS
+
         notice_manager = None
+        rendered_disclosure = None
         if model_part is not None and model_part.network_denial_host is not None:
             from app.telegram_bots.publication import fixed_source
 
@@ -2154,6 +2162,8 @@ class TelegramBotChannel(TelegramChannel):
             text = work_part[1] if part.get("plain_fallback", False) else work_part[0]
         elif model_part is None:
             text = await self._render_source(saved.link, part["source_ref"], plain=part.get("plain_fallback", False))
+            if saved.link.agent_kind == "instance" and source_key in CONNECTION_DISCLOSURE_KEYS:
+                rendered_disclosure = text
         else:
             text = model_part.plain_text if part.get("plain_fallback", False) else model_part.html
         settings = await self._services.settings.get(saved.link.owner_user_id)
@@ -2310,6 +2320,9 @@ class TelegramBotChannel(TelegramChannel):
                     await presentation_fence.check()
                 latest_part = await self._services.outbox.capture_sending_part(**capture)
                 if latest_part.part != part or latest_part.item != current.item or any(getattr(latest_part.link, name) != getattr(current.link, name) for name in basis):
+                    raise DeliveryClaimRetired()
+                # The rate limiter can outlive a connection grant. Retire stale wording before SDK dispatch.
+                if rendered_disclosure is not None and await self._render_source(latest_part.link, latest_part.part["source_ref"], plain=part.get("plain_fallback", False)) != rendered_disclosure:
                     raise DeliveryClaimRetired()
                 verdict = await self._services.eligibility(latest_part.link, latest_part.item, latest_part.part)
                 if not isinstance(verdict, DeliveryEligibility) or verdict.decision != "allow" or verdict.protect_content and not part.get("protect_content") or not self._callback_current(current.link):

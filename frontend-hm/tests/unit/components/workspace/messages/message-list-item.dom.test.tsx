@@ -20,6 +20,24 @@ rs.mock("@/components/workspace/messages/markdown-content", () => ({
 // message content for the body (markdown, reasoning, tasks), so content
 // getters cannot distinguish rendering reads from copy derivation — the spy
 // on the derived entry point can.
+rs.mock("@/components/workspace/person-name", () => ({
+  usePersonName: (id: string) => {
+    authority.name(id);
+    return null;
+  },
+}));
+
+const authority = rs.hoisted(() => ({
+  run: undefined as unknown,
+  read: rs.fn(),
+  name: rs.fn(),
+}));
+rs.mock("@/core/threads/hooks", () => ({
+  useRunDetail: (thread: string, run: string) => {
+    authority.read(thread, run);
+    return { data: authority.run, isError: false };
+  },
+}));
 const copyDataCalls = rs.spyOn(messageUtils, "getMessageCopyData");
 
 function makeMessage(type: "human" | "ai"): Message {
@@ -115,4 +133,92 @@ describe("MessageListItem copy-data derivation guard", () => {
 
     expect(copyDataCalls.mock.calls.length).toBeGreaterThan(0);
   });
+});
+
+it("attributes only an employee human row bound to the same current run receipt", () => {
+  const run = "f11d919a-1436-4662-bdf7-a880142c49a1";
+  const marker = { package: "daily-notes", user_id: "member-1", run_id: run };
+  const message = {
+    ...makeMessage("human"),
+    additional_kwargs: { deerflow_package_origin: marker },
+  } as Message;
+  const row = (employee: boolean, msg: Message) =>
+    withI18n(
+      <MessageListItem
+        employeeConversation={employee}
+        threadId="thread-1"
+        message={msg}
+      />,
+    );
+  const meta = {
+    deerflow_origin: { kind: "extension", namespace: "daily-notes" },
+    requester_id: "member-1",
+    deerflow_package_turn: { run_id: run, message_ids: [message.id] },
+  };
+  const record = { thread_id: "thread-1", run_id: run, metadata: meta };
+  authority.run = undefined;
+  authority.name.mockClear();
+  authority.read.mockClear();
+  const view = render(row(true, message));
+  expect(view.queryByText(/Started by/)).toBeNull();
+  expect(authority.name).not.toHaveBeenCalled();
+  for (const rejected of [
+    { ...record, thread_id: "another-thread" },
+    { ...record, run_id: "another-run" },
+    { ...record, metadata: { ...meta, requester_id: "other" } },
+    {
+      ...record,
+      metadata: {
+        ...meta,
+        deerflow_origin: { kind: "human", namespace: "daily-notes" },
+      },
+    },
+    {
+      ...record,
+      metadata: {
+        ...meta,
+        deerflow_origin: { kind: "extension", namespace: "other" },
+      },
+    },
+    {
+      ...record,
+      metadata: {
+        ...meta,
+        deerflow_package_turn: { run_id: run, message_ids: ["other"] },
+      },
+    },
+    {
+      ...record,
+      metadata: {
+        ...meta,
+        deerflow_package_turn: { run_id: "other", message_ids: [message.id] },
+      },
+    },
+    { ...record, metadata: { ...meta, deerflow_package_turn: null } },
+  ]) {
+    authority.run = rejected;
+    view.rerender(row(true, message));
+    expect(view.queryByText(/Started by/)).toBeNull();
+  }
+  authority.run = record;
+  view.rerender(row(true, message));
+  expect(view.getByText("Started by daily-notes for member-1")).toBeDefined();
+  expect(authority.read).toHaveBeenCalledWith("thread-1", run);
+  const otherRunMessage = { ...message, run_id: "another-run" };
+  view.rerender(row(true, otherRunMessage));
+  expect(view.queryByText(/Started by/)).toBeNull();
+  view.rerender(row(false, message));
+  expect(view.queryByText(/Started by/)).toBeNull();
+  view.rerender(row(true, { ...message, type: "ai" } as Message));
+  expect(view.queryByText(/Started by/)).toBeNull();
+  authority.read.mockClear();
+  view.rerender(
+    row(true, {
+      ...message,
+      additional_kwargs: {
+        deerflow_package_origin: { ...marker, run_id: "old" },
+      },
+    } as Message),
+  );
+  expect(authority.read).not.toHaveBeenCalled();
 });

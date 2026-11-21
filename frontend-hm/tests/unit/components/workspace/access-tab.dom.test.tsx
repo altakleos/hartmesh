@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -9,7 +10,11 @@ import {
   within,
 } from "@testing-library/react";
 
-const state = rs.hoisted(() => ({ held: false, refresh: rs.fn() }));
+const state = rs.hoisted(() => ({
+  held: false,
+  connections: false,
+  refresh: rs.fn(),
+}));
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({
     user: {
@@ -21,6 +26,7 @@ rs.mock("@/core/auth/AuthProvider", () => ({
 }));
 rs.mock("@/core/features", () => ({
   useAgentInstances: () => ({
+    connections: state.connections,
     known: true,
     enabled: true,
     execution: state.held ? "unavailable" : "ready",
@@ -124,6 +130,7 @@ function show(permissions = 7) {
   );
 }
 beforeEach(() => {
+  state.connections = false;
   state.held = false;
   state.refresh.mockReset();
   rs.mocked(api.getInstanceGrants)
@@ -271,4 +278,135 @@ test("supervisor choices are confined to existing managers and never grant acces
   expect(within(options).queryByRole("option", { name: "Alex" })).toBeNull();
   expect(within(options).getByRole("option", { name: "You" })).toBeDefined();
   expect(api.changeInstanceLifecycle).not.toHaveBeenCalled();
+});
+
+test("a manager without Inspect can give and immediately remove a connection without seeing member identities", async () => {
+  state.connections = true;
+  const item = {
+    id: "notes/active",
+    name: "Notes",
+    description: "Read notes",
+    host: "notes.example.test",
+    reason: null,
+    given: false,
+    given_by: null,
+    given_at: null,
+    can_give: true,
+  };
+  const other = {
+    ...item,
+    id: "local",
+    host: "",
+    name: "Local",
+    reason: "not-remote",
+    can_give: false,
+  };
+  let given = false;
+  let attempts = 0;
+  rs.mocked(api.request).mockImplementation(async (url, options) => {
+    if (!options?.method)
+      return { chat_member_count: 4, connections: [{ ...item, given }, other] };
+    expect(url.endsWith("/notes%2Factive")).toBe(true);
+    expect(options.body).toBeUndefined();
+    given = options.method === "PUT";
+    attempts++;
+  });
+  show(4);
+  expect(
+    await screen.findByRole("heading", { name: "Connections" }),
+  ).toBeDefined();
+  const control = await screen.findByRole("switch", { name: "Notes" });
+  expect(rs.mocked(api.getInstanceGrants)).not.toHaveBeenCalled();
+  expect(
+    screen.getByRole("switch", { name: "Local" }).hasAttribute("disabled"),
+  ).toBe(true);
+  expect(screen.getByText("notes.example.test")).toBeDefined();
+  fireEvent.click(control);
+  const dialog = screen.getByRole("dialog");
+  expect(dialog.textContent).toContain("4 people can chat");
+  expect(dialog.textContent).toContain("Shared");
+  expect(dialog.textContent).toContain("approved package");
+  expect(attempts).toBe(0);
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Give connection" }),
+  );
+  await waitFor(() =>
+    expect(control.getAttribute("aria-checked")).toBe("true"),
+  );
+  fireEvent.click(control);
+  await waitFor(() =>
+    expect(control.getAttribute("aria-checked")).toBe("false"),
+  );
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(attempts).toBe(2);
+});
+test("a live change to the roster or audience retires the give confirmation", async () => {
+  state.connections = true;
+  const row = {
+    id: "a",
+    name: "Notes",
+    host: "notes.example.test",
+    given: false,
+    reason: null,
+    can_give: true,
+  };
+  const current = { connections: [row], chat_member_count: 1 };
+  rs.mocked(api.request).mockReset().mockResolvedValue(current);
+  show(4);
+  fireEvent.click(await screen.findByRole("switch", { name: "Notes" }));
+  const dialog = screen.getByRole("dialog");
+  act(() => {
+    clients[0]?.setQueriesData({ queryKey: ["agent-instances"] }, () => ({
+      ...current,
+      chat_member_count: 2,
+    }));
+  });
+  await waitFor(() =>
+    expect(
+      within(dialog)
+        .getByRole("button", { name: "Give connection" })
+        .hasAttribute("disabled"),
+    ).toBe(true),
+  );
+  expect(within(dialog).getByRole("alert").textContent).toContain(
+    "membership changed",
+  );
+  expect(
+    rs.mocked(api.request).mock.calls.filter(([, options]) => options?.method),
+  ).toHaveLength(0);
+});
+test("a failed grant refetches its state and never automatically repeats the write", async () => {
+  state.connections = true;
+  let reads = 0,
+    writes = 0;
+  rs.mocked(api.request).mockImplementation(async (_url, options) => {
+    if (options?.method) {
+      writes++;
+      throw Error("temporary");
+    }
+    reads++;
+    return {
+      connections: [
+        {
+          id: "a",
+          name: "Notes",
+          host: "notes.example.test",
+          given: false,
+          reason: null,
+          can_give: true,
+        },
+      ],
+      chat_member_count: 1,
+    };
+  });
+  show(4);
+  fireEvent.click(await screen.findByRole("switch", { name: "Notes" }));
+  fireEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", {
+      name: "Give connection",
+    }),
+  );
+  await screen.findByText(/Could not confirm the change/);
+  expect(writes).toBe(1);
+  expect(reads).toBeGreaterThanOrEqual(2);
 });

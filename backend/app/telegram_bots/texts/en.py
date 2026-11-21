@@ -298,13 +298,13 @@ TEXTS: dict[str, str] = {
     "agent.deleted": "{name} was deleted.\n{name}'s files were deleted too, and {name} cannot be brought back. This chat will no longer answer. To remove this conversation from Telegram, delete the chat.",
     "hello.assistant": (
         "Connected as {email}. This chat is {name}, your AI assistant ({role}). No other Telegram account can"
-        " write here.\n\n{name} starts nothing alone. Write to {name} as to a colleague: ask a question, or say"
+        " write here.\n\nWrite to {name} as to a colleague: ask a question, or say"
         " what needs doing. /work shows what is going on. A file you send here is passed on to {name}.\n\n{name} is an AI and can be wrong. C"
         "heck anything you will act on."
     ),
     "hello.employee": (
         "Connected as {email}. This chat is {name}, an AI employee ({role}). No other Telegram account can wr"
-        "ite here.\n\n{name} starts nothing alone. Write to {name} as to a colleague: ask a question, or say wh"
+        "ite here.\n\nWrite to {name} as to a colleague: ask a question, or say wh"
         "at needs doing. /work shows what is going on. A file you send here is passed on to {name}.\n\n{name} is an AI and can be wrong. Chec"
         "k anything you will act on."
     ),
@@ -320,8 +320,12 @@ TEXTS: dict[str, str] = {
         "- /stop stops what is in progress\n"
         "- /settings sets when this chat may message you, and the language\n"
         "\n"
-        "{name} starts nothing alone, and writes here first when a question, a result or a problem needs you."
+        "{name} writes here first when a question, a result or a problem needs you."
     ),
+    "hello.connections": "{name} can use: {names}. Send /privacy for what that means.",
+    "privacy.connections": "{name} can use: {names}. What you write or send here can be sent there. This chat shows {name}'s answers. To see the connection activity as well, open the conversation on the web.",
+    "privacy.connections_more": "{count} more",
+    "privacy.connections_unavailable": "Connection details are temporarily unavailable. Check the agent’s page before sharing information.",
     "privacy.company": ("People who can see all of {name}'s work can read this conversation in {product}. Files you send are kept in {name}'s files, which everyone who can see all of {name}'s work can open."),
     "privacy.protected": "{name}'s managers have switched off forwarding and saving in this chat. Messages {name} sends first show their details after a tap on Show.",
     "profile.short.agent": "AI assistant. Private: answers only the person who connected this bot.",
@@ -600,7 +604,7 @@ FORMS.update(
         "hello.assistant": {
             "colleague": (
                 "Connected as {email}. This chat is {name}, {owner}'s AI assistant ({role}). No other Telegram accoun"
-                "t can write here.\n\n{name} starts nothing alone. Write to {name} as to a colleague: ask a question, o"
+                "t can write here.\n\nWrite to {name} as to a colleague: ask a question, o"
                 "r say what needs doing. A file you send here is passed on to {name}.\n\n{name} is an AI and can be wro"
                 "ng. Check anything you will act on."
             )

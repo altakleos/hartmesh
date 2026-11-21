@@ -30,6 +30,7 @@ import { useSpaceActionSignal } from "@/core/spaces/lifetime";
 
 import { AgentAvatar } from "./agent-avatar";
 import { ExecutionNotice } from "./execution-notice";
+import { ConnectionDisclosure } from "./instance-connections";
 
 export function AgentAvailabilityNotice({
   instance,
@@ -187,6 +188,9 @@ function HeaderContent({
           </p>
         </div>
       </div>
+      {feature.connections && status === "active" && (
+        <ConnectionDisclosure instance={instance} />
+      )}
       <TelegramInstanceState instance={instance} />
       {status !== "deleted" && status !== "provisioning" && (
         <div className="space-y-2">

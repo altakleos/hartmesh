@@ -4131,14 +4131,25 @@ export function usePinThread() {
   });
 }
 
-export function useRunDetail(threadId: string, runId: string) {
-  const apiClient = getAPIClient();
+export function useRunDetail(
+  threadId: string,
+  runId: string,
+  { immutableMetadataOnly = false }: { immutableMetadataOnly?: boolean } = {},
+) {
+  const client = useQueryClient();
   return useQuery<Run>({
     queryKey: ["thread", threadId, "run", runId],
-    queryFn: async () => {
-      const response = await apiClient.runs.get(threadId, runId);
-      return response;
-    },
+    initialData: () =>
+      client
+        .getQueryData<Run[]>(["thread", threadId])
+        ?.find((run) => run.thread_id === threadId && run.run_id === runId),
+    initialDataUpdatedAt: () =>
+      client.getQueryState(["thread", threadId])?.dataUpdatedAt,
+    queryFn: ({ signal }) =>
+      getAPIClient().runs.get(threadId, runId, { signal }),
+    // The origin receipt is immutable. A remount can recover a failed lookup.
+    staleTime: immutableMetadataOnly ? Infinity : undefined,
+    retry: immutableMetadataOnly ? false : undefined,
     refetchOnWindowFocus: false,
   });
 }

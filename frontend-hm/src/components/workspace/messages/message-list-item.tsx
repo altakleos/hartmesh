@@ -75,6 +75,7 @@ import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
+import { PackageOriginLabel } from "./package-origin-label";
 
 function FeedbackButtons({
   threadId,
@@ -148,6 +149,7 @@ export function MessageListItem({
   message,
   isLoading,
   feedback,
+  employeeConversation = false,
   runId,
   threadId,
   artifactPaths = [],
@@ -164,6 +166,7 @@ export function MessageListItem({
   threadId: string;
   artifactPaths?: readonly string[];
   feedback?: FeedbackData | null;
+  employeeConversation?: boolean;
   runId?: string;
   showCopyButton?: boolean;
   showWorkspaceChanges?: boolean;
@@ -232,6 +235,9 @@ export function MessageListItem({
       className={cn("group/conversation-message relative w-full", className)}
       from={isHuman ? "user" : "assistant"}
     >
+      {employeeConversation && isHuman && (
+        <PackageOriginLabel threadId={threadId} message={message} />
+      )}
       <MessageContent
         className={isHuman ? "w-fit" : "w-full"}
         message={message}

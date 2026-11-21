@@ -4,5 +4,6 @@ export interface MCPServerConfig extends Record<string, unknown> {
 }
 
 export interface MCPConfig {
+  given_agent_counts?: Record<string, number>;
   mcp_servers: Record<string, MCPServerConfig>;
 }

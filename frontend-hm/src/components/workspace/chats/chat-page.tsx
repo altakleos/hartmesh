@@ -539,6 +539,7 @@ export default function ChatPage() {
                   {binding ? (
                     <ConversationAgentHeader
                       binding={binding}
+                      showConnections={!isMock && feature.connections === true}
                       detail={instance}
                       alsoWorking={
                         !!instance &&
@@ -635,6 +636,9 @@ export default function ChatPage() {
                       activeRunId={activeRunId}
                       activeRunStartedAt={activeRunStartedAt}
                       agentTarget={agentTarget}
+                      showPackageOrigins={
+                        !isMock && agentTarget?.kind === "agent"
+                      }
                       archiveDownloadsEnabled={
                         legacyCapabilities &&
                         (isNewThread || isMock || threadMetadata.data != null)

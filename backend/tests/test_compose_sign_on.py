@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 import yaml
+from _config_singleton_guard import restore_config_singletons  # noqa: F401 -- autouse fixture
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROFILE = REPO_ROOT / "deploy" / "compose"

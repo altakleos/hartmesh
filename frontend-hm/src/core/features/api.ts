@@ -67,6 +67,7 @@ export interface FeaturesResponse {
   };
   accounts?: { seats?: { allowed?: unknown; in_use?: unknown } };
   agent_instances?: {
+    connections?: unknown;
     enabled?: unknown;
     execution?: unknown;
     reason?: unknown;
@@ -229,6 +230,7 @@ export const EXECUTION_REASONS = [
 ] as const;
 export type ExecutionReason = (typeof EXECUTION_REASONS)[number];
 export interface AgentInstancesFeature {
+  connections?: boolean;
   known: boolean;
   enabled: boolean;
   execution: "ready" | "unavailable";
@@ -264,6 +266,9 @@ export function selectAgentInstances(
   return {
     known: true,
     enabled: agents.enabled,
+    ...(agents.enabled && agents.connections === true
+      ? { connections: true }
+      : {}),
     execution: agents.execution,
     reason: EXECUTION_REASONS.includes(agents.reason as ExecutionReason)
       ? (agents.reason as ExecutionReason)

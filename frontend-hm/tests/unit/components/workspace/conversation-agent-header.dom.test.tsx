@@ -1,6 +1,8 @@
 import { afterEach, expect, test, rs } from "@rstest/core";
-import { cleanup, render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
+rs.mock("@/core/agent-instances/api", { spy: true });
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({ user: { id: "reader" } }),
 }));
@@ -10,7 +12,7 @@ rs.mock("@/components/workspace/person-name", () => ({
 }));
 
 import { ConversationAgentHeader } from "@/components/workspace/chats/conversation-agent-header";
-import type { AgentInstanceDetail } from "@/core/agent-instances/api";
+import { request, type AgentInstanceDetail } from "@/core/agent-instances/api";
 import { I18nProvider } from "@/core/i18n/context";
 const binding = {
   id: "a".repeat(32),
@@ -22,25 +24,30 @@ const binding = {
 function show(
   detail: Partial<AgentInstanceDetail> | null,
   kind: "personal" | "company" = "personal",
+  showConnections = false,
 ) {
+  const client = new QueryClient();
   return render(
-    <I18nProvider initialLocale="en-US">
-      <ConversationAgentHeader
-        binding={{ ...binding, custody: kind }}
-        detail={
-          detail
-            ? ({
-                ...binding,
-                owner_id: "reader",
-                supervisor: { kind: "human", subject_id: "supervisor" },
-                ...detail,
-              } as AgentInstanceDetail)
-            : null
-        }
-        title={<span>My conversation</span>}
-        alsoWorking
-      />
-    </I18nProvider>,
+    <QueryClientProvider client={client}>
+      <I18nProvider initialLocale="en-US">
+        <ConversationAgentHeader
+          binding={{ ...binding, custody: kind }}
+          detail={
+            detail
+              ? ({
+                  ...binding,
+                  owner_id: "reader",
+                  supervisor: { kind: "human", subject_id: "supervisor" },
+                  ...detail,
+                } as AgentInstanceDetail)
+              : null
+          }
+          title={<span>My conversation</span>}
+          alsoWorking
+          showConnections={showConnections}
+        />
+      </I18nProvider>
+    </QueryClientProvider>,
   );
 }
 afterEach(cleanup);
@@ -68,4 +75,30 @@ test("failed or loading detail falls back only to the kind carried by the thread
   show(null, "company");
   expect(screen.getByText("AI employee")).toBeDefined();
   expect(screen.queryByText(/supervised by/)).toBeNull();
+});
+
+test("a chat-only member sees usable names and sharing details from the current view", async () => {
+  rs.mocked(request)
+    .mockReset()
+    .mockResolvedValue({
+      connections: [{ name: "Weekly notes", host: "notes.example.test" }],
+    });
+  show({ permissions: 1, generation: 1 }, "company", true);
+  const control = await screen.findByRole("button", {
+    name: /Researcher can use: Weekly notes/,
+  });
+  fireEvent.click(control);
+  expect(screen.getByRole("dialog").textContent).toContain(
+    "anything in Researcher",
+  );
+  expect(screen.queryByText("notes.example.test")).toBeNull();
+  expect(screen.queryByRole("switch")).toBeNull();
+});
+test("an unavailable feature or dormant agent does not read connection details", () => {
+  rs.mocked(request).mockReset();
+  const off = show({ permissions: 1, generation: 1 }, "company", false);
+  off.unmount();
+  show({ permissions: 1, generation: 1, status: "archived" }, "company", true);
+  expect(rs.mocked(request)).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: /can use:/ })).toBeNull();
 });

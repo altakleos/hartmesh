@@ -381,6 +381,65 @@ export function createEnUS(product: string): Translations {
         `${name} could not reach ${host}, which is not on the list of sites allowed here. To allow ${host} for a short time, ask ${name} to reach ${host} in a conversation of your own and allow the site when asked. Then ask ${name} to try again, or, for an assignment that has ended, press Resume. The permanent list is set by ${provider}.`,
     },
     agentInstances: {
+      connections: {
+        peopleNeedInspect: (name) =>
+          `Managing who can work with ${name} also requires “Can see all work”. Ask another manager to give you that access.`,
+        heading: "Connections",
+        intro: (name) =>
+          `Give ${name} one of your company’s MCP connections to use in conversations, assignments and work the product continues automatically. Each action can run without asking anyone first.`,
+        adminControl:
+          "An administrator controls where each connection points and which account it uses. The administrator can change both at any time.",
+        exposure: (name) =>
+          `Anything ${name} can read can be sent through these connections. Even with limited chat access, ${name} can act on what it reads, including information a connection brings back from outside your company. Give only the connections the job needs.`,
+        empty:
+          "Your company has no MCP connections yet. An administrator can add one in Settings under Tools.",
+        loadFailed: "Could not load the current connections.",
+        writeFailed:
+          "Could not confirm the change. Check the current connection before trying again.",
+        giveTitle: (name, connection) => `Give ${connection} to ${name}?`,
+        giveScope: (name) =>
+          `${name} can use this connection without asking anyone first in conversations, assignments and work started by an approved package.`,
+        giveData: (name) =>
+          `Anything ${name} can read can be sent to the service, including its conversations, attachments, files and your company’s Shared folder. It can act on someone’s request or on what it reads, including information returned by people outside your company. You choose who can chat and which connections it has. The outside service controls what it returns.`,
+        giveAccount:
+          "The service sees the account configured for the connection, whoever asked. An administrator can change the service or account at any time.",
+        brief: (name) =>
+          `Use the brief to guide ${name}. The brief cannot enforce which actions the connection takes.`,
+        members: (count, name) =>
+          `${count} ${count === 1 ? "person can" : "people can"} chat with ${name} and ask it to use this connection.`,
+        give: "Give connection",
+        changed:
+          "The connection or chat membership changed. Close this dialog and review the current details.",
+        givenBy: (person, date) => `Given by ${person}, ${date}`,
+        givenOn: (date) => `Given on ${date}`,
+        unsupported: "This connection cannot be given.",
+        active: (name, names) =>
+          `${name} can use: ${names}. What you write or attach here can be sent there.`,
+        disclosure: (name) =>
+          `${name} uses these connections without asking anyone first. What you write or attach, and anything in ${name}’s files, may be sent because someone asks or because of something ${name} reads. A person who manages ${name} decides which connections it has.`,
+        chatUse: (name) =>
+          `Anyone who can chat with ${name} can ask it to use its connections.`,
+        chatOnly: (person, name) =>
+          `${person} can ask ${name} to use its connections, including to send information from its files.`,
+        manage: (name) =>
+          `Change the brief, access, connections and files. Pause, retire or delete ${name}.`,
+        packageOrigin: (source, person) => `Started by ${source} for ${person}`,
+        reasons: {
+          "switched-off": "Switched off by an administrator.",
+          "not-remote":
+            "Cannot be given because it starts a program on the server.",
+          "per-person-credentials":
+            "Cannot be given because it uses each person’s own credentials.",
+          "per-request-credentials":
+            "Cannot be given because it takes credentials from each request.",
+          "agent-credential":
+            "Cannot be given because your provider reserved it for one agent.",
+          "long-running":
+            "Cannot be given because it runs long tasks in the background.",
+          ambiguous:
+            "This connection shares an identity with another. An administrator needs to remove one and add it again.",
+        },
+      },
       welcome: {
         title: (name) => `${name} is ready`,
         body: (name) =>
@@ -1238,7 +1297,7 @@ export function createEnUS(product: string): Translations {
         from: (title) => `From ${title}`,
         giveTitle: (name) => `Give this file to ${name}?`,
         disclosure: (file, name) =>
-          `${file} will be copied into ${name}’s files. ${name} can use it in any conversation. Anyone who can chat with ${name} can ask for it, and anyone who can see all of ${name}’s work can open it. Managers can see that you gave the file. The record does not identify your source conversation. Your own copy stays where it is.`,
+          `${file} will be copied into ${name}’s files. ${name} can use it in any conversation. Anyone who can chat with ${name} can ask for it, and anyone who can see all of ${name}’s work can open it. If a manager gives ${name} a company connection, it can send this file to that service without asking you first. Managers can see that you gave the file. The record does not identify your source conversation. Your own copy stays where it is.`,
         needsInspect: (name) =>
           `This conversation or its files are unavailable. Opening ${name}’s files requires “Can see all work”.`,
         changed: (time) => `Changed ${time}`,
@@ -2272,6 +2331,11 @@ export function createEnUS(product: string): Translations {
       },
       tools: {
         connection: {
+          givenCount: (n) => `Given to ${n} AI ${n === 1 ? "agent" : "agents"}`,
+          changedFor: (n) =>
+            `Your change applies to ${n} AI ${n === 1 ? "agent" : "agents"} from the next action.`,
+          removeGiven: (name, n) =>
+            `Remove “${name}”? Its tools will stop being available in chats, and ${n} AI ${n === 1 ? "agent" : "agents"} will lose this connection. If you add a connection with the same name later, their managers must give it again.`,
           discardJson: "Discard form changes and open JSON",
           changed:
             "This connection changed while you were editing. Open it again to see its current settings.",
