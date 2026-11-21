@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.68] - 2026-11-21
+
+### Fixed
+
+- Shared now reconciles an interrupted publication or removal at Gateway startup and on subsequent maintenance passes when the stored evidence identifies the outcome. While an interrupted removal is waiting, people can still list Shared and open its other files. A live writer continues to hold the Shared lock.
+- The Shared list checks that a file still holds its recorded contents before displaying its publisher. Removing a recorded publication also checks the staged file. If its contents changed, refresh the list before deciding what to do with the replacement.
+- Interrupted Keep and Projects operations whose private receipt was never created now release the affected Space on the next eligible pass. When an interrupted publish has a proven file identity, recovery records the same source and publisher as the original request.
+- After a Gateway restart with Redis sandbox ownership, a background scan now waits until it can register a surviving chat sandbox before claiming it. This lets employee workspaces become ready once the previous owner’s lease and recovery grace have elapsed.
+
+### Operations
+
+- Use `ai pending` to find the Space and operation IDs. `ai status` reporting `file_operations_pending: 0` describes the instant of that check. For an uncertain Shared operation, run `ai settle --space ID --operation ID`. Its output identifies the selected Shared folder and whether visible candidates have matching publication records.
+- A publication interrupted after its public name appeared but before the writer recorded the file’s identity can require operator intervention. Inspect the evidence before using `--discard`, which records failure and leaves the file in place. After discarding that operation, an administrator can remove the unrecorded file it left. Damaged receipts also require inspection.
+- Rolling back to `2.2.0+hartmesh.67` preserves completed outcomes. After rollback, restarting a Redis-backed Gateway with a surviving chat sandbox can again leave employee workspaces unavailable. A new interruption on the older release can block further writes and a waiting removal can block reads. On older releases, inspect the actual Shared folder independently because `ai settle` can list the wrong directory. On these versions, Shared can attribute a replacement at the same path to the earlier publisher and allow that person to remove it. Verify its contents against the recorded digest before removal. Rolling back as far as `2.2.0+hartmesh.60` also loses the later Home recovery improvements.
+- In the Docker qualification, all nine volumes kept their device numbers across Gateway restarts. All nine also kept their device numbers after unmounting and remounting. Filesystem UUIDs and the checked directory inodes stayed the same. Host reboot behavior remains unmeasured.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.67. The existing receipt format, operation phases and resolutions remain compatible.
+
 ## [2.2.0+hartmesh.67] - 2026-11-21
 
 ### Added
