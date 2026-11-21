@@ -3,9 +3,15 @@ import { useRouter } from "next/navigation";
 import { useCallback } from "react";
 import { toast } from "sonner";
 
+import { useAuth } from "../auth/AuthProvider";
 import { useStorage } from "../features";
 import { useFileActionLifetime } from "../file-areas/file-action-lifetime";
 import { useStorageCopy } from "../file-areas/storage-copy";
+import {
+  readWorkspaceFolder,
+  retryWorkspaceFolder,
+  type WorkspaceList,
+} from "../file-areas/workspace-folder";
 import { useI18n } from "../i18n/hooks";
 
 import {
@@ -18,10 +24,22 @@ import {
 
 export const MY_FILES_QUERY_KEY = ["files", "mine"] as const;
 
-export function useMyFiles() {
+export function useMyFiles(folder?: string) {
+  const { user } = useAuth();
   return useQuery({
-    queryKey: MY_FILES_QUERY_KEY,
-    queryFn: () => listMyFiles(),
+    queryKey: [
+      ...MY_FILES_QUERY_KEY,
+      user?.id,
+      user?.system_role,
+      user?.permissions,
+      ...(folder === undefined ? [] : ["folder", folder]),
+    ],
+    queryFn: ({ signal }): Promise<WorkspaceList<MyFileInfo>> =>
+      folder === undefined
+        ? listMyFiles(signal)
+        : readWorkspaceFolder<MyFileInfo>("personal", folder, signal),
+    ...(folder !== undefined && { retry: retryWorkspaceFolder }),
+    gcTime: 0,
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
@@ -33,6 +51,7 @@ export function useDeleteMyFile() {
     mutationFn: (path: string) => deleteMyFile(path),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: MY_FILES_QUERY_KEY });
+      void queryClient.invalidateQueries({ queryKey: ["file-browser"] });
     },
   });
 }
@@ -44,6 +63,7 @@ export function useKeepInMyFiles(threadId: string) {
       keepInMyFiles(threadId, request),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: MY_FILES_QUERY_KEY });
+      void queryClient.invalidateQueries({ queryKey: ["file-browser"] });
     },
   });
 }

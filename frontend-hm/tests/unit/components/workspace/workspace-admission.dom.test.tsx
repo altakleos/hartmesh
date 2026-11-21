@@ -47,9 +47,6 @@ rs.mock("@/core/i18n/hooks", () => ({
     },
   }),
 }));
-rs.mock("@/components/query-client-provider", () => ({
-  QueryClientProvider: ({ children }: { children: ReactNode }) => children,
-}));
 rs.mock("@/components/ui/sidebar", () => ({
   SidebarInset: ({ children }: { children: ReactNode }) => children,
   SidebarProvider: ({ children }: { children: ReactNode }) => children,

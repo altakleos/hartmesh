@@ -81,6 +81,12 @@ describe("publishToShared", () => {
     }
   });
 
+  it("requires a completed publish response before offering an outcome", async () => {
+    mockedFetch.mockResolvedValueOnce(jsonResponse(202, entry));
+    await expect(
+      publishToShared({ path: "/mnt/user-data/files/august.pdf" }),
+    ).rejects.toThrow("No completed publication receipt");
+  });
   it("reports a fresh publication as newly shared", async () => {
     mockedFetch.mockResolvedValueOnce(jsonResponse(201, entry));
     await expect(

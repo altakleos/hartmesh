@@ -19,6 +19,11 @@ const state = rs.hoisted(() => ({
     reason: null as string | null,
   },
 }));
+rs.mock("next/navigation", () => ({
+  useRouter: () => ({ push: rs.fn() }),
+  useSearchParams: () => new URLSearchParams(),
+  usePathname: () => "/workspace/instances",
+}));
 rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({
@@ -29,7 +34,14 @@ rs.mock("@/core/auth/AuthProvider", () => ({
     },
   }),
 }));
+rs.mock("@/core/file-areas/browser-renderer", () => ({
+  useBrowserRenderer: () => ({ native: false, choice: undefined }),
+}));
+rs.mock("@/core/agent-instances/home-transfer-access", () => ({
+  checkHomeTransferAccess: rs.fn(async () => true),
+}));
 rs.mock("@/core/features", () => ({
+  useFeatures: () => ({ data: undefined }),
   useAgentInstances: () => state.feature,
   useStorage: () => null,
   useBranding: () => ({ providerName: "Provider", supportURL: null }),
@@ -56,6 +68,7 @@ import {
   InstanceApiError,
   type AgentInstanceDetail,
 } from "@/core/agent-instances/api";
+import { HomeFileTransferProvider } from "@/core/agent-instances/home-transfers";
 import { fetch as fetcher } from "@/core/api/fetcher";
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 import { I18nProvider } from "@/core/i18n/context";
@@ -81,6 +94,7 @@ const instance: AgentInstanceDetail = {
   supervisor: { kind: "human", subject_id: "reader" },
   definition_revision: "d".repeat(64),
   home_id: home,
+  home_generation: 1,
   status: "active",
   permissions: 7,
   generation: 1,
@@ -100,11 +114,13 @@ function show(change: Partial<AgentInstanceDetail> = {}, initialFolder = "") {
     <QueryClientProvider client={client}>
       <I18nProvider initialLocale="en-US">
         <FileActionLifetimeProvider>
-          <FilesTab
-            instance={{ ...instance, ...current }}
-            initialFolder={initialFolder}
-            changed={state.changed}
-          />
+          <HomeFileTransferProvider>
+            <FilesTab
+              instance={{ ...instance, ...current }}
+              initialFolder={initialFolder}
+              changed={state.changed}
+            />
+          </HomeFileTransferProvider>
         </FileActionLifetimeProvider>
       </I18nProvider>
     </QueryClientProvider>
@@ -133,6 +149,8 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue({
       id: home,
+      generation: 1,
+      status: "active",
       permissions: 19,
       quota: { max_bytes: 999999999, max_inodes: 5000 },
     } as spaces.StorageSpace);
@@ -581,33 +599,18 @@ test("shows the returned collision-safe name", async () => {
   await choose();
   await screen.findByText("Saved as note (2).txt");
 });
-test("directory rename and deletion use only audited agent routes", async () => {
+test("a Gateway without guarded replacement checks offers no rename or delete", async () => {
   rs.mocked(spaces.listSpaceFiles).mockResolvedValue({
     files: [file],
     truncated: false,
   });
   show();
-  fireEvent.click(await screen.findByRole("button", { name: "Rename" }));
-  fireEvent.change(screen.getByLabelText("New name"), {
-    target: { value: "renamed.txt" },
-  });
-  fireEvent.click(
-    within(screen.getByRole("dialog")).getByRole("button", { name: "Rename" }),
-  );
-  await waitFor(() =>
-    expect(transfers.changeAgentFile).toHaveBeenCalledWith(
-      id,
-      expect.objectContaining({
-        action: "rename",
-        path: "note.txt",
-        destination: "renamed.txt",
-        operation_id: expect.stringMatching(/^[0-9a-f]{32}$/),
-      }),
-      expect.any(Object),
-    ),
-  );
+  await screen.findByRole("button", { name: "note.txt" });
+  expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+  expect(transfers.changeAgentFile).not.toHaveBeenCalled();
 });
-test.each(["edit", "rename"])(
+test.each(["edit", "mkdir"])(
   "a busy %s keeps its original ID across manual checks and never resends the change",
   async (action) => {
     rs.mocked(spaces.listSpaceFiles).mockResolvedValue({
@@ -628,13 +631,15 @@ test.each(["edit", "rename"])(
       });
       fireEvent.click(screen.getByRole("button", { name: "Save" }));
     } else {
-      fireEvent.click(await screen.findByRole("button", { name: "Rename" }));
-      fireEvent.change(screen.getByLabelText("New name"), {
+      fireEvent.click(
+        await screen.findByRole("button", { name: "New folder" }),
+      );
+      fireEvent.change(screen.getByLabelText("Folder name"), {
         target: { value: "renamed.txt" },
       });
       fireEvent.click(
         within(screen.getByRole("dialog")).getByRole("button", {
-          name: "Rename",
+          name: "Create",
         }),
       );
     }

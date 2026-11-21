@@ -35,22 +35,17 @@ test.describe("My files", () => {
     ).toHaveAttribute("href", /\/api\/files\/Reports\/.*\?download=true$/);
   });
 
-  test("asks before removing a file, then removes it", async ({ page }) => {
+  test("older Gateways keep the file available and offer no path-only deletion", async ({
+    page,
+  }) => {
     mockLangGraphAPI(page, { threads: [], files: [AUGUST] });
     await installLegacyReportPlugin(page);
-
     await page.goto("/workspace/files");
     const row = page.getByTestId(`my-file-${AUGUST.path}`);
-    await expect(row).toBeVisible({ timeout: 15_000 });
-
-    await row.getByRole("button", { name: `Delete ${AUGUST.name}` }).click();
+    await expect(row).toBeVisible();
     await expect(
-      page.getByText(`Delete ${AUGUST.name}? This cannot be undone.`),
-    ).toBeVisible();
-    await page.getByRole("button", { name: "Delete", exact: true }).click();
-
-    await expect(row).toHaveCount(0);
-    await expect(page.getByTestId("my-files-empty")).toBeVisible();
+      row.getByRole("button", { name: `Delete ${AUGUST.name}` }),
+    ).toHaveCount(0);
   });
 });
 
@@ -83,7 +78,9 @@ test("same-page Shared navigation and browser history follow the URL", async ({
   await page
     .getByRole("button", { name: `Share with everyone ${AUGUST.name}` })
     .click();
-  await page.getByRole("button", { name: "Open Shared", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Open Company shared", exact: true })
+    .click();
   await expect(page.getByTestId("shared-files-empty")).toBeVisible();
   await page.goBack();
   await expect(page.getByTestId("my-files-list")).toBeVisible();

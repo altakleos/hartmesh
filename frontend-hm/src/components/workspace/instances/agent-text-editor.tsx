@@ -12,12 +12,16 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { putAgentFile } from "@/core/agent-instances/agent-files";
 import * as api from "@/core/agent-instances/api";
-import { readAgentText } from "@/core/agent-instances/file-reads";
+import {
+  readAgentText,
+  retryFileRead,
+} from "@/core/agent-instances/file-reads";
 import {
   fileOutcome,
   unansweredWrite,
 } from "@/core/agent-instances/file-status";
 import { awaitAbortable } from "@/core/api/abort";
+import { readBrowserText } from "@/core/file-areas/browser-protocol";
 import { useI18n } from "@/core/i18n/hooks";
 import { StorageRequestError, type SpaceFile } from "@/core/spaces/api";
 import { useSpaceActionSignal } from "@/core/spaces/lifetime";
@@ -26,6 +30,7 @@ import { PendingFileChange } from "./file-operation-notice";
 import { AgentFileRefusal } from "./file-refusal";
 
 export function AgentTextEditor({
+  versioned = false,
   instance,
   home,
   file,
@@ -34,6 +39,7 @@ export function AgentTextEditor({
   changed,
   observe,
 }: {
+  versioned?: boolean;
   instance: api.AgentInstance;
   home: string;
   file: SpaceFile;
@@ -74,7 +80,12 @@ export function AgentTextEditor({
       setError(undefined);
       pending.current = undefined;
       try {
-        const value = await readAgentText(home, file.path, signal);
+        const value = versioned
+          ? await retryFileRead(
+              () => readBrowserText(instance.id, file.path, signal),
+              signal,
+            )
+          : await readAgentText(home, file.path, signal);
         if (owner.aborted) return;
         if (!keepDraft || !dirty.current) {
           setText(value.text);
@@ -87,7 +98,7 @@ export function AgentTextEditor({
         if (!owner.aborted) setReading(false);
       }
     },
-    [home, file.path, captureSignal],
+    [versioned, instance.id, home, file.path, captureSignal],
   );
   useEffect(() => {
     void load(false);

@@ -24,7 +24,7 @@ is provider-only. EN/ZH notices use configured provider links.
 `/workspace/instances` owns detail tabs. Apply current grants/provider ceilings,
 account/role caches and retired-action fences. Retry exact intents; 202 is pending.
 Viewer-scoped `/api/search` is cancellable; demos filter locally. Agent files use Spaces and audited writes.
-Device uploads run on send in chats, immediately in instances. Pickers send destination references. Browse inspectable agents on demand. Confirm Home copies, omit source titles, reconcile by ID; verify receipt, Home and execution.
+Conversation attachments stay local to chat. The account workspace owns Home uploads and rechecks grants, incarnation and receipts across routes. Pickers send destination references. Browse inspectable agents on demand. Confirm Home copies, omit source titles, reconcile by ID; verify receipt, Home and execution.
 Binding discovery hides ordinary artifacts, preserving selections; confirmed bindings retire the panel. Use verified custody in breadcrumbs.
 Only Inspect opens produced files. Browser/sidecar/scheduling remain ordinary-chat
 controls. Memory uses instance APIs/all summaries only.
@@ -409,22 +409,14 @@ To reach a dev server on anything other than localhost — a LAN address, or a p
 
 ## Contributing
 
-When adding features:
+Follow the existing `src/` structure, type and handle errors, and update guidance
+when architecture or commands change. Run `pnpm check` before committing.
+Unit tests live in `tests/unit/` (`pnpm test`), E2E in `tests/e2e/` (`pnpm test:e2e`).
 
-1. Follow the established `src/` structure
-2. Add TypeScript types and proper error handling
-3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
-4. Run `pnpm check` before committing
-5. Update this `AGENTS.md` when architecture, commands, or conventions change
-
-Route asset budgets are enforced with `pnpm perf:check`. The command measures
-`/login` from a normal production build, then builds in static-demo mode for the
-fixture-backed workspace routes. It starts the production server on temporary local
-ports, measures the unique JavaScript and CSS files referenced by representative
-routes, writes the detailed result to `.next/performance-results.json`, and compares
-totals with `performance-budgets.json`. Fix route ownership or split points when a
-budget fails; do not raise a ceiling without documenting and reviewing the measured
-regression.
+`pnpm perf:check` measures unique JS and CSS for production `/login` and
+static-demo workspace routes on temporary local ports. It compares totals in
+`.next/performance-results.json` with `performance-budgets.json`. Fix route
+ownership or split points. Document and review any measured budget increase.
 
 `/workspace/attention` owns durable Work-backed human requests, separate from chat
 clarification cards. Poll every30 seconds while mounted; zero inactive retention,
@@ -465,3 +457,8 @@ retain real-service outage checks. See the
 
 An admitted composer send anchors its visible human row until reader input.
 History, replay and busy-run inputs never initiate that anchor.
+
+Workspace and agent Files share `components/workspace/file-browser`. Default to
+classic without a qualified fine pointer or protocol. Negotiate each source’s
+operations, recheck restored paths and keep history in account memory. A refused
+versioned operation has no path-only fallback.

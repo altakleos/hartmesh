@@ -1511,7 +1511,7 @@ export function createEnUS(product: string): Translations {
       agents: "Agents",
       scheduledTasks: "Scheduled tasks",
       agentsDisabledTooltip: "Feature not enabled",
-      files: "My files",
+      files: "Files",
     },
 
     files: {
@@ -1549,7 +1549,7 @@ export function createEnUS(product: string): Translations {
       deleted: (name) => `Deleted ${name}`,
       deleteFailed: "Couldn't delete the file. Try again.",
       truncated: (count) =>
-        `Showing the first ${count.toLocaleString()} files. Delete some to see the rest.`,
+        `Showing the first ${count.toLocaleString()} files.`,
       saveToMyFiles: "Save to My files",
       saving: "Saving…",
       saved: (name) => `Saved ${name} to My files`,
@@ -1603,7 +1603,7 @@ export function createEnUS(product: string): Translations {
       sharedSome: (published, total) =>
         `Shared ${published} of ${total}. Couldn't share the rest. Try again.`,
       shareFailed: "Couldn't share it. Try again.",
-      openShared: "Open Shared",
+      openShared: "Open Company shared",
       undo: "Undo",
       undone: (name) => `Took ${name} back out of Shared`,
       alreadyShared: (name) => `${name} is already shared with everyone`,

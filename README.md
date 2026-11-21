@@ -320,10 +320,19 @@ formats. The report model schema ships with the skill. Generic business starters
 cover documents and spreadsheets; the report-enabled Compose provider explicitly
 selects the monthly-review starter, and tenant starter overrides still take priority.
 
-The Files page follows the selected tab in its URL, including Shared links and
-browser history. Gateways with folder browsing return direct entries on navigation, including only groups that contain a visible file. Each tab can filter loaded files by name or folder and sort by
-Name or Newest. Counts and truncation notices describe the loaded entries;
-folders remain visible on mobile. If report download availability cannot be
+Workspace Files and an agent’s Files tab use the same file browser on supported
+desktops. **Locations** opens My files, Company shared, and the agent homes
+you can inspect. Open a folder or search the loaded files; **More actions**
+shows the full path, current audience, and available actions. The address and
+Back button preserve your location. Agent searches filter the current folder.
+On supported Gateways, opening My files or Company shared loads the current
+folder, including groups that contain a visible file. Entering a search loads the available files across that location. Folder
+listings and search results each indicate when they reach their own limit.
+
+Touch devices open the classic view. Use **Use file browser** to switch on a
+supported Gateway, or **Use classic file view** to return. Sharing publishes
+a company-visible copy. Eligible new publications offer **Undo** when the
+Gateway can verify that exact copy. If report download availability cannot be
 checked, the card offers **Retry check**; it checks the files again without
 regenerating them.
 Operators can add a **Contact support** link to the workspace's **Settings and
@@ -1973,6 +1982,8 @@ Gateway after promotion or upgrade to refresh every worker's catalog.
 
 A new employee or personal assistant conversation can open before its first reply
 without waiting for the agent’s tools to finish loading.
+
+While signed in, you can leave an assistant’s or AI employee’s Files tab during an upload and return to its original folder to see the result. If the connection drops, HartMesh checks the original operation and shows the filename the Home saved. Changing accounts or losing access clears the transfer from view.
 
 When company connections are enabled, a manager can give an AI employee or personal AI assistant a connection on its **Access** tab. It can then use the connection in conversations, assignments and work started by an approved package, without asking before each action. Anyone who can chat with the agent can ask it to send information it can read, including conversations, attachments, its files and the company’s Shared folder. The agent can also act on information returned by an outside service. Give only the connections the work needs and use a service account with limited rights. The service sees that account regardless of who asked. Helpers have no connection of their own. An administrator’s changes apply from the next action. Telegram shows the agent’s answers. Open the conversation on the web for connection activity.
 

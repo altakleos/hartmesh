@@ -33,6 +33,7 @@ rs.mock("@/core/auth/AuthProvider", () => ({
   }),
 }));
 rs.mock("@/core/features", () => ({
+  useFeatures: () => ({ data: undefined, isPending: false, isError: false }),
   useAgentInstances: () => ({
     known: true,
     enabled: state.enabled,

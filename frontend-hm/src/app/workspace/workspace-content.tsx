@@ -11,6 +11,7 @@ import { TelegramSetupHost } from "@/components/workspace/telegram/setup-host";
 import { WorkspacePresentationBoundary } from "@/components/workspace/workspace-presentation-boundary";
 import { WorkspaceSettingsDeepLink } from "@/components/workspace/workspace-settings-deep-link";
 import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
+import { HomeFileTransferProvider } from "@/core/agent-instances/home-transfers";
 import { ExtensionPageBootstrap } from "@/core/extensions/hooks";
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 
@@ -39,22 +40,24 @@ export async function WorkspaceContent({
       <GatewayOfflineBanner gatewayUnavailable={gatewayUnavailable} />
       <WorkspacePresentationBoundary route={children}>
         <FileActionLifetimeProvider>
-          <ExtensionPageBootstrap />
-          <SidebarProvider
-            className="h-screen"
-            defaultOpen={initialSidebarOpen}
-          >
-            <WorkspaceSidebar />
-            <SidebarInset className="min-w-0">
-              <ModelLoadErrorBanner gatewayUnavailable={gatewayUnavailable} />
-              {children}
-            </SidebarInset>
-          </SidebarProvider>
-          <CommandPalette />
-          <SettingsDialogHost />
-          <TelegramSetupHost />
-          <WorkspaceSettingsDeepLink />
-          <Toaster position="top-center" />
+          <HomeFileTransferProvider>
+            <ExtensionPageBootstrap />
+            <SidebarProvider
+              className="h-screen"
+              defaultOpen={initialSidebarOpen}
+            >
+              <WorkspaceSidebar />
+              <SidebarInset className="min-w-0">
+                <ModelLoadErrorBanner gatewayUnavailable={gatewayUnavailable} />
+                {children}
+              </SidebarInset>
+            </SidebarProvider>
+            <CommandPalette />
+            <SettingsDialogHost />
+            <TelegramSetupHost />
+            <WorkspaceSettingsDeepLink />
+            <Toaster position="top-center" />
+          </HomeFileTransferProvider>
         </FileActionLifetimeProvider>
       </WorkspacePresentationBoundary>
     </QueryClientProvider>

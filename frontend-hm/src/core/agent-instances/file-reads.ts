@@ -40,9 +40,12 @@ export function downloadAgentFile(
   path: string,
   signal: AbortSignal,
 ) {
+  return downloadAgentURL(spaceFileURL(home, path, true), signal);
+}
+export function downloadAgentURL(url: string, signal: AbortSignal) {
   return retryFileRead(async () => {
     const response = await awaitAbortable(
-      fetch(spaceFileURL(home, path, true), { signal, cache: "no-store" }),
+      fetch(url, { signal, cache: "no-store" }),
       signal,
       (late) => {
         void late.body?.cancel().catch(() => undefined);

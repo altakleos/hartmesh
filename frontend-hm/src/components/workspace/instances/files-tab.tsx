@@ -1,6 +1,8 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -11,18 +13,24 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { BrowserView } from "@/components/workspace/file-browser/browser-view";
+import { useBrowserCopy } from "@/components/workspace/file-browser/copy";
+import { BrowserLocations } from "@/components/workspace/file-browser/locations";
 import { useSupervisorName } from "@/components/workspace/person-name";
 import {
   changeAgentFile,
   type AgentFileAction,
 } from "@/core/agent-instances/agent-files";
 import * as api from "@/core/agent-instances/api";
-import { downloadAgentFile } from "@/core/agent-instances/file-reads";
+import {
+  downloadAgentFile,
+  downloadAgentURL,
+} from "@/core/agent-instances/file-reads";
 import {
   fileOutcome,
   unansweredWrite,
 } from "@/core/agent-instances/file-status";
-import { useAgentFileTransfers } from "@/core/agent-instances/file-transfers";
+import { useHomeFileTransfers } from "@/core/agent-instances/home-transfers";
 import {
   agentBlock,
   hasCeiling,
@@ -32,6 +40,14 @@ import {
 import { awaitAbortable } from "@/core/api/abort";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useAgentInstances } from "@/core/features";
+import { browserFolder, browserHref } from "@/core/file-areas/browser";
+import { useRetireBrowserHistory } from "@/core/file-areas/browser-history";
+import {
+  useBrowserProtocol,
+  readAgentFolder,
+  agentBrowserURL,
+} from "@/core/file-areas/browser-protocol";
+import { useBrowserRenderer } from "@/core/file-areas/browser-renderer";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   getSpace,
@@ -73,7 +89,15 @@ export function FilesTab(props: Props) {
   const { user } = useAuth();
   const { t } = useI18n();
   const supervisor = useSupervisorName(props.instance.supervisor.subject_id);
-  if ((props.instance.permissions & INSPECT) === 0)
+  const canInspect =
+    !!user &&
+    hasCeiling(user.permissions, "agents:read") &&
+    (props.instance.permissions & INSPECT) !== 0;
+  useRetireBrowserHistory(
+    "agent:" + props.instance.id,
+    !canInspect || !props.instance.home_id,
+  );
+  if (!canInspect)
     return (
       <section className="space-y-2">
         <p>
@@ -117,19 +141,47 @@ function FileBrowser({
   onGeneration: (value: { home: string; generation: number }) => void;
 }) {
   const { user } = useAuth();
+  const router = useRouter(),
+    renderer = useBrowserRenderer(),
+    words = useBrowserCopy(),
+    protocol = useBrowserProtocol();
+  const requestedNative = renderer.native;
+  const qualified =
+    requestedNative &&
+    protocol.supports("agent", "folder") &&
+    protocol.supports("agent", "content");
+  const qualifiedBefore = useRef(false);
+  if (qualified) qualifiedBefore.current = true;
+  const closing = requestedNative && qualifiedBefore.current && !qualified;
+  const waiting =
+    requestedNative && (!protocol.settled || protocol.failed || closing);
+  const checked = browserFolder(initialFolder ?? "");
+  const [drag, setDrag] = useState(false);
   const { t, locale } = useI18n();
   const copy = t.agentInstances.files;
   const feature = useAgentInstances();
   const client = useQueryClient();
-  const [path, setPath] = useState(
+  const [legacyPath, setLegacyPath] = useState(
     initialFolder === "uploads" || initialFolder === "outputs"
       ? initialFolder
       : "",
   );
+  const path = qualified ? (checked ?? "") : legacyPath;
+  function setPath(next: string) {
+    if (qualified)
+      router.push(
+        browserHref("agent", next, {
+          instance: instance.id,
+          view: renderer.choice,
+        }),
+        { scroll: false },
+      );
+    else setLegacyPath(next);
+  }
   const input = useRef<HTMLInputElement>(null);
   const inputId = useId();
   const key = [
-    "agent-files",
+    qualified ? "file-browser" : "agent-files",
     user?.id,
     user?.system_role,
     user?.permissions,
@@ -153,13 +205,36 @@ function FileBrowser({
     queryKey: [...key, "files", path],
     queryFn: ({ signal }) => {
       const deadline = AbortSignal.any([signal, AbortSignal.timeout(20_000)]);
-      return awaitAbortable(listSpaceFiles(home, path, deadline), deadline);
+      return awaitAbortable(
+        qualified
+          ? readAgentFolder(instance.id, path, deadline)
+          : listSpaceFiles(home, path, deadline),
+        deadline,
+      );
     },
-    enabled: space.isSuccess && !space.isError,
+    enabled:
+      !waiting &&
+      space.isSuccess &&
+      !space.isError &&
+      (!qualified || checked !== null),
     retry: false,
     staleTime: 0,
     refetchInterval: (query) => (isBusy(query.state.error) ? 3000 : false),
   });
+  useRetireBrowserHistory(
+    "agent:" + instance.id,
+    lostAccess(space.error) ||
+      lostAccess(files.error) ||
+      (space.data !== undefined && !(space.data.permissions & 1)),
+  );
+  const refreshDiscovery = protocol.refresh;
+  const missingRoute =
+    qualified &&
+    files.error instanceof StorageRequestError &&
+    files.error.status === 404;
+  useEffect(() => {
+    if (missingRoute) void refreshDiscovery();
+  }, [missingRoute, refreshDiscovery]);
   const generation = space.data?.generation;
   useEffect(() => {
     if (generation !== undefined) onGeneration({ home, generation });
@@ -180,11 +255,13 @@ function FileBrowser({
     void client.invalidateQueries({ queryKey: key });
     changed?.();
   }
-  const transfers = useAgentFileTransfers({
-    instanceId: instance.id,
+  const transfers = useHomeFileTransfers({
+    instance,
+    homeGeneration: generation,
+    homePermissions: space.data?.permissions,
+    accessDenied: lostAccess(space.error),
     folder: path,
     enabled: writable,
-    changed: refresh,
   });
   const failedBusy = transfers.rows.some(
     (row) =>
@@ -216,7 +293,12 @@ function FileBrowser({
       return (
         await Promise.all(
           ["uploads", "outputs"].map((folder) =>
-            awaitAbortable(listSpaceFiles(home, folder, deadline), deadline),
+            awaitAbortable(
+              qualified
+                ? readAgentFolder(instance.id, folder, deadline)
+                : listSpaceFiles(home, folder, deadline),
+              deadline,
+            ),
           ),
         )
       ).every((folder) => !folder.files.length && !folder.truncated);
@@ -232,16 +314,24 @@ function FileBrowser({
       { id, file },
     ]);
   }
-  const [action, setAction] = useState<
-    { kind: "mkdir" } | { kind: "rename" | "remove"; file: SpaceFile }
-  >();
+  const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const request = useRef<AgentFileAction | undefined>(undefined);
-  const captureSignal = useSpaceActionSignal();
-  const [downloadError, setDownloadError] = useState<unknown>();
+  const captureSignal = useSpaceActionSignal(
+    JSON.stringify([
+      home,
+      generation,
+      space.data?.permissions,
+      lostAccess(space.error) || lostAccess(files.error),
+    ]),
+  );
+  const [downloadError, setDownloadError] = useState<{
+    path: string;
+    error: unknown;
+  }>();
   const [downloading, setDownloading] = useState<string>();
   const sorted = [...top].sort((a, b) => {
     const priority = (file: SpaceFile) =>
@@ -254,15 +344,15 @@ function FileBrowser({
         : 0;
     return priority(a) - priority(b);
   });
-  function openAction(value: NonNullable<typeof action>) {
+  function startFolder() {
     request.current = undefined;
-    setName(value.kind === "rename" ? value.file.name : "");
+    setName("");
     setError(undefined);
-    setAction(value);
+    setCreating(true);
   }
   async function execute() {
-    if (!action || busyRef.current || !writable) return;
-    if (action.kind !== "remove" && !validName(name)) {
+    if (!creating || busyRef.current || !writable) return;
+    if (!validName(name)) {
       setError(new api.InstanceApiError(400, "Invalid name", "invalid-name"));
       return;
     }
@@ -272,15 +362,8 @@ function FileBrowser({
     const signal = captureSignal();
     request.current ??= {
       operation_id: api.operationID(),
-      ...(action.kind === "mkdir"
-        ? { action: "mkdir", path: `${path ? `${path}/` : ""}${name}` }
-        : action.kind === "remove"
-          ? { action: "remove", path: action.file.path }
-          : {
-              action: "rename",
-              path: action.file.path,
-              destination: `${path ? `${path}/` : ""}${name}`,
-            }),
+      action: "mkdir",
+      path: `${path ? `${path}/` : ""}${name}`,
     };
     try {
       await awaitAbortable(
@@ -289,20 +372,20 @@ function FileBrowser({
       );
       signal.throwIfAborted();
       request.current = undefined;
-      setAction(undefined);
+      setCreating(false);
       refresh();
     } catch (failure) {
       if (!signal.aborted) {
         if (request.current && unansweredWrite(failure)) {
           observe(request.current.operation_id, request.current.path);
           request.current = undefined;
-          setAction(undefined);
+          setCreating(false);
           return;
         }
         if (fileOutcome(failure) === "unconfirmed") {
           setUncertain(request.current?.path);
           request.current = undefined;
-          setAction(undefined);
+          setCreating(false);
           return;
         }
         setError(failure);
@@ -328,14 +411,19 @@ function FileBrowser({
       }
     }
   }
-  async function download(file: SpaceFile) {
+  async function download(file: Pick<SpaceFile, "path" | "name">) {
     if (downloading) return;
     const owner = captureSignal();
     const signal = AbortSignal.any([owner, AbortSignal.timeout(20_000)]);
     setDownloading(file.path);
     setDownloadError(undefined);
     try {
-      const blob = await downloadAgentFile(home, file.path, signal);
+      const blob = qualified
+        ? await downloadAgentURL(
+            agentBrowserURL(instance.id, "content", file.path, true),
+            signal,
+          )
+        : await downloadAgentFile(home, file.path, signal);
       signal.throwIfAborted();
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
@@ -344,13 +432,49 @@ function FileBrowser({
       anchor.click();
       URL.revokeObjectURL(url);
     } catch (failure) {
-      if (!owner.aborted) setDownloadError(failure);
+      if (!owner.aborted) setDownloadError({ path: file.path, error: failure });
     } finally {
       if (!owner.aborted) setDownloading(undefined);
     }
   }
+  if (waiting)
+    return (
+      <p role="status">
+        {protocol.failed || closing
+          ? copy.listFailed(instance.name)
+          : t.common.loading}
+      </p>
+    );
+  if (qualified && checked === null)
+    return (
+      <>
+        <p role="alert">{words.missing}</p>
+        <Link href={browserHref("agent", "", { instance: instance.id })}>
+          {instance.name}
+        </Link>
+      </>
+    );
+  if (
+    qualified &&
+    files.error instanceof StorageRequestError &&
+    files.error.status === 404
+  )
+    return (
+      <>
+        <p role="alert">{words.missing}</p>
+        <Link href={browserHref("agent", "", { instance: instance.id })}>
+          {instance.name}
+        </Link>
+        <BrowserLocations area="agent" instance={instance.id} />
+      </>
+    );
   if (lostAccess(space.error) || lostAccess(files.error))
-    return <p role="alert">{copy.accessNotSaved(instance.name)}</p>;
+    return (
+      <>
+        <p role="alert">{copy.accessNotSaved(instance.name)}</p>
+        {qualified && <BrowserLocations area="agent" instance={instance.id} />}
+      </>
+    );
   const notices = (
     <>
       <FileRecoveryNotice
@@ -387,6 +511,7 @@ function FileBrowser({
           instance={instance}
           home={home}
           file={editor}
+          versioned={qualified}
           editable={writable}
           close={() => setEditor(undefined)}
           changed={refresh}
@@ -434,52 +559,26 @@ function FileBrowser({
   if (space.isPending || files.isPending)
     return preserved(<p role="status">{t.agentInstances.loading}</p>);
   const rowTransfers = transfers.rows.filter((row) => row.folder === path);
-  return (
-    <section
-      className="space-y-4"
-      onDragOver={(event) => {
-        if (writable) {
-          event.preventDefault();
-          event.dataTransfer.dropEffect = "copy";
-        }
-      }}
-      onDrop={(event) => {
-        event.preventDefault();
-        if (writable) transfers.add(Array.from(event.dataTransfer.files));
-      }}
-    >
-      {notices}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <nav
-          aria-label={copy.root(instance.name)}
-          className="flex flex-wrap gap-2"
-        >
-          <Button type="button" variant="link" onClick={() => setPath("")}>
-            {copy.root(instance.name)}
-          </Button>
-          {path
-            .split("/")
-            .filter(Boolean)
-            .map((part, index, parts) => (
-              <Button
-                key={index}
-                type="button"
-                variant="link"
-                onClick={() => setPath(parts.slice(0, index + 1).join("/"))}
-              >
-                {part}
-              </Button>
-            ))}
-        </nav>
-        <Button
-          type="button"
-          variant="outline"
-          disabled={files.isFetching}
-          onClick={refresh}
-        >
-          {t.agentInstances.refresh}
-        </Button>
-      </div>
+  const savedAt = new Map(
+    rowTransfers.flatMap((transfer) =>
+      transfer.status === "saved" && transfer.result
+        ? [[transfer.result.path, transfer.file.name] as const]
+        : [],
+    ),
+  );
+  function savedStatus(file: Pick<SpaceFile, "name" | "path">) {
+    const original = savedAt.get(file.path);
+    if (!original) return null;
+    return (
+      <p role="status">
+        {original === file.name
+          ? copy.saved(instance.name)
+          : copy.savedAs(file.name)}
+      </p>
+    );
+  }
+  const fileTools = (
+    <>
       {instance.activity.running_runs > 0 && (
         <p>{copy.listLive(instance.name)}</p>
       )}
@@ -489,27 +588,38 @@ function FileBrowser({
         <p>{copy.notActive(instance.name)}</p>
       ) : writable ? (
         <div className="space-y-3">
+          {qualified && (
+            <p className="text-sm [overflow-wrap:anywhere]">
+              {words.drop([instance.name, path].filter(Boolean).join("/"))}
+            </p>
+          )}
           <div className="flex gap-2">
             <Button type="button" onClick={() => input.current?.click()}>
-              {copy.add}
+              {qualified ? words.upload : copy.add}
             </Button>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => openAction({ kind: "mkdir" })}
-            >
+            <Button type="button" variant="outline" onClick={startFolder}>
               {copy.newFolder}
             </Button>
           </div>
-          <div className="rounded-lg border border-dashed p-4">
-            <p>{copy.drop(instance.name)}</p>
-            <Button
-              type="button"
-              variant="link"
-              onClick={() => input.current?.click()}
-            >
-              {copy.choose}
-            </Button>
+          <div
+            className={qualified ? "" : "rounded-lg border border-dashed p-4"}
+          >
+            {qualified ? (
+              drag && (
+                <p role="status">{words.drop(instance.name + "/" + path)}</p>
+              )
+            ) : (
+              <>
+                <p>{copy.drop(instance.name)}</p>
+                <Button
+                  type="button"
+                  variant="link"
+                  onClick={() => input.current?.click()}
+                >
+                  {copy.choose}
+                </Button>
+              </>
+            )}
             <input
               ref={input}
               id={inputId}
@@ -545,172 +655,276 @@ function FileBrowser({
             disabled={!writable}
           />
         ))}
-      {!sorted.length && <p>{t.storageSpaces.empty}</p>}
-      {!!sorted.length && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr>
-                <th className="p-2">{copy.name}</th>
-                <th className="p-2">{copy.size}</th>
-                <th className="p-2">{copy.modified}</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.map((file) => {
-                const accessible =
-                  file.accessible &&
-                  (file.kind === "file" || file.kind === "directory");
-                const saved = rowTransfers.find(
-                  (row) =>
-                    row.status === "saved" && row.result?.path === file.path,
-                );
-                return (
-                  <tr key={file.path} className="border-t">
-                    <td className="p-2">
-                      {accessible ? (
-                        <Button
-                          type="button"
-                          variant="link"
-                          className="px-0"
-                          onClick={() =>
-                            file.kind === "directory"
-                              ? setPath(file.path)
-                              : setEditor(file)
-                          }
-                        >
-                          {file.name}
-                        </Button>
-                      ) : (
-                        <span>{file.name}</span>
-                      )}
-                      {!accessible && <p>{t.storageSpaces.unsupportedEntry}</p>}
-                      {path === "" && file.name === "uploads" && (
-                        <p className="text-muted-foreground">
-                          {copy.uploadsHint(instance.name)}
-                        </p>
-                      )}
-                      {path === "" && file.name === "outputs" && (
-                        <p className="text-muted-foreground">
-                          {copy.outputsHint(instance.name)}
-                        </p>
-                      )}
-                      {path.split("/")[0] === "outputs" &&
-                        file.kind === "file" && (
-                          <p>
-                            {copy.producedBy(
-                              instance.name,
-                              new Intl.DateTimeFormat(locale, {
-                                dateStyle: "medium",
-                                timeStyle: "short",
-                              }).format(new Date(file.modified * 1000)),
-                            )}
-                          </p>
-                        )}
-                      {saved && (
-                        <p role="status">
-                          {saved.file.name === file.name
-                            ? copy.saved(instance.name)
-                            : copy.savedAs(file.name)}
-                        </p>
-                      )}
-                    </td>
-                    <td className="p-2">
-                      {file.kind === "file" ? formatUploadSize(file.size) : "—"}
-                    </td>
-                    <td className="p-2">
-                      <time
-                        dateTime={new Date(file.modified * 1000).toISOString()}
-                      >
-                        {new Intl.DateTimeFormat(locale, {
-                          dateStyle: "medium",
-                          timeStyle: "short",
-                        }).format(new Date(file.modified * 1000))}
-                      </time>
-                    </td>
-                    <td className="p-2">
-                      {accessible && (
-                        <div className="flex gap-2">
-                          {file.kind === "file" && (
+    </>
+  );
+  return (
+    <section
+      className="space-y-4"
+      onDragOver={(event) => {
+        if (writable && event.dataTransfer.types.includes("Files")) {
+          if (qualified) setDrag(true);
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+        }
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+          setDrag(false);
+      }}
+      onDrop={(event) => {
+        setDrag(false);
+        if (!event.dataTransfer.types.includes("Files")) return;
+        event.preventDefault();
+        if (writable) transfers.add(Array.from(event.dataTransfer.files));
+      }}
+    >
+      {notices}
+      {!qualified && (
+        <>
+          {protocol.supports("agent", "folder") && (
+            <Link
+              className="text-sm underline"
+              href={browserHref("agent", path, {
+                instance: instance.id,
+                view: "browser",
+              })}
+            >
+              {words.native}
+            </Link>
+          )}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <nav
+              aria-label={copy.root(instance.name)}
+              className="flex flex-wrap gap-2"
+            >
+              <Button type="button" variant="link" onClick={() => setPath("")}>
+                {copy.root(instance.name)}
+              </Button>
+              {path
+                .split("/")
+                .filter(Boolean)
+                .map((part, index, parts) => (
+                  <Button
+                    key={index}
+                    type="button"
+                    variant="link"
+                    onClick={() => setPath(parts.slice(0, index + 1).join("/"))}
+                  >
+                    {part}
+                  </Button>
+                ))}
+            </nav>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={files.isFetching}
+              onClick={refresh}
+            >
+              {t.agentInstances.refresh}
+            </Button>
+          </div>
+        </>
+      )}
+      {!qualified && fileTools}
+      {qualified ? (
+        <BrowserView
+          area="agent"
+          title={instance.name}
+          audience={words.agentAudience}
+          tools={fileTools}
+          folder={path}
+          instance={instance.id}
+          scope={JSON.stringify([
+            ...key,
+            space.data?.generation,
+            space.data?.permissions,
+          ])}
+          rows={sorted}
+          truncated={files.data.truncated}
+          navigate={setPath}
+          hrefFor={(row) =>
+            row.kind === "file" && !protocol.supports("agent", "text")
+              ? agentBrowserURL(instance.id, "content", row.path)
+              : ""
+          }
+          open={(row) => {
+            const file = sorted.find((f) => f.path === row.path);
+            if (file?.accessible) setEditor(file);
+          }}
+          rowStatus={savedStatus}
+          describe={(row) =>
+            row.kind === "directory" && !path && row.name === "uploads" ? (
+              <p>{copy.uploadsHint(instance.name)}</p>
+            ) : row.kind === "directory" && !path && row.name === "outputs" ? (
+              <p>{copy.outputsHint(instance.name)}</p>
+            ) : row.kind === "file" && path.split("/")[0] === "outputs" ? (
+              <p>
+                {copy.producedBy(
+                  instance.name,
+                  new Date(row.modified * 1000).toLocaleString(locale),
+                )}
+              </p>
+            ) : null
+          }
+          actions={(row) =>
+            row.kind === "file" ? (
+              <>
+                <Button
+                  variant="outline"
+                  disabled={!!downloading}
+                  onClick={() => void download(row)}
+                >
+                  {t.common.download}
+                </Button>
+                {downloadError?.path === row.path && (
+                  <p role="alert">
+                    {lostAccess(downloadError.error)
+                      ? words.downloadDenied(row.name)
+                      : words.downloadFailed(row.name)}
+                  </p>
+                )}
+              </>
+            ) : null
+          }
+        />
+      ) : (
+        <>
+          {!sorted.length && <p>{t.storageSpaces.empty}</p>}
+          {!!sorted.length && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr>
+                    <th className="p-2">{copy.name}</th>
+                    <th className="p-2">{copy.size}</th>
+                    <th className="p-2">{copy.modified}</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {sorted.map((file) => {
+                    const accessible =
+                      file.accessible &&
+                      (file.kind === "file" || file.kind === "directory");
+                    return (
+                      <tr key={file.path} className="border-t">
+                        <td className="p-2">
+                          {accessible ? (
                             <Button
                               type="button"
-                              variant="outline"
-                              disabled={!!downloading}
-                              onClick={() => void download(file)}
+                              variant="link"
+                              className="px-0"
+                              onClick={() =>
+                                file.kind === "directory"
+                                  ? setPath(file.path)
+                                  : setEditor(file)
+                              }
                             >
-                              {t.common.download}
+                              {file.name}
                             </Button>
+                          ) : (
+                            <span>{file.name}</span>
                           )}
-                          {writable && (
-                            <>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                onClick={() =>
-                                  openAction({ kind: "rename", file })
-                                }
-                              >
-                                {t.common.rename}
-                              </Button>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                onClick={() =>
-                                  openAction({ kind: "remove", file })
-                                }
-                              >
-                                {t.common.delete}
-                              </Button>
-                            </>
+                          {!accessible && (
+                            <p>{t.storageSpaces.unsupportedEntry}</p>
                           )}
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                          {path === "" && file.name === "uploads" && (
+                            <p className="text-muted-foreground">
+                              {copy.uploadsHint(instance.name)}
+                            </p>
+                          )}
+                          {path === "" && file.name === "outputs" && (
+                            <p className="text-muted-foreground">
+                              {copy.outputsHint(instance.name)}
+                            </p>
+                          )}
+                          {path.split("/")[0] === "outputs" &&
+                            file.kind === "file" && (
+                              <p>
+                                {copy.producedBy(
+                                  instance.name,
+                                  new Intl.DateTimeFormat(locale, {
+                                    dateStyle: "medium",
+                                    timeStyle: "short",
+                                  }).format(new Date(file.modified * 1000)),
+                                )}
+                              </p>
+                            )}
+                          {savedStatus(file)}
+                        </td>
+                        <td className="p-2">
+                          {file.kind === "file"
+                            ? formatUploadSize(file.size)
+                            : "—"}
+                        </td>
+                        <td className="p-2">
+                          <time
+                            dateTime={new Date(
+                              file.modified * 1000,
+                            ).toISOString()}
+                          >
+                            {new Intl.DateTimeFormat(locale, {
+                              dateStyle: "medium",
+                              timeStyle: "short",
+                            }).format(new Date(file.modified * 1000))}
+                          </time>
+                        </td>
+                        <td className="p-2">
+                          {accessible && (
+                            <div className="flex gap-2">
+                              {file.kind === "file" && (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  disabled={!!downloading}
+                                  onClick={() => void download(file)}
+                                >
+                                  {t.common.download}
+                                </Button>
+                              )}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {rootFolders && empty.data === true && (
+            <p>
+              {writable ? copy.emptyRoot(instance.name) : copy.emptyRootReader}
+            </p>
+          )}
+          {files.data.truncated && <p>{t.storageSpaces.truncated}</p>}
+        </>
       )}
-      {rootFolders && empty.data === true && (
-        <p>{writable ? copy.emptyRoot(instance.name) : copy.emptyRootReader}</p>
-      )}
-      {files.data.truncated && <p>{t.storageSpaces.truncated}</p>}
-      {!!downloadError && (
-        <AgentFileRefusal instance={instance} error={downloadError} action />
+      {!qualified && !!downloadError && (
+        <AgentFileRefusal
+          instance={instance}
+          error={downloadError.error}
+          action
+        />
       )}
       <Dialog
-        open={!!action}
+        open={creating}
         onOpenChange={(open) => {
-          if (!open && !busy) setAction(undefined);
+          if (!open && !busy) setCreating(false);
         }}
       >
         <DialogContent showCloseButton={!busy} aria-describedby={undefined}>
-          <DialogTitle>
-            {action?.kind === "mkdir"
-              ? copy.newFolder
-              : action?.kind === "rename"
-                ? t.common.rename
-                : copy.deleteConfirm(action?.file.name ?? "")}
-          </DialogTitle>
-          {action?.kind !== "remove" && (
-            <>
-              <label htmlFor={`${inputId}-name`}>
-                {action?.kind === "mkdir" ? copy.folderName : copy.newName}
-              </label>
-              <Input
-                id={`${inputId}-name`}
-                value={name}
-                disabled={busy}
-                onChange={(event) => {
-                  request.current = undefined;
-                  setName(event.target.value);
-                }}
-              />
-            </>
-          )}
+          <DialogTitle>{copy.newFolder}</DialogTitle>
+          <label htmlFor={`${inputId}-name`}>{copy.folderName}</label>
+          <Input
+            id={`${inputId}-name`}
+            value={name}
+            disabled={busy}
+            onChange={(event) => {
+              request.current = undefined;
+              setName(event.target.value);
+            }}
+          />
           {!!error && (
             <AgentFileRefusal instance={instance} error={error} action />
           )}
@@ -719,20 +933,16 @@ function FileBrowser({
               type="button"
               variant="outline"
               disabled={busy}
-              onClick={() => setAction(undefined)}
+              onClick={() => setCreating(false)}
             >
               {t.common.cancel}
             </Button>
             <Button
               type="button"
-              disabled={busy || (action?.kind !== "remove" && !name.trim())}
+              disabled={busy || !name.trim()}
               onClick={() => void execute()}
             >
-              {action?.kind === "mkdir"
-                ? t.common.create
-                : action?.kind === "rename"
-                  ? t.common.rename
-                  : t.common.delete}
+              {t.common.create}
             </Button>
           </DialogFooter>
         </DialogContent>

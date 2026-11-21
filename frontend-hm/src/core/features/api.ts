@@ -47,6 +47,11 @@ export const CLOSED_TELEGRAM: TelegramFeature = {
 };
 
 export interface FeaturesResponse {
+  file_browser?: {
+    versions?: unknown;
+    storage_mode?: unknown;
+    operations?: Partial<Record<"personal" | "shared" | "agent", string[]>>;
+  } | null;
   message_search?: boolean;
   /** Queue/Steer during an active interactive run; true only when the Gateway stores run inputs. */
   run_inputs?: unknown;

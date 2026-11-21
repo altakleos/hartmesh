@@ -211,7 +211,7 @@ test("one build admits complete tenant snapshots through authenticated activatio
       first.tenant.logo,
     );
     activate("B");
-    await page.getByRole("link", { name: "My files", exact: true }).click();
+    await page.getByRole("link", { name: "Files", exact: true }).click();
     await expect(page).toHaveURL(/\/workspace\/files/);
     await expect(
       page.getByRole("heading", { name: "Files", exact: true }),

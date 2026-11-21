@@ -49,7 +49,7 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-test("puts Attention, Chats, My assistants, AI employees, My files, Agents and Scheduled tasks in order", () => {
+test("puts Attention, Chats, My assistants, AI employees, Files, Agents and Scheduled tasks in order", () => {
   show();
   expect(
     screen.getAllByRole("link").map((link) => link.getAttribute("href")),
