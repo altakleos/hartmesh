@@ -251,14 +251,24 @@ class ProviderWire:
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=_Body(body), request=request)
 
 
-def install_provider_wire(monkeypatch, wire):
+def install_provider_wire(monkeypatch, wire, *, loopback_port=None):
     """Replaces only outbound transports; the Gateway's own ASGI client never uses them."""
 
+    actual_async = httpx.AsyncHTTPTransport.handle_async_request
+    actual_sync = httpx.HTTPTransport.handle_request
+
     async def handle_async(self, request):
+        if loopback_port is not None and request.url.host == "127.0.0.1" and request.url.port == loopback_port:
+            return await actual_async(self, request)
+        return wire.respond(request)
+
+    def handle_sync(self, request):
+        if loopback_port is not None and request.url.host == "127.0.0.1" and request.url.port == loopback_port:
+            return actual_sync(self, request)
         return wire.respond(request)
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle_async)
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", lambda self, request: wire.respond(request))
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle_sync)
 
 
 def _renderer(monkeypatch):
