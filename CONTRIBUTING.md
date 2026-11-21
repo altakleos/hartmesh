@@ -423,6 +423,7 @@ succeed on the current published head before merge. The regression workflows inc
 - **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
 - **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered by `frontend-hm/`, the pnpm runner or that workflow)
 - **Production Docker acceptance** — [.github/workflows/docker-acceptance.yml](.github/workflows/docker-acceptance.yml), using real application services and synthetic inference
+- **Workspace file browser qualification** exercises ordinary files on both storage profiles. A manual dispatch takes the candidate's pinned backend and frontend and the previous published tag. Each mixed pair records which image and source served the browser. [Workflow](.github/workflows/file-browser-qualification.yml)
 
 The browser E2E and full-stack replay jobs install Chromium and its system
 libraries using the Playwright version in the product's frozen lockfile.

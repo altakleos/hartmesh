@@ -15,9 +15,10 @@ import pytest
 if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("HARTMESH_VERIFY_CONNECTIONS") not in {"explicit", "bundle-default"}:
     pytest.skip("requires the hosted connection qualification", allow_module_level=True)
 
+from _compose_browser_session import signed_in_browser, verify_image
 from _compose_connection_evidence import confirmed_browser_notice, observe_initial_thread_reads
 from _compose_gateway_restart import start_gateway, stop_gateway
-from playwright.sync_api import expect, sync_playwright
+from playwright.sync_api import expect
 from test_compose_instance_acceptance import Bundle, activate, await_attempt, await_execution_ready, delegate, eventually, new_conversation, required
 from test_compose_instance_acceptance import compose as compose
 from test_compose_instance_acceptance import session as session
@@ -46,14 +47,6 @@ def set_grant(session, agent, name, given):
     refreshed = option(session, agent, name)
     assert refreshed["given"] is given
     return refreshed
-
-
-def verify_image(compose, service, image):
-    container = compose.run("ps", "-q", service).stdout.strip()
-    running = compose.invoke(["docker", "inspect", "--format", "{{.Config.Image}} {{.Image}}", container]).stdout.strip().split()
-    expected = compose.invoke(["docker", "image", "inspect", "--format", "{{.Id}}", image]).stdout.strip()
-    assert running == [image, expected]
-    return {"ref": image, "image_id": expected}
 
 
 @contextmanager
@@ -104,19 +97,6 @@ def create_employees(session):
         instance = session.request("POST", "/api/agent-instances", json={"creation_id": uuid.uuid4().hex, "name": f"Notice reader {index}", "definition_name": name, "custody": "company"}, expected=201).json()
         employees.append(new_conversation(session, {"instance": instance, "definition": name}))
     return employees
-
-
-@contextmanager
-def signed_in_browser(compose, session):
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        try:
-            context = browser.new_context(locale="en-US")
-            context.add_cookies([{"url": compose.url, "name": c.name, "value": c.value, "httpOnly": c.has_nonstandard_attr("HttpOnly"), "secure": c.secure, "sameSite": "Lax"} for c in session.client.cookies.jar])
-            assert context.request.get(compose.url + "/api/v1/auth/me").json()["id"] == session.user["id"]
-            yield context.new_page()
-        finally:
-            browser.close()
 
 
 def access_page(page, compose, agent, enabled):

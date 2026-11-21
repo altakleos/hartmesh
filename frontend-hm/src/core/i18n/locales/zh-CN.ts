@@ -1443,8 +1443,7 @@ export function createZhCN(product: string): Translations {
       deleting: "删除中…",
       deleted: (name) => `已删除 ${name}`,
       deleteFailed: "无法删除该文件，请重试。",
-      truncated: (count) =>
-        `仅显示前 ${count.toLocaleString()} 个文件。删除一些后可以看到其余的。`,
+      truncated: (count) => `仅显示前 ${count.toLocaleString()} 个文件。`,
       saveToMyFiles: "保存到我的文件",
       saving: "保存中…",
       saved: (name) => `已将 ${name} 保存到我的文件`,
@@ -1495,7 +1494,7 @@ export function createZhCN(product: string): Translations {
       sharedSome: (published, total) =>
         `已共享 ${published}/${total} 个，其余共享失败，请重试。`,
       shareFailed: "无法共享，请重试。",
-      openShared: "打开共享",
+      openShared: "打开公司共享",
       undo: "撤销",
       undone: (name) => `已将 ${name} 撤出共享`,
       alreadyShared: (name) => `${name} 已共享给所有人`,

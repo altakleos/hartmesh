@@ -223,7 +223,7 @@ test("a deployment whose storage is too small reads differently for a user and a
   await expect(
     page.getByText(enUS.agentInstances.unavailable.reference("disk-too-small")),
   ).toHaveCount(0);
-  await page.getByRole("link", { name: "My files", exact: true }).click();
+  await page.getByRole("link", { name: "Files", exact: true }).click();
   await expect(page.getByText(enUS.chat.filesUnavailable)).toBeVisible();
   await page.getByTestId("files-tab-shared").click();
   await expect(page.getByText(enUS.chat.filesUnavailable)).toBeVisible();

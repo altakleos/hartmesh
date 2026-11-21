@@ -59,7 +59,7 @@ const routerReplace = rs.hoisted(() => rs.fn());
 rs.mock("next/navigation", () => ({
   usePathname: () => "/workspace/files",
   useRouter: () => ({
-    push: rs.fn(),
+    push: routerReplace,
     replace: routerReplace,
     prefetch: rs.fn(),
   }),
@@ -90,7 +90,11 @@ const viewer = rs.hoisted(() => ({
   user: { id: "default", system_role: "user" as "user" | "admin" },
 }));
 rs.mock("@/core/auth/AuthProvider", () => ({ useAuth: () => viewer }));
+rs.mock("@/core/file-areas/browser-renderer", () => ({
+  useBrowserRenderer: () => ({ native: false, choice: undefined }),
+}));
 rs.mock("@/core/features", () => ({
+  useFeatures: () => ({ data: undefined }),
   useDocumentTitle: () => undefined,
   useStorage: () => storage,
   useBranding: () => ({
@@ -152,6 +156,7 @@ rs.mock("@/core/shared/hooks", () => ({
   }),
   useShareWithEveryone: () => ({
     share: shareWithEveryone,
+    available: true,
     isPending: false,
     openShared: rs.fn(),
   }),
@@ -568,27 +573,14 @@ describe("FilesPage", () => {
     expect(within(jobs).queryByRole("button", { name: /Remove/ })).toBeNull();
   });
 
-  it("offers Remove only where the server said the person may, and asks first", () => {
+  it("withholds an unguarded remove even from a legacy publisher", () => {
     renderPage();
     openSharedTab();
-
-    fireEvent.click(screen.getByRole("button", { name: "Remove august.pdf" }));
     expect(
-      screen.getByText(/Remove august.pdf from Shared\?/).textContent,
-    ).toContain("Your own copy, if you have one, stays.");
+      screen.queryByRole("button", { name: "Remove august.pdf" }),
+    ).toBeNull();
     expect(shared.removeMutate).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole("button", { name: /^Remove$/ }));
-
-    expect(shared.removeMutate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        path: "Reports/august.pdf",
-        publication_id: "publication-owned-1",
-      }),
-      expect.anything(),
-    );
   });
-
   it.each(["pending", "discovery failure", "module failure"])(
     "holds sharing during %s",
     (failure) => {
@@ -749,23 +741,13 @@ describe("FilesPage", () => {
     expect(notes.textContent).toContain("—");
   });
 
-  it("asks before deleting, then deletes that file", () => {
+  it("withholds path-only personal deletion", () => {
     renderPage();
-
-    fireEvent.click(screen.getByRole("button", { name: "Delete august.pdf" }));
     expect(
-      screen.getByText("Delete august.pdf? This cannot be undone."),
-    ).toBeTruthy();
+      screen.queryByRole("button", { name: "Delete august.pdf" }),
+    ).toBeNull();
     expect(files.deleteMutate).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole("button", { name: /^Delete$/ }));
-
-    expect(files.deleteMutate).toHaveBeenCalledWith(
-      "Reports/august.pdf",
-      expect.anything(),
-    );
   });
-
   it("says when there is nothing yet, and how something gets here", () => {
     files.data = { files: [], count: 0, truncated: false };
     renderPage();
@@ -779,11 +761,7 @@ describe("FilesPage", () => {
     files.data = { files: [AUGUST], count: 1, truncated: true };
     renderPage();
 
-    expect(
-      screen.getByText(
-        "Showing the first 1 files. Delete some to see the rest.",
-      ),
-    ).toBeTruthy();
+    expect(screen.getByText("Showing the first 1 files.")).toBeTruthy();
   });
 
   it("offers to try again when the list could not be loaded", () => {
@@ -821,11 +799,7 @@ describe("FilesPage", () => {
     );
     expect(screen.queryByTestId("my-files-empty")).toBeNull();
     expect(screen.getByText("Showing 0 of 2 loaded files")).toBeTruthy();
-    expect(
-      screen.getByText(
-        "Showing the first 2 files. Delete some to see the rest.",
-      ),
-    ).toBeTruthy();
+    expect(screen.getByText("Showing the first 2 files.")).toBeTruthy();
   });
 
   it("sorts by name or newest and addresses duplicate names by their original path", () => {
@@ -868,12 +842,9 @@ describe("FilesPage", () => {
       screen.getByRole("searchbox", { name: "Find loaded files" }),
       { target: { value: "B/" } },
     );
-    fireEvent.click(screen.getByRole("button", { name: "Delete report.pdf" }));
-    fireEvent.click(screen.getByRole("button", { name: /^Delete$/ }));
-    expect(files.deleteMutate).toHaveBeenCalledWith(
-      "B/report.pdf",
-      expect.anything(),
-    );
+    expect(
+      screen.getByRole("link", { name: "report.pdf" }).getAttribute("href"),
+    ).toContain("B/report.pdf");
   });
 
   it("matches canonically equivalent Unicode and keeps each tab's filter separate", () => {

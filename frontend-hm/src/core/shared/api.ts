@@ -38,6 +38,8 @@ export interface SharedFileInfo {
   can_remove: boolean;
   /** Omitted only by older Gateways; null denotes an operator-placed file. */
   publication_id?: string | null;
+  /** Revision returned for the physical copy created by this publish. */
+  revision?: string;
 }
 
 export interface SharedFilesListResponse {
@@ -75,6 +77,7 @@ export class SharedRequestError extends FileAreaRequestError {
     status: number,
     message: string,
     refusal: StorageRefusal | null = null,
+    public readonly routeMissing = false,
   ) {
     super(status, message, "SharedRequestError", refusal);
   }
@@ -85,9 +88,12 @@ export function urlOfSharedFile(path: string, { download = false } = {}) {
   return `${getBackendBaseURL()}/api/shared/${encodeRelativePath(path)}${download ? "?download=true" : ""}`;
 }
 
-export async function listSharedFiles(): Promise<SharedFilesListResponse> {
+export async function listSharedFiles(
+  signal?: AbortSignal,
+): Promise<SharedFilesListResponse> {
   const response = await fetch(`${getBackendBaseURL()}/api/shared`, {
     cache: "no-store",
+    signal,
   });
   if (!response.ok) {
     const failure = await readFileAreaFailure(
@@ -146,6 +152,12 @@ export async function publishToShared(
       failure.refusal,
     );
   }
+  if (response.status !== 200 && response.status !== 201) {
+    throw new SharedRequestError(
+      response.status,
+      "No completed publication receipt",
+    );
+  }
   return {
     file: (await response.json()) as SharedFileInfo,
     alreadyShared: response.status === 200,
@@ -163,4 +175,75 @@ export function canPublishToShared(filepath: string) {
     filepath.startsWith("/mnt/user-data/uploads/") ||
     filepath.startsWith("/mnt/user-data/files/")
   );
+}
+
+export interface PublicationSelection {
+  path: string;
+  name: string;
+  revision: string;
+  publication_id: string | null;
+  can_remove: boolean;
+}
+
+async function guardedFailure(response: Response, fallback: string) {
+  const { message, refusal, detail } = await readFileAreaFailure(
+    response,
+    fallback,
+  );
+  return new SharedRequestError(
+    response.status,
+    message,
+    refusal,
+    response.status === 404 && detail === "Not Found",
+  );
+}
+
+export async function selectSharedFile(
+  path: string,
+  signal: AbortSignal,
+): Promise<PublicationSelection> {
+  const response = await fetch(
+    getBackendBaseURL() +
+      "/api/file-browser/v1/shared/selection?" +
+      new URLSearchParams({ path }).toString(),
+    { signal, cache: "no-store" },
+  );
+  if (!response.ok)
+    throw await guardedFailure(
+      response,
+      "Could not select the current publication",
+    );
+  return response.json() as Promise<PublicationSelection>;
+}
+
+export async function removeSelectedSharedFile(
+  selection: PublicationSelection,
+  operationId: string,
+  signal?: AbortSignal,
+) {
+  if (
+    !selection.can_remove ||
+    !selection.revision ||
+    (selection.publication_id !== null && !selection.publication_id)
+  )
+    throw new Error("Missing selected publication identity");
+  const response = await fetch(
+    getBackendBaseURL() + "/api/file-browser/v1/shared/remove",
+    {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        path: selection.path,
+        expected_revision: selection.revision,
+        expected_publication_id: selection.publication_id,
+        operation_id: operationId,
+      }),
+    },
+  );
+  if (response.status !== 204)
+    throw await guardedFailure(
+      response,
+      "Could not remove the selected publication",
+    );
 }

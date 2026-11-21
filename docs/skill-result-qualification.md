@@ -14,9 +14,14 @@ facts. The static scanner flags OOXML namespace `http:` identifiers; those are
 inert document metadata and the writers perform no network requests.
 
 The browser verifies the actual tool transcript, source bytes, table totals,
-steps, caveats, custom labels, downloaded export hashes, selected-file Save,
-Share and Undo. It also exercises malformed-view and plain-PDF ordinary controls,
-owner isolation, and an inert Shared archive before explicit recipient installation.
+steps, caveats, custom labels, downloaded export hashes and selected-file Save
+and Share. In ordinary storage it checks the success notice, the absence of
+Undo and the published bytes. It then takes back each copy through the
+publisher's existing authenticated API using the returned publication ID.
+The [managed Shared tests](../backend/tests/test_file_browser_shared_remove.py)
+cover removal with the original revision, publication ID and operation ID.
+The journey also exercises malformed views, plain PDFs, owner isolation and
+an inert Shared archive before explicit recipient installation.
 Gateway, graph, files, frontend and authentication use production implementations;
 there are no browser API mocks or acceptance bypass routes.
 

@@ -145,7 +145,7 @@ async function files(page: Page) {
   });
 }
 
-test("checking a lost rename or delete leaves the current file in place", async ({
+test("checking an unanswered folder creation leaves current files in place", async ({
   page,
   request,
 }) => {
@@ -168,7 +168,8 @@ test("checking a lost rename or delete leaves the current file in place", async 
         `replacement-${writes}`,
         revision,
       );
-      if (body.action === "rename") await route.abort("connectionreset");
+      expect(body.action).toBe("mkdir");
+      if (writes === 1) await route.abort("connectionreset");
       else await route.fulfill({ status: 502, body: "unavailable" });
     } else {
       expect(sent.method()).toBe("GET");
@@ -184,13 +185,16 @@ test("checking a lost rename or delete leaves the current file in place", async 
     }
   });
   await files(page);
-  for (const [index, action] of ["Rename", "Delete"].entries()) {
-    const row = page.getByRole("row").filter({ hasText: "current.txt" });
-    await row.getByRole("button", { name: action, exact: true }).click();
+  const row = page.getByRole("row").filter({ hasText: "current.txt" });
+  await expect(row).toBeVisible();
+  await expect(row.getByRole("button", { name: /Rename|Delete/ })).toHaveCount(
+    0,
+  );
+  for (const [index, folder] of ["first-folder", "second-folder"].entries()) {
+    await page.getByRole("button", { name: "New folder", exact: true }).click();
     const dialog = page.getByRole("dialog");
-    if (action === "Rename")
-      await dialog.getByRole("textbox").fill("moved.txt");
-    await dialog.getByRole("button", { name: action, exact: true }).click();
+    await dialog.getByRole("textbox").fill(folder);
+    await dialog.getByRole("button", { name: "Create", exact: true }).click();
     await expect(page.getByText("No result is recorded yet.")).toBeVisible();
     const before = reads.length;
     await page.getByRole("button", { name: "Check again" }).click();
@@ -201,7 +205,7 @@ test("checking a lost rename or delete leaves the current file in place", async 
     );
     await page
       .getByRole("article")
-      .filter({ hasText: "current.txt" })
+      .filter({ hasText: folder })
       .getByRole("button", { name: "Close" })
       .click();
   }
@@ -311,8 +315,7 @@ test("a check can see no record while the first upload is committing, then recov
   expect((await stored(request, "deferred.txt")).text).toBe("committed once");
 });
 
-test("an in-flight first rename or delete cannot be repeated by checking its missing receipt", async ({
-  page,
+test("legacy in-flight rename and remove leave the replacement untouched across receipt checks", async ({
   request,
 }) => {
   await seed(request, "concurrent.txt", "previous");
@@ -321,74 +324,46 @@ test("an in-flight first rename or delete cannot be repeated by checking its mis
       await request.get(gateway.origin + "/test/observed", { headers: cookie })
     ).json()) as { receipts: number; current: string; destination: boolean };
   const initial = await observe();
-  let mutation: ReturnType<APIRequestContext["post"]> | undefined;
-  let writes = 0;
-  let reads = 0;
-  let expectedHandle = "";
-  await wire(page, async (route, url) => {
-    const sent = route.request();
-    if (sent.method() === "POST") {
-      const body = sent.postDataJSON() as {
-        action: string;
-        operation_id: string;
-      };
-      expectedHandle = body.operation_id;
-      writes++;
-      mutation = request.post(url, { headers: cookie, data: body });
-      const held = await request.get(gateway.origin + "/test/intent", {
-        headers: cookie,
-        params: { action: body.action },
-      });
-      expect(await held.json()).toEqual({ entered: true });
-      if (body.action === "rename") await route.abort("connectionreset");
-      else await route.fulfill({ status: 502, body: "unavailable" });
-    } else {
-      expect(sent.method()).toBe("GET");
-      expect(sent.postData()).toBeNull();
-      expect(url).toContain("/home/operations/" + expectedHandle);
-      const result = await route.fetch({
-        url,
-        headers: { ...sent.headers(), ...cookie },
-      });
-      expect(await result.json()).toEqual({ status: "unknown" });
-      reads++;
-      await route.fulfill({ response: result });
-    }
-  });
-  await files(page);
-  for (const [index, action] of ["rename", "remove"].entries()) {
-    const button = action === "rename" ? "Rename" : "Delete";
-    await page
-      .getByRole("row")
-      .filter({ hasText: "concurrent.txt" })
-      .getByRole("button", { name: button, exact: true })
-      .click();
-    const dialog = page.getByRole("dialog");
-    if (action === "rename")
-      await dialog.getByRole("textbox").fill("moved-concurrent.txt");
-    await dialog.getByRole("button", { name: button, exact: true }).click();
-    await expect(page.getByText("No result is recorded yet.")).toBeVisible();
-    const before = reads;
-    await page.getByRole("button", { name: "Check again" }).click();
-    await expect.poll(() => reads).toBeGreaterThan(before);
+  for (const action of ["rename", "remove"] as const) {
+    const operation_id = op();
+    const data = {
+      operation_id,
+      action,
+      path: "concurrent.txt",
+      ...(action === "rename" ? { destination: "moved-concurrent.txt" } : {}),
+    };
+    const pending = request.post(homeURL() + "/operations", {
+      headers: cookie,
+      data,
+    });
+    const held = await request.get(gateway.origin + "/test/intent", {
+      headers: cookie,
+      params: { action },
+    });
+    expect(await held.json()).toEqual({ entered: true });
     const expected = {
       receipts: initial.receipts,
       current: "replacement-" + action,
       destination: false,
     };
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const receipt = await request.get(
+          homeURL() + "/operations/" + operation_id,
+          { headers: cookie },
+        );
+        expect(receipt.status()).toBe(200);
+        expect(await receipt.json()).toEqual({ status: "unknown" });
+        expect(await observe()).toEqual(expected);
+      }
+    } finally {
+      await request.post(gateway.origin + "/test/commit", {
+        headers: cookie,
+        params: { action },
+      });
+    }
+    expect((await pending).status()).toBe(503);
     expect(await observe()).toEqual(expected);
-    await request.post(gateway.origin + "/test/commit", {
-      headers: cookie,
-      params: { action },
-    });
-    expect((await mutation!)?.status()).toBe(503);
-    expect(await observe()).toEqual(expected);
-    expect(writes).toBe(index + 1);
-    await page
-      .getByRole("article")
-      .filter({ hasText: "concurrent.txt" })
-      .getByRole("button", { name: "Close" })
-      .click();
   }
 });
 

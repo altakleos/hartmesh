@@ -9,20 +9,61 @@ const artifact =
 async function openSharedFiles(page: Page) {
   // Both tabs contain acceptance.txt. Wait for Shared's own fresh response
   // and list, rather than matching the previous tab during URL navigation.
-  const listing = page.waitForResponse(
-    (response) =>
-      new URL(response.url()).pathname === "/api/shared" &&
-      response.request().method() === "GET",
-  );
-  await page.getByRole("tab", { name: "Shared", exact: true }).click();
+  const listing = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      url.pathname === "/api/file-browser/v1/shared/folder" &&
+      url.searchParams.get("path") === "" &&
+      response.request().method() === "GET"
+    );
+  });
+  const personal = page.getByRole("region", { name: "My files", exact: true });
+  await expect(personal).toBeVisible();
+  const rail = personal.getByRole("link", {
+    name: "Company shared",
+    exact: true,
+  });
+  if (await rail.isVisible()) {
+    await rail.click();
+  } else {
+    await personal
+      .getByRole("button", { name: "Locations", exact: true })
+      .click();
+    await page
+      .getByRole("dialog")
+      .getByRole("link", { name: "Company shared", exact: true })
+      .click();
+  }
   const response = await listing;
   expect(response.status(), await response.text()).toBe(200);
+  expect(await response.json()).toMatchObject({
+    files: expect.arrayContaining([
+      expect.objectContaining({
+        kind: "file",
+        path: "acceptance.txt",
+        url: "/api/shared/acceptance.txt",
+      }),
+    ]),
+    truncated: false,
+  });
   await expect(page).toHaveURL(/\/workspace\/files\?tab=shared$/);
-  await expect(
-    page
-      .getByTestId("shared-files-list")
-      .getByRole("link", { name: "acceptance.txt", exact: true }),
-  ).toBeVisible();
+  const shared = page.getByRole("region", {
+    name: "Company shared",
+    exact: true,
+  });
+  const file = shared.getByRole("link", {
+    name: "acceptance.txt",
+    exact: true,
+  });
+  await expect(file).toBeVisible();
+  await expect(file).toHaveAttribute("href", "/api/shared/acceptance.txt");
+  await shared
+    .getByRole("button", { name: "More actions for acceptance.txt" })
+    .click();
+  const details = page.getByRole("dialog", { name: "acceptance.txt" });
+  await expect(details).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(details).toBeHidden();
 }
 
 async function attachFromFirstConversation(page: Page, sourceThread: string) {

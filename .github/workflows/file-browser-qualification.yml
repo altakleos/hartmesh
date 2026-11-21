@@ -1,0 +1,90 @@
+name: Workspace file browser qualification
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/file-browser-qualification.yml"
+      - "scripts/docker_acceptance.py"
+      - "docker/acceptance/file-browser/**"
+      - "frontend-hm/playwright.file-browser.config.ts"
+      - "frontend-hm/tests/e2e-file-browser-qualification/**"
+  workflow_dispatch:
+    inputs:
+      backend_image:
+        description: Signed candidate backend repository@sha256:digest
+        type: string
+        required: true
+      frontend_image:
+        description: Signed candidate frontend repository@sha256:digest
+        type: string
+        required: true
+      previous_tag:
+        description: Verified previous published release tag for mixed-version checks
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  packages: read
+  attestations: read
+
+jobs:
+  browse:
+    name: Workspace Files (${{ matrix.stores }}, ${{ matrix.pair }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        stores: [sqlite, postgres-redis]
+        pair: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["current","previous-ui","previous-gateway"]' || '["current"]') }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install crane for candidate provenance
+        if: github.event_name == 'workflow_dispatch'
+        uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b
+      - name: Prepare pinned Chromium
+        working-directory: frontend-hm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.26.2 --activate
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install chromium --with-deps
+      - name: Qualify source build
+        if: github.event_name == 'pull_request'
+        env:
+          STORES: ${{ matrix.stores }}
+        run: python3 scripts/docker_acceptance.py --measure-files current --stores "$STORES" --artifacts "$RUNNER_TEMP/files"
+      - name: Qualify signed application pair
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STORES: ${{ matrix.stores }}
+          PAIR: ${{ matrix.pair }}
+          FLOOR: ${{ inputs.previous_tag }}
+          BACKEND: ${{ inputs.backend_image }}
+          FRONTEND: ${{ inputs.frontend_image }}
+        run: |
+          args=(--measure-files "$PAIR" --stores "$STORES" --artifacts "$RUNNER_TEMP/files")
+          if [[ "$PAIR" != current ]]; then
+            [[ "$FLOOR" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\+hartmesh\.[0-9]+$ ]]
+            case "$PAIR" in previous-ui) component=frontend ;; previous-gateway) component=backend ;; *) exit 1 ;; esac
+            previous=$(git show "refs/tags/${FLOOR}:deploy/compose/images.txt" | grep -E "^ghcr.io/${GITHUB_REPOSITORY,,}-${component}@sha256:[0-9a-f]{64}$")
+            case "$component" in frontend) FRONTEND="$previous" ;; backend) BACKEND="$previous" ;; esac
+            args+=(--file-browser-floor "$FLOOR")
+          fi
+          python3 scripts/docker_acceptance.py "${args[@]}" --backend-image "$BACKEND" --frontend-image "$FRONTEND"
+      - name: Upload qualification observations
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: workspace-files-${{ matrix.stores }}-${{ matrix.pair }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/files
+          if-no-files-found: error
+          retention-days: 90
