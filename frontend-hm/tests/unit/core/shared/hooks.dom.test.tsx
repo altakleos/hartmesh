@@ -20,7 +20,19 @@ const router = rs.hoisted(() => ({ push: rs.fn() }));
 rs.mock("sonner", () => ({ toast }));
 rs.mock("next/navigation", () => ({ useRouter: () => router }));
 rs.mock("@/core/auth/AuthProvider", () => ({
-  useAuth: () => ({ user: { id: "alice", system_role: "user" } }),
+  useAuth: () => ({
+    user: { id: "alice", system_role: "user", permissions: gate.permissions },
+  }),
+}));
+const gate = rs.hoisted(() => ({
+  enabled: true,
+  permissions: undefined as string[] | undefined,
+}));
+rs.mock("@/core/file-areas/browser-protocol", () => ({
+  useBrowserProtocol: () => ({
+    supports: () => gate.enabled,
+    refresh: rs.fn(),
+  }),
 }));
 const storageState = rs.hoisted(() => ({ state: "off", own: "ready" }));
 rs.mock("@/core/features", () => ({
@@ -29,7 +41,7 @@ rs.mock("@/core/features", () => ({
 }));
 rs.mock("@/core/shared/api", () => ({
   publishToShared: rs.fn(),
-  removeSharedFile: rs.fn(),
+  removeSelectedSharedFile: rs.fn(),
   listSharedFiles: rs.fn(),
 }));
 
@@ -38,11 +50,11 @@ import { FileAreaRequestError } from "@/core/file-areas/http";
 import { readStorageRefusal } from "@/core/file-areas/storage-state";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
-import { publishToShared, removeSharedFile } from "@/core/shared/api";
+import { publishToShared, removeSelectedSharedFile } from "@/core/shared/api";
 import { useShareWithEveryone } from "@/core/shared/hooks";
 
 const mockedPublish = rs.mocked(publishToShared);
-const mockedRemove = rs.mocked(removeSharedFile);
+const mockedRemove = rs.mocked(removeSelectedSharedFile);
 
 function createWrapper() {
   const queryClient = new QueryClient({
@@ -78,6 +90,7 @@ function published(name: string, alreadyShared = false) {
       from_thread_id: null,
       can_remove: true,
       publication_id: `publication-${name}`,
+      revision: "observed-" + name,
     },
   };
 }
@@ -86,6 +99,8 @@ type ToastOptions = { action: { label: string; onClick: () => void } };
 
 describe("useShareWithEveryone", () => {
   beforeEach(() => {
+    gate.enabled = true;
+    gate.permissions = undefined;
     storageState.state = "off";
     storageState.own = "ready";
     mockedPublish.mockReset();
@@ -99,6 +114,43 @@ describe("useShareWithEveryone", () => {
 
   afterEach(cleanup);
 
+  it("a publisher with write-only permission can publish but cannot undo", async () => {
+    gate.permissions = ["threads:read", "threads:write"];
+    mockedPublish.mockResolvedValueOnce(published("report.txt"));
+    const { result } = renderHook(() => useShareWithEveryone(), {
+      wrapper: createWrapper(),
+    });
+    await act(async () => {
+      await result.current.share(["/mnt/user-data/files/report.txt"]);
+    });
+    expect(mockedPublish).toHaveBeenCalledTimes(1);
+    expect(toast.success.mock.calls[0]?.[1]).toMatchObject({
+      action: undefined,
+    });
+  });
+  it.each([
+    "old gateway",
+    "missing revision",
+    "ineligible row",
+    "absent identity",
+  ])("suppresses Undo for %s", async (reason) => {
+    const reply = published("report.txt");
+    if (reason === "old gateway") gate.enabled = false;
+    if (reason === "missing revision") reply.file.revision = "";
+    if (reason === "ineligible row") reply.file.can_remove = false;
+    if (reason === "absent identity") reply.file.publication_id = "";
+    mockedPublish.mockResolvedValue(reply);
+    const { result } = renderHook(() => useShareWithEveryone(), {
+      wrapper: createWrapper(),
+    });
+    await act(async () => {
+      await result.current.share(["/mnt/user-data/files/report.txt"]);
+    });
+    expect(toast.success.mock.calls[0]?.[1]).toMatchObject({
+      action: undefined,
+    });
+    expect(mockedRemove).not.toHaveBeenCalled();
+  });
   it("explains company capacity and busy refusals without exposing server text", async () => {
     const { result } = renderHook(() => useShareWithEveryone("thread-1"), {
       wrapper: createWrapper(),
@@ -235,9 +287,11 @@ describe("useShareWithEveryone", () => {
   });
 
   it("shares each path and offers to take back what it put there", async () => {
-    mockedPublish.mockImplementation(async ({ path }) =>
-      published(path.split("/").pop()!),
-    );
+    mockedPublish.mockImplementation(async ({ path, folder }) => {
+      const reply = published(path.split("/").pop()!);
+      if (folder) reply.file.path = folder + "/" + reply.file.name;
+      return reply;
+    });
     mockedRemove.mockResolvedValue(undefined);
     const { result } = renderHook(() => useShareWithEveryone("thread-1"), {
       wrapper: createWrapper(),
@@ -267,18 +321,30 @@ describe("useShareWithEveryone", () => {
     });
     expect(mockedRemove).toHaveBeenNthCalledWith(
       1,
-      "a.pdf",
-      "publication-a.pdf",
+      expect.objectContaining({
+        path: "Reports/a.pdf",
+        publication_id: "publication-a.pdf",
+        revision: "observed-a.pdf",
+      }),
+      expect.stringMatching(/^[a-f0-9]{32}$/),
+      expect.any(AbortSignal),
     );
     expect(mockedRemove).toHaveBeenNthCalledWith(
       2,
-      "a.xlsx",
-      "publication-a.xlsx",
+      expect.objectContaining({
+        path: "Reports/a.xlsx",
+        publication_id: "publication-a.xlsx",
+        revision: "observed-a.xlsx",
+      }),
+      expect.stringMatching(/^[a-f0-9]{32}$/),
+      expect.any(AbortSignal),
     );
   });
 
   it("says which folder it went into, because the person did not choose it", async () => {
-    mockedPublish.mockResolvedValue(published("august.pdf"));
+    const actual = published("august.pdf");
+    actual.file.path = "Accepted/august.pdf";
+    mockedPublish.mockResolvedValue(actual);
     const { result } = renderHook(() => useShareWithEveryone("thread-1"), {
       wrapper: createWrapper(),
     });
@@ -291,7 +357,7 @@ describe("useShareWithEveryone", () => {
     });
 
     expect(toast.success).toHaveBeenCalledWith(
-      "Shared august.pdf with everyone at the company, in Reports",
+      "Shared august.pdf with everyone at the company, in Accepted",
       expect.anything(),
     );
   });
@@ -352,7 +418,7 @@ describe("useShareWithEveryone", () => {
     expect(toast.info).toHaveBeenCalledTimes(1);
     const [message, options] = toast.info.mock.calls[0]!;
     expect(message).toBe("august.pdf is already shared with everyone");
-    expect((options as ToastOptions).action.label).toBe("Open Shared");
+    expect((options as ToastOptions).action.label).toBe("Open Company shared");
     (options as ToastOptions).action.onClick();
     expect(router.push).toHaveBeenCalledWith("/workspace/files?tab=shared");
     expect(mockedRemove).not.toHaveBeenCalled();
@@ -381,7 +447,15 @@ describe("useShareWithEveryone", () => {
       (options as ToastOptions).action.onClick();
     });
     expect(mockedRemove).toHaveBeenCalledTimes(1);
-    expect(mockedRemove).toHaveBeenCalledWith("b.xlsx", "publication-b.xlsx");
+    expect(mockedRemove).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: "b.xlsx",
+        publication_id: "publication-b.xlsx",
+        revision: "observed-b.xlsx",
+      }),
+      expect.any(String),
+      expect.any(AbortSignal),
+    );
   });
 
   it("reports a failure in the person's words and keeps what landed", async () => {

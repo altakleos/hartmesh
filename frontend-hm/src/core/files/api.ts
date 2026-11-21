@@ -58,9 +58,12 @@ export function urlOfMyFile(path: string, { download = false } = {}) {
   return `${getBackendBaseURL()}/api/files/${encodeRelativePath(path)}${download ? "?download=true" : ""}`;
 }
 
-export async function listMyFiles(): Promise<MyFilesListResponse> {
+export async function listMyFiles(
+  signal?: AbortSignal,
+): Promise<MyFilesListResponse> {
   const response = await fetch(`${getBackendBaseURL()}/api/files`, {
     cache: "no-store",
+    signal,
   });
   if (!response.ok) {
     const failure = await readFileAreaFailure(response, "Failed to list files");

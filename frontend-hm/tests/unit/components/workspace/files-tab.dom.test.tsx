@@ -19,6 +19,11 @@ const state = rs.hoisted(() => ({
     reason: null as string | null,
   },
 }));
+rs.mock("next/navigation", () => ({
+  useRouter: () => ({ push: rs.fn() }),
+  useSearchParams: () => new URLSearchParams(),
+  usePathname: () => "/workspace/instances",
+}));
 rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({
@@ -29,7 +34,11 @@ rs.mock("@/core/auth/AuthProvider", () => ({
     },
   }),
 }));
+rs.mock("@/core/file-areas/browser-renderer", () => ({
+  useBrowserRenderer: () => ({ native: false, choice: undefined }),
+}));
 rs.mock("@/core/features", () => ({
+  useFeatures: () => ({ data: undefined }),
   useAgentInstances: () => state.feature,
   useStorage: () => null,
   useBranding: () => ({ providerName: "Provider", supportURL: null }),
@@ -581,33 +590,18 @@ test("shows the returned collision-safe name", async () => {
   await choose();
   await screen.findByText("Saved as note (2).txt");
 });
-test("directory rename and deletion use only audited agent routes", async () => {
+test("a Gateway without guarded replacement checks offers no rename or delete", async () => {
   rs.mocked(spaces.listSpaceFiles).mockResolvedValue({
     files: [file],
     truncated: false,
   });
   show();
-  fireEvent.click(await screen.findByRole("button", { name: "Rename" }));
-  fireEvent.change(screen.getByLabelText("New name"), {
-    target: { value: "renamed.txt" },
-  });
-  fireEvent.click(
-    within(screen.getByRole("dialog")).getByRole("button", { name: "Rename" }),
-  );
-  await waitFor(() =>
-    expect(transfers.changeAgentFile).toHaveBeenCalledWith(
-      id,
-      expect.objectContaining({
-        action: "rename",
-        path: "note.txt",
-        destination: "renamed.txt",
-        operation_id: expect.stringMatching(/^[0-9a-f]{32}$/),
-      }),
-      expect.any(Object),
-    ),
-  );
+  await screen.findByRole("button", { name: "note.txt" });
+  expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+  expect(transfers.changeAgentFile).not.toHaveBeenCalled();
 });
-test.each(["edit", "rename"])(
+test.each(["edit", "mkdir"])(
   "a busy %s keeps its original ID across manual checks and never resends the change",
   async (action) => {
     rs.mocked(spaces.listSpaceFiles).mockResolvedValue({
@@ -628,13 +622,15 @@ test.each(["edit", "rename"])(
       });
       fireEvent.click(screen.getByRole("button", { name: "Save" }));
     } else {
-      fireEvent.click(await screen.findByRole("button", { name: "Rename" }));
-      fireEvent.change(screen.getByLabelText("New name"), {
+      fireEvent.click(
+        await screen.findByRole("button", { name: "New folder" }),
+      );
+      fireEvent.change(screen.getByLabelText("Folder name"), {
         target: { value: "renamed.txt" },
       });
       fireEvent.click(
         within(screen.getByRole("dialog")).getByRole("button", {
-          name: "Rename",
+          name: "Create",
         }),
       );
     }

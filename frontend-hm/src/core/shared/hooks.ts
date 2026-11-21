@@ -1,9 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import { toast } from "sonner";
 
+import { hasCeiling } from "../agent-instances/presentation";
+import { useAuth } from "../auth/AuthProvider";
 import { useStorage } from "../features";
+import { parentFolder } from "../file-areas/browser";
+import { useBrowserProtocol } from "../file-areas/browser-protocol";
 import { useFileActionLifetime } from "../file-areas/file-action-lifetime";
 import { useStorageCopy } from "../file-areas/storage-copy";
 import { useI18n } from "../i18n/hooks";
@@ -11,18 +15,25 @@ import { useI18n } from "../i18n/hooks";
 import {
   listSharedFiles,
   publishToShared,
-  removeSharedFile,
+  removeSelectedSharedFile,
+  type PublicationSelection,
   type PublishOutcome,
   type PublishToSharedRequest,
-  type SharedFileInfo,
 } from "./api";
 
 export const SHARED_FILES_QUERY_KEY = ["files", "shared"] as const;
 
 export function useSharedFiles() {
+  const { user } = useAuth();
   return useQuery({
-    queryKey: SHARED_FILES_QUERY_KEY,
-    queryFn: () => listSharedFiles(),
+    queryKey: [
+      ...SHARED_FILES_QUERY_KEY,
+      user?.id,
+      user?.system_role,
+      user?.permissions,
+    ],
+    queryFn: ({ signal }) => listSharedFiles(signal),
+    gcTime: 0,
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
@@ -30,17 +41,69 @@ export function useSharedFiles() {
 
 export function useRemoveSharedFile() {
   const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (
-      file: string | Pick<SharedFileInfo, "path" | "publication_id">,
-    ) =>
-      typeof file === "string"
-        ? removeSharedFile(file)
-        : removeSharedFile(file.path, file.publication_id),
+  const { user } = useAuth(),
+    protocol = useBrowserProtocol();
+  const refusalKey = [
+    "file-browser-availability",
+    user?.id,
+    user?.system_role,
+    user?.permissions,
+    "shared-remove",
+  ];
+  const refusal = useQuery({
+    queryKey: refusalKey,
+    queryFn: () => false,
+    enabled: false,
+    initialData: false,
+    staleTime: Infinity,
+  });
+  const enabled =
+    !refusal.data &&
+    !!user &&
+    hasCeiling(user.permissions, "threads:delete") &&
+    protocol.supports("shared", "remove");
+  const live = useRef(enabled);
+  live.current = enabled;
+  const lifetime = useFileActionLifetime();
+  const refused = (error: unknown) => {
+    if (
+      error &&
+      typeof error === "object" &&
+      "status" in error &&
+      error.status === 404 &&
+      "routeMissing" in error &&
+      error.routeMissing === true
+    ) {
+      queryClient.setQueryData(refusalKey, true);
+    }
+    void queryClient.invalidateQueries({ queryKey: SHARED_FILES_QUERY_KEY });
+    void queryClient.invalidateQueries({ queryKey: ["file-browser"] });
+    void protocol.refresh();
+  };
+  const mutation = useMutation({
+    mutationFn: (action: {
+      selection: PublicationSelection;
+      operationId: string;
+    }) => {
+      if (
+        !live.current ||
+        queryClient.getQueryData(refusalKey) === true ||
+        !lifetime.active
+      )
+        throw new Error("Publication removal is unavailable");
+      return removeSelectedSharedFile(
+        action.selection,
+        action.operationId,
+        lifetime.signal,
+      );
+    },
+    onError: refused,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: SHARED_FILES_QUERY_KEY });
+      void queryClient.invalidateQueries({ queryKey: ["file-browser"] });
     },
   });
+  return { ...mutation, enabled, refused };
 }
 
 export function usePublishToShared() {
@@ -49,6 +112,7 @@ export function usePublishToShared() {
     mutationFn: (request: PublishToSharedRequest) => publishToShared(request),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: SHARED_FILES_QUERY_KEY });
+      void queryClient.invalidateQueries({ queryKey: ["file-browser"] });
     },
   });
 }
@@ -74,7 +138,11 @@ export function useShareWithEveryone(threadId?: string) {
   const lifetime = useFileActionLifetime();
   const copy = useStorageCopy("shared");
   const storage = useStorage();
-  const available = storage.state !== "unavailable";
+  const { user } = useAuth();
+  const available =
+    !!user &&
+    hasCeiling(user.permissions, "threads:write") &&
+    storage.state !== "unavailable";
   const openShared = useCallback(() => {
     if (lifetime.active) router.push("/workspace/files?tab=shared");
   }, [lifetime, router]);
@@ -114,7 +182,6 @@ export function useShareWithEveryone(threadId?: string) {
               : undefined,
           ),
         );
-        return published;
       }
       if (published.length === 0) {
         return published;
@@ -125,6 +192,7 @@ export function useShareWithEveryone(threadId?: string) {
         .filter(({ outcome }) => !outcome.alreadyShared)
         .map(({ outcome }) => outcome.file);
       if (fresh.length === 0) {
+        if (failed > 0) return published;
         // Shared holds bytes, so the entry that was there may carry another
         // name than the one the person clicked; the sentence says both, or
         // it reads as the wrong file.
@@ -144,41 +212,69 @@ export function useShareWithEveryone(threadId?: string) {
       }
       // The folder is derived from the file, so the person never chose it:
       // the toast is where they find out which one it was.
+      const undo =
+        remove.enabled &&
+        fresh.every(
+          (file) => file.can_remove && !!file.publication_id && !!file.revision,
+        )
+          ? fresh.map((file) => ({
+              selection: {
+                path: file.path,
+                name: file.name,
+                publication_id: file.publication_id!,
+                revision: file.revision!,
+                can_remove: true,
+              },
+              operationId: crypto.randomUUID().replaceAll("-", ""),
+            }))
+          : [];
+      const destination = parentFolder(fresh[0]!.path);
+      const commonFolder = fresh.every(
+        (file) => parentFolder(file.path) === destination,
+      )
+        ? destination
+        : "";
+      if (failed && !undo.length) return published;
+      const notify = failed ? toast.info : toast.success;
       lifetime.toasts.add(
-        toast.success(
+        notify(
           fresh.length === 1
-            ? folder
-              ? t.shared.sharedInFolder(fresh[0]!.name, folder)
+            ? commonFolder
+              ? t.shared.sharedInFolder(fresh[0]!.name, commonFolder)
               : t.shared.shared(fresh[0]!.name)
-            : folder
-              ? t.shared.sharedManyInFolder(fresh.length, folder)
+            : commonFolder
+              ? t.shared.sharedManyInFolder(fresh.length, commonFolder)
               : t.shared.sharedMany(fresh.length),
           {
             // Handing a file to the whole company is one click, so taking it
             // back is one click too, right where the person is looking.
-            action: {
-              label: t.shared.undo,
-              onClick: () => {
-                void (async () => {
-                  try {
-                    for (const file of fresh) {
-                      if (!lifetime.active) return;
-                      await remove.mutateAsync(file);
-                    }
-                    if (!lifetime.active) return;
-                    lifetime.toasts.add(
-                      toast.success(t.shared.undone(fresh[0]!.name)),
-                    );
-                  } catch (error) {
-                    if (!lifetime.active) return;
-                    console.error("Undo share failed:", error);
-                    lifetime.toasts.add(
-                      toast.error(copy.message(error, t.shared.removeFailed)),
-                    );
-                  }
-                })();
-              },
-            },
+            action: undo.length
+              ? {
+                  label: t.shared.undo,
+                  onClick: () => {
+                    void (async () => {
+                      try {
+                        for (const action of undo) {
+                          if (!lifetime.active) return;
+                          await remove.mutateAsync(action);
+                        }
+                        if (!lifetime.active) return;
+                        lifetime.toasts.add(
+                          toast.success(t.shared.undone(fresh[0]!.name)),
+                        );
+                      } catch (error) {
+                        if (!lifetime.active) return;
+                        console.error("Undo share failed:", error);
+                        lifetime.toasts.add(
+                          toast.error(
+                            copy.message(error, t.shared.removeFailed),
+                          ),
+                        );
+                      }
+                    })();
+                  },
+                }
+              : undefined,
           },
         ),
       );

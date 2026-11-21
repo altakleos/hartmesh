@@ -312,10 +312,17 @@ formats. The report model schema ships with the skill. Generic business starters
 cover documents and spreadsheets; the report-enabled Compose provider explicitly
 selects the monthly-review starter, and tenant starter overrides still take priority.
 
-The Files page follows the selected tab in its URL, including Shared links and
-browser history. Each tab can filter loaded files by name or folder and sort by
-Name or Newest. Counts and truncation notices describe the loaded entries;
-folders remain visible on mobile. If report download availability cannot be
+Workspace Files and an agent’s Files tab use the same file browser on supported
+desktops. **Locations** opens My files, Company shared, and the agent homes
+you can inspect. Open a folder or search the loaded files; **More actions**
+shows the full path, current audience, and available actions. The address and
+Back button preserve your location. Agent searches filter the current folder.
+When a listing reaches its limit, the browser labels its results as partial.
+
+Touch devices open the classic view. Use **Use file browser** to switch on a
+supported Gateway, or **Use classic file view** to return. Sharing publishes
+a company-visible copy. Eligible new publications offer **Undo** when the
+Gateway can verify that exact copy. If report download availability cannot be
 checked, the card offers **Retry check**; it checks the files again without
 regenerating them.
 Operators can add a **Contact support** link to the workspace's **Settings and

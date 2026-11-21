@@ -1,6 +1,7 @@
 "use client";
 
 import { DownloadIcon, FolderIcon, Trash2Icon, UsersIcon } from "lucide-react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   useCallback,
@@ -33,11 +34,15 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatArtifactBytes } from "@/components/workspace/artifacts/artifact-file-preview";
 import { NativeDownloadLink } from "@/components/workspace/artifacts/native-download-link";
 import { FilesStateNotice } from "@/components/workspace/chats/files-state-notice";
+import { BrowserView } from "@/components/workspace/file-browser/browser-view";
+import { useBrowserCopy } from "@/components/workspace/file-browser/copy";
+import { BrowserLocations } from "@/components/workspace/file-browser/locations";
 import {
   WorkspaceBody,
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
+import { hasCeiling } from "@/core/agent-instances/presentation";
 import { useAuth } from "@/core/auth/AuthProvider";
 import {
   installedFileCollection,
@@ -46,6 +51,10 @@ import {
 import { useFrontendExtensions } from "@/core/extensions/hooks";
 import { useDocumentTitle, useStorage } from "@/core/features";
 import { STORAGE_REASONS, type StorageReason } from "@/core/features/api";
+import { browserFolder, browserHref } from "@/core/file-areas/browser";
+import { useRetireBrowserHistory } from "@/core/file-areas/browser-history";
+import { useBrowserProtocol } from "@/core/file-areas/browser-protocol";
+import { useBrowserRenderer } from "@/core/file-areas/browser-renderer";
 import {
   selectLoadedFiles,
   type FileListOrder,
@@ -56,13 +65,7 @@ import {
   readStorageRefusal,
   type StorageRefusal,
 } from "@/core/file-areas/storage-state";
-import {
-  MY_FILES_VIRTUAL_PREFIX,
-  urlOfMyFile,
-  useDeleteMyFile,
-  useMyFiles,
-  type MyFileInfo,
-} from "@/core/files";
+import { MY_FILES_VIRTUAL_PREFIX, urlOfMyFile, useMyFiles } from "@/core/files";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   urlOfSharedFile,
@@ -70,7 +73,10 @@ import {
   useShareWithEveryone,
   useSharedFiles,
   type SharedFileInfo,
+  selectSharedFile,
+  type PublicationSelection,
 } from "@/core/shared";
+import { useSpaceActionSignal } from "@/core/spaces/lifetime";
 import { formatTimeAgo } from "@/core/utils/datetime";
 
 type FilesTab = "mine" | "shared";
@@ -89,6 +95,15 @@ function useDeploymentRefusal(
     )
       report(refusal);
   }, [error, report]);
+}
+
+function readDenied(error: unknown) {
+  return (
+    !!error &&
+    typeof error === "object" &&
+    "status" in error &&
+    (error.status === 401 || error.status === 403)
+  );
 }
 
 function useBusyRetry(error: unknown, refetch: () => unknown) {
@@ -178,16 +193,29 @@ export default function FilesPage() {
           reason: failure.refusal.reason as StorageReason,
         }
       : discovered;
+  const browserCopy = useBrowserCopy();
+  const browserProtocol = useBrowserProtocol(),
+    renderer = useBrowserRenderer();
+  const legacy =
+    !renderer.native ||
+    !browserProtocol.supports(
+      searchParams?.get("tab") === "shared" ? "shared" : "personal",
+      "select",
+    );
+  const folder = browserFolder(searchParams?.get("folder") ?? null);
+  const denied = !user || !hasCeiling(user.permissions, "threads:read");
+  useRetireBrowserHistory("personal", denied);
+  useRetireBrowserHistory("shared", denied);
   const tab = tabOf(searchParams?.get("tab") ?? null);
   // The tab is also written back to the URL, so a person who copies the link
   // sends their colleague to the tab they were looking at.
   const setTab = (next: FilesTab) => {
-    router.replace(
-      next === "shared" ? "/workspace/files?tab=shared" : "/workspace/files",
+    router.push(
+      browserHref(next === "shared" ? "shared" : "personal", "", {
+        view: renderer.choice,
+      }),
     );
   };
-  // A row's Delete button is gone after a deletion, so focus returns to the
-  // heading rather than falling to the top of the document.
   const headingRef = useRef<HTMLHeadingElement>(null);
 
   useDocumentTitle(
@@ -199,45 +227,98 @@ export default function FilesPage() {
     <WorkspaceContainer>
       <WorkspaceHeader />
       <WorkspaceBody>
-        <div className="mx-auto flex w-full max-w-(--container-width-md) flex-col gap-4 p-6">
-          <div>
-            <h1
-              className="text-2xl font-semibold focus:outline-none"
-              ref={headingRef}
-              tabIndex={-1}
-            >
-              {t.files.pageTitle}
-            </h1>
-            <p className="text-muted-foreground mt-1 text-sm">
-              {tab === "shared" ? t.shared.description : t.files.description}
-            </p>
-          </div>
+        <div
+          className={
+            legacy
+              ? "mx-auto flex w-full max-w-(--container-width-md) flex-col gap-4 p-6"
+              : "mx-auto w-full max-w-7xl min-w-0 p-3 sm:p-5"
+          }
+        >
+          {legacy && (
+            <>
+              <div>
+                <h1
+                  className="text-2xl font-semibold focus:outline-none"
+                  ref={headingRef}
+                  tabIndex={-1}
+                >
+                  {t.files.pageTitle}
+                </h1>
+                <p className="text-muted-foreground mt-1 text-sm">
+                  {tab === "shared"
+                    ? t.shared.description
+                    : t.files.description}
+                </p>
+              </div>
 
-          <Tabs
-            onValueChange={(value) => setTab(value as FilesTab)}
-            value={tab}
-          >
-            <TabsList variant="line">
-              <TabsTrigger data-testid="files-tab-mine" value="mine">
-                {t.files.title}
-              </TabsTrigger>
-              <TabsTrigger data-testid="files-tab-shared" value="shared">
-                {t.shared.title}
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
+              <Tabs
+                onValueChange={(value) => setTab(value as FilesTab)}
+                value={tab}
+              >
+                <TabsList variant="line">
+                  <TabsTrigger data-testid="files-tab-mine" value="mine">
+                    {t.files.title}
+                  </TabsTrigger>
+                  <TabsTrigger data-testid="files-tab-shared" value="shared">
+                    {t.shared.title}
+                  </TabsTrigger>
+                </TabsList>
+              </Tabs>
 
-          {tab === "shared" ? (
+              {browserProtocol.supports(
+                tab === "shared" ? "shared" : "personal",
+                "select",
+              ) && (
+                <Link
+                  className="text-sm underline"
+                  href={browserHref(
+                    tab === "shared" ? "shared" : "personal",
+                    folder ?? "",
+                    { view: "browser" },
+                  )}
+                >
+                  {browserCopy.native}
+                </Link>
+              )}
+            </>
+          )}
+          {!user || !hasCeiling(user.permissions, "threads:read") ? (
+            <p role="alert">{t.files.loadFailed}</p>
+          ) : folder === null ? (
+            <>
+              <p role="alert">{browserCopy.missing}</p>
+              <BrowserLocations
+                area={tab === "shared" ? "shared" : "personal"}
+              />
+            </>
+          ) : tab === "shared" ? (
             <SharedFiles
+              key={
+                identity +
+                JSON.stringify(user?.permissions) +
+                tab +
+                folder +
+                legacy
+              }
+              native={!legacy}
+              folder={folder}
               storage={storage}
               onGlobalFailure={reportFailure}
               onChanged={() => headingRef.current?.focus()}
             />
           ) : (
             <MyFiles
+              key={
+                identity +
+                JSON.stringify(user?.permissions) +
+                tab +
+                folder +
+                legacy
+              }
+              native={!legacy}
+              folder={folder}
               storage={storage}
               onGlobalFailure={reportFailure}
-              onChanged={() => headingRef.current?.focus()}
             />
           )}
         </div>
@@ -311,26 +392,30 @@ function FileListControls({
 }
 
 function MyFiles({
-  onChanged,
+  native,
+  folder,
   storage,
   onGlobalFailure,
 }: {
-  onChanged: () => void;
+  native: boolean;
+  folder: string;
   storage: StorageObservation;
   onGlobalFailure: (refusal: StorageRefusal) => void;
 }) {
   const pluginQuery = useFrontendExtensions();
   const { t, locale } = useI18n();
+  const { user } = useAuth();
+  const words = useBrowserCopy();
   const { data, error, isPending, refetch } = useMyFiles();
   useDeploymentRefusal(error, onGlobalFailure);
-  const copy = useStorageCopy("files");
+  useRetireBrowserHistory("personal", readDenied(error));
   useBusyRetry(error, refetch);
   useStorageRecovery(error, storage, "files", refetch);
-  const deleteFile = useDeleteMyFile();
+
   // The empty state tells people they can share one of their own files; this
   // is where they do it. No conversation is involved, so no thread.
   const everyone = useShareWithEveryone();
-  const [pendingDelete, setPendingDelete] = useState<MyFileInfo | null>(null);
+
   const loadedFiles = data?.files ?? EMPTY_FILES;
   const [query, setQuery] = useState("");
   const [order, setOrder] = useState<FileListOrder>("name");
@@ -339,6 +424,10 @@ function MyFiles({
     [loadedFiles, query, order, locale],
   );
 
+  const rows = useMemo(
+    () => loadedFiles.map((file) => ({ ...file, kind: "file" as const })),
+    [loadedFiles],
+  );
   const notice = fileAreaNotice(storage, error, "files");
   if (notice)
     return (
@@ -346,6 +435,7 @@ function MyFiles({
         className="space-y-3 rounded-lg border p-4"
         data-testid="my-files-storage-notice"
       >
+        {native && <BrowserLocations area="personal" />}
         <FilesStateNotice refusal={notice} />
         {
           <Button size="sm" variant="outline" onClick={() => void refetch()}>
@@ -355,6 +445,90 @@ function MyFiles({
       </div>
     );
 
+  if (native && !error && data) {
+    const byPath = new Map(
+      loadedFiles.map((file) => [file.path, file] as const),
+    );
+    return (
+      <BrowserView
+        area="personal"
+        title={words.personal}
+        audience={words.myAudience}
+        folder={folder}
+        scope={JSON.stringify([
+          user?.id,
+          user?.system_role,
+          user?.permissions,
+          "personal",
+        ])}
+        rows={rows}
+        truncated={data.truncated}
+        folderKnown={
+          !folder ||
+          data.truncated ||
+          rows.some((r) => r.path.startsWith(folder + "/"))
+        }
+        open={() => undefined}
+        hrefFor={(row) => (row.kind === "file" ? urlOfMyFile(row.path) : "")}
+        empty={t.files.emptyHint}
+        actions={(row) => {
+          const file = byPath.get(row.path);
+          if (!file) return null;
+          return (
+            <>
+              <Button asChild variant="outline">
+                <NativeDownloadLink
+                  area="files"
+                  onGlobalFailure={onGlobalFailure}
+                  href={urlOfMyFile(file.path, { download: true })}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {t.files.download}
+                </NativeDownloadLink>
+              </Button>
+              {user &&
+                hasCeiling(user.permissions, "threads:write") &&
+                isFileFilingReady(pluginQuery) && (
+                  <>
+                    <p className="text-sm">{words.disclose}</p>
+                    <Button
+                      disabled={everyone.isPending}
+                      onClick={() => {
+                        const path = MY_FILES_VIRTUAL_PREFIX + "/" + file.path;
+                        void everyone.share(
+                          [path],
+                          installedFileCollection(pluginQuery.data ?? [], {
+                            filepath: path,
+                            destination: "shared",
+                            presented: [],
+                          }),
+                        );
+                      }}
+                    >
+                      {t.shared.shareWithEveryone}
+                    </Button>
+                  </>
+                )}
+            </>
+          );
+        }}
+      />
+    );
+  }
+  if (native)
+    return (
+      <>
+        <BrowserLocations area="personal" />
+        {error ? (
+          <Button onClick={() => void refetch()} variant="outline">
+            {t.files.retry}
+          </Button>
+        ) : (
+          <p role="status">{t.common.loading}</p>
+        )}
+      </>
+    );
   return (
     <>
       {!pluginQuery.isPending && !isFileFilingReady(pluginQuery) && (
@@ -493,7 +667,9 @@ function MyFiles({
                     <Button
                       aria-label={`${t.shared.shareWithEveryone} ${file.name}`}
                       disabled={
-                        everyone.isPending || !isFileFilingReady(pluginQuery)
+                        !everyone.available ||
+                        everyone.isPending ||
+                        !isFileFilingReady(pluginQuery)
                       }
                       onClick={() => {
                         const path = `${MY_FILES_VIRTUAL_PREFIX}/${file.path}`;
@@ -514,14 +690,6 @@ function MyFiles({
                     >
                       <UsersIcon className="size-4" />
                     </Button>
-                    <Button
-                      aria-label={`${t.files.delete} ${file.name}`}
-                      onClick={() => setPendingDelete(file)}
-                      size="icon-sm"
-                      variant="ghost"
-                    >
-                      <Trash2Icon className="size-4" />
-                    </Button>
                   </td>
                 </tr>
               ))}
@@ -534,75 +702,69 @@ function MyFiles({
           {t.files.truncated(loadedFiles.length)}
         </p>
       )}
-
-      <Dialog
-        onOpenChange={(open) => {
-          if (!open) setPendingDelete(null);
-        }}
-        open={pendingDelete !== null}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t.files.deleteTitle}</DialogTitle>
-            <DialogDescription>
-              {pendingDelete ? t.files.deleteConfirm(pendingDelete.name) : ""}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              disabled={deleteFile.isPending}
-              onClick={() => setPendingDelete(null)}
-              variant="outline"
-            >
-              {t.common.cancel}
-            </Button>
-            <Button
-              disabled={deleteFile.isPending}
-              onClick={() => {
-                if (!pendingDelete) return;
-                const { name, path } = pendingDelete;
-                deleteFile.mutate(path, {
-                  onSuccess: () => {
-                    setPendingDelete(null);
-                    toast.success(t.files.deleted(name));
-                    onChanged();
-                  },
-                  onError: (failure) => {
-                    console.error("Delete from My files failed:", failure);
-                    toast.error(copy.message(failure, t.files.deleteFailed));
-                  },
-                });
-              }}
-              variant="destructive"
-            >
-              {deleteFile.isPending ? t.files.deleting : t.files.delete}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </>
   );
 }
 
 function SharedFiles({
+  native,
+  folder,
   onChanged,
   storage,
   onGlobalFailure,
 }: {
+  native: boolean;
+  folder: string;
   onChanged: () => void;
   storage: StorageObservation;
   onGlobalFailure: (refusal: StorageRefusal) => void;
 }) {
   const { t, locale } = useI18n();
+  const { user } = useAuth();
+  const words = useBrowserCopy();
   const { data, error, isPending, refetch } = useSharedFiles();
   useDeploymentRefusal(error, onGlobalFailure);
+  useRetireBrowserHistory("shared", readDenied(error));
   const copy = useStorageCopy("shared");
   useBusyRetry(error, refetch);
   useStorageRecovery(error, storage, "shared", refetch);
   const removeFile = useRemoveSharedFile();
-  const [pendingRemove, setPendingRemove] = useState<SharedFileInfo | null>(
-    null,
-  );
+  const [pendingRemove, setPendingRemove] = useState<
+    (PublicationSelection & { operationId: string }) | null
+  >(null);
+  const captureSelection = useSpaceActionSignal(String(removeFile.enabled));
+  const eligible = (file: SharedFileInfo) =>
+    removeFile.enabled &&
+    file.can_remove &&
+    ((typeof file.publication_id === "string" &&
+      file.publication_id.length > 0) ||
+      (file.publication_id === null && user?.system_role === "admin"));
+  const pick = async (file: SharedFileInfo) => {
+    if (!eligible(file)) return;
+    const signal = captureSelection();
+    try {
+      const selection = await selectSharedFile(file.path, signal);
+      if (signal.aborted) return;
+      if (
+        selection.path !== file.path ||
+        !selection.can_remove ||
+        !selection.revision ||
+        selection.publication_id !== file.publication_id
+      ) {
+        void refetch();
+        return;
+      }
+      setPendingRemove({
+        ...selection,
+        operationId: crypto.randomUUID().replaceAll("-", ""),
+      });
+    } catch (failure) {
+      if (!signal.aborted) {
+        removeFile.refused(failure);
+        toast.error(copy.message(failure, t.shared.removeFailed));
+      }
+    }
+  };
   const loadedFiles = data?.files ?? EMPTY_FILES;
   const [query, setQuery] = useState("");
   const [order, setOrder] = useState<FileListOrder>("name");
@@ -611,6 +773,10 @@ function SharedFiles({
     [loadedFiles, query, order, locale],
   );
 
+  const rows = useMemo(
+    () => loadedFiles.map((file) => ({ ...file, kind: "file" as const })),
+    [loadedFiles],
+  );
   const notice = fileAreaNotice(storage, error, "shared");
   if (notice)
     return (
@@ -618,6 +784,7 @@ function SharedFiles({
         className="space-y-3 rounded-lg border p-4"
         data-testid="shared-files-storage-notice"
       >
+        {native && <BrowserLocations area="shared" />}
         <FilesStateNotice refusal={notice} area="shared" />
         {
           <Button size="sm" variant="outline" onClick={() => void refetch()}>
@@ -627,6 +794,149 @@ function SharedFiles({
       </div>
     );
 
+  const confirmation = (
+    <Dialog
+      onOpenChange={(open) => {
+        if (!open) setPendingRemove(null);
+      }}
+      open={removeFile.enabled && pendingRemove !== null}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{t.shared.removeTitle}</DialogTitle>
+          <DialogDescription>
+            {pendingRemove ? t.shared.removeConfirm(pendingRemove.name) : ""}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button
+            disabled={removeFile.isPending}
+            onClick={() => setPendingRemove(null)}
+            variant="outline"
+          >
+            {t.common.cancel}
+          </Button>
+          <Button
+            disabled={removeFile.isPending}
+            onClick={() => {
+              if (!pendingRemove || !removeFile.enabled) return;
+              const { name } = pendingRemove;
+              removeFile.mutate(
+                {
+                  selection: pendingRemove,
+                  operationId: pendingRemove.operationId,
+                },
+                {
+                  onSuccess: () => {
+                    setPendingRemove(null);
+                    toast.success(t.shared.removed(name));
+                    onChanged();
+                  },
+                  onError: (failure) => {
+                    if (
+                      failure &&
+                      typeof failure === "object" &&
+                      "status" in failure &&
+                      [403, 404, 409].includes(Number(failure.status))
+                    )
+                      setPendingRemove(null);
+                    console.error("Remove from Shared failed:", failure);
+                    toast.error(copy.message(failure, t.shared.removeFailed));
+                  },
+                },
+              );
+            }}
+            variant="destructive"
+          >
+            {removeFile.isPending ? t.shared.removing : t.shared.remove}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+  if (native && !error && data) {
+    const byPath = new Map(
+      loadedFiles.map((file) => [file.path, file] as const),
+    );
+    return (
+      <>
+        <BrowserView
+          area="shared"
+          title={words.shared}
+          audience={words.companyAudience}
+          folder={folder}
+          scope={JSON.stringify([
+            user?.id,
+            user?.system_role,
+            user?.permissions,
+            "shared",
+          ])}
+          rows={rows}
+          truncated={data.truncated}
+          folderKnown={
+            !folder ||
+            data.truncated ||
+            rows.some((r) => r.path.startsWith(folder + "/"))
+          }
+          open={() => undefined}
+          hrefFor={(row) =>
+            row.kind === "file" ? urlOfSharedFile(row.path) : ""
+          }
+          empty={t.shared.emptyHint}
+          describe={(row) => {
+            const file = byPath.get(row.path);
+            return (
+              file && (
+                <p>
+                  {t.shared.publisher}:{" "}
+                  {file.published_by ?? t.shared.publishedByNobody}
+                </p>
+              )
+            );
+          }}
+          actions={(row) => {
+            const file = byPath.get(row.path);
+            if (!file) return null;
+            return (
+              <>
+                <Button asChild variant="outline">
+                  <NativeDownloadLink
+                    area="shared"
+                    onGlobalFailure={onGlobalFailure}
+                    href={urlOfSharedFile(file.path, { download: true })}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {t.files.download}
+                  </NativeDownloadLink>
+                </Button>
+
+                {eligible(file) && (
+                  <Button variant="destructive" onClick={() => void pick(file)}>
+                    {t.shared.remove}
+                  </Button>
+                )}
+              </>
+            );
+          }}
+        />
+        {confirmation}
+      </>
+    );
+  }
+  if (native)
+    return (
+      <>
+        <BrowserLocations area="shared" />
+        {error ? (
+          <Button onClick={() => void refetch()} variant="outline">
+            {t.files.retry}
+          </Button>
+        ) : (
+          <p role="status">{t.common.loading}</p>
+        )}
+      </>
+    );
   return (
     <>
       {!error && !isPending && loadedFiles.length > 0 && (
@@ -772,10 +1082,10 @@ function SharedFiles({
                           <DownloadIcon className="size-4" />
                         </NativeDownloadLink>
                       </Button>
-                      {file.can_remove && (
+                      {eligible(file) && (
                         <Button
                           aria-label={`${t.shared.remove} ${file.name}`}
-                          onClick={() => setPendingRemove(file)}
+                          onClick={() => void pick(file)}
                           size="icon-sm"
                           variant="ghost"
                         >
@@ -796,51 +1106,7 @@ function SharedFiles({
         </p>
       )}
 
-      <Dialog
-        onOpenChange={(open) => {
-          if (!open) setPendingRemove(null);
-        }}
-        open={pendingRemove !== null}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t.shared.removeTitle}</DialogTitle>
-            <DialogDescription>
-              {pendingRemove ? t.shared.removeConfirm(pendingRemove.name) : ""}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              disabled={removeFile.isPending}
-              onClick={() => setPendingRemove(null)}
-              variant="outline"
-            >
-              {t.common.cancel}
-            </Button>
-            <Button
-              disabled={removeFile.isPending}
-              onClick={() => {
-                if (!pendingRemove) return;
-                const { name } = pendingRemove;
-                removeFile.mutate(pendingRemove, {
-                  onSuccess: () => {
-                    setPendingRemove(null);
-                    toast.success(t.shared.removed(name));
-                    onChanged();
-                  },
-                  onError: (failure) => {
-                    console.error("Remove from Shared failed:", failure);
-                    toast.error(copy.message(failure, t.shared.removeFailed));
-                  },
-                });
-              }}
-              variant="destructive"
-            >
-              {removeFile.isPending ? t.shared.removing : t.shared.remove}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {confirmation}
     </>
   );
 }

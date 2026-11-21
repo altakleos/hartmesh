@@ -3,6 +3,7 @@ import { useRouter } from "next/navigation";
 import { useCallback } from "react";
 import { toast } from "sonner";
 
+import { useAuth } from "../auth/AuthProvider";
 import { useStorage } from "../features";
 import { useFileActionLifetime } from "../file-areas/file-action-lifetime";
 import { useStorageCopy } from "../file-areas/storage-copy";
@@ -19,9 +20,16 @@ import {
 export const MY_FILES_QUERY_KEY = ["files", "mine"] as const;
 
 export function useMyFiles() {
+  const { user } = useAuth();
   return useQuery({
-    queryKey: MY_FILES_QUERY_KEY,
-    queryFn: () => listMyFiles(),
+    queryKey: [
+      ...MY_FILES_QUERY_KEY,
+      user?.id,
+      user?.system_role,
+      user?.permissions,
+    ],
+    queryFn: ({ signal }) => listMyFiles(signal),
+    gcTime: 0,
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
@@ -33,6 +41,7 @@ export function useDeleteMyFile() {
     mutationFn: (path: string) => deleteMyFile(path),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: MY_FILES_QUERY_KEY });
+      void queryClient.invalidateQueries({ queryKey: ["file-browser"] });
     },
   });
 }
@@ -44,6 +53,7 @@ export function useKeepInMyFiles(threadId: string) {
       keepInMyFiles(threadId, request),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: MY_FILES_QUERY_KEY });
+      void queryClient.invalidateQueries({ queryKey: ["file-browser"] });
     },
   });
 }
