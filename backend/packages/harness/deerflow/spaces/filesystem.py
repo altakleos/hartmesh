@@ -147,6 +147,10 @@ class ConfinedFilesystem:
             return _openat2(self._data_fd, _path(path, allow_root=allow_root), flags)
         return _openat2(self._data_fd, _path(path, allow_root=allow_root), flags, follow_symlinks=False)
 
+    def open_directory(self, path: str) -> int:
+        """Open a directory beneath the verified root without following links or mounts."""
+        return self._open(path, os.O_RDONLY | os.O_DIRECTORY, follow_symlinks=False)
+
     def open_regular(self, path: str, *, follow_symlinks: bool = True) -> int:
         # O_PATH avoids opening a planted FIFO/device. The host-owned proc-fd
         # reopen targets that already-verified inode, never the mutable name.

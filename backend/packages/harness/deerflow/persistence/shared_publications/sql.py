@@ -113,10 +113,14 @@ class SharedPublicationRepository:
             rows = (await session.execute(stmt)).scalars().all()
         return [self._row_to_dict(row) for row in rows if _folder_of(row.path) == folder]
 
-    async def live_publications(self) -> dict[str, dict]:
-        """Every publication not yet removed, keyed by path."""
+    async def live_publications(self, *, paths: list[str] | None = None) -> dict[str, dict]:
+        """Live publications keyed by path, optionally limited to a bounded folder response."""
+        if paths is not None and not paths:
+            return {}
         async with self._session() as session:
             stmt = select(SharedPublicationRow).where(SharedPublicationRow.removed_at.is_(None)).order_by(SharedPublicationRow.published_at.asc())
+            if paths is not None:
+                stmt = stmt.where(SharedPublicationRow.path.in_(paths))
             rows = (await session.execute(stmt)).scalars().all()
         # A path published twice without a removal in between is a directory
         # the record did not see change; the latest word wins.

@@ -117,7 +117,7 @@ def test_features_reports_agents_api_enabled(monkeypatch) -> None:
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json() == {
-        "file_browser": {"versions": [1], "storage_mode": "ordinary", "operations": {"personal": ["select"], "shared": ["select"], "agent": []}},
+        "file_browser": {"versions": [1], "storage_mode": "ordinary", "operations": {"personal": ["select", "folder"], "shared": ["select", "folder"], "agent": []}},
         "storage_spaces": {"enabled": False, "backend": None, "native_attachments": False, "editor_concurrency": None, "user_spaces": False, "state": "off", "reason": None, "own": "ready"},
         "accounts": {"seats": {"allowed": 0, "in_use": 0}},
         "agent_instances": {"connections": False, "enabled": False, "execution": "unavailable", "reason": None, "ai_assistants": {"per_user": 0, "allowed": 0, "in_use": 0, "mine": 0}, "ai_employees": {"allowed": 0, "in_use": 0}},
@@ -185,7 +185,7 @@ async def test_features_report_storage_allowances_and_only_the_callers_assistant
     await agents._enroll(ALICE, {"name": "Pending fixture", "custody": "personal", "supervisor_id": "alice"}, definition(), operation())
     response = await _managed_features(startup)
     assert response["storage_spaces"] == {"enabled": True, "backend": "fixed-ext4", "native_attachments": False, "editor_concurrency": "shared", "user_spaces": False, "state": "ready", "reason": None, "own": "not-assigned"}
-    assert response["file_browser"] == {"versions": [1], "storage_mode": "spaces", "operations": {"personal": ["select"], "shared": ["select", "remove"], "agent": ["select", "folder", "content", "text"]}}
+    assert response["file_browser"] == {"versions": [1], "storage_mode": "spaces", "operations": {"personal": ["select", "folder"], "shared": ["select", "folder", "remove"], "agent": ["select", "folder", "content", "text"]}}
     assert response["accounts"]["seats"] == {"allowed": 1, "in_use": 2}
     assert response["agent_instances"] == {
         "connections": False,
@@ -318,7 +318,7 @@ def test_features_reports_agents_api_disabled(monkeypatch) -> None:
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json() == {
-        "file_browser": {"versions": [1], "storage_mode": "ordinary", "operations": {"personal": ["select"], "shared": ["select"], "agent": []}},
+        "file_browser": {"versions": [1], "storage_mode": "ordinary", "operations": {"personal": ["select", "folder"], "shared": ["select", "folder"], "agent": []}},
         "storage_spaces": {"enabled": False, "backend": None, "native_attachments": False, "editor_concurrency": None, "user_spaces": False, "state": "off", "reason": None, "own": "ready"},
         "accounts": {"seats": {"allowed": 0, "in_use": 0}},
         "agent_instances": {"connections": False, "enabled": False, "execution": "unavailable", "reason": None, "ai_assistants": {"per_user": 0, "allowed": 0, "in_use": 0, "mine": 0}, "ai_employees": {"allowed": 0, "in_use": 0}},

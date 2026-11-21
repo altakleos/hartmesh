@@ -12,14 +12,18 @@ from app.gateway.authz import get_auth_context, require_permission
 from app.gateway.deps import get_shared_publications_repo, is_admin_user
 from app.gateway.routers._file_http import acting_user_id
 from app.gateway.routers.agent_instances import _service as instance_service
-from app.gateway.routers.shared import _may_remove
+from app.gateway.routers.files import UserFileInfo
+from app.gateway.routers.shared import SharedFileInfo, _may_remove, _publisher_names, _shared_mutation
 from app.gateway.routers.spaces import MAX_TEXT_BYTES, SpaceFileResponse, StorageRoute, StrictRequest, _actor, text_result
 from app.gateway.storage_features import current_feature_service, storage_feature
 from deerflow.agent_instances.contract import AgentDenied
 from deerflow.config.paths import get_paths
 from deerflow.features.paths import FeaturePaths
 from deerflow.files import resolve_shared_file, resolve_user_file
-from deerflow.files.shared_attribution import observed_descriptor
+from deerflow.files.folders import read_folder
+from deerflow.files.manager import UserFile
+from deerflow.files.shared import SharedFile
+from deerflow.files.shared_attribution import observed_descriptor, visible_records
 from deerflow.files.store import SafeFileAccessUnavailable, normalize_relative_path, open_regular_source, selected_revision
 from deerflow.spaces.contract import Permission, SpaceDenied
 from deerflow.spaces.filesystem import _path
@@ -71,6 +75,60 @@ def _collection_entry(path, *, personal, owner):
         finally:
             os.close(fd)
     return _selection(path, metadata)
+
+
+async def _read_collection_folder(owner, path, limit):
+    try:
+        return await run_file_io(read_folder, owner, path, limit)
+    except SafeFileAccessUnavailable:
+        raise HTTPException(501, "File browsing requires descriptor-relative reads") from None
+    except FileNotFoundError:
+        raise HTTPException(404, {"code": "folder-unavailable"}) from None
+
+
+def _folder_result(response, page, file_rows):
+    response.headers["cache-control"] = "private, no-store"
+    folders = [{"path": path, "name": path.rsplit("/", 1)[-1], "kind": "directory", "size": 0, "modified": 0} for path in sorted(page.folders)]
+    return {"files": [*folders, *sorted(file_rows, key=lambda row: row["path"])], "truncated": page.truncated}
+
+
+@router.get("/personal/folder")
+@require_permission("threads", "read")
+@storage_feature("hm.my-files")
+async def personal_folder(request: Request, response: Response, path: str = Query("", max_length=4096), limit: int = Query(500, ge=1, le=500)):
+    page = await _read_collection_folder(acting_user_id(request), path, limit)
+    files = [{"kind": "file", **UserFileInfo.of(UserFile.of(entry)).model_dump()} for entry in page.files]
+    return _folder_result(response, page, files)
+
+
+@router.get("/shared/folder")
+@require_permission("threads", "read")
+@storage_feature("hm.shared")
+async def shared_folder(request: Request, response: Response, path: str = Query("", max_length=4096), limit: int = Query(500, ge=1, le=500)):
+    repo = get_shared_publications_repo(request)
+    async with _shared_mutation(repo) as state:
+        page = await _read_collection_folder(None, path, limit)
+        raw = await repo.live_publications(paths=[entry.path for entry in page.files])
+        records = await run_file_io(visible_records, state, page.files, raw)
+    names = await _publisher_names(list(records.values()))
+    service = current_feature_service(request, "hm.shared")
+    auth = get_auth_context(request)
+    owner = acting_user_id(request)
+    admin = await is_admin_user(request)
+    may_remove = False
+    if service and auth and auth.has_permission("threads", "delete"):
+        space = await service.resource()
+        may_remove = space.status == "active" and bool(space.permissions & Permission.EXPORT)
+    files = []
+    for entry in page.files:
+        record = records.get(entry.path)
+        observed = entry.path not in raw or record is not None
+        allowed = may_remove and observed and _may_remove(record, user_id=owner, admin=admin)
+        row = SharedFileInfo.of(SharedFile.of(entry), record, can_remove=allowed, publisher=names.get(record["published_by"]) if record else None).model_dump()
+        if not observed or not service:
+            row.pop("publication_id")
+        files.append({"kind": "file", **row})
+    return _folder_result(response, page, files)
 
 
 @router.get("/personal/selection", response_model=SelectedEntry)

@@ -321,7 +321,7 @@ cover documents and spreadsheets; the report-enabled Compose provider explicitly
 selects the monthly-review starter, and tenant starter overrides still take priority.
 
 The Files page follows the selected tab in its URL, including Shared links and
-browser history. Each tab can filter loaded files by name or folder and sort by
+browser history. Gateways with folder browsing return direct entries on navigation, including only groups that contain a visible file. Each tab can filter loaded files by name or folder and sort by
 Name or Newest. Counts and truncation notices describe the loaded entries;
 folders remain visible on mobile. If report download availability cannot be
 checked, the card offers **Retry check**; it checks the files again without

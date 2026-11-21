@@ -1,5 +1,10 @@
 # Gateway routers
 
+Personal and Shared folder pages scan direct children on an admitted directory
+descriptor. A visible regular descendant establishes each virtual group.
+Stop on the work or row limit and expose truncation. Shared loads attribution
+for the returned files and checks their contents under its normal read lock.
+
 The `file_browser` field in `GET /api/features` lists versioned operations by source.
 `/api/file-browser/v1` selects fresh file metadata under the collection’s current
 admission. Agent folder, text and content reads also require current instance inspection,

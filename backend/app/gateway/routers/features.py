@@ -94,11 +94,11 @@ class FileBrowserFeature(BaseModel):
     @classmethod
     def for_storage(cls, storage: StorageSpacesFeature, instances: AgentInstancesFeature):
         if storage.state == "off":
-            operations = FileBrowserOperations(personal=["select"], shared=["select"]) if supports_descriptor_reads() else FileBrowserOperations()
+            operations = FileBrowserOperations(personal=["select", "folder"], shared=["select", "folder"]) if supports_descriptor_reads() else FileBrowserOperations()
             return cls(storage_mode="ordinary", operations=operations)
         if storage.state == "unavailable":
             return cls(storage_mode="unavailable")
-        return cls(storage_mode="spaces", operations=FileBrowserOperations(personal=["select"], shared=["select", "remove"], agent=["select", "folder", "content", "text"] if instances.enabled else []))
+        return cls(storage_mode="spaces", operations=FileBrowserOperations(personal=["select", "folder"], shared=["select", "folder", "remove"], agent=["select", "folder", "content", "text"] if instances.enabled else []))
 
 
 class BrowserControlFeature(BaseModel):
