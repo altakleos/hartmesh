@@ -166,6 +166,30 @@ async def complete_environment(execution, environment, run_manager, record):
 
 
 @contextmanager
+def helper_workspace_scope(execution):
+    """Carry the same workspace and attachment into the restricted helper scope."""
+    parent = current_environment()
+    if execution is None or parent is None or execution is parent.execution:
+        yield
+        return
+    if execution.connection_origin is not None or execution._workspace_identity is not parent.execution._workspace_identity:
+        raise AgentDenied("The helper workspace belongs to another execution")
+    with execution_scope(execution) as child:
+        child.attachment_id = parent.attachment_id
+        child.recycle_required = parent.recycle_required
+        provider = parent.provider
+        if provider is not None:
+            if not isinstance(provider, InstanceSandboxProvider) or provider.execution is not parent.execution:
+                raise AgentDenied("The helper cannot use this workspace provider")
+            child.provider = InstanceSandboxProvider(execution, provider.sandbox, app_config=provider.app_config, skill_revision=provider.skill_revision, baseline=provider.baseline)
+        try:
+            yield
+        finally:
+            if child.recycle_required:
+                parent.recycle_required = True
+
+
+@contextmanager
 def execution_scope(execution):
     if not isinstance(execution, AgentExecution):
         yield None

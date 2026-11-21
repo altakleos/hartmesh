@@ -399,3 +399,15 @@ async def test_list_thread_inputs_starves_receipts_when_all_inputs_are_unresolve
     assert len(items) == 32
     assert all(i["status"] == "not_applied" for i in items)
     assert not any(i["id"] == "input-032" for i in items)
+
+
+@pytest.mark.asyncio
+async def test_queued_package_source_survives_reconciliation_and_cannot_be_changed(input_store):
+    inputs = RunInputs(input_store, "run", USER_ID, "worker")
+    item = await inputs.submit("sample", "Review the sample", "queue", source="extension", source_package="calendar")
+    assert item["source_package"] == "calendar"
+    same = await inputs.submit("sample", "Review the sample", "queue", source="extension", source_package="calendar")
+    assert same == item
+    with pytest.raises(InputConflict):
+        await inputs.submit("sample", "Review the sample", "queue", source="extension", source_package="another")
+    assert (await inputs.read())["items"][0]["source_package"] == "calendar"

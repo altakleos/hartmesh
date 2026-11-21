@@ -1643,54 +1643,76 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         _append_memory_tools_without_name_conflicts(authorization_candidates)
     _append_project_document_tools_if_pinned(authorization_candidates, cfg)
     append_task_continuity_tools(authorization_candidates, resolved_app_config)
+    connection_status = None
+    if instance_execution and instance_execution.execution_allowed and getattr(instance_execution, "connection_origin", None) and not cfg.get("is_subagent"):
+        from deerflow.agent_instances.connection_tools import build_connection_inventory, unique_instance_tools
+
+        issued, connection_status = build_connection_inventory(instance_execution)
+        # Late host tools must get their usual names even when an external
+        # service disables the provider's name prefix.
+        authorization_candidates = unique_instance_tools([*authorization_candidates, *issued], {"tool_search"})
+        configured_tools.extend(issued)
     configured_tool_ids = {id(tool) for tool in configured_tools}
     authorized_tools, _authz_provider = apply_tool_authorization(
         authorization_candidates,
         context=cfg,
         app_config=resolved_app_config,
     )
-    layer_one = layer_one_outcome(authorization_candidates, authorized_tools)
-    configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
-    late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
-    final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
-    final_tools.extend(late_tools)
-    mcp_routing_middleware = build_mcp_routing_middleware(
-        final_tools,
-        setup,
-        top_k=resolved_app_config.tool_search.auto_promote_top_k,
-    )
-    mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(authorized_tools, deferred_names=setup.deferred_names)
-    external_middlewares = [] if instance_execution else None
-    middlewares = build_middlewares(
-        config,
-        model_name=model_name,
-        agent_name=agent_name,
-        available_skills=available_skills,
-        memory_enabled=memory_enabled,
-        app_config=resolved_app_config,
-        deferred_setup=setup,
-        mcp_routing_middleware=mcp_routing_middleware,
-        user_id=resolved_user_id,
-        owns_agent_skill_projection=not bool(instance_execution),
-        authorization_provider=_authz_provider,
-        skill_authorization=skill_authorization,
-        subagent_execution_capacity=subagent_execution_capacity,
-        assignment_proposals=any(tool.name == "propose_assignment" for tool in authorized_tools),
-        external_middlewares=external_middlewares,
-    )
-    if instance_execution:
-        from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
-        from deerflow.agents.middlewares.tool_declarations import instance_tool_names, isolate_instance_declarations
+    for attempt in range(2):
+        layer_one = layer_one_outcome(authorization_candidates, authorized_tools)
+        configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
+        late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
+        final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
+        final_tools.extend(late_tools)
+        mcp_routing_middleware = build_mcp_routing_middleware(
+            final_tools,
+            setup,
+            top_k=resolved_app_config.tool_search.auto_promote_top_k,
+        )
+        mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(authorized_tools, deferred_names=setup.deferred_names)
+        external_middlewares = [] if instance_execution else None
+        middlewares = build_middlewares(
+            config,
+            model_name=model_name,
+            agent_name=agent_name,
+            available_skills=available_skills,
+            memory_enabled=memory_enabled,
+            app_config=resolved_app_config,
+            deferred_setup=setup,
+            mcp_routing_middleware=mcp_routing_middleware,
+            user_id=resolved_user_id,
+            owns_agent_skill_projection=not bool(instance_execution),
+            authorization_provider=_authz_provider,
+            skill_authorization=skill_authorization,
+            subagent_execution_capacity=subagent_execution_capacity,
+            assignment_proposals=any(tool.name == "propose_assignment" for tool in authorized_tools),
+            external_middlewares=external_middlewares,
+        )
+        if instance_execution:
+            from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
+            from deerflow.agents.middlewares.tool_declarations import instance_tool_names, isolate_instance_declarations
 
-        middlewares.insert(0, InstanceAuthorityMiddleware(require_memory_audience=memory_enabled))
-        middlewares, external_positions = isolate_instance_declarations(middlewares, external_middlewares, read_only=not instance_execution.execution_allowed)
-    middlewares, declared_authorized = narrow_declared_tools(
-        middlewares,
-        outcome=layer_one,
-        context=cfg,
-        app_config=resolved_app_config,
-        authorization_provider=_authz_provider,
-    )
+            middlewares.insert(0, InstanceAuthorityMiddleware(require_memory_audience=memory_enabled))
+            middlewares, external_positions = isolate_instance_declarations(middlewares, external_middlewares, read_only=not instance_execution.execution_allowed)
+        middlewares, declared_authorized = narrow_declared_tools(
+            middlewares,
+            outcome=layer_one,
+            context=cfg,
+            app_config=resolved_app_config,
+            authorization_provider=_authz_provider,
+        )
+        graph_middlewares = normalize_middleware_state_schemas(middlewares, mode)
+        if not connection_status:
+            break
+        reserved = instance_tool_names([], graph_middlewares, external_positions)
+        filtered = unique_instance_tools(authorized_tools, reserved)
+        if len(filtered) == len(authorized_tools):
+            break
+        # Rebuild deferral and its catalog hash after dropping a collision with a
+        # product middleware. Both passes use the same authorization and discovery.
+        if attempt:
+            raise RuntimeError("Instance middleware tool declarations changed during graph assembly")
+        authorized_tools = filtered
     system_prompt = apply_prompt_template(
         subagent_enabled=subagent_enabled,
         max_concurrent_subagents=max_concurrent_subagents,
@@ -1711,9 +1733,17 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         adopted_soul=instance_execution.definition.soul if instance_execution else None,
         runtime_scope=build_runtime_scope(execution=instance_execution, tools=authorized_tools, memory_enabled=memory_enabled and resolved_app_config.memory.enabled),
     )
-    graph_middlewares = normalize_middleware_state_schemas(middlewares, mode)
+    if connection_status is not None:
+        from deerflow.agent_instances.connection_tools import CONNECTION_GUIDANCE, ConnectionInventoryMiddleware
+
+        system_prompt += CONNECTION_GUIDANCE
+        graph_middlewares.append(ConnectionInventoryMiddleware(connection_status))
     if instance_execution:
         graph_middlewares[0].allowed_tool_names = instance_tool_names(final_tools, graph_middlewares, external_positions)
+        if instance_execution.execution_allowed:
+            from deerflow.agent_instances.connection_tools import verify_connection_inventory
+
+            verify_connection_inventory(instance_execution, final_tools, graph_middlewares, helper=bool(cfg.get("is_subagent")))
     verify_declared_tool_view(graph_middlewares, authorized_names=declared_authorized)
     state_schema = get_thread_state_schema(mode)
     graph = create_agent(

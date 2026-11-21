@@ -384,7 +384,7 @@ class _BoundAgentRuns:
         from app.gateway.run_inputs import dispatch_one_input
 
         async with self._request("runs:create", thread_id) as request:
-            return await dispatch_one_input(thread_id, run_id, input_id, request)
+            return await dispatch_one_input(thread_id, run_id, input_id, request, host_delivery=self._plugin_namespace is None and self._origin is None)
 
     async def list_inputs(self, *, thread_id):
         from app.gateway.routers.thread_runs import get_thread_inputs

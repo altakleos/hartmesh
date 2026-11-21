@@ -1050,7 +1050,7 @@ class SubagentExecutor:
         """
         from deerflow.agent_instances.conversations import AgentExecution
 
-        self.agent_execution = agent_execution if isinstance(agent_execution, AgentExecution) else None
+        self.agent_execution = agent_execution.for_helper() if isinstance(agent_execution, AgentExecution) else None
         self.config = config
         self.app_config = app_config
         self._resolved_app_config = app_config
@@ -1358,6 +1358,11 @@ class SubagentExecutor:
             discovery_tools=getattr(self, "_policy_discovery_tools", ()),
             name_resolver=policy_names,
         )
+        if self.agent_execution is not None:
+            from deerflow.agent_instances.connection_tools import verify_connection_inventory
+            from deerflow.utils.file_io import run_file_io
+
+            await run_file_io(verify_connection_inventory, self.agent_execution, bound_tools, middlewares, helper=True)
         agent = create_agent(
             model=model,
             tools=bound_tools,
@@ -1712,6 +1717,8 @@ class SubagentExecutor:
 
         ordinary_extras = build_ordinary_file_context(app_config=resolved_app_config, tools=runtime_scope.tools) if runtime_scope.mode == "conversation" else ""
         system_parts.append(runtime_scope.working_directory(delegated=True, ordinary_extras=ordinary_extras))
+        if self.agent_execution is not None and getattr(getattr(resolved_app_config, "agent_connections", None), "enabled", False) is True:
+            system_parts.append("Helpers cannot use the AI employee's company connections.")
         if self.context_snapshot is not None:
             system_parts.append(SNAPSHOT_SYSTEM_NOTE)
         # RFC #4651 PR3: every subagent — built-in or custom — gets the same
@@ -1807,10 +1814,12 @@ class SubagentExecutor:
                 trace_id=self.trace_id,
                 status=SubagentStatus.PENDING,
             )
+        from deerflow.agent_instances.runtime import helper_workspace_scope
         from deerflow.runtime.customer_administration import bind_customer_administration_policy, bind_customer_management_actor, bind_customer_management_actor_role, customer_management_actor_role
         from deerflow.subagents.checkpoints import SubagentCheckpointError, subagent_checkpoint_scope
 
         with (
+            helper_workspace_scope(self.agent_execution),
             ensure_trace_context(self.deerflow_trace_id),
             bind_customer_administration_policy(self.customer_administration_policy),
             bind_customer_management_actor(self.customer_management_actor),

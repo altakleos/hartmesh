@@ -7329,22 +7329,28 @@ def test_utcnow_helper_returns_utc_aware_datetime(classes):
 
 
 @pytest.mark.anyio
-async def test_instance_child_receives_host_capability_and_discloses_inherited_filesystem(classes, base_config, monkeypatch):
+@pytest.mark.parametrize("marked", [False, True])
+async def test_instance_child_receives_host_capability_and_discloses_inherited_filesystem(classes, base_config, monkeypatch, marked):
+    from dataclasses import replace
+
     from test_agent_execution_runtime import execution
 
-    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, ConnectionOrigin
     from deerflow.agent_instances.runtime import InstanceSandboxProvider, current_environment, execution_scope
     from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
-    bound = execution()
+    bound = replace(execution(), connection_origin=ConnectionOrigin("message")) if marked else execution()
     executor = classes["SubagentExecutor"](config=base_config, tools=[], thread_id=bound.thread_id, user_id="requester", agent_execution=bound)
     monkeypatch.setattr(executor, "_load_skills", AsyncMock(return_value=[]))
     captured = {}
 
     async def stream(state, *, config, context, **kwargs):
         captured.update(context)
-        assert current_environment().execution is bound
-        assert get_sandbox_provider() is provider
+        child = context[AGENT_EXECUTION_CONTEXT_KEY]
+        assert child.connection_origin is None
+        assert current_environment().execution is child
+        assert get_sandbox_provider().execution is child
+        assert get_sandbox_provider().sandbox is provider.sandbox
         prompt = str(state["messages"][0].content)
         assert "mounted files and filesystem authority" in prompt
         assert "persist across conversations" in prompt
@@ -7364,7 +7370,9 @@ async def test_instance_child_receives_host_capability_and_discloses_inherited_f
         environment.provider = provider
         result = await executor._aexecute("Do bounded Home work")
     assert result.status == classes["SubagentStatus"].COMPLETED, result.error
-    assert captured[AGENT_EXECUTION_CONTEXT_KEY] is bound and captured["user_id"] == "requester"
+    assert (captured[AGENT_EXECUTION_CONTEXT_KEY] is bound) is (not marked)
+    assert captured["user_id"] == "requester"
+    assert (bound.connection_origin is not None) is marked
     assert current_environment() is None
 
 
@@ -7441,6 +7449,13 @@ def test_bound_child_real_middleware_chain_activates_only_public_packages(classe
         assert activation._resolve_activation("/sample").activation is None
         assert all(skill.category.value == "public" for skill in load_order._storage().load_skills())
         assert all(skill.category.value == "public" for skill in errors._storage().load_skills())
+        from langchain_core.tools import StructuredTool
+
+        from deerflow.tools.mcp_metadata import tag_mcp_tool
+
+        sample = StructuredTool.from_function(lambda: "sample", name="calendar", description="Read a fixture.")
+        with pytest.raises(RuntimeError, match="unissued company connection"):
+            asyncio.run(executor._create_agent(tools=[tag_mcp_tool(sample, server_name="calendar", transport="http")]))
 
 
 @pytest.mark.anyio

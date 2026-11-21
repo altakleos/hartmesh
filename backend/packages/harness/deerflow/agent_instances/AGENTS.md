@@ -7,6 +7,18 @@ preserve a grant, and a recreated installation needs a new grant. The embedded
 client omits the private binding. A manager sees the registry and grants; a
 viewer with Use or Inspect sees only active connection names and hosts.
 
+Company connection authority belongs to the host-admitted employee execution.
+Use a current human web session, a qualified Telegram turn, an authenticated
+queued human input, an admitted Work attempt, or an installed, listed package.
+Keep unattended batch continuation gated by its own admission. A helper receives
+a restricted execution sharing its parent’s workspace, with no connection origin.
+Before graph assembly, check the final helper tools and middleware declarations.
+
+On package turns the Gateway stamps fresh visible human IDs and records them with
+the run, requester and package. A package can submit text only to its own employee
+run. Queued delivery uses the stored author. Compare each connection call against
+its committed journal receipt on the owner loop before allowing the send.
+
 For a conversation file import, keep the redacted source and original requested name
 in the native put intent. Choose the actual upload name before persisting that
 intent, under exclusive writer ownership. A competing resident cannot redirect

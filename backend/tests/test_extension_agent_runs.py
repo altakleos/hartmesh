@@ -698,3 +698,48 @@ async def test_configuration_revision_canonicalizes_sets_but_preserves_list_orde
     assert before == await runs.configuration_revision(assistant_ids=["lead_agent"], durable=True)
     data["tools"].reverse()
     assert before != await runs.configuration_revision(assistant_ids=["lead_agent"], durable=True)
+
+
+@pytest.mark.asyncio
+async def test_package_input_and_host_queue_dispatch_use_the_admitted_author(runtime, monkeypatch):
+    from app.gateway import agent_conversations, run_inputs
+    from app.gateway.routers import thread_runs
+    from deerflow.runtime.runs.inputs import RunInputs
+
+    runs, state, request, _, _ = runtime
+    thread = await runs.create_thread(thread_id="employee-input")
+    owner = str(request.state.user.id)
+    calendar = runs.for_plugin("calendar")
+    another = runs.for_plugin("notes")
+    monkeypatch.setattr(agent_conversations, "require_conversation", AsyncMock(return_value=True))
+    sent = []
+
+    async def receive(thread_id, body, dispatch_request, *, idempotency_key):
+        sent.append((body.input["messages"][0]["content"], dispatch_request.state.run_origin, getattr(dispatch_request.state, "admitted_queued_human", False)))
+        return SimpleNamespace(run_id=f"receipt-{len(sent)}", status="success", assistant_id=None, stop_reason=None)
+
+    monkeypatch.setattr(thread_runs, "create_run", receive)
+    for run_id, metadata in (("personal-reply", {}), ("package-reply", {"deerflow_origin": {"kind": "extension", "namespace": "calendar"}})):
+        await state.run_store.put(run_id, thread_id=thread, user_id=owner, status="running", metadata={"agent_instance_id": "employee", **metadata}, owner_worker_id="worker")
+        await state.run_store.mutate_run_inputs(run_id, lambda _state, _row: None, user_id=owner)
+    message = {"text": "Review the sample", "mode": "queue", "request_id": "example"}
+    with pytest.raises(AgentRunError) as wrong:
+        await calendar.send_input(thread_id=thread, run_id="personal-reply", **message)
+    assert wrong.value.status_code == 403
+    human = run_inputs.RunInputRequest(**message)
+    assert (await run_inputs.submit_run_input(thread, "personal-reply", human, request))["source"] == "user"
+    accepted = await calendar.send_input(thread_id=thread, run_id="package-reply", **message)
+    assert accepted["source_package"] == "calendar"
+    with pytest.raises(AgentRunError) as foreign:
+        await another.send_input(thread_id=thread, run_id="package-reply", **message)
+    assert foreign.value.status_code == 403
+    assert sent == []
+    for run_id in ("personal-reply", "package-reply"):
+        await state.run_store.update_status(run_id, "success")
+        inputs = RunInputs(state.run_store, run_id, owner)
+        await run_inputs.dispatch_queued_inputs(inputs, agent_runs=runs, thread_id=thread)
+        assert [entry["status"] for entry in (await inputs.read())["items"]] == ["applied"]
+    assert sent == [
+        ("Review the sample", None, True),
+        ("Review the sample", {"kind": "extension", "namespace": "calendar"}, False),
+    ]

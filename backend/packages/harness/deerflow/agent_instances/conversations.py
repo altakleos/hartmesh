@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from typing import Literal
 from uuid import uuid4
 
 from sqlalchemy import and_, false, or_, select
@@ -19,6 +20,12 @@ from deerflow.spaces.registry import _stored_permissions
 AGENT_EXECUTION_CONTEXT_KEY = "__agent_execution"
 
 
+@dataclass(frozen=True, slots=True)
+class ConnectionOrigin:
+    kind: Literal["message", "assignment", "package", "batch_followup"]
+    package: str | None = None
+
+
 @dataclass(frozen=True)
 class AgentExecution:
     instance: InstanceIdentity
@@ -32,6 +39,11 @@ class AgentExecution:
     execution_allowed: bool = True
     memory_audience_allowed: bool = True
     work: object | None = field(default=None, compare=False, repr=False)
+    connection_origin: ConnectionOrigin | None = None
+    _workspace_identity: object = field(default_factory=object, repr=False, compare=False)
+
+    def for_helper(self):
+        return self if self.connection_origin is None else replace(self, connection_origin=None)
 
     async def _validate(self, environment=None):
         await self.authority.validate(self)

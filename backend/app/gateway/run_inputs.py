@@ -44,6 +44,9 @@ async def submit_run_input(thread_id: str, run_id: str, body: RunInputRequest, r
     run = await manager.get(run_id, user_id=user_id)
     if run is None or run.thread_id != thread_id:
         raise HTTPException(404, "Run not found")
+    from app.gateway.company_connection_runs import package_input_source
+
+    package = await package_input_source(request, thread_id, getattr(run, "metadata", None))
     if get_agent_runs(request) is None:
         raise HTTPException(503, "Run inputs require an authenticated session")
     row = await _store(request).get(run_id, user_id=user_id)
@@ -57,7 +60,7 @@ async def submit_run_input(thread_id: str, run_id: str, body: RunInputRequest, r
         if isinstance(body.context.get("locale"), str):
             context["locale"] = body.context["locale"]
         source = "extension" if admit_origin(getattr(request.state, "run_origin", None)) is not None else "user"
-        item = await RunInputs(_store(request), run_id, user_id).submit(body.request_id, body.text, body.mode, context=context, source=source)
+        item = await RunInputs(_store(request), run_id, user_id).submit(body.request_id, body.text, body.mode, context=context, source=source, source_package=package)
     except InputConflict as exc:
         raise HTTPException(409, str(exc)) from exc
     return {**item, "target_run_id": run_id}
@@ -124,7 +127,7 @@ async def dispatch_queued_inputs(inputs: RunInputs, *, agent_runs, thread_id: st
             return
 
 
-async def dispatch_one_input(thread_id, run_id, input_id, request, *, retry=False):
+async def dispatch_one_input(thread_id, run_id, input_id, request, *, retry=False, host_delivery=False):
     from deerflow_extension_api.agent_runs import AgentRun
 
     from app.gateway.routers.thread_runs import create_run, get_run
@@ -137,6 +140,10 @@ async def dispatch_one_input(thread_id, run_id, input_id, request, *, retry=Fals
     source = await _store(request).get(run_id, user_id=user_id)
     if source is None or source["thread_id"] != thread_id:
         raise HTTPException(404, "Run not found")
+    from app.gateway.company_connection_runs import package_input_source
+
+    if not host_delivery:
+        await package_input_source(request, thread_id, source.get("metadata"))
     inputs = RunInputs(_store(request), run_id, user_id)
     entry = await inputs.claim(input_id, retry=retry)
     if entry.get("run_id"):
@@ -162,6 +169,15 @@ async def dispatch_one_input(thread_id, run_id, input_id, request, *, retry=Fals
         # This fact comes from the stored, authenticated input, not from text
         # or an arbitrary extension-supplied metadata flag.
         request.state.run_origin = None
+        request.state.admitted_queued_human = True
+    elif package := entry.get("source_package"):
+        from deerflow.runtime.run_origin import make_origin
+
+        request.state.run_origin = make_origin("extension", namespace=package)
+    elif (source.get("metadata") or {}).get("agent_instance_id"):
+        # Older package inputs carried no attested namespace. A retry must
+        # never borrow the dispatcher's package authority for their text.
+        request.state.run_origin = {"kind": "extension"}
     body = RunCreateRequest(assistant_id=await resolve_thread_assistant_id(request, thread_id, fail_closed=True), input={"messages": [message]}, context=context, config=config, on_disconnect="continue")
     run = await create_run(thread_id, body, request, idempotency_key=f"run-input:{run_id}:{input_id}")
     await inputs.dispatched(entry["id"], run.run_id)

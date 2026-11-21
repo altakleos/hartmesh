@@ -10,6 +10,13 @@ literal operator prepend/append text. Do not template-format these extensions
 or source them from run context. The graph and assembly descriptor must see the
 same resulting prompt. Empty overlays preserve bytes.
 
+Instance company tools require a host-admitted foreground run. Issue schemas from
+current company grants and check the final tools, including middleware declarations,
+against a separate grant read. Preserve product tool names and deferred selection.
+The model receives connection names as transient data. Each call resolves its
+current definition and commits a sending event before dispatch. An interrupted
+call with only a sending event has an unknown outcome.
+
 **Lead Agent** (`packages/harness/deerflow/agents/lead_agent/agent.py`):
 - `make_lead_agent(config: RunnableConfig)` is the published `langgraph.json`
   entry point; preserve its signature and bare-graph return type.
