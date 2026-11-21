@@ -133,6 +133,7 @@ ABSENT_MEANS_DEFAULT = True  # mirrors app.gateway.storage_init
 AGENT_COUNTS_ACTIVE = True
 TELEGRAM_ABSENT_MEANS_ON = True
 TELEGRAM_ENV = "HARTMESH_TELEGRAM"
+AGENT_CONNECTIONS_ENV = "HARTMESH_AGENT_CONNECTIONS"
 TELEGRAM_VOICE_ENV = "HARTMESH_TELEGRAM_VOICE"
 TELEGRAM_MAX_BOTS_ENV = "HARTMESH_TELEGRAM_MAX_BOTS"
 TELEGRAM_MAX_BOTS_PER_PERSON_ENV = "HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON"
@@ -1042,6 +1043,11 @@ def render(
     if name is not None:
         ui["product_name"] = name
     document["ui"] = ui
+    connection_mode = environ.get(AGENT_CONNECTIONS_ENV, "on")
+    if connection_mode not in {"on", "off"}:
+        raise RenderError(f"{AGENT_CONNECTIONS_ENV} must be `on` or `off`")
+    connections = _mapping(document.get("agent_connections", {}), "template `agent_connections`")
+    document["agent_connections"] = {"packages": [], **connections, "enabled": connection_mode == "on"}
     _storage_sections(document, environ)
     _telegram_sections(document, environ)
 
