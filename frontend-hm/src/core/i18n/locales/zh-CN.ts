@@ -1374,6 +1374,8 @@ export function createZhCN(product: string): Translations {
     },
 
     chat: {
+      conversationLoadFailed: "无法加载此对话。",
+      reloadConversation: "重新加载对话",
       filesFull: (support) =>
         `您的文件存储已满，无法开始新对话。请删除“我的文件”中的文件或旧对话，然后重新开始对话。如果仍然不够，请联系${support}增加存储。`,
       filesPreparing: (support) =>

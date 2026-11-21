@@ -214,3 +214,79 @@ test("a chat member sees active connections on the employee and conversation, in
   await expect(active).toHaveCount(0);
   expect(reads).toBe(before);
 });
+
+for (const [scenario, failures, cached] of [
+  ["first attempt interrupted", 1, false],
+  ["both attempts interrupted", 2, false],
+  ["cached binding could not be refreshed", 2, true],
+] as const) {
+  test(`the bound conversation recovers before editing when ${scenario}`, async ({
+    page,
+  }) => {
+    const agent = { ...workInstance(), permissions: 1 };
+    mockLangGraphAPI(page, {
+      features: { agentInstancesEnabled: true },
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Read recovery",
+          messages: [],
+          agent_instance: {
+            id: agent.id,
+            name: agent.name,
+            custody: agent.custody,
+            status: agent.status,
+            requester_id: "default",
+          },
+        },
+      ],
+    });
+    await page.route(
+      (url) => url.pathname === "/api/agent-instances/" + agent.id,
+      (route) => route.fulfill({ json: agent }),
+    );
+    const path = "/api/langgraph/threads/" + MOCK_THREAD_ID;
+    let interrupt = !cached;
+    const reads = { metadata: 0, history: 0 };
+    const writes: string[] = [];
+    page.on("request", (request) => {
+      if (
+        new URL(request.url()).pathname.startsWith(path + "/runs") &&
+        request.method() === "POST"
+      ) {
+        writes.push(request.method());
+      }
+    });
+    for (const kind of ["metadata", "history"] as const) {
+      await page.route(
+        (url) =>
+          url.pathname === (kind === "metadata" ? path : path + "/history"),
+        async (route) => {
+          if (interrupt && ++reads[kind] <= failures)
+            return route.abort("connectionreset");
+          return route.fallback();
+        },
+      );
+    }
+    await page.goto("/workspace/chats/" + MOCK_THREAD_ID);
+    const editor = page.locator("textarea").first();
+    if (cached) {
+      await expect(editor).toBeEditable();
+      await page.getByRole("link", { name: "Chats", exact: true }).click();
+      await expect(page).toHaveURL(/\/workspace\/chats$/);
+      interrupt = true;
+      await page.goBack();
+    }
+    if (failures === 2) {
+      const reload = page.getByRole("button", { name: "Reload conversation" });
+      await expect(reload).toBeVisible();
+      await expect(editor).toBeDisabled();
+      await expect.poll(() => reads.history).toBe(2);
+      await reload.click();
+    }
+    await expect(editor).toBeEditable();
+    await expect.poll(() => reads.history).toBe(failures + 1);
+    expect(reads.metadata).toBe(failures + 1);
+    expect(writes).toEqual([]);
+  });
+}

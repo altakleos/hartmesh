@@ -27,6 +27,8 @@ export interface Translations {
     unknown: string;
   };
   chat: {
+    conversationLoadFailed: string;
+    reloadConversation: string;
     filesFull: (support: string) => string;
     filesPreparing: (support: string) => string;
     filesNoSeat: (administrator: boolean, provider: string) => string;
