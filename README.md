@@ -1956,6 +1956,9 @@ requires Linux atomic directory exchange; unsupported hosts leave the old pack
 unchanged. Restart the
 Gateway after promotion or upgrade to refresh every worker's catalog.
 
+A new employee or personal assistant conversation can open before its first reply
+without waiting for the agent’s tools to finish loading.
+
 When company connections are enabled, a manager can give an AI employee or personal AI assistant a connection on its **Access** tab. It can then use the connection in conversations, assignments and work started by an approved package, without asking before each action. Anyone who can chat with the agent can ask it to send information it can read, including conversations, attachments, its files and the company’s Shared folder. The agent can also act on information returned by an outside service. Give only the connections the work needs and use a service account with limited rights. The service sees that account regardless of who asked. Helpers have no connection of their own. An administrator’s changes apply from the next action. Telegram shows the agent’s answers. Open the conversation on the web for connection activity.
 
 Inline MCP audio results are not supported. Stdio tools report an explicit error, matching HTTP/SSE tools, rather than treating base64 audio as a successful text result.
