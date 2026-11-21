@@ -804,7 +804,7 @@ def test_env_example_lists_exactly_the_fixed_contract_keys() -> None:
     keys = {line.split("=", 1)[0] for line in lines if line and not line.startswith("#")}
     assert keys == CONTRACT_KEYS | SIGN_ON_KEYS, "the example shows sign-on-only mode"
     comments = [line for line in lines if line.startswith("#")]
-    assert len(comments) == 28
+    assert len(comments) == 30
     assert "sign-on-only" in comments[0] and LOCAL_PASSWORDS_KEY in comments[0] and "callback" in comments[0]
     assert "Membership follows the claim" in comments[1] and "HARTMESH_SIGN_ON_ROLES" in comments[1]
     assert [line.split("=", 1)[0] for line in comments[2:5]] == ["#HARTMESH_SIGN_ON_ACCESS_CLAIM", "#HARTMESH_SIGN_ON_ACCESS_VALUES", "#HARTMESH_SIGN_ON_ROLES"], "the optional access keys are shown commented out"
@@ -833,7 +833,9 @@ def test_env_example_lists_exactly_the_fixed_contract_keys() -> None:
     assert comments[22:25] == ["#HARTMESH_TELEGRAM_VOICE=auto", "#HARTMESH_TELEGRAM_MAX_BOTS=100", "#HARTMESH_TELEGRAM_MAX_BOTS_PER_PERSON=10"]
     assert "MCP connections" in comments[25] and "host:port" in comments[25]
     assert comments[26] == "#HARTMESH_PRIVATE_ENDPOINTS=", "optional, shown commented out and empty: absent means none"
-    assert "verbatim" in comments[27] and "subset" in comments[27]
+    assert "default to on" in comments[27] and "off" in comments[27]
+    assert comments[28] == "#HARTMESH_AGENT_CONNECTIONS=on"
+    assert "verbatim" in comments[29] and "subset" in comments[29]
     values = dict(line.split("=", 1) for line in lines if line and not line.startswith("#"))
     assert values["HARTMESH_TRUSTED_PROXIES"] == "192.0.2.10,192.0.2.11"
     assert values["HARTMESH_PUBLIC_HOST"] == "tenant.example.com"
