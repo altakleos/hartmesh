@@ -138,13 +138,13 @@ class WorkerProviderWire(ProviderWire):
 
 
 @asynccontextmanager
-async def installed_worker(e, monkeypatch, tmp_path):
+async def installed_worker(e, monkeypatch, tmp_path, *, custody="personal"):
     config = await asyncio.to_thread(app_config.get_app_config)
     async with e.engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     users = SQLiteUserRepository(e.sf)
     async with e.sf.begin() as writer:
-        writer.add(UserRow(id=OWNER, email="work-worker@example.com", password_hash="unusable-fixture", system_role="user"))
+        writer.add(UserRow(id=OWNER, email="work-worker@example.com", password_hash="unusable-fixture", system_role="admin" if custody == "company" else "user"))
     monkeypatch.setattr(deps, "_cached_repo", users)
     monkeypatch.setattr(deps, "_cached_local_provider", LocalAuthProvider(users))
     human = storage_spaces.human_lookup(users)
@@ -160,7 +160,7 @@ async def installed_worker(e, monkeypatch, tmp_path):
         actor=owner,
         creation_id=uuid4().hex,
         name="Documentation assistant",
-        custody="personal",
+        custody=custody,
         supervisor=owner,
         definition=DefinitionSnapshot.capture(owner_id=OWNER, config={"name": "analyst", "skills": [], "mcp_plugins": [], "work_policy": {"enabled": True}}, soul="Review documentation and report verified findings."),
     )
