@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from _telegram_repository_test_support import code_of
+from _telegram_repository_test_support import code_of, employee_definition_row
 from _telegram_repository_test_support import db as db
 from sqlalchemy import select, update
 from test_telegram_bot_adapter import build, start
@@ -12,7 +12,7 @@ from test_telegram_threads import close, inbound, origin
 from test_telegram_threads_http import http_environment
 
 from deerflow.agent_instances.contract import AgentDenied, AgentPermission
-from deerflow.persistence.agent_instances.model import AgentDefinitionRevisionRow, AgentInstanceGrantRow, AgentInstanceRow, AgentProtectedContextRow
+from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow, AgentProtectedContextRow
 from deerflow.persistence.spaces.model import SpaceRow
 from deerflow.persistence.telegram_bots.model import TelegramOutboxRow
 from deerflow.spaces.contract import PrincipalRef
@@ -28,7 +28,8 @@ async def instance_environment(db, monkeypatch):
     owner = e.link.owner_user_id
     async with db.sessions.begin() as writer:
         writer.add(SpaceRow(id=home, backing_handle=uuid4().hex, name="Fixture Home", custody_kind="company", custodian_kind=None, custodian_id=None, mode="native", status="active", generation=1))
-        writer.add(AgentDefinitionRevisionRow(revision="b" * 64, owner_id=owner, config={}, soul=""))
+        definition = employee_definition_row(owner)
+        writer.add(definition)
         await writer.flush()
         writer.add(
             AgentInstanceRow(
@@ -39,7 +40,7 @@ async def instance_environment(db, monkeypatch):
                 owner_id=None,
                 creator_id=owner,
                 supervisor_id=owner,
-                definition_revision="b" * 64,
+                definition_revision=definition.revision,
                 home_id=home,
                 status="active",
                 generation=1,
