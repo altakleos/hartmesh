@@ -74,7 +74,7 @@ export async function checkFileOperation(
   update: (
     state: CheckState,
     result?: SavedAgentFile & { sandbox_path?: string },
-  ) => void,
+  ) => void | Promise<void>,
 ) {
   for (const wait of automatic ? [0, 3000, 15000, 60000, 300000] : [0]) {
     // Let a retiring view cancel even its first read before issuing HTTP.
@@ -86,7 +86,7 @@ export async function checkFileOperation(
       if (outcome.status === "complete") {
         if (!outcome.file || typeof outcome.file.path !== "string")
           throw new Error("Incomplete file receipt");
-        update("complete", outcome.file);
+        await update("complete", outcome.file);
         return;
       }
       if (
@@ -95,7 +95,7 @@ export async function checkFileOperation(
         )
       )
         throw new Error("Unknown file outcome");
-      update(outcome.status);
+      await update(outcome.status);
       if (
         outcome.status === "nothing-changed" ||
         outcome.status === "unconfirmed"
@@ -108,10 +108,10 @@ export async function checkFileOperation(
         (error instanceof InstanceApiError &&
           [401, 403, 404].includes(error.status))
       ) {
-        update("denied");
+        await update("denied");
         return;
       }
-      update("unavailable");
+      await update("unavailable");
     }
   }
 }
