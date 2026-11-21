@@ -75,7 +75,7 @@ services:
 
   # Storage preparation is a privileged one-shot, outside the running-service budget.
   storage-init:
-    image: ghcr.io/altakleos/hartmesh-backend@sha256:337ea4fbae7526a9c6ef480f53d58628ed903959d93885194abe09d9f058eeae
+    image: ghcr.io/altakleos/hartmesh-backend@sha256:f22e724ac8f5cba8bcbcdd1c377a0f1f8442822fbddcc8fd020d0ffd91ec3fd3
     working_dir: /app/backend
     entrypoint: ["uv", "run", "--no-sync", "python", "-m", "app.storage_init"]
     command: ["prepare", "--at-start"]
@@ -108,7 +108,7 @@ services:
 
   # ── Gateway (FastAPI + embedded agent runtime) ───────────────────────────
   gateway:
-    image: ghcr.io/altakleos/hartmesh-backend@sha256:337ea4fbae7526a9c6ef480f53d58628ed903959d93885194abe09d9f058eeae
+    image: ghcr.io/altakleos/hartmesh-backend@sha256:f22e724ac8f5cba8bcbcdd1c377a0f1f8442822fbddcc8fd020d0ffd91ec3fd3
     # No `user:` on purpose. The container starts as root only long enough for
     # gateway/entrypoint.sh to read the Docker socket's group, then drops to
     # uid/gid 1000 plus that one supplementary group before any application
@@ -146,7 +146,7 @@ services:
       # product").
       HARTMESH_PROFILE_DIR: /opt/hartmesh
       # The same backend image supplies the Gateway's bounded mount-only helper.
-      HARTMESH_STORAGE_INIT_IMAGE: ghcr.io/altakleos/hartmesh-backend@sha256:337ea4fbae7526a9c6ef480f53d58628ed903959d93885194abe09d9f058eeae
+      HARTMESH_STORAGE_INIT_IMAGE: ghcr.io/altakleos/hartmesh-backend@sha256:f22e724ac8f5cba8bcbcdd1c377a0f1f8442822fbddcc8fd020d0ffd91ec3fd3
       # The key a provider key set in the product is stored encrypted under.
       # Interpolated rather than left to env_file so it can come from the
       # environment of the `docker compose` command itself and stay off the
@@ -310,7 +310,7 @@ services:
 
   # ── Frontend (Next.js) ───────────────────────────────────────────────────
   frontend:
-    image: ghcr.io/altakleos/hartmesh-frontend@sha256:4ba72b7acfffbde5640ec75e060555f0f134704d8e32f81cc015cdb365f6db6f
+    image: ghcr.io/altakleos/hartmesh-frontend@sha256:2bf55c2f4f10d482a5318df0e9e7102f4a439364cd8e8158d90c7d6f6152d4c7
     user: "1000:1000"
     # Explicit entries only: no env_file, so provider keys never reach it. The
     # frontend's one runtime need is the internal Gateway URL; its browser
