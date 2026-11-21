@@ -98,7 +98,7 @@ class FileBrowserFeature(BaseModel):
             return cls(storage_mode="ordinary", operations=operations)
         if storage.state == "unavailable":
             return cls(storage_mode="unavailable")
-        return cls(storage_mode="spaces", operations=FileBrowserOperations(personal=["select"], shared=["select"], agent=["select", "folder", "content", "text"] if instances.enabled else []))
+        return cls(storage_mode="spaces", operations=FileBrowserOperations(personal=["select"], shared=["select", "remove"], agent=["select", "folder", "content", "text"] if instances.enabled else []))
 
 
 class BrowserControlFeature(BaseModel):

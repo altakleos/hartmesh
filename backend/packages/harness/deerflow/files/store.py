@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import logging
 import os
 import stat
@@ -61,6 +62,12 @@ logger = logging.getLogger(__name__)
 
 class StoreError(ValueError):
     """A path that cannot name a file in this area."""
+
+
+def selected_revision(path, metadata) -> str:
+    """Identify one observed directory entry, including bounded native metadata."""
+    identity = [path, metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns]
+    return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
 
 
 def supports_descriptor_reads() -> bool:

@@ -1,8 +1,11 @@
 """Keep native Company reads and rollback bound to the owned publication."""
 
+import os
+
 from deerflow.features.publications import PublicationUnavailable
 from deerflow.features.qualified_publications import shared_file_holding
 from deerflow.files.shared import SharedFile
+from deerflow.files.store import selected_revision
 from deerflow.spaces.backings import BackingUnavailable
 from deerflow.spaces.workflows import record_fact
 from deerflow.utils.file_io import await_drained, run_file_io
@@ -15,6 +18,7 @@ class NativeSharedCopy:
         self.stage = None
         self.directories = None
         self.published = None
+        self.revision = None
 
     def verify(self):
         current = self.sources.files.catalog.verify(self.volume.spec.slot_id, previous=self.volume)
@@ -51,6 +55,25 @@ class NativeSharedCopy:
         if self.directories is not None:
             await await_drained(run_file_io(self.directories.rollback))
 
+    def _close_stage(self, stage):
+        # Unlinking the private staging name changes ctime. Measure the original
+        # opened file after that unlink, never a replacement at its public name.
+        try:
+            fd = os.dup(stage.fd)
+        except OSError:
+            stage.close()
+            return None
+        try:
+            stage.close()
+            try:
+                metadata = os.fstat(fd)
+            except OSError:
+                return None
+            if self.published is not None and metadata.st_nlink:
+                return selected_revision(self.published.path, metadata)
+        finally:
+            os.close(fd)
+
     async def close(self):
         try:
             if self.directories is not None:
@@ -59,4 +82,4 @@ class NativeSharedCopy:
         finally:
             if self.stage is not None:
                 stage, self.stage = self.stage, None
-                await await_drained(run_file_io(stage.close))
+                self.revision = await await_drained(run_file_io(self._close_stage, stage))

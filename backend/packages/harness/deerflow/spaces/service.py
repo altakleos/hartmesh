@@ -733,7 +733,7 @@ class SpaceFiles:
 
         return await await_drained(perform())
 
-    async def run_workflow(self, *, actor, requests, destination_id, operation_id, request, call, controller_admission=None, reconcile=False, host_write=False, initial_facts=None):
+    async def run_workflow(self, *, actor, requests, destination_id, operation_id, request, call, controller_admission=None, reconcile=False, host_write=False, initial_facts=None, completed_replay=None):
         """Host-only domain work spanning its own SQL sessions and file publication.
 
         Private process-held filesystem locks prevent accepting/replaying a live
@@ -769,6 +769,13 @@ class SpaceFiles:
                     if controller_admission is not None:
                         await controller_admission(session, rows)
                     volumes = {key: await self._volume(session, row) for key, (row, _) in rows.items()}
+                    if completed_replay is not None:
+                        existing = await session.get(SpaceFileOperationRow, (destination_id, operation_id))
+                        if existing is not None:
+                            if (existing.phase, existing.actor_kind, existing.actor_id, existing.generation, existing.request) != ("complete", actor.kind, actor.subject_id, generation, request):
+                                raise SpaceConflict("The operation ID does not match a completed request")
+                            await completed_replay(session)
+                            return None
                     descriptors = await run_file_io(acquire, volumes)
                     token = _owner.set((self, frozenset(rows)))
                     if reconcile:

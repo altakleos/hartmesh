@@ -36,10 +36,13 @@ Invalid cron fields remain custom expressions instead
 of appearing as a valid preset. Optional extension packages can publish bounded
 usage documentation through the authenticated plugin API.
 
-File clients can check `file_browser` in `GET /api/features` for supported reads.
+File clients can check `file_browser` in `GET /api/features` for supported operations.
 Each source lists its operations. The versioned API returns a selection’s current
 metadata and revision. For inspectable agent homes it also lists bounded folders
-and opens regular files. If an operation is missing, keep it unavailable.
+and opens regular files. Managed Shared can remove the selected file after checking
+its revision, publication and your current access. Undo uses the receipt from a
+new copy. A duplicate returns the existing file. If an operation is missing,
+keep it unavailable.
 
 Hartmesh clears private workspace caches when the signed-in account changes.
 Artifact, My Files and Shared reads, copies and hashes refuse symlinks throughout the

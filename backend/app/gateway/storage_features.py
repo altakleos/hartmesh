@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import uuid
+from contextlib import asynccontextmanager
 from functools import wraps
 from pathlib import Path
 from typing import get_type_hints
@@ -49,7 +50,7 @@ def current_feature_service(request, namespace):
     return _installed(request, namespace)[0]
 
 
-def storage_feature(namespace, *, write=False):
+def storage_feature(namespace, *, write=False, selected_remove=False):
     """HTTP parsing/legacy permission guards run before this feature boundary."""
 
     def decorate(function):
@@ -67,6 +68,8 @@ def storage_feature(namespace, *, write=False):
                 if getattr(request.app.state, "storage_spaces_enabled", False):
                     reason = getattr(getattr(request.app.state, "agent_execution", None), "storage_reason", None)
                     raise _unavailable(reason if reason in STORAGE_REASONS else "admission-failed")
+                if selected_remove:
+                    raise HTTPException(501, "Selected removal requires managed Shared storage")
                 return await function(*args, **kwargs)
             reason = getattr(getattr(request.app.state, "agent_execution", None), "storage_reason", None)
             if reason is not None:
@@ -89,7 +92,8 @@ def storage_feature(namespace, *, write=False):
                         permission = Permission.READ | Permission.EXPORT if write and service.host_written else Permission.WRITE if write else Permission.READ
                         requests = {space.id: (permission, space.generation)}
                         associations = {namespace: space.id}
-                        operation_id = uuid.uuid4().hex
+                        body = bound.arguments.get("body")
+                        operation_id = body.operation_id if selected_remove else uuid.uuid4().hex
                         if native is not None:
                             sources, source = native
                             for identifier, (source_permissions, generation) in sources.requests.items():
@@ -97,7 +101,6 @@ def storage_feature(namespace, *, write=False):
                                 if expected_generation != generation:
                                     raise SpaceDenied("The source and destination generations differ")
                                 requests[identifier] = (permission | source_permissions, generation)
-                        body = bound.arguments.get("body")
                         if namespace == "hm.shared" and write and str(getattr(body, "path", "")).startswith(USER_FILES_VIRTUAL_PREFIX + "/"):
                             home_service, home_entry = _installed(request, "hm.my-files")
                             if (await asyncio.to_thread(plugin_settings, *home_entry))["enabled"] is not True:
@@ -122,13 +125,37 @@ def storage_feature(namespace, *, write=False):
                                 ):
                                     raise SpaceDenied("The host publication requires the assigned company Space")
 
+                        async def admit_removal_authority(session):
+                            from app.gateway.deps import is_admin_user
+                            from deerflow.persistence.shared_publications.model import SharedPublicationRow
+
+                            if await is_admin_user(request):
+                                return
+                            publication = await session.get(SharedPublicationRow, body.expected_publication_id) if body.expected_publication_id else None
+                            if publication is None or publication.path != body.path or publication.published_by != actor.subject_id:
+                                raise SpaceDenied("Only the publisher or an administrator can remove this publication")
+
+                        @asynccontextmanager
+                        async def selected_shared_admission():
+                            async with files.registry.admitted(actor=actor, requests=requests, operation_id=(space.id, operation_id)) as (session, rows):
+                                await files._host_write_admission(session, rows, space.id, operation_id)
+                                await controller(session, rows)
+                                await admit_removal_authority(session)
+                                yield
+
                         ordered_publish = native is not None and service.host_written and function.__name__ == "publish"
 
                         async def invoke(volumes):
                             paths = FeaturePaths(get_paths(), actor.subject_id, {name: volumes[identifier] for name, identifier in associations.items()})
                             with paths_scope(paths):
                                 try:
-                                    if native is None:
+                                    if selected_remove:
+                                        request.state.selected_shared_admission = selected_shared_admission
+                                        try:
+                                            result = await function(*args, **kwargs)
+                                        finally:
+                                            del request.state.selected_shared_admission
+                                    elif native is None:
                                         result = await function(*args, **kwargs)
                                     else:
 
@@ -203,6 +230,8 @@ def storage_feature(namespace, *, write=False):
                                     if write and exc.status_code < 500 and effect is not None and effect[0] is False:
                                         raise WorkflowRejected(exc) from None
                                     raise
+                                if ordered_publish and shared_owner.revision is not None:
+                                    result.revision = shared_owner.revision
                                 if isinstance(result, FileResponse):
                                     relative = Path(result.path).relative_to(volumes[space.id].data_path).as_posix()
                                     download = bound.arguments.get("download", False) is True or result.headers.get("content-disposition", "").startswith("attachment")
@@ -218,6 +247,14 @@ def storage_feature(namespace, *, write=False):
                         if write:
                             from deerflow.features.publications import FACT_BEFORE_NAME
 
+                            if selected_remove:
+                                parameters = body.model_dump(exclude={"operation_id"})
+                                # The older settlement reader already understands an explicitly unrecorded file as "".
+                                parameters["expected_publication_id"] = body.expected_publication_id or ""
+                                source_parameters = {}
+                            else:
+                                parameters = {name: value for name, value in bound.arguments.items() if isinstance(value, str) and len(value) <= 4096}
+                                source_parameters = {name: ("/" + getattr(body, name).lstrip("/") if name == "path" else getattr(body, name)) for name in ("path", "thread_id", "folder") if getattr(body, name, None) is not None}
                             return await files.run_workflow(
                                 actor=actor,
                                 requests=requests,
@@ -226,13 +263,14 @@ def storage_feature(namespace, *, write=False):
                                 request={
                                     "action": "feature-workflow",
                                     "namespace": namespace,
-                                    "operation": function.__name__,
-                                    "parameters": {name: value for name, value in bound.arguments.items() if isinstance(value, str) and len(value) <= 4096},
-                                    "source": {name: ("/" + getattr(body, name).lstrip("/") if name == "path" else getattr(body, name)) for name in ("path", "thread_id", "folder") if getattr(body, name, None) is not None},
+                                    "operation": "remove_shared" if selected_remove else function.__name__,
+                                    "parameters": parameters,
+                                    "source": source_parameters,
                                 },
                                 controller_admission=controller,
                                 call=invoke,
                                 host_write=service.host_written,
+                                completed_replay=admit_removal_authority if selected_remove else None,
                                 initial_facts={"publication_order": FACT_BEFORE_NAME} if ordered_publish else None,
                             )
                         return await files.run_read_workflow(actor=actor, requests=requests, controller_admission=controller, call=invoke)

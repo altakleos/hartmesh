@@ -103,6 +103,7 @@ class SharedFileInfo(BaseModel):
     can_remove: bool = False
     # A stale Remove/Undo must not act on a newer publication of the same path.
     publication_id: str | None = None
+    revision: str | None = None  # Present only on an observed new managed publication.
 
     @classmethod
     def of(cls, entry: SharedFile, record: dict | None, *, can_remove: bool = False, publisher: str | None = None) -> SharedFileInfo:

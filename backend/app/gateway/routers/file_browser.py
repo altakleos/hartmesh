@@ -1,25 +1,26 @@
 """Bounded browser selection and directory reads under each source's own authority."""
 
-import hashlib
-import json
 import os
 import stat
 from dataclasses import asdict
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import get_auth_context, require_permission
+from app.gateway.deps import get_shared_publications_repo, is_admin_user
 from app.gateway.routers._file_http import acting_user_id
 from app.gateway.routers.agent_instances import _service as instance_service
-from app.gateway.routers.spaces import MAX_TEXT_BYTES, SpaceFileResponse, StorageRoute, _actor, text_result
-from app.gateway.storage_features import storage_feature
+from app.gateway.routers.shared import _may_remove
+from app.gateway.routers.spaces import MAX_TEXT_BYTES, SpaceFileResponse, StorageRoute, StrictRequest, _actor, text_result
+from app.gateway.storage_features import current_feature_service, storage_feature
 from deerflow.agent_instances.contract import AgentDenied
 from deerflow.config.paths import get_paths
 from deerflow.features.paths import FeaturePaths
 from deerflow.files import resolve_shared_file, resolve_user_file
-from deerflow.files.store import SafeFileAccessUnavailable, normalize_relative_path, open_regular_source
+from deerflow.files.shared_attribution import observed_descriptor
+from deerflow.files.store import SafeFileAccessUnavailable, normalize_relative_path, open_regular_source, selected_revision
 from deerflow.spaces.contract import Permission, SpaceDenied
 from deerflow.spaces.filesystem import _path
 from deerflow.utils.file_io import run_file_io
@@ -46,8 +47,7 @@ def _selection(path, metadata, *, directories=False):
         raise HTTPException(404, "File or folder is unavailable")
     # A selection describes the entry already observed. It conveys no permission
     # to operate on another file at its old pathname.
-    identity = [path, metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns]
-    revision = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
+    revision = selected_revision(path, metadata)
     return SelectedEntry(path=path, name=path.rsplit("/", 1)[-1], kind=kind, size=metadata.st_size, modified=metadata.st_mtime, revision=revision)
 
 
@@ -81,12 +81,80 @@ async def select_personal(request: Request, response: Response, path: str = Quer
     return await run_file_io(_collection_entry, path, personal=True, owner=acting_user_id(request))
 
 
-@router.get("/shared/selection", response_model=SelectedEntry)
+class SharedSelection(SelectedEntry):
+    publication_id: str | None = None
+    can_remove: bool = False
+
+
+@router.get("/shared/selection", response_model=SharedSelection, response_model_exclude_unset=True)
 @require_permission("threads", "read")
 @storage_feature("hm.shared")
 async def select_shared(request: Request, response: Response, path: str = Query(min_length=1, max_length=4096)):
     response.headers["cache-control"] = "private, no-store"
-    return await run_file_io(_collection_entry, path, personal=False, owner=None)
+    service = current_feature_service(request, "hm.shared")
+    if not service:
+        selected = await run_file_io(_collection_entry, path, personal=False, owner=None)
+        return SharedSelection(**selected.model_dump(), can_remove=False)
+    if normalize_relative_path(path) != path:
+        raise HTTPException(400, "Use a relative file path")
+
+    raw = await get_shared_publications_repo(request).live_publication(path)
+
+    def observe():
+        volume = get_paths()._volume("hm.shared")
+        with volume.filesystem() as filesystem:
+            fd = filesystem.open_regular("shared/" + path, follow_symlinks=False)
+            try:
+                metadata = os.fstat(fd)
+                if raw is None or raw["size"] != metadata.st_size:
+                    return _selection(path, metadata), None
+                proof = observed_descriptor(fd, use_cache=True)
+                return _selection(path, proof.metadata), raw if proof.matches(raw) else None
+            finally:
+                os.close(fd)
+
+    selected, record = await run_file_io(observe)
+    space = await service.resource()
+    auth = get_auth_context(request)
+    can_remove = bool(
+        (raw is None or record is not None)
+        and space.status == "active"
+        and space.permissions & Permission.EXPORT
+        and auth
+        and auth.has_permission("threads", "delete")
+        and _may_remove(record, user_id=acting_user_id(request), admin=await is_admin_user(request))
+    )
+    result = SharedSelection(**selected.model_dump(), can_remove=can_remove)
+    # Only an actual absence is encoded as null. A mismatched record provides no identity.
+    if raw is None or record is not None:
+        result.publication_id = record["publication_id"] if record else None
+    return result
+
+
+class RemoveSelectedShared(StrictRequest):
+    path: str = Field(min_length=1, max_length=4096)
+    expected_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_publication_id: str | None = Field(min_length=1, max_length=64)
+    operation_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
+@router.post("/shared/remove", status_code=204, response_class=Response)
+@require_permission("threads", "delete")
+@storage_feature("hm.shared", write=True, selected_remove=True)
+async def remove_selected_shared(request: Request, body: RemoveSelectedShared):
+    if normalize_relative_path(body.path) != body.path:
+        raise HTTPException(400, "Use a relative file path")
+    service = current_feature_service(request, "hm.shared")
+    await service.execute(
+        "remove",
+        repo=get_shared_publications_repo(request),
+        path=body.path,
+        expected_publication_id=body.expected_publication_id or "",
+        expected_revision=body.expected_revision,
+        admin=await is_admin_user(request),
+        stage_admission=request.state.selected_shared_admission,
+    )
+    return Response(status_code=204)
 
 
 def _visible_agent_path(path, *, root=False):
