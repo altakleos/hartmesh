@@ -11,6 +11,7 @@ from typing import NotRequired
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from _config_singleton_guard import restore_config_singletons  # noqa: F401 -- autouse fixture
 from deerflow_extension_api import AgentScope
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, AgentState
