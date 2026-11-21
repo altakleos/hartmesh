@@ -108,6 +108,14 @@ async def test_shared_role_is_rechecked_at_every_write_admission(feature_app, mo
         assert len(intent) == (0 if admission == 1 else 1)
         if intent:
             assert intent[0].phase == "pending"
+    if admission == 2:
+        # The role check refused after reservation and before the workflow saved its receipt.
+        assert await files.settle_interrupted() == 1
+        async with files.registry._sf() as session:
+            settled = await session.get(SpaceFileOperationRow, (intent[0].space_id, intent[0].operation_id))
+            assert settled.phase == "failed" and settled.result["resolution"] == "host-settled"
+        retried = await client.post("/api/shared/publish", json={"path": "/mnt/user-data/outputs/role.txt", "thread_id": THREAD})
+        assert retried.status_code == 201, retried.text
 
 
 @pytest.mark.asyncio

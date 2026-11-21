@@ -457,3 +457,38 @@ async def test_malformed_durable_operation_id_is_preserved_without_filesystem_ef
         session.add(SpaceFileOperationRow(space_id=space.id, operation_id="invalid-operation-id", actor_kind="human", actor_id="alice", generation=1, phase="pending", request={"action": "remove", "path": "absent"}))
     assert await files.settle_interrupted() == 0
     assert await outcome(sf, space, "invalid-operation-id") == ("pending", None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence", ["absent", "malformed", "mismatched"])
+async def test_registered_workflow_settles_only_proved_absence_before_work(space_file_storage, evidence, caplog):
+    files, sf, _ = space_file_storage
+    space = await home(files)
+    volume = next(iter(files._verified.values()))
+    request = {"action": "feature-workflow", "namespace": "hm.projects", "operation": "read-document"}
+    identifier = await intent(sf, space, request)
+    receipt = WorkflowReceipt(volume, identifier, request)
+    if evidence == "malformed":
+        receipt.save()
+        receipt.path.write_text("{")
+    elif evidence == "mismatched":
+        receipt.value["request"] = {**request, "operation": "different"}
+        receipt.save()
+
+    async def should_not_run(*args, **kwargs):
+        pytest.fail("A domain handler requires a valid matching receipt")
+
+    files.workflow_settlers["hm.projects"] = should_not_run
+    stage = volume.control_path / ("stage-" + operation())
+    stage.write_bytes(b"temporary")
+    with caplog.at_level("INFO"):
+        count = await files.settle_interrupted()
+    phase, result = await outcome(sf, space, identifier)
+    if evidence == "absent":
+        assert (count, phase) == (1, "failed")
+        assert_host_settlement(result, {"resolution": "host-settled"})
+        assert not stage.exists()
+        assert "settled failed" in caplog.text and "not settled" not in caplog.text
+    else:
+        assert (count, phase, result) == (0, "pending", None)
+        assert stage.is_file() and receipt.path.is_file()

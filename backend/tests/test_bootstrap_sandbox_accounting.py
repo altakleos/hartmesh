@@ -2,13 +2,15 @@
 
 from copy import copy
 from dataclasses import replace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from test_native_create_provider import fixture as fixture
 from test_native_create_provider import install
+from test_sandbox_orphan_reconciliation import _make_shared_ownership_store, _ScopedOwnershipStore
 
 from deerflow.community.aio_sandbox.aio_sandbox_provider import SandboxInfo
+from deerflow.community.aio_sandbox.ownership import compute_lease_ttl
 from deerflow.sandbox.admission import ProviderAdmission
 from deerflow.sandbox.exceptions import SandboxRuntimeAdmissionError
 from deerflow.spaces.docker import StorageHostUnqualified
@@ -61,6 +63,125 @@ def test_parking_original_identity_counts_once_without_client_or_readiness(fixtu
         assert provider._counted_slots_locked() == (3, 0, 1, 0)
     with pytest.raises(SandboxRuntimeAdmissionError):
         provider.get("native")
+    provider._backend.destroy.assert_not_called()
+
+
+@pytest.fixture
+def orphan_lease(fixture):
+    provider, owner = fixture
+    install(provider, owner)
+    admission = closed(provider)
+    info = primary()
+    provider._backend.list_running.return_value = [info]
+    clock = Mock(return_value=1000.0)
+    ttl = compute_lease_ttl(provider._ownership_config)
+    store = _make_shared_ownership_store(ttl_seconds=ttl, time_source=clock)
+    peer = _ScopedOwnershipStore(store, "old-worker")
+    provider._ownership = _ScopedOwnershipStore(store, "new-worker")
+
+    def expire(fraction=1):
+        clock.return_value += ttl * fraction + 1
+
+    with patch("deerflow.community.aio_sandbox.aio_sandbox_provider.time.time", clock):
+        yield provider, admission, info, peer, expire
+
+
+def test_expired_orphan_lease_is_available_to_closed_bootstrap_after_an_idle_scan(orphan_lease):
+    provider, admission, info, peer, expire = orphan_lease
+    assert peer.claim(info.sandbox_id)
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        provider._cleanup_idle_resources(3600)
+        with pytest.raises(StorageHostUnqualified):
+            provider._park_bootstrap_accounting(permit, info)
+        assert peer.owner(info.sandbox_id) == "old-worker"
+
+        expire()
+        provider._cleanup_idle_resources(3600)
+        with pytest.raises(StorageHostUnqualified):
+            provider._park_bootstrap_accounting(permit, info)
+        assert peer.owner(info.sandbox_id) is None
+
+        expire()
+        provider._cleanup_idle_resources(3600)
+        provider._park_bootstrap_accounting(permit, info)
+    finally:
+        provider._end_bootstrap_accounting(permit)
+    assert provider._warm_pool[info.sandbox_id][0] is info
+    assert peer.owner(info.sandbox_id) == "new-worker"
+    with pytest.raises(SandboxRuntimeAdmissionError):
+        provider.get(info.sandbox_id)
+    provider._backend.destroy.assert_not_called()
+
+
+def test_open_gateway_can_adopt_an_eligible_managed_orphan(orphan_lease):
+    provider, admission, info, peer, expire = orphan_lease
+    provider.external_changed(lambda: admission.open(provider))
+    provider._reconcile_orphans()
+    expire()
+    provider._reconcile_orphans()
+    assert provider._warm_pool[info.sandbox_id][0] is info
+    assert peer.owner(info.sandbox_id) == "new-worker"
+
+
+@pytest.mark.parametrize("interruption", ["idle-admission", "bootstrap-admission", "native-inspection"])
+def test_interrupted_claim_allows_fenced_bootstrap_recovery(orphan_lease, interruption):
+    provider, admission, info, peer, expire = orphan_lease
+    provider._reconcile_orphans()
+    expire()
+    original_claim = provider._ownership.claim
+
+    def change_admission_during_claim(sandbox_id, *, for_destroy=False):
+        claimed = original_claim(sandbox_id, for_destroy=for_destroy)
+        assert claimed
+        if interruption == "bootstrap-admission":
+            provider.external_changed(lambda: admission.open(provider))
+        if interruption != "native-inspection":
+            provider._close_runtime_admission()
+        return claimed
+
+    def inspect_after_claim(subject):
+        original_inspect(subject)
+        if interruption == "native-inspection" and peer.owner(subject.sandbox_id) == "new-worker":
+            raise StorageHostUnqualified("Container inspection changed")
+
+    original_inspect = provider._assert_managed_container
+    with patch.object(provider._ownership, "claim", side_effect=change_admission_during_claim), patch.object(provider, "_assert_managed_container", side_effect=inspect_after_claim):
+        if interruption == "idle-admission":
+            provider.external_changed(lambda: admission.open(provider))
+            provider._reconcile_orphans()
+        else:
+            permit = provider._begin_bootstrap_accounting(admission)
+            try:
+                with pytest.raises((SandboxRuntimeAdmissionError, StorageHostUnqualified)):
+                    provider._park_bootstrap_accounting(permit, info)
+            finally:
+                provider._end_bootstrap_accounting(permit)
+    assert not provider._warm_pool and peer.owner(info.sandbox_id) == "new-worker"
+
+    permit = provider._begin_bootstrap_accounting(admission)
+    try:
+        # A returning peer may take over this normal lease. Only a fresh,
+        # uninterrupted interval after its final lease expires permits parking.
+        if interruption == "bootstrap-admission":
+            assert peer.take(info.sandbox_id)
+        expire(0.5)
+        provider._renew_owned_leases()
+        provider._reconcile_orphans()
+        with pytest.raises(StorageHostUnqualified):
+            provider._park_bootstrap_accounting(permit, info)
+        assert peer.owner(info.sandbox_id) == ("old-worker" if interruption == "bootstrap-admission" else "new-worker")
+        expire(0.5)
+        assert peer.owner(info.sandbox_id) is None
+        provider._reconcile_orphans()
+        with pytest.raises(StorageHostUnqualified):
+            provider._park_bootstrap_accounting(permit, info)
+        expire()
+        provider._reconcile_orphans()
+        provider._park_bootstrap_accounting(permit, info)
+    finally:
+        provider._end_bootstrap_accounting(permit)
+    assert provider._warm_pool[info.sandbox_id][0] is info
     provider._backend.destroy.assert_not_called()
 
 

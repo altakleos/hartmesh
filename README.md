@@ -45,16 +45,17 @@ output completeness. Interrupted provider-key
 updates settle their database and active configuration changes before accepting
 another edit; refresh settings to see whether the interrupted update completed.
 Files saved to My Files or Shared become available only after the copy finishes;
-new copies never overwrite existing files. An interrupted Share request finishes
-recording or rolling back its copy before another publication begins.
+new copies never overwrite existing files. Managed storage checks interrupted
+Shares against the recorded file identity and bytes. A Share that stopped
+before recording its identity can leave a file for an operator to inspect.
 
 Shared Remove and Undo carry the publication ID they displayed, so a stale action
-cannot remove a newer publication at the same path. Publishing and removing share
-a filesystem mutation lock. Removals retain bytes in private `.shared-state`
-staging until the publication record settles; the next Shared access recovers an
-interrupted removal from its recorded outcome. An unavailable or inconsistent
-record keeps the bytes staged and returns a retryable error. Preserve this hidden
-directory with Shared storage and its publication database when backing up or restoring.
+cannot remove a newer publication at the same path. Removals hold private staging
+until the publication record settles. On managed storage, other Shared files can
+still be listed and opened while an interrupted removal awaits recovery. The
+host restores or finishes the removal from its journal and publication record.
+For a legacy Shared directory, preserve its private `.shared-state` folder
+together with Shared storage and the publication database when backing up or restoring.
 
 [Persistent agent instances](docs/AGENT_EXECUTION.md) add resident non-login
 identities, personal/company custody, adopted custom definition revisions and
@@ -122,6 +123,9 @@ includes stopped containers and historical prefixes; missing or ambiguous facts
 prevent it from reporting complete accounting.
 The staged startup coordinator retains work across timeouts and retries, checks
 complete accounting before opening admission, and drains shutdown in order.
+After a Gateway restart, idle sandbox checks leave recovered chat sandboxes
+available for startup accounting once their previous ownership leases and
+recovery grace periods expire.
 The run API distinguishes a Gateway shutdown from a human Stop. Shutdown records
 its reason before cancelling active runs; a run that finishes during shutdown
 keeps its outcome.

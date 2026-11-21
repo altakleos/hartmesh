@@ -5,6 +5,7 @@ import os
 import stat
 import time
 from contextvars import ContextVar
+from enum import StrEnum
 
 from deerflow.files.store import open_directory_source
 
@@ -105,6 +106,16 @@ def close(descriptors):
 _receipt = ContextVar("storage_host_workflow_receipt", default=None)
 
 
+class WorkflowResolution(StrEnum):
+    SETTLED = "host-settled"
+    RECONCILED = "host-reconciled"
+    FAILED = "failed"
+
+
+class MissingWorkflowReceipt(FileNotFoundError):
+    """Only the named receipt was absent inside the verified control directory."""
+
+
 class WorkflowReceipt:
     def __init__(self, volume, operation_id, request, *, control_fd=None):
         self.root = volume.control_path
@@ -151,7 +162,10 @@ class WorkflowReceipt:
 
         root = self._root()
         try:
-            fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=root)
+            try:
+                fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=root)
+            except FileNotFoundError as exc:
+                raise MissingWorkflowReceipt(self.path.name) from exc
             with os.fdopen(fd, "rb") as source:
                 metadata = os.fstat(source.fileno())
                 if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1:

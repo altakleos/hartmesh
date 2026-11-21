@@ -3381,7 +3381,9 @@ ai settle --space 0b1c2d3e4f5a4b6c8d7e9f0a1b2c3d4e --operation 6e2d7f8a9b0c4d1e8
 ai settle --space 9c4d1e6f8a0b4c2d9e7f5a3b1c8d6e40 --operation 6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80 --discard
 ```
 
-Every write the Gateway makes to a Space, a file given to an agent, a Keep into My Files, a project document, a publication to Shared or its removal, leaves a `pending` row in `storage_space_file_operations` until its outcome is recorded. The Gateway settles a row the restart or the crash left `pending` by itself, at its start and in every pass of its 60-second task: a file write by replaying its record against the files, a Keep or a project document as complete because each publishes by a hard link under a unique name and records nothing the filesystem does not show, a publication to Shared by reading its receipt `control/host-workflow-<operation id>.json` and reconciling the record with the files. A row that it cannot settle, because the receipt is missing or the reconciliation raises, is left `pending`, and the journal says so: `storage: publication 6e2d… not settled: <text>`. While such a row stands, a request that includes a write on that Space is refused as `storage-busy`; the person reads "Shared is being changed right now. Try again in a moment." or "Your files are being changed right now. Try again in a moment.", and reads it again at every try. This verb is the operator's way to end that. In order:
+The Gateway records an operation before it changes a Space. `ai status` counts pending operations and `ai pending` lists their Space and operation IDs. A zero count describes the instant of that check. At startup and in its periodic pass, the Gateway settles a registered feature workflow as failed if its private receipt was never created. It checks Shared publications against the chosen folder, staged inode and content. For a removal it uses the journal, the publication record and the public path. Other Shared files remain readable while an interrupted removal waits. A live writer still holds the Space lock.
+
+An older Share can leave a visible file before recording which inode it published. A matching filename alone cannot identify that copy. In this case, or when recorded evidence is damaged, the operation stays pending and blocks writes on the affected Space. The operator can inspect it with this command.
 
 1. It finds the row by Space and operation id and requires the phase `pending`.
 2. It prints the row's facts under `request`, the receipt under `receipt` when one exists, and what the folder holds under `files`, so that the operator can read them before acting; with neither flag it stops here when the settlement would raise, verdict `unsettled`, exit 2.
@@ -3398,13 +3400,27 @@ Every write the Gateway makes to a Space, a file given to an agent, a Keep into 
 | `request` | object | The row's request as stored. |
 | `receipt` | object or null | The receipt's content, or null when none exists. |
 | `files` | array of strings or null | Names under the target folder. An empty array means missing or empty. Null means the folder could not be listed safely. |
+| `shared_folder` | string | Folder relative to Shared for a recognized publication or removal. The empty string is its root. |
+| `publication_matches` | object or null | For visible candidate names, true means the live publication record matches both size and content. False means no matching record was found. Null indicates that the comparison could not be made. These observations precede settlement. |
 | `verdict` | string | `settled-complete`, `settled-failed`, `settled-unconfirmed`, `discarded` or `unsettled`. |
 | `resolution` | string or null | The recorded resolution, including `host-settled`, `host-reconciled`, `host-unconfirmed` and `host-discarded`. Unrecognized resolutions retain their original value and report `settled-unconfirmed`. Null with `unsettled`. |
 
-Example:
+Selected fields from a successful settlement appear below. The file was visible before settlement and had no matching publication record at the time of inspection.
 
 ```json
-{"action": "feature-workflow", "command": "settle", "files": ["q3-review.pdf"], "kind": "company", "namespace": "hm.shared", "note": "publication 6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80 on the company space settled complete (host-reconciled): the file is in shared/ and its record now names it", "on_behalf_of": "1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c", "operation_id": "6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80", "receipt": {"digest": "sha256:4a5b…", "name": "q3-review.pdf", "operation_id": "6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80", "source_space_id": "0b1c2d3e4f5a4b6c8d7e9f0a1b2c3d4e"}, "request": {"action": "feature-workflow", "by": "host", "intent": "publish", "namespace": "hm.shared"}, "resolution": "host-reconciled", "returncode": 0, "space_id": "9c4d1e6f8a0b4c2d9e7f5a3b1c8d6e40", "verdict": "settled-complete"}
+{
+  "command": "settle",
+  "action": "feature-workflow",
+  "namespace": "hm.shared",
+  "operation_id": "6e2d7f8a9b0c4d1e8f2a3b4c5d6e7f80",
+  "space_id": "9c4d1e6f8a0b4c2d9e7f5a3b1c8d6e40",
+  "shared_folder": "reports",
+  "files": ["q3-review.pdf"],
+  "publication_matches": {"q3-review.pdf": false},
+  "verdict": "settled-complete",
+  "resolution": "host-reconciled",
+  "returncode": 0
+}
 ```
 
 Refusals, exit 1, beside the common ones:
@@ -3567,8 +3583,7 @@ current binding identities; it never replays an unknown write or claims success
 from elapsed time. Uncertain copy/lifecycle/controller outcomes remain pending
 for inspection. `ai settle --space <id> --operation <id>` inspects and reconciles
 one exact row. Use `--discard` only after inspecting the request, receipts and
-files: it records host/operator failure and replays no write. A missing receipt
-or uncertain publication can remain unsettled with exit 2.
+files: it records host/operator failure and replays no write. An ambiguous publication or a damaged receipt can remain unsettled with exit 2. After inspecting the exact row, an operator can discard it. Only then can an administrator remove a file the interrupted publication left unrecorded.
 
 ### Roles and the provider's name
 

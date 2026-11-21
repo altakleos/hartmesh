@@ -105,7 +105,7 @@ class FeatureService:
     async def settle_workflow(self, intent, *, session):
         """Trusted generic recovery callback; domain reconciliation stays here."""
         from deerflow.spaces.contract import SpaceDenied
-        from deerflow.spaces.workflows import _owner, _read_only, _receipt
+        from deerflow.spaces.workflows import WorkflowResolution, _owner, _read_only, _receipt
 
         files = self.resources().files
         owner, receipt = _owner.get(), _receipt.get()
@@ -121,9 +121,11 @@ class FeatureService:
         ):
             raise SpaceDenied("Workflow settlement requires exact owned evidence")
         if self.host_written:
-            await self.settle_publication(intent, session=session)
-            return "host-reconciled"
-        return "host-settled"
+            outcome = await self.settle_publication(intent, session=session)
+            if outcome is WorkflowResolution.FAILED:
+                return outcome
+            return WorkflowResolution.RECONCILED
+        return WorkflowResolution.SETTLED
 
     async def settle_publication(self, intent, *, session):
         """Reconcile one exact host workflow inside its caller's transaction.
@@ -180,8 +182,8 @@ class FeatureService:
 
                 from deerflow.features.qualified_publications import shared_file_holding as qualified_holding
 
-                holding = partial(qualified_holding, volume, expected_identity=receipt.value["facts"].get("publication_identity"))
-                return await reconcile_publication(SharedPublicationRepository(files.registry._sf, session=session), receipt, current, holding=holding)
+                holding = partial(qualified_holding, volume, settling=True)
+                return await reconcile_publication(SharedPublicationRepository(files.registry._sf, session=session), receipt, current, holding=holding, volume=volume)
 
         return await await_drained(perform())
 

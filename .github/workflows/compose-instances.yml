@@ -332,6 +332,29 @@ jobs:
           assert not tree.findall(".//failure") and not tree.findall(".//error")
           PY
 
+      - name: Qualify interrupted Shared operations
+        if: github.event_name != 'workflow_dispatch' || inputs.connections == 'skip'
+        env:
+          HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
+          HARTMESH_BUNDLE_URL: http://localhost:2026
+          HARTMESH_BUNDLE_PROJECT_DIR: /opt/hartmesh
+          HARTMESH_BUNDLE_ENV_FILE: /srv/hartmesh/.env
+          HARTMESH_BUNDLE_ADMIN_EMAIL: admin@example.com
+          HARTMESH_BUNDLE_ADMIN_PASSWORD: 'Acceptance-Admin-2026!'
+          HARTMESH_BUNDLE_RUNTIME: hartmesh-ci
+        working-directory: backend
+        run: |
+          sudo python3 ../docker/acceptance/mounted_devices.py before-gateway > "$EVIDENCE/mounted-devices-before.json"
+          PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 .venv/bin/python -m pytest tests/test_compose_shared_settlement.py \
+            -q --tb=short --maxfail=1 --junitxml="$EVIDENCE/shared-settlement.xml"
+          jq -e --arg image "$BACKEND_REF" '.backend == $image and .pending_after == 0 and (.operations | length) == 2 and
+            .operations[0].settled == "complete|host-reconciled" and .operations[1].settled == "failed|host-settled" and
+            all(.operations[]; .reader_release_to_terminal_seconds >= 0 and .reader_release_to_terminal_seconds < 150 and .restart_to_terminal_seconds >= .reader_release_to_terminal_seconds) and
+            .subsequent_remove_seconds >= 0 and .subsequent_publish_seconds >= 0 and
+            .reader_retirement.container_absent and .reader_retirement.execution_after == "ready" and
+            .operations[1].sibling_read_during_pending_removal and .operations[0].publication_id != .subsequent_publication' "$EVIDENCE/shared-settlement.json"
+          sudo python3 ../docker/acceptance/mounted_devices.py after-gateway --previous "$EVIDENCE/mounted-devices-before.json" > "$EVIDENCE/mounted-devices-after-gateway.json"
+
       - name: Measure Home settlement and the first fresh answer
         if: github.event_name != 'workflow_dispatch' || inputs.connections == 'skip'
         env:
@@ -459,6 +482,8 @@ jobs:
           jq -e '.complete == true and (.rollback | keys) == ["60","61","66"]' "$EVIDENCE/connections.json"
 
       - name: 14 Check that the stack stops cleanly
+        env:
+          SHARED_MEASURED: ${{ github.event_name != 'workflow_dispatch' || inputs.connections == 'skip' }}
         run: |
           $C logs --no-color > "$EVIDENCE/compose-before-down.log" 2>&1
           $C ps -a > "$EVIDENCE/services-before-down.txt"
@@ -468,6 +493,14 @@ jobs:
           $C run --rm -T storage-init quiesce | tee "$EVIDENCE/quiesce.json"
           tail -n 1 "$EVIDENCE/quiesce.json" | jq -e '.command == "quiesce" and .returncode == 0 and (.unmounted | length) == 9 and (.busy | length) == 0 and (.holders | length) == 0'
           test "$(findmnt -rn -o TARGET | grep -c '^/srv/hartmesh/spaces/' || true)" = 0
+          if [[ "$SHARED_MEASURED" == true ]]; then
+            $C run --rm -T storage-init mount-all | tee "$EVIDENCE/remount.json"
+            tail -n 1 "$EVIDENCE/remount.json" | jq -e '.command == "mount-all" and .returncode == 0 and (.mounted | length) == 9 and .already == 0 and .failed == []'
+            sudo python3 docker/acceptance/mounted_devices.py after-remount --previous "$EVIDENCE/mounted-devices-after-gateway.json" > "$EVIDENCE/mounted-devices-after-remount.json"
+            $C run --rm -T storage-init quiesce | tee "$EVIDENCE/quiesce-after-remount.json"
+            tail -n 1 "$EVIDENCE/quiesce-after-remount.json" | jq -e '.returncode == 0 and (.unmounted | length) == 9 and .busy == [] and .holders == []'
+            test "$(findmnt -rn -o TARGET | grep -c '^/srv/hartmesh/spaces/' || true)" = 0
+          fi
 
       - name: Collect logs
         if: always()
