@@ -15,7 +15,10 @@ current company grants and check the final tools, including middleware declarati
 against a separate grant read. Preserve product tool names and deferred selection.
 The model receives connection names as transient data. Each call resolves its
 current definition and commits a sending event before dispatch. An interrupted
-call with only a sending event has an unknown outcome.
+call with only a sending event has an unknown outcome. Terminal inventory qualifies
+the exact host-issued connection tool alongside its instance authority and
+checkpoint-normalized connection inventory middleware. The terminal snapshot
+witnesses rich tool messages and their artifacts. Inner MCP callbacks stay private.
 
 **Lead Agent** (`packages/harness/deerflow/agents/lead_agent/agent.py`):
 - `make_lead_agent(config: RunnableConfig)` is the published `langgraph.json`

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from _router_auth_helpers import call_unwrapped
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, FastAPI, Request
 from langchain_core.messages import HumanMessage
 
 from app.gateway.routers import threads
@@ -88,7 +88,7 @@ async def test_history_head_carries_exactly_the_contract_keys(monkeypatch):
     monkeypatch.setattr(threads, "get_checkpointer", lambda _request: None)
     monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", AsyncMock(return_value=(accessor, {})))
 
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    request = Request({"type": "http", "app": FastAPI()})
     entries = await call_unwrapped(threads.get_thread_history, thread_id="contract-thread", body=threads.ThreadHistoryRequest(limit=2), request=request, background_tasks=BackgroundTasks())
 
     head, older = (entry.model_dump(mode="json")["values"] for entry in entries)
