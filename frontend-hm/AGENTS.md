@@ -448,18 +448,15 @@ sticky; other send refusals retire after newer valid discovery. Composer recover
 restores only the captured attempt, preserves subsequent edits and excludes
 failed attachment chips without blocking text-only Send. Native download frames
 capture the account `FileActionLifetime` signal; component retirement fences
-notices without canceling same-account navigation's streamed transfer. Unknown
-download responses/deadlines are inconclusive and require a manual ordinary-link
-retry, never a second automatic GET or a buffered Blob. Auth-enabled registration
-browser coverage uses `playwright.auth.config.ts`, because the replay workspace
-fixture deliberately SSR-redirects Login in auth-disabled mode.
-Ordinary sends retain an admission outcome independently of SDK `submit()`'s
-early resolution. Private input/empty-metadata object identities track both
-thread-create and run errors without wire tokens. Stop captures its original
-attempt; failed cancellation preserves uncertainty and all new sends wait while
-Stop is pending. Text and file submissions propagate admission rejection to the
-existing PromptInput cleanup boundary. Draft/reference cleanup happens only on
-confirmed admission; accepted attempts release captured browser File objects.
+notices without canceling same-account navigation's streamed transfer. Unknown download outcomes need a manual link retry. Avoid a second GET or buffered Blob.
+Use `playwright.auth.config.ts` for registration. Replay fixtures SSR-redirect Login.
+Retry a failed fetch once for conversation metadata GET and history POST. Unknown
+identity locks the composer. Reload restarts both reads.
+Ordinary sends track admission beyond SDK `submit()` resolution. Private input
+and empty-metadata identities track thread-create and run errors without wire
+tokens. Stop captures its attempt and blocks new sends. A failed cancellation
+remains uncertain. Propagate text/file admission errors to PromptInput. Clear
+drafts/references and release captured browser Files only on confirmed admission.
 
 Collapsed provider support keeps its named logo link. Browser-mocked Playwright suites use
 `tests/fixtures/product-gateway.mjs` for product identity and explicit legacy selection (other routes 503);

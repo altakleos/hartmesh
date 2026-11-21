@@ -1473,6 +1473,8 @@ export function createEnUS(product: string): Translations {
     },
 
     chat: {
+      conversationLoadFailed: "This conversation could not be loaded.",
+      reloadConversation: "Reload conversation",
       filesFull: (support) =>
         `Your files are full, so a new conversation cannot start. Delete files in My files or delete old conversations, then start the conversation again. If that is not enough, ask ${support} for more room.`,
       filesPreparing: (support) =>

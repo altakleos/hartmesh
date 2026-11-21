@@ -504,6 +504,7 @@ def test_initial_browser_read_evidence_survives_timeout_and_keeps_only_expected_
         start("GET", url + "/history")
         now = 6
         first = start("GET", url)
+        first.failure = "net::ERR_ABORTED"
         now = 8
         handlers["requestfailed"](first)
         now = 9
@@ -522,7 +523,7 @@ def test_initial_browser_read_evidence_survives_timeout_and_keeps_only_expected_
             "metadata": {
                 "state": "pending",
                 "attempts": [
-                    {"started_ms": 1000, "elapsed_ms": 2000, "state": "failed"},
+                    {"started_ms": 1000, "elapsed_ms": 2000, "state": "failed", "failure_kind": "aborted"},
                     {"started_ms": 4000, "elapsed_ms": 3000, "state": "completed", "http_status": 503},
                     {"started_ms": 7000, "elapsed_ms": 3000, "state": "pending", "http_status": 200},
                 ],
@@ -538,3 +539,11 @@ def test_initial_browser_read_evidence_survives_timeout_and_keeps_only_expected_
         handlers["response"](Mock(request=history, status=200))
         handlers["requestfinished"](history)
     assert evidence["initial_reads"]["history"] == {"state": "completed", "attempts": [{"state": "completed", "http_status": 200, "started_ms": 0, "elapsed_ms": 0}]}
+
+    with receipt.observe_initial_thread_reads(page, url, evidence):
+        for failure in ("net::ERR_CONNECTION_RESET", "net::ERR_ABORTED at https://private.invalid/?secret=value", None):
+            attempt = start("POST", url + "/history")
+            attempt.failure = failure
+            handlers["response"](Mock(request=attempt, status=200))
+            handlers["requestfailed"](attempt)
+    assert evidence["initial_reads"]["history"]["attempts"] == [{"started_ms": 0, "elapsed_ms": 0, "state": "failed", "http_status": 200, "failure_kind": kind} for kind in ("connection-reset", "other", "other")]

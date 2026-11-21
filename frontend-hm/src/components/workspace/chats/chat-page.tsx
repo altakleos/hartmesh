@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { Button } from "@/components/ui/button";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { BrowserTrigger } from "@/components/workspace/browser-view";
@@ -736,6 +737,24 @@ export default function ChatPage() {
                     )}
                     {mountedRef.current ? (
                       <>
+                        {threadMetadata.isError &&
+                          !legacyCapabilities &&
+                          !binding && (
+                            <div
+                              role="alert"
+                              className="flex items-center gap-2"
+                            >
+                              {t.chat.conversationLoadFailed}
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => window.location.reload()}
+                              >
+                                {t.chat.reloadConversation}
+                              </Button>
+                            </div>
+                          )}
                         {sendNotice && <div role="alert">{sendNotice}</div>}
                         {stop.message && <div role="alert">{stop.message}</div>}
                         {binding && agentRunRefusal && (

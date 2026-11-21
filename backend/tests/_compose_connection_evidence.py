@@ -3,6 +3,17 @@
 from contextlib import contextmanager
 from time import monotonic
 
+_BROWSER_FAILURES = {
+    "net::ERR_ABORTED": "aborted",
+    "net::ERR_BLOCKED_BY_CLIENT": "blocked-by-client",
+    "net::ERR_BLOCKED_BY_RESPONSE": "blocked-by-response",
+    "net::ERR_CONNECTION_CLOSED": "connection-closed",
+    "net::ERR_CONNECTION_REFUSED": "connection-refused",
+    "net::ERR_CONNECTION_RESET": "connection-reset",
+    "net::ERR_NAME_NOT_RESOLVED": "name-not-resolved",
+    "net::ERR_TIMED_OUT": "timed-out",
+}
+
 
 @contextmanager
 def observe_initial_thread_reads(page, thread_url, evidence):
@@ -30,6 +41,8 @@ def observe_initial_thread_reads(page, thread_url, evidence):
         if request in tracked:
             row = tracked.pop(request)
             row.update(state=state, elapsed_ms=elapsed_ms() - row["started_ms"])
+            if state == "failed":
+                row["failure_kind"] = _BROWSER_FAILURES.get(request.failure, "other")
 
     listeners = {"request": issued, "response": headers, "requestfinished": lambda req: ended(req, "completed"), "requestfailed": lambda req: ended(req, "failed")}
     for event, handler in listeners.items():
