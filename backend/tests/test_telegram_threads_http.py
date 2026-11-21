@@ -3,11 +3,13 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import httpx
 import pytest
 from _telegram_repository_test_support import db as db
+from _telegram_repository_test_support import employee_definition_row
 from fastapi import FastAPI
 from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy import select, text
@@ -15,8 +17,9 @@ from test_telegram_bot_adapter import build as build_channel
 from test_telegram_bot_adapter import start as start_channel
 from test_telegram_supervisor import _supervisor_logging as _supervisor_logging
 from test_telegram_threads import close, environment, inbound, origin
-from test_threads_router import _RawStateAccessor
+from test_threads_router import _RawStateAccessor, _write_checkpoint
 
+from app.gateway import services
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.csrf_middleware import CSRFMiddleware
 from app.gateway.routers import threads
@@ -30,7 +33,7 @@ from deerflow.persistence.channel_connections.model import ChannelConversationRo
 from deerflow.persistence.spaces.model import SpaceRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
-from deerflow.spaces.contract import ResolvedPrincipal
+from deerflow.spaces.contract import PrincipalRef, ResolvedPrincipal
 
 pytestmark = pytest.mark.asyncio
 
@@ -67,12 +70,14 @@ async def http_environment(db, monkeypatch):
         e.observed.append((request.method, request.url.path, str(getattr(getattr(request.state, "user", None), "id", "")), request.headers.get("x-csrf-token") == request.cookies.get("csrf_token")))
         return response
 
-    async def accessor(request, *, thread_id, assistant_id=None, checkpoint_id=None):
-        # Graph execution is not activated by this PR. Materialize the actual
-        # checkpointer without constructing a model; auth/stores remain real.
-        return _RawStateAccessor(app.state.checkpointer), {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    def accessor(request, *, thread_id, assistant_id=None, checkpoint_id=None, agent_inspection=None):
+        # Read the real checkpoint after the Gateway's normal conversation inspection.
+        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        if checkpoint_id is not None:
+            config["configurable"]["checkpoint_id"] = checkpoint_id
+        return _RawStateAccessor(app.state.checkpointer), config
 
-    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", accessor)
+    monkeypatch.setattr(services, "build_checkpoint_state_accessor", accessor)
     await e.http_client.stop()
     e.http_client = GatewayClientOwner(gateway_url="http://gateway.example", langgraph_url="http://runtime.example/api", transport=httpx.ASGITransport(app=app))
     e.threads.client = e.http_client
@@ -95,7 +100,8 @@ async def test_sdk_create_replay_and_get_prove_actual_stored_owner_with_real_mid
         await close(e)
 
 
-async def test_create_replay_default_is_not_proof_when_real_binding_exists(db, monkeypatch):
+@pytest.mark.parametrize("populated", [False, True], ids=["empty", "populated"])
+async def test_create_replay_default_is_not_proof_when_real_binding_exists(db, monkeypatch, populated):
     e = await http_environment(db, monkeypatch)
     try:
         row = await origin(e)
@@ -120,7 +126,8 @@ async def test_create_replay_default_is_not_proof_when_real_binding_exists(db, m
                     feature_metadata_version=None,
                 )
             )
-            writer.add(AgentDefinitionRevisionRow(revision="a" * 64, owner_id=e.link.owner_user_id, config={}, soul=""))
+            definition = employee_definition_row(e.link.owner_user_id)
+            writer.add(definition)
             await writer.flush()
             writer.add(
                 AgentInstanceRow(
@@ -131,7 +138,7 @@ async def test_create_replay_default_is_not_proof_when_real_binding_exists(db, m
                     owner_id=None,
                     creator_id=e.link.owner_user_id,
                     supervisor_id=e.link.owner_user_id,
-                    definition_revision="a" * 64,
+                    definition_revision=definition.revision,
                     home_id=home,
                     status="active",
                     generation=1,
@@ -144,8 +151,14 @@ async def test_create_replay_default_is_not_proof_when_real_binding_exists(db, m
             writer.add(AgentConversationRow(thread_id=identity, instance_id=agent, requester_id=e.link.owner_user_id, creation_id=uuid4().hex))
         replay = await e.http_client.create_thread(e.link.owner_user_id, thread_id=identity, metadata={"channel_agent_name": "lead_agent"})
         assert replay["agent_instance"] is None  # the POST's default is unsafe proof
+        if populated:
+            await _write_checkpoint(e.http_app.state.checkpointer, identity, str(uuid4()), [], step=1)
+        authority = e.http_app.state.agent_conversations
+        inspection = AsyncMock(wraps=authority.inspection)
+        monkeypatch.setattr(authority, "inspection", inspection)
         proof = await e.http_client.get_thread(e.link.owner_user_id, identity)
         assert proof["agent_instance"]["id"] == agent
+        inspection.assert_awaited_once_with(actor=PrincipalRef("human", e.link.owner_user_id), thread_id=identity)
         with pytest.raises(ValueError, match="invalid-thread-proof"):
             await e.threads.ensure_thread(e.link, inbound(e), origin=row)
         assert await db.connections.get_thread_id(e.link.connection_id, str(e.link.chat_id)) is None
