@@ -104,6 +104,7 @@ get explicit `environment:` entries and never see a provider key.
 | `HARTMESH_PROVIDER_KEYS_SECRET` | The wrapping key for provider keys an administrator sets in the product and for the tokens of Telegram bots people connect, at least 32 characters (`openssl rand -base64 32`). Absent -- which is what every existing tenant `.env` is -- nothing changes and the product refuses to store a key, saying why, and no Telegram bot can be added or polled (§ "Telegram bots"). Best supplied from the environment of the `docker compose` command rather than this file, which shares a disk with the database it protects (§ "Provider keys in the product"). |
 | `HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS` | Only while rotating that key: the old value, so keys wrapped under it are read and rewrapped under the new one at the next start (§ "Provider keys in the product"). |
 | `HARTMESH_PRIVATE_ENDPOINTS` | Private endpoints that an MCP connection or a custom model made in the product may use although they are not public: exact `host:port` pairs separated by commas, for example `mcp.internal.example:8443,10.0.4.7:9000`. No wildcard, and the port is always written. Absent -- which is what every existing tenant `.env` is -- none. An entry that is not a `host:port` pair is ignored and logged; it allows nothing and never stops a start. Read at Gateway start (§ "MCP connections"). |
+| `HARTMESH_AGENT_CONNECTIONS` | Bundles with this switch accept `on` (default) or `off`. It controls company connection calls by AI assistants and employees. [Operation and rollback](#agent-connection-grants). |
 | `SANDBOX_READY_TIMEOUT` | The cold-start readiness budget, `sandbox.ready_timeout` in the rendered `config.yaml`: whole seconds from 60 to 600. Absent -- which is what every existing tenant `.env` is -- the template's 120 applies. Anything else (zero, a negative or fractional number, text, a value outside the range) refuses to render and the Gateway does not start, so no value can turn the deadline off (§ "Sandbox readiness budget"). |
 | `SANDBOX_CAPACITY_WAIT_TIMEOUT` | How long an acquisition waits for one of the two sandbox slots when both are in active use and nothing is parked to evict, `sandbox.capacity_wait_timeout` in the rendered `config.yaml`: whole seconds from 0 to 60, where 0 refuses at once. Absent, the template's 5 applies. Anything else refuses to render, so no value makes the wait unbounded (§ "Memory budget"). |
 | `HARTMESH_SIGN_ON_ADMINS` | Sign-on only. Comma-separated email addresses that become the provider's `admin_emails`: an address on it is created as `admin` at its first sign-in, every other address as `user`. Absent, the deployment has **no administrator** (§ "Sign-in"). |
@@ -4385,6 +4386,24 @@ before upgrading to see which ones a tenant has.
 
 Rolling back to a release without the rule restores the earlier behaviour for
 every stored connection; the two lines are ignored by an older Gateway.
+
+### Agent connection grants
+
+In bundles that include `HARTMESH_AGENT_CONNECTIONS`, the published default is `on`.
+Set it to `off` in the deployment `.env` and [apply the re-render](#applying-a-env-re-render) to stop company
+connection calls by AI assistants and employees. Their grants stay in
+`extensions_config.json`. Set it back to `on` to resume eligible grants. Personal
+chats continue to use their configured connections with either setting.
+
+Start the upgrade from `v2.2.0+hartmesh.66`, which includes the endpoint restrictions
+introduced in `.61` and the personal-chat tool-list fix in `.65`. For a downgrade,
+follow the [rollback procedure](#rolling-back) and use the preceding `.66` bundle.
+It ignores the grants. On upgrade, grants apply again to the same installations;
+a connection deleted and added again through the older UI needs a fresh grant.
+An older embedded client replacing a definition without its installation metadata
+can also retire its grants. A trusted restore of the raw configuration can restore
+credentials, installation identities and their grants together. Review restored
+grants before enabling agent connection calls.
 
 ### Custom model addresses
 

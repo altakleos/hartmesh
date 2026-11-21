@@ -1,0 +1,36 @@
+# This overlay runs only beside the disposable mounted bundle.
+x-notice: &notice
+  image: ${BACKEND_REF:?qualification requires a verified image}
+  entrypoint: ["/app/backend/.venv/bin/python", "-B", "/fixture/notice_service.py"]
+  init: true
+  read_only: true
+  user: "65534:65534"
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: ["/tmp:size=8m,mode=1777"]
+  volumes:
+    - ./notice_service.py:/fixture/notice_service.py:ro
+    - ./notice-ca.pem:/fixture/ca.pem:ro
+    - ./notice.pem:/fixture/notice.pem:ro
+    - ./notice.key:/fixture/notice.key:ro
+  pids_limit: 32
+  mem_limit: 160m
+services:
+  notices-a:
+    <<: *notice
+    command: ["notices-a"]
+    networks:
+      app:
+        aliases: [notices-a.example.test]
+  notices-b:
+    <<: *notice
+    command: ["notices-b"]
+    networks:
+      app:
+        aliases: [notices-b.example.test]
+  notices-unlisted:
+    <<: *notice
+    command: ["notices-unlisted"]
+    networks:
+      app:
+        aliases: [notices-unlisted.example.test]
