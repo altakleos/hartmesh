@@ -103,6 +103,9 @@ async def test_callback_reservation_keeps_old_tombstone_and_has_its_own_exact_id
     e = retry_input_environment
     stage = await e.stage()
     record = await e.inbox.reserve_callback_publication(e.link, e.callback_id, thread_id=e.thread_id, endpoint_id=e.http.endpoint_id, guard=e.guard_factory())
+    claimed = []
+    restored = await e.inbox.read_callback_input(e.link, e.callback_id, guard=e.guard_factory(), claim_open=claimed.append)
+    assert restored.record == record and claimed == [record]
     assert record.owner_callback_id == e.callback_id and record.turn_id == e.callback_id
     assert record.event_id == "c" + e.callback_id and not record.dispatch_started
     assert record.input_sha256 == stage.input_sha256
@@ -300,3 +303,103 @@ async def test_callback_reservation_requires_saved_source_thread_or_completed_pr
     assert stage.thread_id is None and stage.thread_preparation is None
     with pytest.raises(ValueError):
         await e.inbox.reserve_callback_publication(e.link, e.callback_id, thread_id="unproven-caller-thread", endpoint_id=e.http.endpoint_id, guard=e.guard_factory())
+
+
+@pytest.mark.asyncio
+async def test_callback_turn_reattaching_during_recovery_commit_skips_live_preview(retry_input_environment, monkeypatch):
+    import asyncio
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from test_telegram_publication_observation import output_projection, serve
+
+    from app.telegram_bots.recovery import PublicationRecoveryService
+    from app.telegram_bots.turns import ChatTurns
+
+    e = retry_input_environment
+    stage = await e.stage()
+    record = await e.inbox.reserve_callback_publication(e.link, e.callback_id, thread_id=e.thread_id, endpoint_id=e.http.endpoint_id, guard=e.guard_factory())
+    record = await e.coordinator.dispatch_record(record, e.link)
+    await serve(e, record, output=output_projection(record))
+
+    services = SimpleNamespace(config=e.db.config, outbox=e.outbox)
+    turns = ChatTurns(services)
+    turn = SimpleNamespace(callback_id=e.callback_id, origins=stage.origins, link=e.link, record=None, input_closed=False, stop_requested=False)
+    recovery = PublicationRecoveryService(e.inbox, e.outbox, e.coordinator, e.db.links, lambda: True, owned=lambda *_: turn.record is not None)
+    fenced, release, reading = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    writer = e.outbox._writer
+
+    @asynccontextmanager
+    async def pause_before_commit(*args, **kwargs):
+        async with writer(*args, **kwargs) as unit:
+            yield unit
+            fenced.set()
+            await release.wait()
+
+    guard = e.guard_factory()
+
+    async def entered_read(session):
+        reading.set()
+        return await guard.check(session)
+
+    monkeypatch.setattr(e.outbox, "_writer", pause_before_commit)
+    monkeypatch.setattr(turns, "_guard", lambda *args, **kwargs: SimpleNamespace(captured_link=e.link, current=lambda: None, check=entered_read))
+    operation = asyncio.create_task(recovery.tick())
+    foreground = None
+    try:
+        await asyncio.wait_for(fenced.wait(), 8)
+        foreground = asyncio.create_task(turns._prepare_once(turn))
+        await asyncio.wait_for(reading.wait(), 8)
+        assert not foreground.done()
+        release.set()
+        await operation
+        assert await foreground is False
+        assert turn.input_closed
+        async with e.db.sessions() as session:
+            [primary] = await session.scalars(select(TelegramOutboxRow).where(TelegramOutboxRow.dedupe_key == "reply:" + record.turn_id))
+            assert primary.payload["reply_basis"]["version"] == 2
+    finally:
+        release.set()
+        await recovery.stop()
+        if foreground is not None:
+            await asyncio.gather(foreground, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("callback", [False, True], ids=["submission", "callback"])
+@pytest.mark.parametrize("reader_fails", [False, True], ids=["open", "reader-failure"])
+async def test_only_a_confirmed_staged_owner_can_start_a_preview(monkeypatch, callback, reader_fails):
+    from types import SimpleNamespace
+
+    from app.telegram_bots.config import TelegramBotsConfig
+    from app.telegram_bots.turns import ChatTurns
+
+    scope = SimpleNamespace(link_id="bot", message_thread_id=7)
+    record = SimpleNamespace(scope=scope, publication_id="publication")
+    stage = SimpleNamespace(record=record, route_complete=False)
+    link = SimpleNamespace(id=scope.link_id)
+    turn = SimpleNamespace(callback_id="callback" if callback else None, link=link, submission=None if callback else stage, rejoining_record=None, record=None, closing=False)
+
+    async def read(link, source, *, guard, claim_open):
+        assert source == (turn.callback_id if callback else turn.submission)
+        claim_open(record)
+        assert turns.owns_publication(record, link)
+        assert turn.record is None
+        if reader_fails:
+            raise OSError("stage read interrupted")
+        return stage
+
+    method = "read_callback_input" if callback else "read_submission"
+    inbox = SimpleNamespace(**{method: read})
+    turns = ChatTurns(SimpleNamespace(config=TelegramBotsConfig(), outbox=SimpleNamespace(inbox=inbox)))
+    turns._turns[(link.id, scope.message_thread_id)] = turn
+    monkeypatch.setattr(turns, "_current", lambda candidate: candidate is turn)
+    guard = SimpleNamespace(current=lambda: None)
+    if reader_fails:
+        with pytest.raises(OSError, match="stage read interrupted"):
+            await turns._read_rejoining_stage(turn, guard)
+        assert turn.record is None and not turns.owns_publication(record, link)
+    else:
+        assert await turns._read_rejoining_stage(turn, guard) is stage
+        assert turn.record is record and turns.owns_publication(record, link)
+    assert turn.rejoining_record is None

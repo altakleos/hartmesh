@@ -2296,7 +2296,8 @@ opened signed out: after sign-in the person lands on the page it named. The
 access token nor the internal token reaches them, and no response carries a bot token.
 
 **Messages.** Answers appear as temporary drafts by default, or as edited messages when
-`telegram_bots.streaming` is `edit`. While an answer runs, further messages wait without
+`telegram_bots.streaming` is `edit`. In edit mode, a background recovery check leaves
+the visible preview for the live turn to finish. While an answer runs, further messages wait without
 occupying a model worker and are answered together in order. `/stop` and the current
 answer's Stop control stop that turn and discard its waiting messages. When the
 workspace has no room a message waits for up to two minutes; Cancel takes it out of

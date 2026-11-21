@@ -8,6 +8,7 @@ import math
 import re
 from collections import deque
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING
 
 from app.telegram_bots.inbox import PublicationRecord
@@ -165,8 +166,14 @@ class PublicationRecoveryService:
             if link is None:
                 return "held"
             if epoch is None:
-                closing = None if self._owned is None or self._owned(record, link) else "chat.restarted"
-                result = await self.coordinator.observe(record, link, max_pages=MAX_OBSERVATION_PAGES, deadline=control.deadline, closing=closing)
+                observe = partial(self.coordinator.observe, closing=None)
+                if self._owned is not None:
+                    # Only the foreground can freeze and finish its acknowledged preview.
+                    def unowned():
+                        return self._owned(record, link) is False
+
+                    observe = partial(self.coordinator.observe, closing="chat.restarted", while_unowned=unowned)
+                result = await observe(record, link, max_pages=MAX_OBSERVATION_PAGES, deadline=control.deadline)
                 control.check()
                 if type(result) is not PublicationObservation:
                     return "held"
