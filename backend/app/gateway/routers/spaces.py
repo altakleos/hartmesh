@@ -271,11 +271,12 @@ async def list_directory(space_id: str, request: Request, path: str = "", limit:
     return {"files": [{**asdict(entry), "url": f"/api/spaces/{space_id}/content?" + urlencode({"path": entry.path})} for entry in entries], "truncated": truncated}
 
 
-@router.get("/{space_id}/text")
-async def read_text(space_id: str, request: Request, path: str):
+MAX_TEXT_BYTES = 1024 * 1024
+
+
+def text_result(content: bytes):
     import hashlib
 
-    content = await _service(request).read(actor=await _actor(request), space_id=space_id, path=path, max_bytes=1024 * 1024)
     if b"\0" in content:
         raise HTTPException(415, "Binary files can be downloaded, not edited as text")
     try:
@@ -283,6 +284,12 @@ async def read_text(space_id: str, request: Request, path: str):
     except UnicodeError:
         raise HTTPException(415, "The text editor supports UTF-8 files") from None
     return {"text": text, "sha256": hashlib.sha256(content).hexdigest(), "concurrency": "exclusive-host-window"}
+
+
+@router.get("/{space_id}/text")
+async def read_text(space_id: str, request: Request, path: str):
+    content = await _service(request).read(actor=await _actor(request), space_id=space_id, path=path, max_bytes=MAX_TEXT_BYTES)
+    return text_result(content)
 
 
 class SpaceFileResponse(DescriptorFileResponse):

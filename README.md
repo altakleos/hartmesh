@@ -36,6 +36,11 @@ Invalid cron fields remain custom expressions instead
 of appearing as a valid preset. Optional extension packages can publish bounded
 usage documentation through the authenticated plugin API.
 
+File clients can check `file_browser` in `GET /api/features` for supported reads.
+Each source lists its operations. The versioned API returns a selection’s current
+metadata and revision. For inspectable agent homes it also lists bounded folders
+and opens regular files. If an operation is missing, keep it unavailable.
+
 Hartmesh clears private workspace caches when the signed-in account changes.
 Artifact, My Files and Shared reads, copies and hashes refuse symlinks throughout the
 source path; these operations require descriptor-relative no-follow filesystem

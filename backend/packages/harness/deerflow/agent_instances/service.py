@@ -74,7 +74,7 @@ class AgentInstances:
         async with self._sf() as session:
             return await session.scalar(select(AgentInstanceRow).where(AgentInstanceRow.home_id == space_id))
 
-    def space_audience_admission(self, home_id, subject):
+    def space_audience_admission(self, home_id, subject, *, expected_instance=None):
         """Borrow the Home transaction before granting a human its files."""
         from deerflow.spaces.contract import SpaceDenied
 
@@ -85,6 +85,8 @@ class AgentInstances:
             except AgentDenied as exc:
                 raise SpaceDenied(message) from exc
             row = await session.scalar(select(AgentInstanceRow).where(AgentInstanceRow.home_id == home_id).with_for_update())
+            if expected_instance is not None and (row is None or row.id != expected_instance.id or row.generation != expected_instance.generation or row.status not in {"active", "suspended", "archived"}):
+                raise SpaceDenied("This agent Home changed; refresh the conversation or Files tab")
             grant = await session.get(AgentInstanceGrantRow, (row.id, subject.subject_id)) if row is not None else None
             if grant is None or not grant.permissions & int(AgentPermission.INSPECT):
                 raise SpaceDenied(message)

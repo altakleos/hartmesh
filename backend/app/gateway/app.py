@@ -41,6 +41,7 @@ from app.gateway.routers import (
     conversation_files,
     features,
     feedback,
+    file_browser,
     files,
     github_webhooks,
     human_input,
@@ -1651,6 +1652,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(conversation_files.router)
 
     # The person's own files: /api/files, plus /api/threads/{thread_id}/files to keep one
+    app.include_router(file_browser.router)
     app.include_router(files.router)
     app.include_router(spaces.router)
 

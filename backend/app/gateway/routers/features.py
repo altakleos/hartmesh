@@ -29,6 +29,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.tenant_bundle import MAX_COMPANY_NAME_CHARS, MAX_SUPPORT_URL_CHARS, TenantBundle, configured_tenant_bundle
 from deerflow.config.ui_config import MAX_STARTER_PROMPT_CHARS, MAX_STARTER_TITLE_CHARS, MAX_STARTERS, UiConfig
 from deerflow.features.resources import StorageFeatureLinkRow
+from deerflow.files.store import supports_descriptor_reads
 from deerflow.knowledge.providers import get_knowledge_capabilities
 from deerflow.persistence.agent_instances.model import AgentInstanceRow
 from deerflow.scheduler.runtime import scheduler_tools_enabled
@@ -77,6 +78,27 @@ class AgentInstancesFeature(BaseModel):
     reason: str | None = None
     ai_assistants: AssistantAllowance = Field(default_factory=AssistantAllowance)
     ai_employees: SeatCount = Field(default_factory=SeatCount)
+
+
+class FileBrowserOperations(BaseModel):
+    personal: list[str] = Field(default_factory=list)
+    shared: list[str] = Field(default_factory=list)
+    agent: list[str] = Field(default_factory=list)
+
+
+class FileBrowserFeature(BaseModel):
+    versions: list[int] = Field(default_factory=lambda: [1])
+    storage_mode: Literal["ordinary", "spaces", "unavailable"]
+    operations: FileBrowserOperations = Field(default_factory=FileBrowserOperations)
+
+    @classmethod
+    def for_storage(cls, storage: StorageSpacesFeature, instances: AgentInstancesFeature):
+        if storage.state == "off":
+            operations = FileBrowserOperations(personal=["select"], shared=["select"]) if supports_descriptor_reads() else FileBrowserOperations()
+            return cls(storage_mode="ordinary", operations=operations)
+        if storage.state == "unavailable":
+            return cls(storage_mode="unavailable")
+        return cls(storage_mode="spaces", operations=FileBrowserOperations(personal=["select"], shared=["select"], agent=["select", "folder", "content", "text"] if instances.enabled else []))
 
 
 class BrowserControlFeature(BaseModel):
@@ -228,6 +250,7 @@ class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
     customer_administration: CustomerAdministrationFeature = Field(default_factory=CustomerAdministrationFeature)
+    file_browser: FileBrowserFeature
     storage_spaces: StorageSpacesFeature = Field(default_factory=StorageSpacesFeature)
     accounts: AccountsFeature = Field(default_factory=AccountsFeature)
     agent_instances: AgentInstancesFeature = Field(default_factory=AgentInstancesFeature)
@@ -283,6 +306,7 @@ async def list_features(request: Request, response: Response, config: AppConfig 
         logger.exception("People-search availability could not be read")
         people_search = "exact"
     return FeaturesResponse(
+        file_browser=FileBrowserFeature.for_storage(storage, instances),
         storage_spaces=storage,
         accounts=accounts,
         agent_instances=instances,
