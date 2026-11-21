@@ -1,7 +1,5 @@
 """Keep native Company reads and rollback bound to the owned publication."""
 
-import os
-
 from deerflow.features.publications import PublicationUnavailable
 from deerflow.features.qualified_publications import shared_file_holding
 from deerflow.files.shared import SharedFile
@@ -34,16 +32,14 @@ class NativeSharedCopy:
     def retain(self, stage, directories):
         self.stage, self.directories = stage, directories
 
-    async def copy(self, source, *, name, folder):
-        await await_drained(run_file_io(self.verify))
-        stored = await self.sources.copy_to(source, self.volume, root_relative="shared", name=name, folder=folder, admission=self.admission, folder_mode=0o755, file_mode=0o644, retain_stage=self.retain)
-        self.published = SharedFile.of(stored)
-
-        def remember_identity():
-            metadata = os.fstat(self.stage.fd)
+    async def copy(self, source, *, name, folder, before_name):
+        def prepare_names(metadata, digest):
             record_fact("publication_identity", {"device": metadata.st_dev, "inode": metadata.st_ino})
+            return lambda path: before_name(path, metadata.st_size, digest)
 
-        await await_drained(run_file_io(remember_identity))
+        await await_drained(run_file_io(self.verify))
+        stored = await self.sources.copy_to(source, self.volume, root_relative="shared", name=name, folder=folder, admission=self.admission, folder_mode=0o755, file_mode=0o644, retain_stage=self.retain, prepare_names=prepare_names)
+        self.published = SharedFile.of(stored)
         return self.published
 
     async def rollback(self, published):

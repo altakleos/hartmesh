@@ -16,11 +16,22 @@ class PublicationUnavailable(Exception):
     pass
 
 
-async def copy_and_record(repo, source, *, name, folder, user_id, thread_id, source_path, copy, remove, copy_async=None, rollback_async=None):
+async def copy_and_record(repo, source, *, name, folder, user_id, thread_id, source_path, copy, remove, copy_async=None, rollback_async=None, ordered_copy=None):
     publication_id = str(uuid.uuid4())
-    published = await copy_async(source, name=name, folder=folder) if copy_async is not None else await run_file_io(copy, source, name=name, folder=folder)
-    fact = {"publication_id": publication_id, "path": published.path, "size": published.size, "sha256": published.sha256 or "", "published_by": user_id, "from_thread_id": thread_id, "from_path": source_path}
-    await run_file_io(record_fact, "publication", fact)
+    fact = None
+
+    def remember(path, size, digest):
+        nonlocal fact
+        fact = {"publication_id": publication_id, "path": path, "size": size, "sha256": digest, "published_by": user_id, "from_thread_id": thread_id, "from_path": source_path}
+        record_fact("publication", fact)
+
+    if ordered_copy is not None:
+        published = await ordered_copy(source, name=name, folder=folder, before_name=remember)
+        if fact is None or (fact["path"], fact["size"], fact["sha256"]) != (published.path, published.size, published.sha256):
+            raise PublicationUnavailable("The published file differs from its recorded candidate")
+    else:
+        published = await copy_async(source, name=name, folder=folder) if copy_async is not None else await run_file_io(copy, source, name=name, folder=folder)
+        await run_file_io(remember, published.path, published.size, published.sha256 or "")
     try:
         record = await repo.record_publication(**fact)
     except Exception as exc:

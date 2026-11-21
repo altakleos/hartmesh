@@ -34,6 +34,7 @@ class NativeFeatureInput:
     commit_async: object = None
     holding_async: object = None
     rollback_async: object = None
+    ordered_copy: object = None
 
 
 def native_feature_input():
@@ -41,8 +42,8 @@ def native_feature_input():
 
 
 @contextmanager
-def feature_input_scope(sources, source, copy_async, *, stage_async=None, commit_async=None, holding_async=None, rollback_async=None):
-    token = _feature_input.set(NativeFeatureInput(sources, source, copy_async, stage_async, commit_async, holding_async, rollback_async))
+def feature_input_scope(sources, source, copy_async, *, stage_async=None, commit_async=None, holding_async=None, rollback_async=None, ordered_copy=None):
+    token = _feature_input.set(NativeFeatureInput(sources, source, copy_async, stage_async, commit_async, holding_async, rollback_async, ordered_copy))
     try:
         yield
     finally:
@@ -213,11 +214,13 @@ class NativeFileSources:
         finally:
             await await_drained(run_file_io(close))
 
-    async def copy_to(self, source, destination, *, root_relative, name, admission, folder=None, folder_mode=0o777, file_mode=0o666, retain_stage=None):
+    async def copy_to(self, source, destination, *, root_relative, name, admission, folder=None, folder_mode=0o777, file_mode=0o666, retain_stage=None, prepare_names=None):
         """Stage bounded pinned bytes, refresh authority, then publish exclusively.
 
         The caller supplies its parent workflow admission, including its own
         operation identity. SQL and file workers never wait on each other.
+        A workflow can save the private stage identity once in prepare_names
+        and return a callback to save each candidate before the exclusive link.
         """
         relative_folder = normalize_relative_path(folder or "", allow_empty=True)
         safe_name = normalize_filename(name)
@@ -274,17 +277,20 @@ class NativeFileSources:
 
         def publish(digest):
             reverify()
+            before_name = prepare_names(os.fstat(stage.fd), digest) if prepare_names is not None else None
             seen = set()
             while True:
                 candidate = claim_unique_filename(safe_name, seen)
+                relative = (relative_folder + "/" if relative_folder else "") + candidate
+                if before_name is not None:
+                    before_name(relative)
+                mark_effect()
                 try:
-                    mark_effect()
                     stage.publish(candidate, file_mode=file_mode)
-                    metadata = os.fstat(stage.fd)
-                    relative = (relative_folder + "/" if relative_folder else "") + candidate
-                    return StoredFile(relative, candidate, metadata.st_size, metadata.st_mtime, digest)
                 except FileExistsError:
                     continue
+                metadata = os.fstat(stage.fd)
+                return StoredFile(relative, candidate, metadata.st_size, metadata.st_mtime, digest)
 
         try:
             try:
