@@ -8,6 +8,7 @@ import {
   test,
   type APIRequestContext,
   type Page,
+  type Response,
 } from "@playwright/test";
 
 test.use({ viewport: { width: 1440, height: 900 } });
@@ -66,12 +67,48 @@ function browserRegion(page: Page, area: Area) {
   return page.getByRole("region", { name: title[area], exact: true });
 }
 
+function waitForFolder(page: Page, area: Area, path: string) {
+  return page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      url.pathname === `/api/file-browser/v1/${area}/folder` &&
+      url.searchParams.get("path") === path
+    );
+  });
+}
+
+async function checkFolder(response: Response, path: string) {
+  expect(response.status()).toBe(200);
+  const data = (await response.json()) as {
+    files: { kind: string; name: string; path: string }[];
+    truncated: boolean;
+  };
+  expect(data.truncated).toBe(false);
+  expect(data.files).toHaveLength(path ? 400 : 26);
+  if (path) {
+    expect(
+      data.files.every(
+        (entry) =>
+          entry.kind === "file" && entry.path === path + "/" + entry.name,
+      ),
+    ).toBe(true);
+  } else {
+    expect(
+      data.files.filter((entry) => entry.kind === "directory"),
+    ).toHaveLength(25);
+    expect(data.files.find((entry) => entry.path === "visible.txt")?.kind).toBe(
+      "file",
+    );
+  }
+}
+
 async function navigateFromWorkspace(page: Page, area: Area) {
   const previous = area === "personal" ? "shared" : "personal";
   const origin = browserRegion(page, previous);
   const location = origin.getByRole("link", { name: title[area], exact: true });
   await location.waitFor();
   const start = time();
+  const folder = waitForFolder(page, area, "");
   await location.click();
   const region = browserRegion(page, area);
   const group = region.getByRole("button", {
@@ -79,7 +116,9 @@ async function navigateFromWorkspace(page: Page, area: Area) {
     exact: true,
   });
   await group.waitFor();
-  return { elapsed: time() - start, region, group };
+  const elapsed = time() - start;
+  await checkFolder(await folder, "");
+  return { elapsed, region, group };
 }
 test("bounded files stay scoped and usable across supported image pairings", async ({
   page,
@@ -176,6 +215,7 @@ test("bounded files stay scoped and usable across supported image pairings", asy
     if (currentGateway) {
       expect(features.file_browser?.storage_mode).toBe("ordinary");
       expect(features.file_browser?.operations.shared).toContain("select");
+      expect(features.file_browser?.operations.shared).toContain("folder");
       expect(features.file_browser?.operations.shared).not.toContain("remove");
     } else expect(features.file_browser).toBeUndefined();
     const csrf = (await context.cookies()).find(
@@ -291,15 +331,24 @@ test("bounded files stay scoped and usable across supported image pairings", asy
       }
     }
     if (!desktopBrowser) return;
+    const flatReads = { personal: 0, shared: 0 };
+    page.on("request", (request) => {
+      const requested = new URL(request.url()).pathname;
+      for (const area of areas)
+        if (requested === endpoint[area]) flatReads[area]++;
+    });
     // A direct document load includes shell startup. Record it independently from
     // entering a location inside the signed-in workspace and opening a child.
     for (const area of areas) {
+      const root = waitForFolder(page, area, "");
       const start = time();
       await page.goto(urls[area], { waitUntil: "commit" });
       await browserRegion(page, area)
         .getByRole("button", { name: "Collection 00", exact: true })
         .waitFor();
       samples[area].documentMs.push(time() - start);
+      await checkFolder(await root, "");
+      expect(flatReads[area]).toBe(0);
       save();
     }
     // Alternate real locations, starting from Shared. Each measurement requires
@@ -311,9 +360,7 @@ test("bounded files stay scoped and usable across supported image pairings", asy
           area,
         );
         samples[area].firstFolderPageMs.push(elapsed);
-        await expect(
-          region.getByText(/only the first 10[,]?000 entries/i),
-        ).toBeVisible();
+        const child = waitForFolder(page, area, "Collection 00");
         const start = time();
         await group.click();
         await region
@@ -321,6 +368,24 @@ test("bounded files stay scoped and usable across supported image pairings", asy
           .first()
           .waitFor();
         samples[area].childFolderMs.push(time() - start);
+        await checkFolder(await child, "Collection 00");
+        if (i === 0) {
+          expect(flatReads[area]).toBe(0);
+          const search = region.getByRole("searchbox");
+          const flat = page.waitForResponse(
+            (response) => new URL(response.url()).pathname === endpoint[area],
+          );
+          await search.fill("Report");
+          expect((await flat).status()).toBe(200);
+          await expect(
+            region.getByText(/only the first 10[,]?000 entries/i),
+          ).toBeVisible();
+          await search.fill("");
+          await region
+            .getByRole("link", { name: /^Report [0-9]+\.txt$/ })
+            .first()
+            .waitFor();
+        }
         if (i % 4 === 0) await rawList(area);
         save();
       }
@@ -332,9 +397,12 @@ test("bounded files stay scoped and usable across supported image pairings", asy
         childFolderMs: p95(sample.childFolderMs),
         rawListMs: p95(sample.rawListMs),
       };
-      save();
-      expect(evidence.p95[area].firstFolderPageMs).toBeLessThan(1000);
-      expect(evidence.p95[area].childFolderMs).toBeLessThan(1000);
+    }
+    save();
+    for (const area of areas) {
+      expect(flatReads[area]).toBe(1);
+      expect(evidence.p95[area]!.firstFolderPageMs).toBeLessThan(1000);
+      expect(evidence.p95[area]!.childFolderMs).toBeLessThan(1000);
     }
   } finally {
     evidence.cgroup.memoryAfter = readCgroup("memory.current");
