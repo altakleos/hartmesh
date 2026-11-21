@@ -270,6 +270,95 @@ async def adopted_definition(instance_id: str, request: Request):
     return {"revision": snapshot.revision, "config": snapshot.config, "soul": snapshot.soul}
 
 
+async def _connection_reader(service, actor, instance_id):
+    from deerflow.agent_instances.contract import AgentPermission
+
+    for permission in (AgentPermission.USE, AgentPermission.INSPECT, AgentPermission.MANAGE):
+        try:
+            return await service.get(actor=actor, instance_id=instance_id, permission=permission)
+        except AgentDenied:
+            continue
+    raise AgentDenied("Agent instance is unavailable")
+
+
+@router.get("/{instance_id}/connections")
+@require_permission("agents", "read")
+async def instance_connections(instance_id: str, request: Request):
+    from deerflow.agent_instances.connections import list_connections
+    from deerflow.agent_instances.contract import AgentPermission
+    from deerflow.config.app_config import agent_connections_enabled
+
+    service = await _service(request)
+    actor = await _actor(request)
+    view = await _connection_reader(service, actor, instance_id)
+    manager = bool(view.permissions & AgentPermission.MANAGE)
+    if not await run_file_io(agent_connections_enabled):
+        return {"connections": []}
+    rows = await run_file_io(list_connections, instance_id, manager=manager)
+    if manager:
+        former = set()
+        for member_id in {row["given_by"] for row in rows if row["given_by"]}:
+            try:
+                await service.get(actor=PrincipalRef("human", member_id), instance_id=instance_id, permission=AgentPermission.MANAGE)
+            except AgentDenied:
+                former.add(member_id)
+        for row in rows:
+            if row["given_by"] in former:
+                row["given_by"] = None
+        from sqlalchemy import select
+
+        from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
+
+        async with service._sf() as session:
+            can_chat = await session.scalars(
+                select(AgentInstanceGrantRow.user_id).where(
+                    AgentInstanceGrantRow.instance_id == instance_id,
+                    AgentInstanceGrantRow.permissions.bitwise_and(int(AgentPermission.USE)) != 0,
+                )
+            )
+            count = 0
+            for user_id in can_chat:
+                try:
+                    await service._human(PrincipalRef("human", user_id), session=session)
+                except AgentDenied:
+                    continue
+                count += 1
+        await service.get(actor=actor, instance_id=instance_id, permission=AgentPermission.MANAGE)
+        return {"connections": rows, "chat_member_count": count}
+    await _connection_reader(service, actor, instance_id)
+    return {"connections": rows}
+
+
+async def _change_instance_connection(request, instance_id, connection_id, *, give):
+    from deerflow.agent_instances.connections import change_grant
+    from deerflow.agent_instances.lifecycle import InstanceLifecycle
+    from deerflow.config.app_config import agent_connections_enabled
+
+    service = await _service(request)
+    actor = await _actor(request)
+    async with service._sf() as session, session.begin():
+        await service._reserve_writer(session)
+        parent, _, _ = await InstanceLifecycle(service)._parent(session, actor, instance_id)
+        if parent.status == "deleted":
+            raise AgentDenied("Agent instance is unavailable")
+        if not await run_file_io(agent_connections_enabled):
+            raise AgentConflict("Company connections are unavailable.", reason="not-available")
+        await await_drained(run_file_io(change_grant, instance_id, connection_id, actor.subject_id, give=give))
+    return Response(status_code=204)
+
+
+@router.put("/{instance_id}/connections/{connection_id}", status_code=204)
+@require_permission("agents", "write")
+async def give_instance_connection(instance_id: str, connection_id: str, request: Request):
+    return await _change_instance_connection(request, instance_id, connection_id, give=True)
+
+
+@router.delete("/{instance_id}/connections/{connection_id}", status_code=204)
+@require_permission("agents", "write")
+async def remove_instance_connection(instance_id: str, connection_id: str, request: Request):
+    return await _change_instance_connection(request, instance_id, connection_id, give=False)
+
+
 @router.get("/{instance_id}/grants")
 @require_permission("agents", "read")
 async def instance_grants(instance_id: str, request: Request):

@@ -2762,6 +2762,12 @@ agents_api:
   ai_assistants_per_user: 1
   ai_employees: 10
 
+# Managers can grant company HTTP/SSE connections to individual agent instances.
+# List trusted extension package names explicitly to permit their runs to use grants.
+agent_connections:
+  enabled: false
+  packages: []
+
 # ============================================================================
 # Skill Self-Evolution Configuration
 # ============================================================================

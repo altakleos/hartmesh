@@ -829,3 +829,133 @@ async def test_stale_creation_follower_never_restores_a_ready_agents_revoked_gra
         follower_paused.set()
         leader_done.set()
         await asyncio.gather(leader, follower, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_company_connection_routes_follow_live_grants_and_provider_switch(instances, tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    import httpx
+
+    from app.gateway.routers import agent_instances as routes
+    from deerflow.capabilities.runtime import installation_id
+
+    service, _, sf, _ = instances
+    employee = await create(service)
+    monkeypatch.setattr(routes, "get_agents_api_config", lambda: SimpleNamespace(enabled=True))
+    enabled = True
+    monkeypatch.setattr("deerflow.config.app_config.agent_connections_enabled", lambda: enabled)
+    file = tmp_path / "extensions.json"
+    server = {"type": "http", "url": "https://example.test/private", "headers": {"Authorization": "Bearer sample"}}
+    file.write_text(json.dumps({"mcpServers": {"records": server}}))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(file))
+    async with sf() as session, session.begin():
+        session.add(AgentInstanceGrantRow(instance_id=employee.id, user_id=BOB.subject_id, permissions=int(AgentPermission.USE)))
+
+    path = f"/api/agent-instances/{employee.id}/connections"
+
+    def http(actor, **kwargs):
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=request_app(service, actor=actor, **kwargs)), base_url="http://test")
+
+    async with http(ALICE) as manager, http(BOB) as member:
+        [row] = (await manager.get(path)).json()["connections"]
+        give = path + "/" + row["id"]
+        assert (await member.get(path)).json() == {"connections": []}
+        assert (await member.put(give)).status_code == 404
+        async with http(ALICE, source="pat") as token:
+            assert (await token.put(give)).status_code == 403
+        async with http(ALICE, permissions=("agents:read",)) as limited:
+            assert (await limited.put(give)).status_code == 403
+        response = await manager.put(give)
+        assert response.status_code == 204, response.text
+        assert installation_id("records", json.loads(file.read_text())["mcpServers"]["records"]) == installation_id("records", server)
+        assert (await member.get(path)).json() == {"connections": [{"name": "records", "host": "example.test"}]}
+        async with sf() as database, database.begin():
+            grant = await database.get(AgentInstanceGrantRow, (employee.id, BOB.subject_id))
+            grant.permissions = int(AgentPermission.INSPECT)
+        assert (await member.get(path)).json() == {"connections": [{"name": "records", "host": "example.test"}]}
+        assert (await member.delete(give)).status_code == 404
+        give = path + "/" + (await manager.get(path)).json()["connections"][0]["id"]
+        enabled = False
+        assert (await member.get(path)).json() == {"connections": []}
+        assert (await manager.put(give)).json()["reason"] == "not-available"
+        enabled = True
+        assert (await member.get(path)).json()["connections"]
+        assert (await manager.delete(give)).status_code == 204
+        assert (await member.get(path)).json() == {"connections": []}
+        assert (await manager.delete(give)).status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_admin_connection_counts_follow_current_registry_and_live_instances(instances, tmp_path, monkeypatch):
+    import json
+
+    from test_mcp_config_secrets import _request_with_role
+
+    from app.gateway.routers import mcp
+    from deerflow.agent_instances import connections
+
+    service, _, sf, _ = instances
+    first = await create(service)
+    second = await create(service, name="Assistant")
+    request = _request_with_role("admin")
+    request.app.state.agent_instances = service
+    monkeypatch.setattr("deerflow.config.app_config.agent_connections_enabled", lambda: True)
+    file = tmp_path / "extensions.json"
+    source = {"type": "http", "url": "https://notices.example.test"}
+    file.write_text(json.dumps({"mcpServers": {"notices": source}}))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(file))
+
+    async def counts():
+        return (await mcp.get_mcp_configuration(request)).given_agent_counts
+
+    assert await counts() == {"notices": 0}
+    [target] = connections.list_connections(first.id, manager=True)
+    for instance in (first.id, second.id, "previously-removed"):
+        connections.change_grant(instance, target["id"], "manager", give=True)
+    assert await counts() == {"notices": 2}
+    async with sf() as session, session.begin():
+        (await session.get(AgentInstanceRow, first.id)).status = "deleted"
+    assert await counts() == {"notices": 1}
+    raw = json.loads(file.read_text())
+    raw["mcpServers"]["notices"] = source
+    file.write_text(json.dumps(raw))
+    assert await counts() == {"notices": 0}
+
+
+@pytest.mark.asyncio
+async def test_connection_manager_read_rechecks_authority_before_delivering_registry(instances, tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    import httpx
+
+    from app.gateway.routers import agent_instances as routes
+
+    service, _, sf, _ = instances
+    employee = await create(service)
+    file = tmp_path / "extensions.json"
+    file.write_text(json.dumps({"mcpServers": {"notices": {"type": "http", "url": "https://notices.example.test"}}}))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(file))
+    monkeypatch.setattr("deerflow.config.app_config.agent_connections_enabled", lambda: True)
+    monkeypatch.setattr(routes, "get_agents_api_config", lambda: SimpleNamespace(enabled=True))
+    get = service.get
+    changed = False
+
+    async def drop_manage_after_first_read(**kwargs):
+        nonlocal changed
+        view = await get(**kwargs)
+        if not changed:
+            async with sf() as session, session.begin():
+                grant = await session.get(AgentInstanceGrantRow, (employee.id, ALICE.subject_id))
+                grant.permissions = int(AgentPermission.USE)
+            changed = True
+        return view
+
+    monkeypatch.setattr(service, "get", drop_manage_after_first_read)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=request_app(service)), base_url="http://test") as client:
+        path = f"/api/agent-instances/{employee.id}/connections"
+        response = await client.get(path)
+        assert changed and response.status_code == 404 and "notices" not in response.text
+        assert (await client.get(path)).json() == {"connections": []}

@@ -31,6 +31,7 @@ def isolated_worker_env(monkeypatch):
 def _app_with_config(
     *,
     agents_api_enabled: bool,
+    agent_connections_enabled: bool = False,
     browser_enabled: bool = False,
     browser_extra: dict | None = None,
     mcp_tasks_available: bool = False,
@@ -63,6 +64,7 @@ def _app_with_config(
         tools.append(SimpleNamespace(name="read_conversation", use="deerflow.tools.conversation:read_conversation", model_extra={}))
     fake_config = SimpleNamespace(
         agents_api=SimpleNamespace(enabled=agents_api_enabled),
+        agent_connections=SimpleNamespace(enabled=agent_connections_enabled),
         tools=tools,
         subagent_runtime=SimpleNamespace(max_running=3),
         knowledge_base=SimpleNamespace(
@@ -117,7 +119,7 @@ def test_features_reports_agents_api_enabled(monkeypatch) -> None:
     assert response.json() == {
         "storage_spaces": {"enabled": False, "backend": None, "native_attachments": False, "editor_concurrency": None, "user_spaces": False, "state": "off", "reason": None, "own": "ready"},
         "accounts": {"seats": {"allowed": 0, "in_use": 0}},
-        "agent_instances": {"enabled": False, "execution": "unavailable", "reason": None, "ai_assistants": {"per_user": 0, "allowed": 0, "in_use": 0, "mine": 0}, "ai_employees": {"allowed": 0, "in_use": 0}},
+        "agent_instances": {"connections": False, "enabled": False, "execution": "unavailable", "reason": None, "ai_assistants": {"per_user": 0, "allowed": 0, "in_use": 0, "mine": 0}, "ai_employees": {"allowed": 0, "in_use": 0}},
         "people_search": "prefix",
         "message_search": False,
         "customer_administration": {"plugin_management": False, "local_skill_management": False, "local_mcp_management": False, "provider_operations": False},
@@ -143,7 +145,7 @@ def test_features_reports_agents_api_enabled(monkeypatch) -> None:
     }
 
 
-async def _managed_features(startup, *, user_id="alice", source="session", attributed_owner=None):
+async def _managed_features(startup, *, user_id="alice", source="session", attributed_owner=None, **feature_settings):
     import httpx
 
     from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
@@ -151,7 +153,7 @@ async def _managed_features(startup, *, user_id="alice", source="session", attri
     ss, state_app, config, sf, _, _, _ = startup
     if not hasattr(state_app.state, "agent_execution"):
         await ss.initialize_storage_spaces(state_app, config, session_factory=sf)
-    app = _app_with_config(agents_api_enabled=True)
+    app = _app_with_config(**{"agents_api_enabled": True, **feature_settings})
     app.state = state_app.state
 
     @app.middleware("http")
@@ -177,6 +179,7 @@ async def test_features_report_storage_allowances_and_only_the_callers_assistant
     assert response["storage_spaces"] == {"enabled": True, "backend": "fixed-ext4", "native_attachments": False, "editor_concurrency": "shared", "user_spaces": False, "state": "ready", "reason": None, "own": "not-assigned"}
     assert response["accounts"]["seats"] == {"allowed": 1, "in_use": 2}
     assert response["agent_instances"] == {
+        "connections": False,
         "enabled": True,
         "execution": "ready",
         "reason": None,
@@ -308,7 +311,7 @@ def test_features_reports_agents_api_disabled(monkeypatch) -> None:
     assert response.json() == {
         "storage_spaces": {"enabled": False, "backend": None, "native_attachments": False, "editor_concurrency": None, "user_spaces": False, "state": "off", "reason": None, "own": "ready"},
         "accounts": {"seats": {"allowed": 0, "in_use": 0}},
-        "agent_instances": {"enabled": False, "execution": "unavailable", "reason": None, "ai_assistants": {"per_user": 0, "allowed": 0, "in_use": 0, "mine": 0}, "ai_employees": {"allowed": 0, "in_use": 0}},
+        "agent_instances": {"connections": False, "enabled": False, "execution": "unavailable", "reason": None, "ai_assistants": {"per_user": 0, "allowed": 0, "in_use": 0, "mine": 0}, "ai_employees": {"allowed": 0, "in_use": 0}},
         "people_search": "prefix",
         "message_search": False,
         "customer_administration": {"plugin_management": False, "local_skill_management": False, "local_mcp_management": False, "provider_operations": False},
@@ -654,3 +657,9 @@ def test_message_search_feature_uses_the_same_caller_and_ready_provider_as_searc
         result = client.post("/api/search", json=query)
         assert result.status_code == 200
         assert result.json()["messages_available"] is expected
+
+
+@pytest.mark.asyncio
+async def test_features_expose_operator_agent_connection_switch(startup):
+    assert (await _managed_features(startup, agent_connections_enabled=True))["agent_instances"]["connections"] is True
+    assert (await _managed_features(startup, agents_api_enabled=False, agent_connections_enabled=True))["agent_instances"]["connections"] is False
