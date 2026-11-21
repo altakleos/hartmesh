@@ -359,9 +359,9 @@ A run the provider refused for `quota` or `auth` carries `stop_reason` `model_re
 which is `error.model_refused` with Try again.
 
 `observe(closing=)` is the durable twin: a marked publication with no live owner ends in
-a plan. Only a caller that knows no turn owns it may pass `closing`; recovery asks
-`owns_publication`, which compares the publication and not the link row, since a poll
-rewrites that row's stamps, and which lets go of a turn that is closing. A publication
+a plan. Recovery rechecks foreground ownership through its final writer so a live
+turn can edit its preview. `owns_publication` follows the exact publication across
+link stamp updates until the turn starts closing. A publication
 stays held only while its proof cannot be read. A conversation deleted under it ends under
 the closed proof `conversation_deleted`, once the thread itself answers 404, whatever run
 the row names: `chat.conversation_deleted` and no Try again, which would ask the same

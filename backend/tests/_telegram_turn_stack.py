@@ -4,8 +4,8 @@ Real: the channel and its pinned Application, ChatTurns, the queue, ThreadCoordi
 GatewayClientOwner, the attempt authority, PublicationCoordinator, RunObserver, the manager's
 worker loop, the bus, the inbox, the outbox and SQL.
 
-Scripted: the Gateway's answers and the Bot API. The live preview is a stand-in, because no
-ending depends on it.
+Scripted: the Gateway's answers and the Bot API. The default live preview is a stand-in.
+Tests that require an SDK acknowledgement can select the production presentation.
 """
 
 import asyncio
@@ -118,7 +118,7 @@ def coordinator_for(services, bus, http):
     return publications
 
 
-async def stack(db, monkeypatch, tmp_path, *, with_worker=True):
+async def stack(db, monkeypatch, tmp_path, *, with_worker=True, live_presentation=False):
     from app.channels.message_bus import MessageBus
     from app.telegram_bots.callbacks import CallbackRepository
     from app.telegram_bots.gateway_client import GatewayClientOwner
@@ -139,7 +139,8 @@ async def stack(db, monkeypatch, tmp_path, *, with_worker=True):
     services.publications = coordinator_for(services, bus, http)
     turns = ChatTurns(services)
     services.turns = turns
-    monkeypatch.setattr(importlib.import_module("app.telegram_bots.streaming"), "LivePresentation", ControlledView)
+    if not live_presentation:
+        monkeypatch.setattr(importlib.import_module("app.telegram_bots.streaming"), "LivePresentation", ControlledView)
 
     async def to_channel(message):
         await e.channel.send(message)
