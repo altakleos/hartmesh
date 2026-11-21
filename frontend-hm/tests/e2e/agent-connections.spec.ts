@@ -1,13 +1,24 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test, type TestInfo } from "@playwright/test";
 
 import { workInstance } from "../fixtures/agent-work";
 
 import { mockLangGraphAPI, MOCK_THREAD_ID } from "./utils/mock-api";
 
-test("a manager can review the audience, give a connection, and remove it", async ({
-  page,
-}, testInfo) => {
-  const agent = { ...workInstance(), permissions: 4 };
+async function exerciseManagerAccess(
+  page: Page,
+  testInfo: TestInfo,
+  custody: "company" | "personal",
+) {
+  const agent = {
+    ...workInstance(),
+    custody,
+    ...(custody === "personal" && {
+      owner_id: "default",
+      creator_id: "default",
+      supervisor: { kind: "human", subject_id: "default" },
+    }),
+    permissions: custody === "personal" ? 7 : 4,
+  };
   const base = "/api/agent-instances/" + agent.id;
   mockLangGraphAPI(page, { features: { agentInstancesEnabled: true } });
   await page.route("**/api/features", (route) =>
@@ -18,6 +29,7 @@ test("a manager can review the audience, give a connection, and remove it", asyn
           enabled: true,
           execution: "ready",
           connections: true,
+          ai_assistants: { per_user: 1, allowed: 5, in_use: 1, mine: 1 },
         },
       },
     }),
@@ -57,7 +69,22 @@ test("a manager can review the audience, give a connection, and remove it", asyn
     granted = method === "PUT";
     return route.fulfill({ status: 204 });
   });
-  await page.goto("/workspace/instances?instance=" + agent.id + "&tab=access");
+  if (custody === "personal") {
+    await page.route(
+      (url) =>
+        url.pathname === "/api/agent-instances" &&
+        url.searchParams.get("custody") === "personal",
+      (route) =>
+        route.fulfill({ json: { instances: [agent], unfinished: [] } }),
+    );
+    await page.goto("/workspace/assistants");
+    await page.getByRole("link", { name: agent.name, exact: true }).click();
+    await page.getByRole("tab", { name: "Access", exact: true }).click();
+  } else {
+    await page.goto(
+      "/workspace/instances?instance=" + agent.id + "&tab=access",
+    );
+  }
   const control = page.getByRole("switch", { name: "Notes", exact: true });
   await expect(control).toBeVisible();
   await control.click();
@@ -89,7 +116,15 @@ test("a manager can review the audience, give a connection, and remove it", asyn
   await expect(control).not.toBeChecked();
   await expect(disclosure).toHaveCount(0);
   expect(writes).toEqual(["PUT", "DELETE"]);
-});
+}
+
+test("a manager can review the audience, give a connection, and remove it", async ({
+  page,
+}, testInfo) => exerciseManagerAccess(page, testInfo, "company"));
+
+test("an owner can select a personal assistant and manage its connections from Access", async ({
+  page,
+}, testInfo) => exerciseManagerAccess(page, testInfo, "personal"));
 
 test("a chat member sees active connections on the employee and conversation, including a manager change while reading", async ({
   page,
