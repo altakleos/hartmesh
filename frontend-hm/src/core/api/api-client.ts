@@ -320,6 +320,33 @@ async function* handleInactiveRunStream({
   }
 }
 
+async function fetchWithThreadReadRetry(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  try {
+    return await globalThis.fetch(input, init);
+  } catch (error) {
+    // The SDK stops its retry loop on a pre-response network failure.
+    // Its history lookup is a read even though it posts a checkpoint filter.
+    const signal =
+      init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    if (!(error instanceof TypeError) || signal?.aborted) throw error;
+    const path = new URL(input instanceof Request ? input.url : input).pathname;
+    const method =
+      init?.method ?? (input instanceof Request ? input.method : "GET");
+    if (
+      (method === "GET" && /\/threads\/[^/]+$/.test(path)) ||
+      (method === "POST" && /\/threads\/[^/]+\/history$/.test(path))
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      if (signal?.aborted) throw error;
+      return globalThis.fetch(input, init);
+    }
+    throw error;
+  }
+}
+
 function createCompatibleClient(isMock?: boolean): LangGraphClient {
   if (isStaticWebsiteOnly() && !isMock) {
     return createStaticClient();
@@ -332,7 +359,7 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
     onRequest: injectCsrfHeader,
     callerOptions: {
       async fetch(input, init) {
-        const response = await globalThis.fetch(input, init);
+        const response = await fetchWithThreadReadRetry(input, init);
         if (response.status === 507 || response.status === 503) {
           const failure = await readFileAreaFailure(response.clone(), "");
           if (failure.refusal) admissionRefusals.set(response, failure.refusal);
