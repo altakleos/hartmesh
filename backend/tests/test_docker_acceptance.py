@@ -526,3 +526,44 @@ def test_title_source_checkout_contains_the_overlay_used_in_the_gateway_config(t
     assert json.loads((tmp_path / "title-search-result.json").read_text())["error"] == "checked generated fixture"
     overlay = "docker/acceptance/title-search/event-storage.yaml"
     assert subprocess.run(["git", "ls-files", "--error-unmatch", "--", overlay], cwd=ROOT, capture_output=True).returncode == 0
+
+
+def test_file_browser_profile_requires_an_explicit_mixed_version_control():
+    parser = load(ROOT / "scripts/docker_acceptance.py").parse_args
+    images = ["--backend-image", "example/backend@sha256:" + "a" * 64, "--frontend-image", "example/frontend@sha256:" + "b" * 64]
+    assert parser(["--measure-files", "current"]).measure_files == "current"
+    assert parser([*images, "--measure-files", "previous-ui", "--file-browser-floor", "v2.2.0+hartmesh.69"]).file_browser_floor.endswith(".69")
+    for invalid in (
+        ["--measure-files", "previous-ui"],
+        [*images, "--measure-files", "previous-gateway"],
+        [*images, "--measure-files", "current", "--file-browser-floor", "v2.2.0+hartmesh.69"],
+        [*images, "--measure-files", "previous-ui", "--file-browser-floor", "main"],
+    ):
+        with pytest.raises(SystemExit):
+            parser(invalid)
+
+
+@pytest.mark.parametrize("pair,component,previous", [("current", "frontend", False), ("previous-ui", "frontend", True), ("previous-ui", "backend", False), ("previous-gateway", "backend", True)])
+def test_file_browser_requires_the_components_own_published_pin(tmp_path, monkeypatch, pair, component, previous):
+    runner = load(ROOT / "scripts/docker_acceptance.py")
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    pins = tmp_path / "deploy/compose/images.txt"
+    pins.parent.mkdir(parents=True)
+    repo = "example/hartmesh"
+    tag = "v2.2.0+hartmesh.42"
+    ref = f"ghcr.io/{repo}-{component}@sha256:"
+    heads = []
+    for digit in ["a", "b"]:
+        pins.write_text(ref + digit * 64 + "\n", encoding="utf-8")
+        subprocess.run(["git", "add", str(pins)], cwd=tmp_path, check=True)
+        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org", "commit", "-qm", "fixture pins"], cwd=tmp_path, check=True)
+        heads.append(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip())
+    subprocess.run(["git", "tag", tag, heads[0]], cwd=tmp_path, check=True)
+    selected = ref + ("a" if previous else "b") * 64
+    assert runner.file_browser_image_revision(component, selected, repo, pair, tag, heads[1], "2.2.0+hartmesh.43") == ((heads[0], "2.2.0+hartmesh.42") if previous else (heads[1], "2.2.0+hartmesh.43"))
+    wrong = ref + ("b" if previous else "a") * 64
+    with pytest.raises(ValueError, match="Compose pin"):
+        runner.file_browser_image_revision(component, wrong, repo, pair, tag, heads[1], "2.2.0+hartmesh.43")
+    with pytest.raises(ValueError, match="repository"):
+        runner.file_browser_image_revision(component, selected, "another/hartmesh", pair, tag, heads[1], "2.2.0+hartmesh.43")

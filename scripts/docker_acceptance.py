@@ -45,6 +45,13 @@ TITLE_SEARCH_PATHS = (
     "frontend-hm/playwright.title-search-measurement.config.ts",
     "frontend-hm/tests/e2e-title-search-measurement",
 )
+FILE_BROWSER_PATHS = (
+    ".github/workflows/file-browser-qualification.yml",
+    "scripts/release_artifacts.py",
+    "docker/acceptance/file-browser",
+    "frontend-hm/playwright.file-browser.config.ts",
+    "frontend-hm/tests/e2e-file-browser-qualification",
+)
 PREVIEW_PATHS = (
     ".github/workflows/preview-measurement.yml",
     "scripts/release_artifacts.py",
@@ -144,8 +151,25 @@ def immutable_image(value: str) -> str:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     measurements = parser.add_mutually_exclusive_group()
-    measurements.add_argument("--measure-titles", action="store_true", help="Measure title search under the PostgreSQL distribution limits")
-    measurements.add_argument("--measure-previews", action="store_true", help="Collect separate preview measurements on supplied candidate digests")
+    measurements.add_argument(
+        "--measure-files",
+        choices=("current", "previous-ui", "previous-gateway"),
+        help="Qualify the bounded workspace file browser with current or mixed images",
+    )
+    parser.add_argument(
+        "--file-browser-floor",
+        help="Published release tag for the previous component of a mixed file-browser check",
+    )
+    measurements.add_argument(
+        "--measure-titles",
+        action="store_true",
+        help="Measure title search under the PostgreSQL distribution limits",
+    )
+    measurements.add_argument(
+        "--measure-previews",
+        action="store_true",
+        help="Collect separate preview measurements on supplied candidate digests",
+    )
     parser.add_argument(
         "--artifacts",
         type=Path,
@@ -170,6 +194,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if bool(args.backend_image) != bool(args.frontend_image):
         parser.error("--backend-image and --frontend-image must be supplied together")
+    mixed_files = args.measure_files in ("previous-ui", "previous-gateway")
+    if mixed_files != bool(args.file_browser_floor) or (
+        mixed_files and not args.backend_image
+    ):
+        parser.error(
+            "A mixed file-browser profile requires its published floor and both immutable images"
+        )
+    if args.file_browser_floor and not re.fullmatch(
+        r"v[0-9]+\.[0-9]+\.[0-9]+\+hartmesh\.[0-9]+", args.file_browser_floor
+    ):
+        parser.error("File-browser floor must be a published HartMesh version tag")
+    if args.measure_files and args.stores == "both":
+        parser.error("Qualify individual file-browser storage profiles")
     if args.measure_titles and args.stores != "postgres-redis":
         parser.error("Title search measurement requires the postgres-redis profile")
     if args.measure_previews and (not args.backend_image or args.stores != "sqlite"):
@@ -262,6 +299,37 @@ def check_preview_image(name: str, image: str, repository: str, revision: str | 
         raise ValueError(f"Measurement requires a {name} candidate built from the dispatched commit")
 
 
+def file_browser_image_revision(
+    component: str,
+    image: str,
+    repository: str,
+    pair: str,
+    floor: str | None,
+    commit: str,
+    version: str,
+) -> tuple[str, str]:
+    if image.split("@", 1)[0] != f"ghcr.io/{repository.lower()}-{component}":
+        raise ValueError("Unexpected file-browser candidate repository")
+    previous = (pair == "previous-ui" and component == "frontend") or (
+        pair == "previous-gateway" and component == "backend"
+    )
+    if previous:
+        if not floor:
+            raise ValueError("Mixed file-browser check requires a published floor")
+        commit = subprocess.check_output(
+            ["git", "rev-parse", f"refs/tags/{floor}^{{commit}}"], cwd=ROOT, text=True
+        ).strip()
+        version = floor.removeprefix("v")
+    pins = subprocess.check_output(
+        ["git", "show", f"{commit}:deploy/compose/images.txt"], cwd=ROOT, text=True
+    ).splitlines()
+    if image not in pins:
+        raise ValueError(
+            f"{component} does not match the selected release's Compose pin"
+        )
+    return commit, version
+
+
 def build_source_images(
     backend: str,
     frontend: str,
@@ -308,7 +376,8 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
     artifacts.mkdir(parents=True, exist_ok=True)
     project = f"hm-acceptance-{uuid.uuid4().hex[:12]}"
     title_measurement = args.measure_titles
-    measurement = title_measurement or args.measure_previews
+    files_profile = args.measure_files
+    measurement = title_measurement or args.measure_previews or bool(files_profile)
     supplied = bool(args.backend_image)
     backend, frontend = (
         (source_build["backend"], source_build["frontend"])
@@ -340,7 +409,15 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
         "schema": 2,
         "project": project,
         "status": "failed",
-        "mode": "title-search-measurement" if title_measurement else "preview-measurement" if args.measure_previews else "images" if supplied else "source",
+        "mode": "file-browser-qualification"
+        if files_profile
+        else "title-search-measurement"
+        if title_measurement
+        else "preview-measurement"
+        if args.measure_previews
+        else "images"
+        if supplied
+        else "source",
         "stores": args.stores,
         "workflow": workflow_identity(),
     }
@@ -352,11 +429,20 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
         summary["harness_commit"] = commit
         summary["source_commit"] = None if supplied else commit
-        paths = TITLE_SEARCH_PATHS if title_measurement else PREVIEW_PATHS if args.measure_previews else ()
+        paths = (
+            FILE_BROWSER_PATHS
+            if files_profile
+            else TITLE_SEARCH_PATHS
+            if title_measurement
+            else PREVIEW_PATHS
+            if args.measure_previews
+            else ()
+        )
         summary["harness_sha256"] = harness_fingerprint(paths)
         if measurement:
             verifier_env = env.copy()
             env.pop("GH_TOKEN", None)
+        if measurement and not files_profile:
             fixture = ROOT / "docker/acceptance"
             config = (fixture / "acceptance-config.yaml").read_text(encoding="utf-8")
             if title_measurement:
@@ -424,12 +510,50 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
             version = json.loads((ROOT / "frontend-hm/package.json").read_text(encoding="utf-8"))["version"]
             summary["release_version"] = version
             for name, image in summary["images"].items():
-                check_preview_image(name, image["requested"], identity["repository"], image["source_revision"], commit)
+                expected_revision, expected_version = commit, version
+                if files_profile:
+                    expected_revision, expected_version = file_browser_image_revision(
+                        name,
+                        image["requested"],
+                        identity["repository"],
+                        files_profile,
+                        args.file_browser_floor,
+                        commit,
+                        version,
+                    )
+                    if expected_revision != commit:
+                        summary["previous_release"] = {
+                            "tag": args.file_browser_floor,
+                            "commit": expected_revision,
+                            "component": name,
+                        }
+                else:
+                    check_preview_image(
+                        name,
+                        image["requested"],
+                        identity["repository"],
+                        image["source_revision"],
+                        commit,
+                    )
                 run(
-                    [sys.executable, str(ROOT / "scripts/release_artifacts.py"), "verify-candidate",
-                     "--repository", identity["repository"], "--component", name, "--version", version,
-                     "--image", image["requested"], "--revision", commit],
-                    env=verifier_env, log=artifacts / "provenance.log", timeout=180,
+                    [
+                        sys.executable,
+                        str(ROOT / "scripts/release_artifacts.py"),
+                        "verify-candidate",
+                        "--repository",
+                        identity["repository"],
+                        "--component",
+                        name,
+                        "--version",
+                        expected_version,
+                        "--image",
+                        image["requested"],
+                        "--revision",
+                        expected_revision,
+                    ],
+                    env=verifier_env,
+                    log=artifacts / "provenance.log",
+                    timeout=180,
                 )
                 image["verified_candidate"] = True
         if args.measure_previews:
@@ -464,6 +588,8 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
                     f"Running {name} image does not match the recorded image"
                 )
             identity["running_image_id"] = actual
+            if files_profile and name == "backend":
+                env["HARTMESH_FILES_GATEWAY_ID"] = container
             if args.measure_previews and name == "backend":
                 env["HARTMESH_PREVIEW_GATEWAY_ID"] = container
             if title_measurement and name == "backend":
@@ -537,7 +663,11 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
             HARTMESH_ACCEPTANCE_PYTHON=sys.executable,
         )
         browser_config = "playwright.docker-acceptance.config.ts"
-        if args.measure_previews:
+        if files_profile:
+            env["HARTMESH_FILES_PAIR"] = files_profile
+            summary["file_browser_pair"] = files_profile
+            browser_config = "playwright.file-browser.config.ts"
+        elif args.measure_previews:
             browser_config = "playwright.preview-measurement.config.ts"
         elif title_measurement:
             browser_config = "playwright.title-search-measurement.config.ts"
