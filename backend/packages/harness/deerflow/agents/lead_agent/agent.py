@@ -968,14 +968,20 @@ def _qualify_inventory_profile(graph, *, state_schema, middlewares, tools, mode,
     from langchain_core.tools import StructuredTool
     from langgraph.graph.state import CompiledStateGraph
 
+    from deerflow.agent_instances.connection_tools import ConnectionInventoryMiddleware, InstanceConnectionTool
+    from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
+
     if type(graph) is not CompiledStateGraph or state_schema is not get_thread_state_schema(mode):
         return None
     if extensions.middleware_contributors:
         return None
-    if any(type(tool) is not StructuredTool for tool in tools):
+    if any(type(tool) not in (StructuredTool, InstanceConnectionTool) for tool in tools):
         return None
+    if any(type(tool) is InstanceConnectionTool for tool in tools):
+        middleware_types = {type(item) for item in middlewares}
+        if not {InstanceAuthorityMiddleware, ConnectionInventoryMiddleware} <= middleware_types:
+            return None
 
-    from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
     from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
     from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
     from deerflow.agents.middlewares.assignment_proposal_middleware import AssignmentProposalMiddleware
@@ -1016,6 +1022,7 @@ def _qualify_inventory_profile(graph, *, state_schema, middlewares, tools, mode,
         AssignmentProposalMiddleware,
         ClarificationMiddleware,
         CompletedSubagentUsageMiddleware,
+        ConnectionInventoryMiddleware,
         DanglingToolCallMiddleware,
         DeerFlowSummarizationMiddleware,
         DeferredToolFilterMiddleware,
@@ -1701,6 +1708,10 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
             app_config=resolved_app_config,
             authorization_provider=_authz_provider,
         )
+        if connection_status is not None:
+            from deerflow.agent_instances.connection_tools import ConnectionInventoryMiddleware
+
+            middlewares.append(ConnectionInventoryMiddleware(connection_status))
         graph_middlewares = normalize_middleware_state_schemas(middlewares, mode)
         if not connection_status:
             break
@@ -1734,10 +1745,9 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         runtime_scope=build_runtime_scope(execution=instance_execution, tools=authorized_tools, memory_enabled=memory_enabled and resolved_app_config.memory.enabled),
     )
     if connection_status is not None:
-        from deerflow.agent_instances.connection_tools import CONNECTION_GUIDANCE, ConnectionInventoryMiddleware
+        from deerflow.agent_instances.connection_tools import CONNECTION_GUIDANCE
 
         system_prompt += CONNECTION_GUIDANCE
-        graph_middlewares.append(ConnectionInventoryMiddleware(connection_status))
     if instance_execution:
         graph_middlewares[0].allowed_tool_names = instance_tool_names(final_tools, graph_middlewares, external_positions)
         if instance_execution.execution_allowed:
