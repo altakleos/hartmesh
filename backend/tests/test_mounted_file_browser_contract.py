@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_signed_and_source_browser_rehearsals_are_distinct_and_bound():
     workflow = yaml.safe_load((ROOT / ".github/workflows/compose-instances.yml").read_text(encoding="utf-8"))
+    assert "inputs.verify_file_browser && '-file-browser' || ''" in workflow["concurrency"]["group"]
     steps = workflow["jobs"]["bundle-instances"]["steps"]
     signed = next(step for step in steps if step.get("name") == "Verify the signed workspace browser pair")
     assert "inputs.verify_file_browser" in signed["if"] and "inputs.backend_image != ''" in signed["if"]

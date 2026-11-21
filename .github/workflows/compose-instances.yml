@@ -28,7 +28,7 @@ on:
         default: false
 
 concurrency:
-  group: compose-instances-${{ github.event.pull_request.number || github.ref }}
+  group: compose-instances-${{ github.event.pull_request.number || github.ref }}${{ inputs.verify_file_browser && '-file-browser' || '' }}
   cancel-in-progress: true
 
 permissions:
