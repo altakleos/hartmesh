@@ -4,7 +4,9 @@ from contextlib import asynccontextmanager
 
 from deerflow.features.publications import PublicationUnavailable, copy_and_record, recover_removals
 from deerflow.files import manager, shared
+from deerflow.files.shared_attribution import observed_file, stage_observed, visible_records
 from deerflow.files.store import normalize_relative_path
+from deerflow.spaces.backings import BackingUnavailable
 from deerflow.spaces.contract import SpaceConflict, SpaceDenied
 from deerflow.utils.file_io import await_drained, run_file_io
 
@@ -38,7 +40,8 @@ class SharedBehavior:
         async with self.mutation(repo) as state:
             if operation == "list":
                 entries, truncated = await run_file_io(shared.list_shared_files)
-                return entries, truncated, await repo.live_publications()
+                records = await repo.live_publications()
+                return entries, truncated, await run_file_io(visible_records, state, entries, records)
             if operation == "publish":
                 source = values["source"]
                 folder = normalize_relative_path(values.get("folder") or "", allow_empty=True)
@@ -65,15 +68,22 @@ class SharedBehavior:
             if operation == "remove":
                 path = normalize_relative_path(values["path"])
                 source = await run_file_io(shared.resolve_shared_file, path)
-                await run_file_io(shared.digest_of, source)
+                try:
+                    observed = await run_file_io(observed_file, source, use_cache=True)
+                except FileNotFoundError:
+                    raise
+                except OSError as exc:
+                    raise BackingUnavailable("Could not verify the selected Shared file") from exc
                 record = await repo.live_publication(path)
+                if not observed.matches(record):
+                    record = None
                 publication_id = "" if record is None else record["publication_id"]
                 expected = values.get("expected_publication_id")
                 if expected is not None and expected != publication_id:
                     raise SpaceConflict("This Shared publication changed; refresh before removing it")
                 if not values.get("admin", False) and (record is None or record.get("published_by") != user_id):
                     raise SpaceDenied("Only the publisher or an administrator can remove this publication")
-                pending = await run_file_io(state.stage, path, publication_id or None)
+                pending = await run_file_io(stage_observed, state, path, publication_id or None, observed)
                 try:
                     if record is not None:
                         if await repo.record_removal(publication_id, removed_by=user_id) is None:

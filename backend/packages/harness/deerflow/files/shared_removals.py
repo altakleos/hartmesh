@@ -197,6 +197,20 @@ class PendingRemoval:
             raise StoreError("Invalid Shared removal payload")
         return True
 
+    def open_payload(self) -> int:
+        """Return the staged regular file. The caller owns the descriptor."""
+        assert self.fd is not None
+        if not self.has_payload():
+            raise FileNotFoundError("The staged Shared file is unavailable")
+        fd = os.open("payload", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise StoreError("Invalid Shared removal payload")
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
     def mark_removed(self) -> None:
         self.journal["removed"] = True
         self.write_journal()
