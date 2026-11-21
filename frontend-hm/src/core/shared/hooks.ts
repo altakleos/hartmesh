@@ -10,6 +10,11 @@ import { parentFolder } from "../file-areas/browser";
 import { useBrowserProtocol } from "../file-areas/browser-protocol";
 import { useFileActionLifetime } from "../file-areas/file-action-lifetime";
 import { useStorageCopy } from "../file-areas/storage-copy";
+import {
+  readWorkspaceFolder,
+  retryWorkspaceFolder,
+  type WorkspaceList,
+} from "../file-areas/workspace-folder";
 import { useI18n } from "../i18n/hooks";
 
 import {
@@ -17,13 +22,14 @@ import {
   publishToShared,
   removeSelectedSharedFile,
   type PublicationSelection,
+  type SharedFileInfo,
   type PublishOutcome,
   type PublishToSharedRequest,
 } from "./api";
 
 export const SHARED_FILES_QUERY_KEY = ["files", "shared"] as const;
 
-export function useSharedFiles() {
+export function useSharedFiles(folder?: string) {
   const { user } = useAuth();
   return useQuery({
     queryKey: [
@@ -31,8 +37,13 @@ export function useSharedFiles() {
       user?.id,
       user?.system_role,
       user?.permissions,
+      ...(folder === undefined ? [] : ["folder", folder]),
     ],
-    queryFn: ({ signal }) => listSharedFiles(signal),
+    queryFn: ({ signal }): Promise<WorkspaceList<SharedFileInfo>> =>
+      folder === undefined
+        ? listSharedFiles(signal)
+        : readWorkspaceFolder<SharedFileInfo>("shared", folder, signal),
+    ...(folder !== undefined && { retry: retryWorkspaceFolder }),
     gcTime: 0,
     staleTime: 0,
     refetchOnWindowFocus: true,

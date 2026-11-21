@@ -7,6 +7,11 @@ import { useAuth } from "../auth/AuthProvider";
 import { useStorage } from "../features";
 import { useFileActionLifetime } from "../file-areas/file-action-lifetime";
 import { useStorageCopy } from "../file-areas/storage-copy";
+import {
+  readWorkspaceFolder,
+  retryWorkspaceFolder,
+  type WorkspaceList,
+} from "../file-areas/workspace-folder";
 import { useI18n } from "../i18n/hooks";
 
 import {
@@ -19,7 +24,7 @@ import {
 
 export const MY_FILES_QUERY_KEY = ["files", "mine"] as const;
 
-export function useMyFiles() {
+export function useMyFiles(folder?: string) {
   const { user } = useAuth();
   return useQuery({
     queryKey: [
@@ -27,8 +32,13 @@ export function useMyFiles() {
       user?.id,
       user?.system_role,
       user?.permissions,
+      ...(folder === undefined ? [] : ["folder", folder]),
     ],
-    queryFn: ({ signal }) => listMyFiles(signal),
+    queryFn: ({ signal }): Promise<WorkspaceList<MyFileInfo>> =>
+      folder === undefined
+        ? listMyFiles(signal)
+        : readWorkspaceFolder<MyFileInfo>("personal", folder, signal),
+    ...(folder !== undefined && { retry: retryWorkspaceFolder }),
     gcTime: 0,
     staleTime: 0,
     refetchOnWindowFocus: true,

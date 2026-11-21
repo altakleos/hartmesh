@@ -57,6 +57,9 @@ type Props = {
   empty?: ReactNode;
   navigate?: (path: string) => void;
   folderKnown?: boolean;
+  searchMode?: boolean;
+  onSearchMode?: (searching: boolean) => void;
+  loading?: boolean;
 };
 export function BrowserView({
   area,
@@ -76,6 +79,9 @@ export function BrowserView({
   empty,
   navigate,
   folderKnown = true,
+  searchMode,
+  onSearchMode,
+  loading = false,
 }: Props) {
   const { t, locale } = useI18n(),
     copy = useBrowserCopy(),
@@ -86,7 +92,15 @@ export function BrowserView({
     area === "agent" ? "agent:" + instance : area,
     scope,
     folder,
+    !loading,
+    searchMode,
   );
+  const searching = Boolean(view.query.trim());
+  useLayoutEffect(() => {
+    onSearchMode?.(searching);
+  }, [onSearchMode, searching]);
+  const waiting =
+    loading || (searchMode !== undefined && searchMode !== searching);
   const [selected, setSelected] = useState<string | null>(null),
     [trail, setTrail] = useState(false);
   const trigger = useRef<HTMLButtonElement | null>(null),
@@ -116,8 +130,9 @@ export function BrowserView({
     observer.observe(measure);
     return () => observer.disconnect();
   }, [folder]);
-  const priorFolder = useRef({ folder, known: folderKnown });
+  const priorFolder = useRef({ folder, known: false });
   useLayoutEffect(() => {
+    if (waiting) return;
     const prior = priorFolder.current;
     priorFolder.current = { folder, known: folderKnown };
     if (
@@ -129,13 +144,26 @@ export function BrowserView({
     )
       return;
     let ancestor = parentFolder(folder);
-    while (ancestor && !rows.some((row) => row.path.startsWith(ancestor + "/")))
+    while (
+      searchMode === undefined &&
+      ancestor &&
+      !rows.some((row) => row.path.startsWith(ancestor + "/"))
+    )
       ancestor = parentFolder(ancestor);
     router.replace(browserHref(area, ancestor, { view: renderer.choice }), {
       scroll: false,
     });
-  }, [area, folder, folderKnown, rows, router, renderer.choice]);
-  const detail = result.find((r) => r.path === selected);
+  }, [
+    area,
+    folder,
+    folderKnown,
+    rows,
+    router,
+    renderer.choice,
+    waiting,
+    searchMode,
+  ]);
+  const detail = waiting ? undefined : result.find((r) => r.path === selected);
   const step = (path: string) => {
     setSelected(null);
     setTrail(false);
@@ -151,7 +179,7 @@ export function BrowserView({
   const label =
     area === "agent"
       ? copy.folderFilter
-      : truncated
+      : truncated || searchMode !== undefined
         ? copy.limited
         : copy.search(title);
   const when = (r: BrowserRow) =>
@@ -159,7 +187,7 @@ export function BrowserView({
       ? new Date(r.published_at)
       : new Date(r.modified * 1000);
   const focus = (id: string) => save({ control: id }, false);
-  const entries = result.slice(0, view.count);
+  const entries = waiting ? [] : result.slice(0, view.count);
   return (
     <section aria-label={title} className={styles.browser}>
       <button
@@ -280,12 +308,17 @@ export function BrowserView({
               </select>
             </label>
           </div>
-          {truncated && (
+          {!waiting && truncated && (
             <p className="text-muted-foreground text-sm">
-              {copy.partial(rows.length)}
+              {searchMode === false && rows.length === 0
+                ? copy.folderScanLimit
+                : copy.partial(rows.length)}
             </p>
           )}
-          {editing && <p role="status">{copy.matches(result.length)}</p>}
+          {waiting && <p role="status">{t.common.loading}</p>}
+          {!waiting && editing && (
+            <p role="status">{copy.matches(result.length)}</p>
+          )}
           {!folderKnown && (
             <p role="status">
               {copy.missing}{" "}
@@ -294,26 +327,29 @@ export function BrowserView({
               </Button>
             </p>
           )}
-          {entries.length === 0 && folderKnown && (
-            <p className="mt-4 text-sm">
-              {editing ? (
-                <>
-                  {copy.noMatch}{" "}
-                  <span>
-                    {view.query} · {title}
-                  </span>{" "}
-                  <Button
-                    variant="link"
-                    onClick={() => save({ query: "", count: 100 })}
-                  >
-                    {t.files.clearFilter}
-                  </Button>
-                </>
-              ) : (
-                (empty ?? copy.empty)
-              )}
-            </p>
-          )}
+          {!waiting &&
+            !(searchMode === false && truncated) &&
+            entries.length === 0 &&
+            folderKnown && (
+              <p className="mt-4 text-sm">
+                {editing ? (
+                  <>
+                    {copy.noMatch}{" "}
+                    <span>
+                      {view.query} · {title}
+                    </span>{" "}
+                    <Button
+                      variant="link"
+                      onClick={() => save({ query: "", count: 100 })}
+                    >
+                      {t.files.clearFilter}
+                    </Button>
+                  </>
+                ) : (
+                  (empty ?? copy.empty)
+                )}
+              </p>
+            )}
           <ul aria-label={title} className="mt-3 divide-y">
             {entries.map((row) => {
               const folderRow = row.kind === "directory",
@@ -415,7 +451,7 @@ export function BrowserView({
               );
             })}
           </ul>
-          {entries.length < result.length && (
+          {!waiting && entries.length < result.length && (
             <Button
               variant="outline"
               className="min-h-11"

@@ -15,8 +15,14 @@ const makeFile = (path: string) => ({
   virtual_path: "/mnt/user-data/files/" + path,
   url: "/api/files/" + path,
 });
-async function setup(page: Page, paths: string[], partial = false) {
+async function setup(
+  page: Page,
+  paths: string[],
+  partial = false,
+  directFolders = false,
+) {
   const files = paths.map(makeFile);
+  const operations = directFolders ? ["select", "folder"] : ["select"];
   mockLangGraphAPI(page, { threads: [], files });
   await installLegacyReportPlugin(page);
   await page.route("**/api/features", (route) =>
@@ -25,7 +31,7 @@ async function setup(page: Page, paths: string[], partial = false) {
         file_browser: {
           versions: [1],
           storage_mode: "ordinary",
-          operations: { personal: ["select"], shared: ["select"], agent: [] },
+          operations: { personal: operations, shared: operations, agent: [] },
         },
         agents_api: { enabled: true },
         agent_instances: { enabled: false },
@@ -447,4 +453,130 @@ test("positive pointer changes update the default while an explicit choice persi
     window.dispatchEvent(new Event("fixture-fine"));
   });
   await expect(page.getByTestId("my-file-note.txt")).toBeVisible();
+});
+
+for (const area of ["personal", "shared"] as const) {
+  test(`loads only the current ${area} folder until a bounded search starts`, async ({
+    page,
+  }) => {
+    await setup(page, [], false, true);
+    const flat: string[] = [],
+      folders: string[] = [];
+    const filesURL = area === "personal" ? "files" : "shared";
+    await page.route("**/api/" + filesURL, (route) => {
+      flat.push(route.request().url());
+      return route.fulfill({
+        json: {
+          files: [makeFile("elsewhere/search-result.txt")],
+          count: 1,
+          truncated: true,
+        },
+      });
+    });
+    let deny = false;
+    await page.route(
+      "**/api/file-browser/v1/" + area + "/folder?*",
+      (route) => {
+        const folder = new URL(route.request().url()).searchParams.get("path")!;
+        folders.push(folder);
+        if (deny)
+          return route.fulfill({
+            status: 403,
+            json: { detail: "Access refused" },
+          });
+        return route.fulfill({
+          json: {
+            files: folder
+              ? [{ ...makeFile("docs/inside.txt"), kind: "file" }]
+              : [
+                  {
+                    name: "docs",
+                    path: "docs",
+                    kind: "directory",
+                    modified: 0,
+                    size: 0,
+                  },
+                ],
+            truncated: false,
+          },
+        });
+      },
+    );
+    await page.goto(
+      "/workspace/files" + (area === "shared" ? "?tab=shared" : ""),
+    );
+    await page.getByRole("button", { name: "docs", exact: true }).click();
+    await expect(
+      page.getByRole("link", { name: "inside.txt", exact: true }),
+    ).toBeVisible();
+    expect(flat).toHaveLength(0);
+    expect(folders).toContain("");
+    expect(folders).toContain("docs");
+    const search = page.getByRole("searchbox");
+    await search.fill("search-result");
+    await expect(
+      page.getByRole("link", { name: "search-result.txt", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Only the first 1 entries are available here."),
+    ).toBeVisible();
+    expect(flat).toHaveLength(1);
+    await search.fill("");
+    await expect(
+      page.getByRole("link", { name: "inside.txt", exact: true }),
+    ).toBeVisible();
+    deny = true;
+    await page.reload();
+    await expect(
+      page.getByText("You no longer have access to this location."),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Try again", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "inside.txt", exact: true }),
+    ).toHaveCount(0);
+    expect(flat).toHaveLength(1);
+  });
+}
+
+test("distinguishes unverified, missing and unsupported folders without a flat path retry", async ({
+  page,
+}) => {
+  await setup(page, [], false, true);
+  let flat = 0;
+  await page.route("**/api/files", (route) => {
+    flat++;
+    return route.fulfill({ json: { files: [], count: 0, truncated: false } });
+  });
+  await page.route("**/api/file-browser/v1/personal/folder?*", (route) => {
+    const path = new URL(route.request().url()).searchParams.get("path");
+    if (path === "uncertain")
+      return route.fulfill({ json: { files: [], truncated: true } });
+    return route.fulfill({
+      status: 404,
+      json: {
+        detail: path === "gone" ? { code: "folder-unavailable" } : "Not Found",
+      },
+    });
+  });
+  await page.goto("/workspace/files?folder=uncertain");
+  await expect(
+    page.getByText(
+      "The scan reached its limit before finding a visible entry.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByText("This folder is empty.")).toHaveCount(0);
+  await page.goto("/workspace/files?folder=gone");
+  await expect(
+    page.getByText("This folder is no longer available.", { exact: false }),
+  ).toBeVisible();
+  await page.goto("/workspace/files?folder=absent");
+  await expect(
+    page.getByRole("link", { name: "Use classic file view" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("This folder is no longer available.", { exact: false }),
+  ).toHaveCount(0);
+  expect(flat).toBe(0);
 });

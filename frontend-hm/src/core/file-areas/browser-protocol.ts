@@ -19,7 +19,7 @@ export function browserOperations(features: FeaturesResponse) {
       personal: protocol.operations?.personal,
       shared: Array.isArray(protocol.operations?.shared)
         ? protocol.operations.shared.filter(
-            (operation) => operation === "select",
+            (operation) => operation === "select" || operation === "folder",
           )
         : [],
       agent: [],

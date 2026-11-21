@@ -25,6 +25,12 @@ export function useBrowserCopy() {
     folderFilter: zh ? "筛选当前文件夹" : "Filter this folder",
     limited: zh ? "搜索已加载的文件" : "Search loaded files",
     search: (s: string) => (zh ? `搜索${s}` : `Search ${s}`),
+    denied: zh
+      ? "你已无法访问此位置。"
+      : "You no longer have access to this location.",
+    folderScanLimit: zh
+      ? "扫描达到上限，尚未找到可见条目。"
+      : "The scan reached its limit before finding a visible entry.",
     noMatch: zh
       ? "已加载的文件中没有匹配项。"
       : "No matches among the loaded files.",

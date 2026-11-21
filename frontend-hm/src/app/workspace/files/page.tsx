@@ -65,6 +65,7 @@ import {
   readStorageRefusal,
   type StorageRefusal,
 } from "@/core/file-areas/storage-state";
+import { FolderRouteMissing } from "@/core/file-areas/workspace-folder";
 import { MY_FILES_VIRTUAL_PREFIX, urlOfMyFile, useMyFiles } from "@/core/files";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -95,6 +96,23 @@ function useDeploymentRefusal(
     )
       report(refusal);
   }, [error, report]);
+}
+
+// Keep the search input mounted across a change of listing only after a fresh
+// read admitted this location. A refusal retires the previous admission.
+function useFolderAdmission(
+  hasData: boolean,
+  error: unknown,
+  refreshProtocol: () => unknown,
+) {
+  const [admitted, setAdmitted] = useState(false);
+  useEffect(() => {
+    if (error) {
+      setAdmitted(false);
+      if (error instanceof FolderRouteMissing) void refreshProtocol();
+    } else if (hasData) setAdmitted(true);
+  }, [hasData, error, refreshProtocol]);
+  return admitted;
 }
 
 function readDenied(error: unknown) {
@@ -291,6 +309,8 @@ export default function FilesPage() {
                 area={tab === "shared" ? "shared" : "personal"}
               />
             </>
+          ) : !browserProtocol.settled ? (
+            <p role="status">{t.common.loading}</p>
           ) : tab === "shared" ? (
             <SharedFiles
               key={
@@ -301,6 +321,10 @@ export default function FilesPage() {
                 legacy
               }
               native={!legacy}
+              directFolder={
+                !legacy && browserProtocol.supports("shared", "folder")
+              }
+              refreshProtocol={browserProtocol.refresh}
               folder={folder}
               storage={storage}
               onGlobalFailure={reportFailure}
@@ -316,6 +340,10 @@ export default function FilesPage() {
                 legacy
               }
               native={!legacy}
+              directFolder={
+                !legacy && browserProtocol.supports("personal", "folder")
+              }
+              refreshProtocol={browserProtocol.refresh}
               folder={folder}
               storage={storage}
               onGlobalFailure={reportFailure}
@@ -394,10 +422,14 @@ function FileListControls({
 function MyFiles({
   native,
   folder,
+  directFolder,
+  refreshProtocol,
   storage,
   onGlobalFailure,
 }: {
   native: boolean;
+  directFolder: boolean;
+  refreshProtocol: () => unknown;
   folder: string;
   storage: StorageObservation;
   onGlobalFailure: (refusal: StorageRefusal) => void;
@@ -406,7 +438,11 @@ function MyFiles({
   const { t, locale } = useI18n();
   const { user } = useAuth();
   const words = useBrowserCopy();
-  const { data, error, isPending, refetch } = useMyFiles();
+  const [searching, setSearching] = useState(false);
+  const { data, error, isPending, refetch } = useMyFiles(
+    directFolder && !searching ? folder : undefined,
+  );
+  const admitted = useFolderAdmission(!!data, error, refreshProtocol);
   useDeploymentRefusal(error, onGlobalFailure);
   useRetireBrowserHistory("personal", readDenied(error));
   useBusyRetry(error, refetch);
@@ -420,13 +456,17 @@ function MyFiles({
   const [query, setQuery] = useState("");
   const [order, setOrder] = useState<FileListOrder>("name");
   const files = useMemo(
-    () => selectLoadedFiles(loadedFiles, { query, order, locale }),
-    [loadedFiles, query, order, locale],
+    () =>
+      native ? [] : selectLoadedFiles(loadedFiles, { query, order, locale }),
+    [native, loadedFiles, query, order, locale],
   );
 
   const rows = useMemo(
-    () => loadedFiles.map((file) => ({ ...file, kind: "file" as const })),
-    [loadedFiles],
+    () => [
+      ...(data?.directories ?? []),
+      ...loadedFiles.map((file) => ({ ...file, kind: "file" as const })),
+    ],
+    [data?.directories, loadedFiles],
   );
   const notice = fileAreaNotice(storage, error, "files");
   if (notice)
@@ -445,7 +485,7 @@ function MyFiles({
       </div>
     );
 
-  if (native && !error && data) {
+  if (native && !error && (data || (directFolder && admitted))) {
     const byPath = new Map(
       loadedFiles.map((file) => [file.path, file] as const),
     );
@@ -462,11 +502,16 @@ function MyFiles({
           "personal",
         ])}
         rows={rows}
-        truncated={data.truncated}
+        truncated={data?.truncated ?? false}
+        searchMode={directFolder ? searching : undefined}
+        onSearchMode={directFolder ? setSearching : undefined}
+        loading={isPending}
         folderKnown={
-          !folder ||
-          data.truncated ||
-          rows.some((r) => r.path.startsWith(folder + "/"))
+          directFolder
+            ? !data?.folderMissing
+            : !folder ||
+              !!data?.truncated ||
+              rows.some((r) => r.path.startsWith(folder + "/"))
         }
         open={() => undefined}
         hrefFor={(row) => (row.kind === "file" ? urlOfMyFile(row.path) : "")}
@@ -520,6 +565,16 @@ function MyFiles({
     return (
       <>
         <BrowserLocations area="personal" />
+        {error && (
+          <p role="alert">
+            {readDenied(error) ? words.denied : t.files.loadFailed}
+          </p>
+        )}
+        {error instanceof FolderRouteMissing && (
+          <Link href={browserHref("personal", folder, { view: "classic" })}>
+            {words.classic}
+          </Link>
+        )}
         {error ? (
           <Button onClick={() => void refetch()} variant="outline">
             {t.files.retry}
@@ -709,11 +764,15 @@ function MyFiles({
 function SharedFiles({
   native,
   folder,
+  directFolder,
+  refreshProtocol,
   onChanged,
   storage,
   onGlobalFailure,
 }: {
   native: boolean;
+  directFolder: boolean;
+  refreshProtocol: () => unknown;
   folder: string;
   onChanged: () => void;
   storage: StorageObservation;
@@ -722,7 +781,11 @@ function SharedFiles({
   const { t, locale } = useI18n();
   const { user } = useAuth();
   const words = useBrowserCopy();
-  const { data, error, isPending, refetch } = useSharedFiles();
+  const [searching, setSearching] = useState(false);
+  const { data, error, isPending, refetch } = useSharedFiles(
+    directFolder && !searching ? folder : undefined,
+  );
+  const admitted = useFolderAdmission(!!data, error, refreshProtocol);
   useDeploymentRefusal(error, onGlobalFailure);
   useRetireBrowserHistory("shared", readDenied(error));
   const copy = useStorageCopy("shared");
@@ -769,13 +832,17 @@ function SharedFiles({
   const [query, setQuery] = useState("");
   const [order, setOrder] = useState<FileListOrder>("name");
   const files = useMemo(
-    () => selectLoadedFiles(loadedFiles, { query, order, locale }),
-    [loadedFiles, query, order, locale],
+    () =>
+      native ? [] : selectLoadedFiles(loadedFiles, { query, order, locale }),
+    [native, loadedFiles, query, order, locale],
   );
 
   const rows = useMemo(
-    () => loadedFiles.map((file) => ({ ...file, kind: "file" as const })),
-    [loadedFiles],
+    () => [
+      ...(data?.directories ?? []),
+      ...loadedFiles.map((file) => ({ ...file, kind: "file" as const })),
+    ],
+    [data?.directories, loadedFiles],
   );
   const notice = fileAreaNotice(storage, error, "shared");
   if (notice)
@@ -854,7 +921,7 @@ function SharedFiles({
       </DialogContent>
     </Dialog>
   );
-  if (native && !error && data) {
+  if (native && !error && (data || (directFolder && admitted))) {
     const byPath = new Map(
       loadedFiles.map((file) => [file.path, file] as const),
     );
@@ -872,11 +939,16 @@ function SharedFiles({
             "shared",
           ])}
           rows={rows}
-          truncated={data.truncated}
+          truncated={data?.truncated ?? false}
+          searchMode={directFolder ? searching : undefined}
+          onSearchMode={directFolder ? setSearching : undefined}
+          loading={isPending}
           folderKnown={
-            !folder ||
-            data.truncated ||
-            rows.some((r) => r.path.startsWith(folder + "/"))
+            directFolder
+              ? !data?.folderMissing
+              : !folder ||
+                !!data?.truncated ||
+                rows.some((r) => r.path.startsWith(folder + "/"))
           }
           open={() => undefined}
           hrefFor={(row) =>
@@ -928,6 +1000,16 @@ function SharedFiles({
     return (
       <>
         <BrowserLocations area="shared" />
+        {error && (
+          <p role="alert">
+            {readDenied(error) ? words.denied : t.files.loadFailed}
+          </p>
+        )}
+        {error instanceof FolderRouteMissing && (
+          <Link href={browserHref("shared", folder, { view: "classic" })}>
+            {words.classic}
+          </Link>
+        )}
         {error ? (
           <Button onClick={() => void refetch()} variant="outline">
             {t.files.retry}

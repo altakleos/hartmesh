@@ -317,7 +317,9 @@ desktops. **Locations** opens My files, Company shared, and the agent homes
 you can inspect. Open a folder or search the loaded files; **More actions**
 shows the full path, current audience, and available actions. The address and
 Back button preserve your location. Agent searches filter the current folder.
-When a listing reaches its limit, the browser labels its results as partial.
+On supported Gateways, opening My files or Company shared loads the current
+folder. Entering a search loads the available files across that location. Folder
+listings and search results each indicate when they reach their own limit.
 
 Touch devices open the classic view. Use **Use file browser** to switch on a
 supported Gateway, or **Use classic file view** to return. Sharing publishes

@@ -35,6 +35,8 @@ export function useBrowserHistory(
   source: string,
   grant: string,
   folder: string,
+  ready = true,
+  searchMode?: boolean,
 ) {
   const { signal } = useFileActionLifetime();
   const scope = JSON.stringify([source, grant, folder]);
@@ -81,7 +83,13 @@ export function useBrowserHistory(
     [signal, scope],
   );
   useLayoutEffect(() => {
-    if (!restore.current || !container.current || view !== value.current)
+    if (
+      !ready ||
+      (searchMode !== undefined && searchMode !== Boolean(view.query.trim())) ||
+      !restore.current ||
+      !container.current ||
+      view !== value.current
+    )
       return;
     restore.current = false;
     const active = value.current.control;
@@ -94,6 +102,6 @@ export function useBrowserHistory(
       : undefined;
     (target ?? heading.current)?.focus({ preventScroll: true });
     container.current.scrollTop = value.current.scroll;
-  }, [view, scope]);
+  }, [view, scope, ready, searchMode]);
   return { view, save, container, heading };
 }
