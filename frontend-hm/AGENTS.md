@@ -277,23 +277,19 @@ the open file, and a My Files row publishes that file directly
 (`canPublishToShared`). Collection policy belongs to installed contributions;
 the compatibility package alone recognizes its historical flat personal folder.
 Arbitrary personal folders and nested legacy folders do not become company
-folders. Collection names are data and never translated. Both toasts name the folder, because the person did not choose it. All
-three go through `useShareWithEveryone`, the same shape as saving: it publishes
-each path, says so once, and carries **Undo** in that toast, because handing a
-file to the whole company is one click and taking it back must be too. Whether
-a file is already shared is the server's word, never the page's memory: the
-publish route answers `200` with the entry that already holds the same bytes
-instead of copying them (`publishToShared` returns `alreadyShared`), so a
-second click from any tab or session gets an _already shared_ toast with a way
-to the Shared tab, and **Undo** takes back only what that click put there. The
-buttons are never disabled on that account; a page's memory of its own clicks
-is exactly what a tab switch loses. The listing carries when each file was
-published, who published it — resolved server-side to the person a colleague
-would recognise, never the stored id — and `can_remove`, which the server
-decides per caller (the publisher, or an admin) so the page never reasons about
-roles: _Remove_ is offered exactly where it would succeed. Both tabs live under
-one heading, _Files_, so the sidebar entry and the page agree whichever tab is
-open.
+folders. Collection names are data and never translated. Save and Share toasts
+name the chosen folder. All three Share controls use `useShareWithEveryone`.
+A new copy returns `201`. Undo is available only when the Gateway advertises
+Shared removal and every new copy's receipt supplies `can_remove`, its
+publication ID and original revision. The client reuses the same operation ID
+for a retry. Ordinary storage shows the successful share without Undo.
+A `200` identifies an existing copy with the same bytes. Show the already-shared
+notice with a link to Shared, and exclude that copy from Undo. Repeat clicks
+always consult the Gateway. Shared rows show the publication time and publisher
+resolved to a display name. The native browser offers Remove only after the
+Gateway advertises it and a fresh selection confirms the caller's authority
+and supplies the required identity. Both tabs sit under the sidebar's _Files_
+heading.
 
 Files filters inspect only loaded name/path metadata, with Unicode-normalized
 case matching and deterministic Name/Newest ordering (`core/file-areas/selection`).

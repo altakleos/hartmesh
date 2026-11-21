@@ -3,7 +3,13 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { expect, test, type BrowserContext } from "@playwright/test";
+import {
+  expect,
+  test,
+  type BrowserContext,
+  type Locator,
+  type Page,
+} from "@playwright/test";
 
 const password = "synthetic-acceptance-password-123";
 const packages = ["supplier-comparison", "procedure-summary"] as const;
@@ -69,6 +75,78 @@ sys.stdout.buffer.write(output.getvalue())`,
 const sha = (buffer: Buffer) =>
   createHash("sha256").update(buffer).digest("hex");
 
+async function shareOrdinaryFiles(
+  page: Page,
+  share: Locator,
+  thread: string,
+  selected: { source: string; path: string; hash: string }[],
+  message: string,
+  excluded: string[] = [],
+) {
+  // Register every response first: a single click may publish multiple exports.
+  const pending = selected.map(({ source }) =>
+    page.waitForResponse((response) => {
+      const request = response.request();
+      if (
+        request.method() !== "POST" ||
+        new URL(response.url()).pathname !== "/api/shared/publish"
+      )
+        return false;
+      const body = request.postDataJSON() as {
+        path: string;
+        thread_id: string;
+      };
+      return body.path === source && body.thread_id === thread;
+    }),
+  );
+  await share.click();
+  const responses = await Promise.all(pending);
+  await expect(page.getByText(message, { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Undo", exact: true }),
+  ).toHaveCount(0);
+
+  const context = page.context();
+  const listing = await context.request.get("/api/shared");
+  expect(listing.status()).toBe(200);
+  const { files } = (await listing.json()) as {
+    files: { path: string; publication_id: string | null }[];
+  };
+  for (const path of excluded)
+    expect(files.map((file) => file.path)).not.toContain(path);
+  for (const [index, response] of responses.entries()) {
+    const { path, hash } = selected[index]!;
+    expect(response.status(), await response.text()).toBe(201);
+    const receipt = (await response.json()) as {
+      path: string;
+      publication_id: string;
+      revision: string | null;
+    };
+    expect(receipt).toMatchObject({
+      path,
+      publication_id: expect.stringMatching(/.+/),
+      revision: null,
+    });
+    expect(files).toContainEqual(
+      expect.objectContaining({ path, publication_id: receipt.publication_id }),
+    );
+    const url =
+      "/api/shared/" + path.split("/").map(encodeURIComponent).join("/");
+    const published = await context.request.get(url);
+    expect(published.status()).toBe(200);
+    expect(sha(await published.body())).toBe(hash);
+
+    // Ordinary storage still supports the publisher's authenticated removal API.
+    const removed = await context.request.delete(url, {
+      headers: await csrf(context),
+      params: { expected_publication_id: receipt.publication_id },
+    });
+    expect(removed.status(), await removed.text()).toBe(200);
+    expect(await removed.json()).toMatchObject({ success: true });
+    expect((await context.request.get(url)).status()).toBe(404);
+  }
+}
+
 test("ordinary skill archives produce rich views through real owner APIs and tools", async ({
   page,
   context,
@@ -78,15 +156,19 @@ test("ordinary skill archives produce rich views through real owner APIs and too
   const before = await context.request.get("/api/skills");
   expect(((await before.json()) as { skills: unknown[] }).skills).toEqual([]);
   const effective = await context.request.get("/api/features");
-  const permissions = (
-    (await effective.json()) as {
-      customer_administration: {
-        local_skill_management: boolean;
-        plugin_management: boolean;
-        local_mcp_management: boolean;
-      };
-    }
-  ).customer_administration;
+  expect(effective.status()).toBe(200);
+  const features = (await effective.json()) as {
+    customer_administration: {
+      local_skill_management: boolean;
+      plugin_management: boolean;
+      local_mcp_management: boolean;
+    };
+    file_browser: { storage_mode: string; operations: { shared: string[] } };
+  };
+  expect(features.file_browser.storage_mode).toBe("ordinary");
+  expect(features.file_browser.operations.shared).toContain("select");
+  expect(features.file_browser.operations.shared).not.toContain("remove");
+  const permissions = features.customer_administration;
   expect(permissions.local_skill_management).toBe(true);
   expect(permissions.plugin_management).toBe(false);
   expect(permissions.local_mcp_management).toBe(false);
@@ -291,30 +373,20 @@ test("ordinary skill archives produce rich views through real owner APIs and too
       const myFiles = await context.request.get("/api/files");
       expect(await myFiles.text()).toContain("Comparisons/comparison.pdf");
       expect(await myFiles.text()).not.toContain("comparison.xlsx");
-      const shared = page.waitForResponse(
-        (response) =>
-          response.request().method() === "POST" &&
-          new URL(response.url()).pathname === "/api/shared/publish",
+      await shareOrdinaryFiles(
+        page,
+        card.getByRole("button", { name: "Share with everyone", exact: true }),
+        thread,
+        [
+          {
+            source: base + "comparison.pdf",
+            path: "Comparisons/comparison.pdf",
+            hash: hashes["comparison.pdf"]!,
+          },
+        ],
+        "Shared comparison.pdf with everyone at the company, in Comparisons",
+        ["Comparisons/comparison.xlsx", "comparison.xlsx"],
       );
-      await card
-        .getByRole("button", { name: "Share with everyone", exact: true })
-        .click();
-      expect((await shared).ok()).toBe(true);
-      await expect
-        .poll(async () =>
-          (await (await context.request.get("/api/shared")).text()).includes(
-            "Comparisons/comparison.pdf",
-          ),
-        )
-        .toBe(true);
-      await page.getByRole("button", { name: "Undo", exact: true }).click();
-      await expect
-        .poll(async () =>
-          (await (await context.request.get("/api/shared")).text()).includes(
-            "Comparisons/comparison.pdf",
-          ),
-        )
-        .toBe(false);
       const manifest = await context.request.get(
         `/api/skills/custom/${packageName}/export-manifest`,
       );
@@ -354,32 +426,17 @@ test("ordinary skill archives produce rich views through real owner APIs and too
           );
         })
         .toBe(true);
-      const shared = page.waitForResponse(
-        (response) =>
-          response.request().method() === "POST" &&
-          new URL(response.url()).pathname === "/api/shared/publish",
+      await shareOrdinaryFiles(
+        page,
+        card.getByRole("button", { name: "Share with everyone", exact: true }),
+        thread,
+        view.exports.map(({ path }) => ({
+          source: base + path,
+          path,
+          hash: hashes[path]!,
+        })),
+        "Shared 2 files with everyone at the company",
       );
-      await card
-        .getByRole("button", { name: "Share with everyone", exact: true })
-        .click();
-      expect((await shared).ok()).toBe(true);
-      await expect
-        .poll(async () => {
-          const files = await (await context.request.get("/api/shared")).text();
-          return (
-            files.includes("procedure.pdf") && files.includes("procedure.docx")
-          );
-        })
-        .toBe(true);
-      await page.getByRole("button", { name: "Undo", exact: true }).click();
-      await expect
-        .poll(async () => {
-          const files = await (await context.request.get("/api/shared")).text();
-          return (
-            files.includes("procedure.pdf") || files.includes("procedure.docx")
-          );
-        })
-        .toBe(false);
     }
     await page.screenshot({
       path: `${test.info().outputDir}/${stem}.png`,
@@ -490,30 +547,19 @@ test("ordinary skill archives produce rich views through real owner APIs and too
   expect(await (await context.request.get("/api/files")).text()).toContain(
     "plain.pdf",
   );
-  const ordinaryShared = page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      new URL(response.url()).pathname === "/api/shared/publish",
+  await shareOrdinaryFiles(
+    page,
+    page.getByRole("button", { name: "Share with everyone", exact: true }),
+    fallbackThread,
+    [
+      {
+        source: "/mnt/user-data/outputs/plain.pdf",
+        path: "plain.pdf",
+        hash: sha(await ordinaryPdf.body()),
+      },
+    ],
+    "Shared plain.pdf with everyone at the company",
   );
-  await page
-    .getByRole("button", { name: "Share with everyone", exact: true })
-    .click();
-  expect((await ordinaryShared).ok()).toBe(true);
-  await expect
-    .poll(async () =>
-      (await (await context.request.get("/api/shared")).text()).includes(
-        '"path":"plain.pdf"',
-      ),
-    )
-    .toBe(true);
-  await page.getByRole("button", { name: "Undo", exact: true }).click();
-  await expect
-    .poll(async () =>
-      (await (await context.request.get("/api/shared")).text()).includes(
-        '"path":"plain.pdf"',
-      ),
-    )
-    .toBe(false);
   receipts.push({
     fallback_thread: fallbackThread,
     plain_pdf_sha256: sha(await ordinaryPdf.body()),
