@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.69] - 2026-11-21
+
+### Fixed
+
+- Publishing a file to managed Company Shared now saves its publication ID, source, publisher, file identity and intended name before making the file visible. If the name is taken, the writer records the next candidate before trying it. An interrupted write can therefore be reconciled using the exact file and publication ID, including when a competing file has identical contents.
+
+### Operations
+
+- The normal rollback target is `2.2.0+hartmesh.68`. Its Gateway understands the new receipt and can reconcile a completed link or a publication interrupted before its file appeared.
+- Before downgrading directly to a version older than `.68`, suspend new file writes, drain operations already in progress and confirm that `ai status` reports `file_operations_pending: 0` while writes remain suspended. Stopping web ingress alone leaves other writers running. An older Gateway can leave a recorded publication pending if the file never landed, blocking further writes to Shared. Inspect the actual Shared folder and the recorded identity before using `ai settle --space ID --operation ID --discard`.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.68. The managed Shared writer adds an order marker to its existing private publication receipt.
+
 ## [2.2.0+hartmesh.68] - 2026-11-21
 
 ### Fixed
