@@ -29,6 +29,8 @@ const VIEW = `${DIR}/summary.view.json`;
 const PDF = `${DIR}/summary.pdf`;
 const WORD = `${DIR}/summary.docx`;
 const SOURCE = `${DIR}/source.json`;
+const PUBLICATION_ID = "00000000-0000-0000-0000-000000004201";
+const PUBLICATION_REVISION = "e".repeat(64);
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
   "base64",
@@ -96,6 +98,8 @@ async function openView(
     available?: () => boolean;
     saved?: Record<string, unknown>[];
     shared?: Record<string, unknown>[];
+    guardedShared?: boolean;
+    publicationRevision?: string;
     read?: () => void;
     omitRevision?: boolean;
     openSource?: boolean;
@@ -209,6 +213,30 @@ async function openView(
       },
     });
   });
+  if (options.guardedShared) {
+    await page.route("**/api/features", (route) =>
+      route.fulfill({
+        json: {
+          storage_spaces: {
+            enabled: true,
+            state: "ready",
+            own: "ready",
+            user_spaces: true,
+            reason: null,
+          },
+          file_browser: {
+            versions: [1],
+            storage_mode: "spaces",
+            operations: {
+              personal: ["select", "folder"],
+              shared: ["select", "folder", "remove"],
+              agent: [],
+            },
+          },
+        },
+      }),
+    );
+  }
   await page.route("**/api/shared/publish", (route) => {
     const request = route.request().postDataJSON() as {
       path: string;
@@ -231,7 +259,8 @@ async function openView(
         published_by: "Example user",
         published_at: "2026-01-01T00:00:00Z",
         from_thread_id: THREAD,
-        publication_id: "00000000-0000-0000-0000-000000004201",
+        publication_id: PUBLICATION_ID,
+        revision: options.publicationRevision,
       },
     });
   });
@@ -361,7 +390,18 @@ test("selected file actions keep their explicit destination and publication Undo
 }) => {
   const saved: Record<string, unknown>[] = [];
   const shared: Record<string, unknown>[] = [];
-  const card = await openView(page, { saved, shared });
+  const removals: unknown[] = [];
+  await page.route("**/api/file-browser/v1/shared/remove", (route) => {
+    expect(route.request().method()).toBe("POST");
+    removals.push(route.request().postDataJSON());
+    return route.fulfill({ status: 204 });
+  });
+  const card = await openView(page, {
+    saved,
+    shared,
+    guardedShared: true,
+    publicationRevision: PUBLICATION_REVISION,
+  });
   await expect(
     card.getByRole("checkbox", { name: "Editable summary" }),
   ).toBeVisible();
@@ -372,10 +412,43 @@ test("selected file actions keep their explicit destination and publication Undo
   await expect
     .poll(() => shared)
     .toEqual([{ path: PDF, thread_id: THREAD, folder: "Summaries" }]);
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect
+    .poll(() => removals)
+    .toEqual([
+      {
+        path: "Summaries/summary.pdf",
+        expected_publication_id: PUBLICATION_ID,
+        expected_revision: PUBLICATION_REVISION,
+        operation_id: expect.stringMatching(/^[a-f0-9]{32}$/),
+      },
+    ]);
   await expect(
-    page.getByRole("button", { name: "Undo", exact: true }),
+    page.getByText("Took summary.pdf back out of Shared"),
   ).toBeVisible();
 });
+
+for (const guardedShared of [true, false]) {
+  test(`a chat publication without ${guardedShared ? "the original revision" : "guarded removal support"} confirms sharing without Undo`, async ({
+    page,
+  }) => {
+    // Distinguish a partial receipt from a worker that does not advertise the route.
+    const card = await openView(page, {
+      guardedShared,
+      publicationRevision: guardedShared ? undefined : PUBLICATION_REVISION,
+    });
+    await card.getByRole("checkbox", { name: "Editable summary" }).uncheck();
+    await card.getByRole("button", { name: "Share with everyone" }).click();
+    await expect(
+      page.getByText(
+        "Shared summary.pdf with everyone at the company, in Summaries",
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Undo", exact: true }),
+    ).toHaveCount(0);
+  });
+}
 
 for (const theme of ["light", "dark"])
   test(`keeps text readable and tables keyboard accessible at 360px in ${theme}`, async ({
