@@ -9,13 +9,16 @@ import {
 
 import { ConversationFilePicker } from "@/components/workspace/chats/conversation-file-picker";
 import { enUS } from "@/core/i18n/locales/en-US";
+import { zhCN } from "@/core/i18n/locales/zh-CN";
 import type {
   ImportDestination,
   PresentedFile,
 } from "@/core/threads/conversation-file-import";
 
+const translations = { "en-US": enUS, "zh-CN": zhCN };
+let locale: keyof typeof translations = "en-US";
 rs.mock("@/core/i18n/hooks", () => ({
-  useI18n: () => ({ t: enUS, locale: "en-US" }),
+  useI18n: () => ({ t: translations[locale], locale }),
 }));
 let agentsEnabled = true;
 rs.mock("@/core/features", () => ({
@@ -114,6 +117,7 @@ function mount(
 afterEach(() => {
   cleanup();
   agentsEnabled = true;
+  locale = "en-US";
   rs.restoreAllMocks();
 });
 test("own chats page past empty deliveries; missing files stay disabled and a saved receipt has no source path", async () => {
@@ -193,6 +197,32 @@ test("a Home lists personal sources, discloses both audiences, and cancellation 
   expect(onSaved).not.toHaveBeenCalled();
   expect(calls.some((x) => x.url.includes("from-conversation"))).toBe(false);
 });
+test.each([
+  [
+    "en-US",
+    /If a manager gives Library a company connection, it can send this file to that service without asking you first\./,
+  ],
+  [
+    "zh-CN",
+    /如果管理者给 Library 分配了公司连接，它就可以将此文件发送到相应的服务，无需事先询问你。/,
+  ],
+] as const)(
+  "the %s copy confirmation discloses access through company connections",
+  async (language, warning) => {
+    locale = language;
+    const { calls } = mount({ threadId: "destination", instance: home }, () =>
+      Response.json(page([note])),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Planning" }));
+    fireEvent.click(await screen.findByRole("button", { name: /notes.txt/ }));
+    expect(screen.getByRole("dialog", { description: warning })).toBeTruthy();
+    expect(
+      calls.some(
+        (x) => x.init.method === "POST" && x.url.includes("from-conversation"),
+      ),
+    ).toBe(false);
+  },
+);
 test("a dropped Home write reconciles its original ID and picked filename, returning the stored numbered copy", async () => {
   let checks = 0;
   const { calls, onSaved } = mount(
