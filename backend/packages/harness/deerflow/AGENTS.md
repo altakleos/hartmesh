@@ -81,3 +81,7 @@ reporting, read [the E2B upload contract](community/e2b_sandbox/AGENTS.md#mount-
 ### Project Summary Worker Shutdown (`projects/summaries.py`)
 
 `stop()` closes admission synchronously and shares one shielded `_stop_task`; `start()` reopens admission only after it completes and is cleared. Preserve queue-drop/sentinel/grace semantics. Regressions: `test_stop_drains_workers_before_propagating_repeated_cancellation` and `test_start_after_stop_restarts_worker_pool` in `backend/tests/test_project_summaries.py`.
+
+### Managed Shared publication receipts
+
+Host-generated conversation document receipts pair each reserved source with its destination filename. Require a validated source thread, the fact-before-name order and native file identity. Member file selection accepts My Files or a conversation upload/output.

@@ -11,6 +11,12 @@ from deerflow.utils.file_io import run_file_io
 
 FACT_BEFORE_NAME = "fact-before-name"
 
+# Reserved host provenance is not a path the member publish route can open.
+_GENERATED_DOCUMENTS = {
+    "/conversation-snapshot/manifest": "conversation.json",
+    "/conversation-snapshot/transcript": "transcript.md",
+}
+
 
 class PublicationUnavailable(Exception):
     pass
@@ -124,8 +130,15 @@ async def _settle_recorded_copy(repo, facts, intent, identity, holding):
         raise PublicationUnavailable("The exact publication receipt is unavailable; retain unknown bytes") from None
     folder, name = publication_destination(intent.request)
     source = intent.request["source"]
+    if source["path"] in _GENERATED_DOCUMENTS and facts.get("publication_order") == FACT_BEFORE_NAME:
+        from deerflow.utils.thread_id import validate_thread_id
+
+        name = _GENERATED_DOCUMENTS[source["path"]]
+        source_thread = validate_thread_id(source.get("thread_id"))
+    else:
+        source_thread = _publication_source_thread(source)
     parent, _, leaf = fact.path.rpartition("/")
-    if fact.published_by != intent.actor_id or fact.from_path != source["path"] or fact.from_thread_id != _publication_source_thread(source):
+    if fact.published_by != intent.actor_id or fact.from_path != source["path"] or fact.from_thread_id != source_thread:
         raise PublicationUnavailable("The publication actor or source does not match the intent")
     if parent != folder or not is_publication_name(name, leaf):
         raise PublicationUnavailable("The publication destination does not match the intent")
