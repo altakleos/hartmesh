@@ -280,7 +280,11 @@ async def test_followup_waits_for_an_actual_answer_without_a_goal(batch_host, mo
     async def ask():
         asked = await runs.start(thread_id=batch["thread_id"], input={"messages": [{"role": "user", "content": "ask"}]})
         assert (await runs.wait(thread_id=batch["thread_id"], run_id=asked.run_id, timeout=5)).status == "success"
-        assert (await state.run_manager.get(asked.run_id)).human_input_request == question
+        # The worker copies the checkpoint question to its record after persisting success.
+        record = await state.run_manager.get(asked.run_id)
+        if record.task is not None:
+            await asyncio.wait_for(asyncio.shield(record.task), 5)
+        assert record.human_input_request == question
 
     await ask()
     assert await controller.dispatch(batch) == {"status": "waiting"}
