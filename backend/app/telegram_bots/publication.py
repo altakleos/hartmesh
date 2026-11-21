@@ -91,6 +91,7 @@ class _Control:
     deadline: float | None = None
     clock: Callable[[], float] | None = None
     file_receipts: object | None = None
+    while_unowned: Callable[[], bool] | None = None
 
     def in_budget(self):
         return self.deadline is None or self.clock() < self.deadline
@@ -119,6 +120,7 @@ class _Admission:
                 and operation in _OPERATIONS
                 and not self.control.retired
                 and self.control.in_budget()
+                and (self.control.while_unowned is None or self.control.while_unowned() is True)
                 and self.coordinator._reading
                 and (operation != "run_create" or self.coordinator._creating)
                 and self.actual.current(operation) is True
@@ -833,7 +835,7 @@ class PublicationCoordinator:
         identity = await self.outbox.plan_publication_outcome(record, deleted=True, source_ref={"key": "chat.conversation_deleted", "values": {}}, keyboard=(), callbacks=self.host.callbacks, guard=guard)
         return PublicationObservation("planned", record, outbox_id=identity)
 
-    async def observe(self, record: PublicationRecord, current_link: BotLink, *, max_pages: int, deadline: float | None = None, closing: str | None = None) -> PublicationObservation:
+    async def observe(self, record: PublicationRecord, current_link: BotLink, *, max_pages: int, deadline: float | None = None, closing: str | None = None, while_unowned: Callable[[], bool] | None = None) -> PublicationObservation:
         """Plan what a saved publication can still say. With `closing`, nobody else will: end it.
 
         `closing` is the sentence for a message that found no run. Only a caller that knows no
@@ -852,6 +854,10 @@ class PublicationCoordinator:
 
         async def perform(control):
             try:
+                if while_unowned is not None:
+                    if while_unowned() is not True:
+                        return PublicationObservation("pending", record, reason="awaiting_output")
+                    control.while_unowned = while_unowned
                 if closing is not None:
                     self.fence(record)
                 admission, _, read_guard = await self._attempt(current_link, record.scope, control)

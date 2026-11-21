@@ -187,6 +187,10 @@ async def test_typed_other_keeps_actual_new_message_and_original_thread_after_ne
         grouped = await e.inbox.group_prepublication(stage.origins, guard=e.guard)
         record = await e.inbox.reserve_publication(e.link, grouped, thread_id=stage.thread_id, endpoint_id=e.http.endpoint_id, guard=e.guard)
         await e.coordinator.dispatch_record(record, e.link)
+        claimed = []
+        restored = await e.inbox.read_submission(e.link, stage, guard=e.guard, claim_open=claimed.append)
+        assert restored.record is not None and claimed == [restored.record]
+        assert claimed[0].publication_id == record.publication_id
         sent = e.bus.get_inbound_nowait()
         e.bus.inbound_task_done()
         assert sent.text == origin.sanitized_input["text"] and sent.metadata["human_message_kwargs"]["human_input_response"] == response
