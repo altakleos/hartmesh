@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from _config_singleton_guard import restore_config_singletons  # noqa: F401 -- autouse fixture
 from langchain_core.messages import AIMessage
 from test_agent_execution_runtime import execution
 from test_compose_operator_models import catalog as catalog
