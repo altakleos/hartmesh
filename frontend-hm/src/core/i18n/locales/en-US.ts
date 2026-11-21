@@ -1297,7 +1297,7 @@ export function createEnUS(product: string): Translations {
         from: (title) => `From ${title}`,
         giveTitle: (name) => `Give this file to ${name}?`,
         disclosure: (file, name) =>
-          `${file} will be copied into ${name}’s files. ${name} can use it in any conversation. Anyone who can chat with ${name} can ask for it, and anyone who can see all of ${name}’s work can open it. Managers can see that you gave the file. The record does not identify your source conversation. Your own copy stays where it is.`,
+          `${file} will be copied into ${name}’s files. ${name} can use it in any conversation. Anyone who can chat with ${name} can ask for it, and anyone who can see all of ${name}’s work can open it. If a manager gives ${name} a company connection, it can send this file to that service without asking you first. Managers can see that you gave the file. The record does not identify your source conversation. Your own copy stays where it is.`,
         needsInspect: (name) =>
           `This conversation or its files are unavailable. Opening ${name}’s files requires “Can see all work”.`,
         changed: (time) => `Changed ${time}`,
