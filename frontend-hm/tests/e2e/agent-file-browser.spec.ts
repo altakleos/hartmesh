@@ -228,3 +228,57 @@ for (const scenario of ["denied", "offline", "retired account"] as const) {
     expect(downloads).toEqual([]);
   });
 }
+
+test("native and classic rows retain the same collision-safe upload receipt", async ({
+  page,
+}) => {
+  const state = await setupAgents(page);
+  state.feature.file_browser = {
+    versions: [1],
+    storage_mode: "spaces",
+    operations: { agent: ["folder", "content", "text"] },
+  };
+  const filename = "report (2).txt";
+  const path = "uploads/" + filename;
+  let writes = 0;
+  await page.route("**/api/file-browser/v1/agents/*/folder?**", (route) =>
+    route.fulfill({ json: { files: state.files, truncated: false } }),
+  );
+  await page.route("**/home/operations/content?**", (route) => {
+    writes++;
+    state.files.push({
+      name: filename,
+      path,
+      kind: "file",
+      size: 4,
+      modified: 1730000000,
+      accessible: true,
+    });
+    return route.fulfill({
+      status: 200,
+      json: { path, size: 4, sha256: "f".repeat(64), deduplicated: false },
+    });
+  });
+  await page.goto(
+    "/workspace/instances?instance=" +
+      AGENT_ID +
+      "&tab=files&folder=uploads&view=browser",
+  );
+  await expect(
+    page.getByRole("button", { name: "Upload", exact: true }),
+  ).toBeVisible();
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "report.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("note"),
+  });
+  const row = page
+    .getByRole("listitem")
+    .filter({ has: page.getByRole("button", { name: filename, exact: true }) });
+  await expect(row.getByRole("status")).toContainText(filename);
+  await page.getByRole("link", { name: "Use classic file view" }).click();
+  await expect(
+    page.getByRole("row").filter({ hasText: filename }).getByRole("status"),
+  ).toContainText(filename);
+  expect(writes).toBe(1);
+});

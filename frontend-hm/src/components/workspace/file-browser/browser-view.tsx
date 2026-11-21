@@ -52,6 +52,7 @@ type Props = {
   hrefFor?: (row: BrowserRow) => string;
   actions: (row: BrowserRow) => ReactNode;
   describe?: (row: BrowserRow) => ReactNode;
+  rowStatus?: (row: BrowserRow) => ReactNode;
   tools?: ReactNode;
   empty?: ReactNode;
   navigate?: (path: string) => void;
@@ -70,6 +71,7 @@ export function BrowserView({
   hrefFor,
   actions,
   describe,
+  rowStatus,
   tools,
   empty,
   navigate,
@@ -369,6 +371,7 @@ export function BrowserView({
                     {area === "agent" && !folder && folderRow && (
                       <small>{describe?.(row)}</small>
                     )}
+                    {rowStatus?.(row)}
                     {disabled && (
                       <small>{t.storageSpaces.unsupportedEntry}</small>
                     )}

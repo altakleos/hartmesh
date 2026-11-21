@@ -559,6 +559,24 @@ function FileBrowser({
   if (space.isPending || files.isPending)
     return preserved(<p role="status">{t.agentInstances.loading}</p>);
   const rowTransfers = transfers.rows.filter((row) => row.folder === path);
+  const savedAt = new Map(
+    rowTransfers.flatMap((transfer) =>
+      transfer.status === "saved" && transfer.result
+        ? [[transfer.result.path, transfer.file.name] as const]
+        : [],
+    ),
+  );
+  function savedStatus(file: Pick<SpaceFile, "name" | "path">) {
+    const original = savedAt.get(file.path);
+    if (!original) return null;
+    return (
+      <p role="status">
+        {original === file.name
+          ? copy.saved(instance.name)
+          : copy.savedAs(file.name)}
+      </p>
+    );
+  }
   const fileTools = (
     <>
       {instance.activity.running_runs > 0 && (
@@ -733,6 +751,7 @@ function FileBrowser({
             const file = sorted.find((f) => f.path === row.path);
             if (file?.accessible) setEditor(file);
           }}
+          rowStatus={savedStatus}
           describe={(row) =>
             row.kind === "directory" && !path && row.name === "uploads" ? (
               <p>{copy.uploadsHint(instance.name)}</p>
@@ -787,11 +806,6 @@ function FileBrowser({
                     const accessible =
                       file.accessible &&
                       (file.kind === "file" || file.kind === "directory");
-                    const saved = rowTransfers.find(
-                      (row) =>
-                        row.status === "saved" &&
-                        row.result?.path === file.path,
-                    );
                     return (
                       <tr key={file.path} className="border-t">
                         <td className="p-2">
@@ -836,13 +850,7 @@ function FileBrowser({
                                 )}
                               </p>
                             )}
-                          {saved && (
-                            <p role="status">
-                              {saved.file.name === file.name
-                                ? copy.saved(instance.name)
-                                : copy.savedAs(file.name)}
-                            </p>
-                          )}
+                          {savedStatus(file)}
                         </td>
                         <td className="p-2">
                           {file.kind === "file"
