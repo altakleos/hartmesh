@@ -1,5 +1,8 @@
 """The browser rehearsal must bind both running services to the qualified images."""
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -25,6 +28,20 @@ def test_signed_and_source_browser_rehearsals_are_distinct_and_bound():
     gate = next(step for step in steps if "test_compose_workspace_files.py" in step.get("run", ""))
     assert gate["if"] == "github.event_name == 'workflow_dispatch' && inputs.verify_file_browser"
     assert "workspace-files.xml" in gate["run"] and "workspace-files.json" in gate["run"]
+
+
+def test_browser_only_dispatch_collects_its_mounted_rehearsal():
+    environment = {**os.environ, "GITHUB_ACTIONS": "true", "HARTMESH_REQUIRE_BUNDLE_INSTANCES": "1", "FILES_BROWSER_REVISION": "a" * 40}
+    environment.pop("HARTMESH_VERIFY_CONNECTIONS", None)
+    case = "tests/test_compose_workspace_files.py::test_installed_workspace_files"
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "-rs", "-p", "no:cacheprovider", case.split("::")[0]],
+        cwd=ROOT / "backend",
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0 and case in result.stdout, result.stdout + result.stderr
 
 
 def test_navigation_percentile_requires_twenty_samples_and_preserves_a_failed_check():

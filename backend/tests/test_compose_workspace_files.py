@@ -17,12 +17,10 @@ import pytest
 if os.environ.get("HARTMESH_REQUIRE_BUNDLE_INSTANCES") != "1" or not os.environ.get("FILES_BROWSER_REVISION"):
     pytest.skip("requires the hosted workspace browser bundle", allow_module_level=True)
 
+from _compose_browser_session import signed_in_browser, verify_image
 from _compose_gateway_restart import start_gateway, stop_gateway
 from _compose_shared_reader import retire_reader
 from _compose_workspace_file_timing import observe
-from playwright.sync_api import TimeoutError as BrowserTimeout
-from playwright.sync_api import expect
-from test_compose_agent_connections import signed_in_browser, verify_image
 from test_compose_instance_acceptance import await_execution_ready, eventually, required, sql
 from test_compose_instance_acceptance import compose as compose
 from test_compose_instance_acceptance import member as member
@@ -89,6 +87,8 @@ def memory(bundle):
 
 
 def browse(page, base, path, name):
+    from playwright.sync_api import expect
+
     started = time.monotonic()
     response = page.goto(base + path, wait_until="domcontentloaded")
     assert response.ok
@@ -100,6 +100,8 @@ def browse(page, base, path, name):
 
 
 def measure(bundle, user, page, agent, evidence, record):
+    from playwright.sync_api import expect
+
     surfaces = (("personal", "/workspace/files?view=browser", "My files"), ("shared", "/workspace/files?tab=shared&view=browser", "Company shared"), ("agent", location(agent), TITLE))
     for key, path, title in surfaces:
         record["ui"][key] = {}
@@ -198,6 +200,8 @@ def measure(bundle, user, page, agent, evidence, record):
 
 
 def phone_geometry(page, base, evidence):
+    from playwright.sync_api import expect
+
     context = page.context.browser.new_context(viewport={"width": 390, "height": 844}, locale="zh-CN", color_scheme="dark", has_touch=True, is_mobile=True)
     try:
         context.add_cookies(page.context.cookies([base]))
@@ -246,6 +250,9 @@ def verify_copies(session, agent, actual, digest):
 
 
 def check_upload(bundle, user, page, agent, evidence, result):
+    from playwright.sync_api import TimeoutError as BrowserTimeout
+    from playwright.sync_api import expect
+
     prefix = f"/api/agent-instances/{agent['id']}/home/operations"
     actual, checks, writes, confirmed = {}, [], [], []
     accepting = False
