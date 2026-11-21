@@ -3638,6 +3638,15 @@ With a name, the sentences read "ask Example Hosting"; without one, "ask your se
 
 The evidence tiers establish different facts. Each is recorded separately:
 
+- The **Compose instances** workflow’s `verify_file_browser` dispatch runs the
+  managed file browser on a fresh disposable bundle. Without image inputs it
+  builds both applications from the selected commit. For a signed run, select
+  the release pin commit and supply its backend digest. The frontend comes from
+  the same bundle. The `workspace-files.json` artifact records the running pair,
+  a lost Home upload across a Gateway restart and renderer change, bounded lists
+  during an ordinary chat, observed folder timings and the one-second target.
+  First browser visits use fresh contexts on the same host. The standard mounted
+  storage qualification runs separately.
 - `managed-storage` runs all 27 required native cases on real loop-mounted ext4
   filesystems and actual containers, using the resident builder and byte-coherence
   probes. It rejects every skip; directories and engine doubles cannot replace it.

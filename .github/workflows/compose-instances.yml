@@ -18,6 +18,10 @@ on:
       frontend_image:
         description: Signed frontend digest required for connection qualification
         type: string
+      verify_file_browser:
+        description: Qualify the managed workspace browser and a lost upload using both source-built or both signed images
+        type: boolean
+        default: false
       verify_home_rollback:
         description: Rehearse in-place Home rollback against the two supported older builds
         type: boolean
@@ -37,12 +41,23 @@ jobs:
     name: Storage and agents in the Compose bundle (Linux Docker)
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-26.04
-    timeout-minutes: ${{ (inputs.verify_home_rollback || (github.event_name == 'workflow_dispatch' && inputs.connections != 'skip')) && 110 || 60 }}
+    timeout-minutes: ${{ (inputs.verify_file_browser || inputs.verify_home_rollback || (github.event_name == 'workflow_dispatch' && inputs.connections != 'skip')) && 110 || 60 }}
     env:
       C: docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env
       EVIDENCE: ${{ github.workspace }}/bundle-evidence
     steps:
       - uses: actions/checkout@v6
+
+      - name: Check workspace browser mode
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_file_browser
+        env:
+          CONNECTIONS: ${{ inputs.connections }}
+          HOME_ROLLBACK: ${{ inputs.verify_home_rollback }}
+          BACKEND: ${{ inputs.backend_image }}
+          FRONTEND: ${{ inputs.frontend_image }}
+        run: |
+          test "$CONNECTIONS" = skip && test "$HOME_ROLLBACK" = false
+          test -n "$BACKEND" || test -z "$FRONTEND"
 
       - name: 1 Require Docker Engine 28 or later
         run: |
@@ -99,7 +114,7 @@ jobs:
 
       - name: 6 Build the backend image from this commit
         if: inputs.backend_image == ''
-        run: docker build --build-arg UV_EXTRAS=postgres --tag localhost:80/hartmesh-backend:ci --file backend/Dockerfile .
+        run: docker build --build-arg UV_EXTRAS=postgres --tag localhost:80/hartmesh-backend:ci --file backend/Dockerfile --label "org.opencontainers.image.revision=$GITHUB_SHA" --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" .
 
       - name: Start the registry for locally built images
         if: inputs.backend_image == '' || inputs.verify_home_rollback
@@ -119,8 +134,8 @@ jobs:
           docker run --rm --entrypoint sh "$backend_ref" -c 'set -eu; command -v nsenter; command -v setpriv; docker --version' > "$EVIDENCE/backend-tools.txt"
           cat "$EVIDENCE/backend-tools.txt"
 
-      - name: Install crane for signed connection candidates
-        if: github.event_name == 'workflow_dispatch' && inputs.connections != 'skip'
+      - name: Install crane for signed candidates
+        if: github.event_name == 'workflow_dispatch' && (inputs.connections != 'skip' || (inputs.verify_file_browser && inputs.backend_image != ''))
         uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
 
       - name: Verify connection candidate images
@@ -143,6 +158,32 @@ jobs:
           docker pull "$FRONTEND"
           echo "HARTMESH_BROWSER_FRONTEND=$FRONTEND" >> "$GITHUB_ENV"
 
+      - name: Verify the signed workspace browser pair
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_file_browser && inputs.backend_image != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BACKEND: ${{ inputs.backend_image }}
+          FRONTEND_HINT: ${{ inputs.frontend_image }}
+        run: |
+          version=$(jq -r .version frontend-hm/package.json)
+          for component in backend frontend; do
+            image=$(grep -Ex "ghcr\.io/altakleos/hartmesh-${component}@sha256:[0-9a-f]{64}" deploy/compose/images.txt)
+            test "$(grep -Ec "image: ${image}$" deploy/compose/compose.yaml)" -ge 1
+            if [ "$component" = backend ]; then test "$BACKEND" = "$image"; else test -z "$FRONTEND_HINT" || test "$FRONTEND_HINT" = "$image"; fi
+            python3 scripts/release_artifacts.py verify-candidate --repository "$GITHUB_REPOSITORY" --version "$version" --component "$component" --image "$image" --revision "$GITHUB_SHA"
+            revision=$(crane config --platform linux/amd64 "$image" | jq -er '.config.Labels["org.opencontainers.image.revision"]')
+            if [ "$component" = backend ]; then
+              common="$revision"
+            else
+              test "$revision" = "$common"
+              echo "HARTMESH_BROWSER_FRONTEND=$image" >> "$GITHUB_ENV"
+            fi
+          done
+          echo "FILES_BROWSER_REVISION=$common" >> "$GITHUB_ENV"
+          cd backend
+          uv sync --frozen --group dev --extra browser
+          .venv/bin/python -m playwright install --with-deps chromium
+
       - name: Use the requested backend candidate
         if: inputs.backend_image != ''
         env:
@@ -163,15 +204,16 @@ jobs:
           test "$(grep -c -F "$BACKEND_REF" /opt/hartmesh/compose.yaml)" = 3
 
       - name: Build the candidate product UI and install its browser rehearsal
-        if: github.event_name == 'workflow_dispatch' && inputs.verify_home_rollback
+        if: github.event_name == 'workflow_dispatch' && (inputs.verify_home_rollback || (inputs.verify_file_browser && inputs.backend_image == ''))
         run: |
-          docker build --target prod --tag localhost:80/hartmesh-frontend:ci --file frontend-hm/Dockerfile .
+          docker build --target prod --tag localhost:80/hartmesh-frontend:ci --file frontend-hm/Dockerfile --label "org.opencontainers.image.revision=$GITHUB_SHA" --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" .
           docker push localhost:80/hartmesh-frontend:ci
           frontend_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' localhost:80/hartmesh-frontend:ci)
           case "$frontend_ref" in localhost:80/hartmesh-frontend@sha256:*) ;; *) exit 1 ;; esac
           sudo sed -i -E "s#ghcr\.io/altakleos/hartmesh-frontend@sha256:[0-9a-f]{64}#${frontend_ref}#g" /opt/hartmesh/compose.yaml /opt/hartmesh/images.txt
           test "$(grep -c -F "$frontend_ref" /opt/hartmesh/compose.yaml)" = 1
           echo "HARTMESH_BROWSER_FRONTEND=$frontend_ref" >> "$GITHUB_ENV"
+          echo "FILES_BROWSER_REVISION=$GITHUB_SHA" >> "$GITHUB_ENV"
           cd backend
           uv sync --frozen --group dev --extra browser
           .venv/bin/python -m playwright install --with-deps chromium
@@ -278,7 +320,7 @@ jobs:
           tail -n 1 "$EVIDENCE/prepare-again.json" | jq -e '.command == "prepare" and .returncode == 0 and .verdict == "nothing-to-do" and (.prepared_now | add) == 0 and .prepared == {"user": 3, "assistant": 3, "employee": 2, "company": 1} and .fstab.changed == false and (.problems | length) == 0'
 
       - name: 13 Run the acceptance tests
-        if: github.event_name != 'workflow_dispatch' || inputs.connections == 'skip'
+        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser)
         working-directory: backend
         run: |
           env PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 \
@@ -333,7 +375,7 @@ jobs:
           PY
 
       - name: Qualify interrupted Shared operations
-        if: github.event_name != 'workflow_dispatch' || inputs.connections == 'skip'
+        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser)
         env:
           HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
           HARTMESH_BUNDLE_URL: http://localhost:2026
@@ -357,7 +399,7 @@ jobs:
           sudo python3 ../docker/acceptance/mounted_devices.py after-gateway --previous "$EVIDENCE/mounted-devices-before.json" > "$EVIDENCE/mounted-devices-after-gateway.json"
 
       - name: Measure Home settlement and the first fresh answer
-        if: github.event_name != 'workflow_dispatch' || inputs.connections == 'skip'
+        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser)
         env:
           HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
           HARTMESH_BUNDLE_URL: http://localhost:2026
@@ -420,7 +462,7 @@ jobs:
           PY
 
       - name: Observe manager acceptance during the last model call
-        if: github.event_name != 'workflow_dispatch' || inputs.connections == 'skip'
+        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser)
         working-directory: backend
         env:
           HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
@@ -482,9 +524,25 @@ jobs:
             -q --tb=short --maxfail=1 -p no:randomly --junitxml="$EVIDENCE/connections.xml"
           jq -e '.complete == true and (.rollback | keys) == ["60","61","66"]' "$EVIDENCE/connections.json"
 
+      - name: Qualify the workspace browser on the installed managed bundle
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_file_browser
+        env:
+          HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
+          HARTMESH_BUNDLE_URL: http://localhost:2026
+          HARTMESH_BUNDLE_PROJECT_DIR: /opt/hartmesh
+          HARTMESH_BUNDLE_ENV_FILE: /srv/hartmesh/.env
+          HARTMESH_BUNDLE_ADMIN_EMAIL: admin@example.com
+          HARTMESH_BUNDLE_ADMIN_PASSWORD: 'Acceptance-Admin-2026!'
+          HARTMESH_BUNDLE_RUNTIME: hartmesh-ci
+        working-directory: backend
+        run: |
+          PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 .venv/bin/python -m pytest tests/test_compose_workspace_files.py \
+            -q --tb=short --maxfail=1 -p no:randomly --junitxml="$EVIDENCE/workspace-files.xml"
+          jq -e '.complete == true and .transfer.confirmed and .transfer.writes == 1 and .access.refused and (.images_before == .images_after)' "$EVIDENCE/workspace-files.json"
+
       - name: 14 Check that the stack stops cleanly
         env:
-          SHARED_MEASURED: ${{ github.event_name != 'workflow_dispatch' || inputs.connections == 'skip' }}
+          SHARED_MEASURED: ${{ github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser) }}
         run: |
           $C logs --no-color > "$EVIDENCE/compose-before-down.log" 2>&1
           $C ps -a > "$EVIDENCE/services-before-down.txt"
