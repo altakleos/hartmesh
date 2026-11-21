@@ -93,6 +93,7 @@ EMPTY_DEFAULT_KEYS = {"HARTMESH_PRIVATE_ENDPOINTS"}
 # through the tenant .env (`env_file`) and are read by the profile's own
 # scripts. See tests/test_compose_operator_models.py.
 PASSTHROUGH_KEYS = {
+    "HARTMESH_AGENT_CONNECTIONS",
     "HARTMESH_TELEGRAM",
     "HARTMESH_TELEGRAM_VOICE",
     "HARTMESH_TELEGRAM_MAX_BOTS",
