@@ -18,7 +18,8 @@ import pytest
 if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("HARTMESH_REQUIRE_BUNDLE_INSTANCES") != "1":
     pytest.skip("requires the hosted mounted bundle", allow_module_level=True)
 
-from test_compose_instance_acceptance import company, eventually, mounted, required, sql
+from _compose_shared_reader import retire_reader
+from test_compose_instance_acceptance import await_execution_ready, company, eventually, mounted, required, sql
 from test_compose_instance_acceptance import compose as compose
 from test_compose_instance_acceptance import session as session
 
@@ -223,5 +224,6 @@ def test_interrupted_shared_write_preserves_proven_bytes_and_sibling(compose, se
         evidence["subsequent_publication"] = fresh["publication_id"]
         evidence["pending_after"] = compose.ai("status")["file_operations_pending"]
         assert evidence["pending_after"] == 0
+        retire_reader(compose, session, reader, shared["reader"], evidence, wait_ready=await_execution_ready)
     finally:
         output.write_text(json.dumps(evidence, indent=2), encoding="utf-8")

@@ -351,6 +351,7 @@ jobs:
             .operations[0].settled == "complete|host-reconciled" and .operations[1].settled == "failed|host-settled" and
             all(.operations[]; .reader_release_to_terminal_seconds >= 0 and .reader_release_to_terminal_seconds < 150 and .restart_to_terminal_seconds >= .reader_release_to_terminal_seconds) and
             .subsequent_remove_seconds >= 0 and .subsequent_publish_seconds >= 0 and
+            .reader_retirement.container_absent and .reader_retirement.execution_after == "ready" and
             .operations[1].sibling_read_during_pending_removal and .operations[0].publication_id != .subsequent_publication' "$EVIDENCE/shared-settlement.json"
           sudo python3 ../docker/acceptance/mounted_devices.py after-gateway --previous "$EVIDENCE/mounted-devices-before.json" > "$EVIDENCE/mounted-devices-after-gateway.json"
 
