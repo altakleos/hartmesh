@@ -69,6 +69,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.describe import build_skill_search_setup
 from deerflow.skills.storage import get_or_new_user_skill_storage
 from deerflow.subagents.capacity import configure_subagent_execution_capacity
+from deerflow.tools.builtins.batch_task_tool import native_batch_tool_names
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, bind_trace_id, ensure_trace_id, generate_trace_id, get_current_trace_id, reset_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
@@ -660,6 +661,7 @@ class DeerFlowClient:
                 subagent_execution_capacity=subagent_execution_capacity,
                 memory_enabled=memory_enabled,
                 bash_available=has_bash_tool(authorized_tools),
+                batch_tool_names=native_batch_tool_names(authorized_tools),
             ),
             "state_schema": get_thread_state_schema(self._checkpoint_channel_mode, self._checkpoint_snapshot_frequency),
         }

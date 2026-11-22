@@ -886,7 +886,7 @@ async def _delete_thread_data_impl(thread_id: str, request: Request, *, native_r
     run_manager = get_run_manager(request)
     batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
     if batch_repo is not None:
-        await batch_repo.suppress_thread_continuations(thread_id)
+        await batch_repo.suppress_thread_continuations(thread_id, teardown=True)
 
     # Legacy IDs may predate the canonical filesystem-safe contract. They can
     # still be removed from metadata/checkpoint stores, but must never be

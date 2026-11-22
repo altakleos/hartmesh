@@ -7,6 +7,7 @@ from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, get_auth_disabled_u
 from deerflow.authz.provider import Principal
 from deerflow.config.paths import make_safe_user_id
 from deerflow.persistence.user.access import ROLES, limited_role
+from deerflow.subagents.batch_scope import is_ordinary_batch_spec, known_agent_batch_scope
 from deerflow.utils.assembly_io import run_assembly
 
 logger = logging.getLogger(__name__)
@@ -15,10 +16,17 @@ logger = logging.getLogger(__name__)
 async def resolve_batch_principal(batch, *, load_user) -> Principal:
     owner = batch["user_id"]
     spec = batch["execution_spec"]
+    scope = known_agent_batch_scope(spec)
+    if scope is None and not is_ordinary_batch_spec(spec):
+        raise PermissionError("Unrecognized batch session authority")
     internal = spec.get("is_internal") is True
-    admitted_role = spec.get("user_role")
-    oauth_provider, oauth_id = spec.get("oauth_provider"), spec.get("oauth_id")
-    development_owner = owner == AUTH_DISABLED_USER_ID and is_auth_disabled() and admitted_role == "admin" and oauth_provider is None and oauth_id is None
+    if scope is not None:
+        admitted_role, oauth_provider, oauth_id = scope.system_role, scope.oauth_provider, scope.oauth_id
+        development_owner = False
+    else:
+        admitted_role = spec.get("user_role")
+        oauth_provider, oauth_id = spec.get("oauth_provider"), spec.get("oauth_id")
+        development_owner = owner == AUTH_DISABLED_USER_ID and is_auth_disabled() and admitted_role == "admin" and oauth_provider is None and oauth_id is None
     if development_owner:
         user = get_auth_disabled_user()
     else:
@@ -45,8 +53,10 @@ async def resolve_batch_principal(batch, *, load_user) -> Principal:
     except Exception as exc:
         logger.warning("Batch owner policy lookup failed (batch_id=%s, error_type=%s)", batch.get("id"), type(exc).__name__)
         raise PermissionError("Batch owner could not be verified") from None
-    # needs_setup confines interactive sessions; it does not revoke automation
-    # already admitted under the saved identity and role.
+    # A session-bound job retains the exact originating login. Ordinary
+    # background batches keep their previously admitted automation ceiling.
+    if scope is not None and (user.token_version != scope.token_version or user.needs_setup or user.system_role != admitted_role):
+        raise PermissionError("Batch session is no longer active with the saved identity")
     if str(user.id) != owner or refusal is not None:
         raise PermissionError("Batch owner is no longer active")
     if oauth_provider != user.oauth_provider or oauth_id != getattr(user, "oauth_id", None):

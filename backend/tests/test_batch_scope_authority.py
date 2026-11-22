@@ -107,6 +107,6 @@ async def test_owner_refusal_suppresses_followup_before_dispatch():
     repo = SimpleNamespace(finish_continuation=AsyncMock(return_value=True))
     dispatch = AsyncMock()
     service = SubagentBatchService(repository=repo, config=SubagentBatchesConfig(), runtime_config=SubagentRuntimeConfig(), owner_access=AsyncMock(return_value=False), dispatch_continuation=dispatch)
-    await service._continue_batch({"id": "batch"}, "worker")
+    await service._continue_batch({"id": "batch", "execution_spec": {}}, "worker")
     dispatch.assert_not_awaited()
     repo.finish_continuation.assert_awaited_once_with("batch", lease_owner="worker", status="suppressed", run_id=None)

@@ -6,8 +6,10 @@ from app.gateway.auth.mode import account_refusal
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, is_auth_disabled
 from app.gateway.authz import resolve_route_permissions
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
+from app.subagent_batches.identity import resolve_batch_principal
 from deerflow.config.paths import make_safe_user_id
 from deerflow.persistence.user.access import limited_role
+from deerflow.subagents.batch_scope import is_ordinary_batch_spec
 from deerflow.subagents.batch_service import SubagentBatchService
 from deerflow.utils.assembly_io import run_assembly
 
@@ -24,6 +26,13 @@ async def batch_owner_allowed(batch: dict) -> bool:
 
     user_id = batch["user_id"]
     spec = batch["execution_spec"]
+    if not is_ordinary_batch_spec(spec):
+        try:
+            session_principal = await resolve_batch_principal(batch, load_user=lambda owner: get_local_provider().get_user(owner))
+        except PermissionError:
+            return False
+        principal_user = SimpleNamespace(id=user_id, system_role=session_principal.role, oauth_provider=session_principal.oauth_provider, oauth_id=session_principal.oauth_id)
+        return "runs:create" in await resolve_route_permissions(principal_user, is_internal=False, strict=True)
     role = spec.get("user_role")
     oauth_provider, oauth_id = spec.get("oauth_provider"), spec.get("oauth_id")
     internal = spec.get("is_internal") is True

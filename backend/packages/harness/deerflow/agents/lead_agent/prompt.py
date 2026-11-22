@@ -5,7 +5,7 @@ import html
 import logging
 import threading
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
@@ -463,7 +463,7 @@ def _build_subagent_section(
     *,
     app_config: AppConfig | None = None,
     allowed_subagents: list[str] | None = None,
-    batch_enabled: bool = False,
+    tool_names: Collection[str] = (),
     lead_bash_available: bool = True,
 ) -> str:
     """Build the subagent system prompt section with dynamic subagent limits.
@@ -581,7 +581,7 @@ A single subagent is justified only by material specialist or context-isolation 
 - **Synthesize all retained results** at the end.
 """
     durable_batch_guidance = ""
-    if batch_enabled:
+    if "batch_task" in tool_names:
         durable_batch_guidance = """
 ## Explicit durable batch mode
 
@@ -595,13 +595,17 @@ count and never emulate it by repeatedly calling `task`.
 - Give every item a stable unique key; retries reuse that key as idempotency identity.
 - Set total, live-window, and running concurrency separately. A high total never
   implies that all items become live or run at once.
-- Use `batch_status` for compact progress and `cancel_batch` for cancellation.
-- Do not wait for or paste all item results into this run. The Web UI and results
-  export API own bulk inspection. When the owner explicitly asks to inspect or
-  synthesize stored results, use `read_batch_result` for selected items in this
-  thread. Follow its bounded continuation/revision contract; never poll for
-  completion or equate execution success with acceptance.
+- Items are self-contained. Do not wait for or paste all item results into
+  this run. Use the Web UI and results export API for bulk inspection.
 """
+        if "batch_status" in tool_names:
+            durable_batch_guidance += "- Use `batch_status` for compact progress. Never poll for completion.\n"
+        if "cancel_batch" in tool_names:
+            durable_batch_guidance += "- Use `cancel_batch` for cancellation.\n"
+        if "read_batch_result" in tool_names:
+            durable_batch_guidance += (
+                "- When the owner asks to inspect or synthesize results, use `read_batch_result` for selected items in this thread. Follow its bounded continuation/revision contract. Execution success alone does not establish acceptance.\n"
+            )
     return f"""<subagent_system>
 ## Subagent Routing: Delegate Only for Clear Net Benefit
 
@@ -643,7 +647,7 @@ Expected cost = delegation and startup overhead + duplicate context and reposito
 - `context_mode="isolated"` is the default: provide the context needed in the delegated prompt.
 - Use `context_mode="snapshot"` when the task needs requirements, decisions, or failed approaches spread across the conversation.
   It adds retained parent history and summary as background, with extra input-token cost. Still specify the bounded task and side-effect ownership.
-- A snapshot is fixed at dispatch; the child keeps its own role and tool restrictions. Parent tool history is background, never evidence that the child performed an action. Durable `batch_task` items remain self-contained.
+- A snapshot is fixed at dispatch; the child keeps its own role and tool restrictions. Parent tool history is background, never evidence that the child performed an action.
 
 **Act on ordinary `task` acceptance results:**
 - `completed` means execution ended, not that the task was accepted. Read the checklist criterion by criterion and retain useful work.
@@ -1291,6 +1295,7 @@ def apply_prompt_template(
     bash_available: bool = True,
     adopted_soul: str | None = None,
     runtime_scope: RuntimeScope | None = None,
+    batch_tool_names: Collection[str] = (),
 ) -> str:
     interaction_policy = interaction_policy or RunInteractionPolicy.interactive()
     # Include subagent section only if enabled (from runtime parameter)
@@ -1308,14 +1313,12 @@ def apply_prompt_template(
     )
     total = effective_total_subagents_per_run(max_total_subagents, app_config)
     if subagent_enabled:
-        from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
-
         subagent_section = _build_subagent_section(
             n,
             total,
             app_config=app_config,
             allowed_subagents=allowed_subagents,
-            batch_enabled=is_subagent_batch_runtime_available(),
+            tool_names=batch_tool_names,
             lead_bash_available=bash_available,
         )
     else:

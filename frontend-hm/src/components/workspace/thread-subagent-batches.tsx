@@ -124,7 +124,7 @@ export function ThreadSubagentBatches({ threadId }: { threadId: string }) {
                   key={batch.id}
                   threadId={threadId}
                   batch={batch}
-                  workerRunning={workerRunning}
+                  workerRunning={workerRunning && !batch.read_only}
                   controlling={
                     control.isPending && control.variables?.batchId === batch.id
                   }

@@ -31,12 +31,14 @@ async def _user_id(request: Request) -> str:
     return user_id
 
 
-async def _owned_batch(request: Request, thread_id: str, batch_id: str) -> tuple[object, str, dict]:
+async def _owned_batch(request: Request, thread_id: str, batch_id: str, *, write: bool = False) -> tuple[object, str, dict]:
     repo = get_subagent_batch_repo(request)
     user_id = await _user_id(request)
     batch = await repo.get_batch(batch_id, user_id=user_id)
     if batch is None or batch["thread_id"] != thread_id:
         raise HTTPException(status_code=404, detail="Subagent batch not found")
+    if write and batch.get("read_only"):
+        raise HTTPException(status_code=409, detail="This batch is read-only on this Gateway")
     return repo, user_id, batch
 
 
@@ -93,14 +95,14 @@ async def get_batch_item(
 @router.post("/{batch_id}/pause")
 @require_permission("threads", "write", owner_check=True)
 async def pause_batch(thread_id: ThreadId, batch_id: str, request: Request) -> dict:
-    repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
+    repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id, write=True)
     return await repo.pause_batch(batch_id, user_id=user_id)
 
 
 @router.post("/{batch_id}/resume")
 @require_permission("threads", "write", owner_check=True)
 async def resume_batch(thread_id: ThreadId, batch_id: str, request: Request) -> dict:
-    repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
+    repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id, write=True)
     return await repo.resume_batch(batch_id, user_id=user_id)
 
 
@@ -109,7 +111,7 @@ async def resume_batch(thread_id: ThreadId, batch_id: str, request: Request) -> 
 async def cancel_batch(thread_id: ThreadId, batch_id: str, request: Request) -> dict:
     if not getattr(request.app.state, "subagent_batches_available", False):
         raise HTTPException(status_code=503, detail="Subagent batch worker is not running")
-    _repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
+    _repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id, write=True)
     require_cancel_permission_if(request, _batch.get("continuation_status") is not None)
     result = await get_subagent_batch_service(request).cancel_batch(batch_id=batch_id, user_id=user_id)
     if result is None:
@@ -120,7 +122,7 @@ async def cancel_batch(thread_id: ThreadId, batch_id: str, request: Request) -> 
 @router.post("/{batch_id}/items/{item_id}/retry")
 @require_permission("threads", "write", owner_check=True)
 async def retry_batch_item(thread_id: ThreadId, batch_id: str, item_id: str, request: Request) -> dict:
-    repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
+    repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id, write=True)
     item = await repo.retry_item(batch_id, item_id, user_id=user_id)
     if item is None:
         raise HTTPException(status_code=409, detail="Only failed items of a batch that is not cancelled can be retried")

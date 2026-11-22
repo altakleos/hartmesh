@@ -249,3 +249,16 @@ async def test_jsonl_export_reads_full_results_in_small_pages(monkeypatch) -> No
     assert [json.loads(line)["id"] for line in payload.splitlines()] == [f"item-{index}" for index in range(25)]
     assert max(repo.limits) <= 10
     assert len(repo.limits) > 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route,extra", [(subagent_batches.pause_batch, {}), (subagent_batches.resume_batch, {}), (subagent_batches.cancel_batch, {}), (subagent_batches.retry_batch_item, {"item_id": "item-1"})])
+async def test_read_only_scope_refuses_writes_after_checking_ownership(monkeypatch, route, extra):
+    repo = Repository()
+    repo.batch["read_only"] = True
+    request = _request(repo)
+    monkeypatch.setattr(subagent_batches, "get_current_user", AsyncMock(return_value="user-1"))
+    for thread_id, expected in (("thread-1", 409), ("other", 404)):
+        with pytest.raises(HTTPException) as error:
+            await route.__wrapped__(thread_id=thread_id, batch_id="batch-1", request=request, **extra)
+        assert error.value.status_code == expected

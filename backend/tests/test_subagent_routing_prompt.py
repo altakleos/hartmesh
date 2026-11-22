@@ -26,13 +26,34 @@ def test_routing_requires_clear_net_benefit(monkeypatch) -> None:
     assert "side-effect risk" in section
 
 
+def test_external_operation_named_batch_task_does_not_enable_native_guidance():
+    from types import SimpleNamespace
+
+    from deerflow.tools.builtins.batch_task_tool import batch_status, batch_task, bind_batch_tools, native_batch_tool_names
+
+    async def remote_operation():
+        return "remote"
+
+    remote = SimpleNamespace(name="batch_task", coroutine=remote_operation)
+    assert native_batch_tool_names([remote]) == set()
+    assert native_batch_tool_names([batch_task, batch_status]) == {"batch_task", "batch_status"}
+    bound = bind_batch_tools(submitter_provider=lambda: None)
+    assert native_batch_tool_names(bound) == {"batch_task", "batch_status", "cancel_batch", "read_batch_result"}
+
+
 def test_durable_batch_guidance_allows_only_explicit_prerequisites(monkeypatch) -> None:
     monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose"])
-    section = prompt_module._build_subagent_section(3, batch_enabled=True)
+    section = prompt_module._build_subagent_section(3, tool_names={"batch_task"})
     assert "depends_on" in section
     assert "must not depend on another item's output" not in section
     assert "simultaneously runnable items independent" in section
-    assert "depends_on" not in prompt_module._build_subagent_section(3, batch_enabled=False)
+    assert "batch_status" not in section
+    assert "cancel_batch" not in section
+    assert "read_batch_result" not in section
+    assert "batch_task" not in prompt_module._build_subagent_section(3)
+    allowed = {"batch_task", "batch_status", "cancel_batch", "read_batch_result"}
+    full = prompt_module._build_subagent_section(3, tool_names=allowed)
+    assert all(f"`{name}`" in full for name in allowed)
 
 
 def test_hard_vetoes_apply_to_parallel_dispatch_not_single_agent_chains(monkeypatch) -> None:

@@ -127,6 +127,27 @@ afterEach(() => {
 });
 
 describe("ThreadSubagentBatches capability gating", () => {
+  it("keeps a read-only batch readable when the ordinary worker is running", async () => {
+    featureState.workerRunning = true;
+    batchState.batches = [{ ...HISTORICAL_BATCH, read_only: true }];
+    batchState.itemPages = [
+      [{ id: "one", item_key: "part", status: "failed" }],
+    ];
+    render(<ThreadSubagentBatches threadId="thread-1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Batches" }));
+    fireEvent.click(await screen.findByRole("button", { name: "View items" }));
+
+    for (const name of ["Pause", "Cancel", "Retry"]) {
+      expect(await screen.findByRole("button", { name })).toHaveProperty(
+        "disabled",
+        true,
+      );
+    }
+    expect(
+      screen.getByRole("link", { name: "Export JSONL" }).getAttribute("href"),
+    ).toBe("/results.jsonl");
+  });
+
   it("keeps historical batches readable when the worker is stopped", async () => {
     batchState.batches = [HISTORICAL_BATCH];
     render(<ThreadSubagentBatches threadId="thread-1" />);

@@ -6,9 +6,11 @@ import asyncio
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import asdict, replace
+from functools import wraps
+from inspect import unwrap
 from typing import Annotated, Any, cast
 
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
@@ -80,6 +82,7 @@ def _bind_batch_tool(
     if original_coroutine is None:  # pragma: no cover - all batch tools are async
         raise RuntimeError(f"{tool.name} has no async implementation")
 
+    @wraps(original_coroutine)
     async def bound_coroutine(**kwargs):
         submitter_token = _explicit_batch_submitter.set(submitter_provider())
         config_token = _explicit_batch_app_config.set(app_config)
@@ -118,6 +121,12 @@ def bind_batch_tools(
     provider = submitter_provider if submitter_provider is not None else lambda: submitter
 
     return tuple(_bind_batch_tool(tool, provider, app_config) for tool in (batch_task, batch_status, cancel_batch, read_batch_result))
+
+
+def native_batch_tool_names(tools: Iterable[Any]) -> set[str]:
+    """Select the authorized native operations, including their SDK-bound copies."""
+    implementations = {t.name: t.coroutine for t in (batch_task, batch_status, cancel_batch, read_batch_result)}
+    return {tool.name for tool in tools if getattr(tool, "name", None) in implementations and unwrap(getattr(tool, "coroutine", None)) is implementations[tool.name]}
 
 
 def _result(tool_call_id: str, *, content: str, batch: dict[str, Any] | None = None, error: bool = False) -> Command:
@@ -286,7 +295,7 @@ async def batch_task(
                 max_running_items=max_running_items,
                 execution_spec=execution_spec,
                 continuation=continuation,
-                continuation_authority=context.get(AGENT_RUNS_CONTEXT_KEY) if continuation else None,
+                continuation_authority=context.get(AGENT_RUNS_CONTEXT_KEY),
                 continuation_context=continuation_context if continuation else None,
             )
         )
@@ -346,6 +355,8 @@ async def cancel_batch(runtime: Runtime, batch_id: str) -> str:
     batch = await submitter.cancel_batch(batch_id=batch_id, user_id=resolve_runtime_user_id(runtime), **authority)
     if batch is None:
         return "Batch not found."
+    if batch.get("read_only") is True:
+        return "This batch is read-only."
     return f"Batch {batch_id} cancellation requested."
 
 

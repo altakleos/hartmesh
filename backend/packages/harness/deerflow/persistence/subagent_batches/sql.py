@@ -13,9 +13,11 @@ from sqlalchemy.orm import aliased, defer
 from deerflow.persistence.extension_leases.model import ExtensionExecutionLeaseRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.subagent_batches.model import SubagentBatchDependencyRow, SubagentBatchItemRow, SubagentBatchRow
+from deerflow.persistence.subagent_batches.scope import known_scope_candidate, ordinary_batch, startup_lock_budget
 from deerflow.subagents.acceptance_checks import AcceptanceVerdict, validate_acceptance_verdict
 from deerflow.subagents.batch_dependencies import batch_dependencies
 from deerflow.subagents.batch_runtime import BATCH_CONTINUATION_NAMESPACE, BatchItemInput, batch_continuation_key
+from deerflow.subagents.batch_scope import is_ordinary_batch_spec, known_agent_batch_scope
 from deerflow.subagents.report_contract import normalize_acceptance_criteria
 from deerflow.utils.time import coerce_iso
 
@@ -70,6 +72,8 @@ class SubagentBatchRepository:
     def _batch_dict(row: SubagentBatchRow) -> dict[str, Any]:
         """Return the stable owner-facing projection, never execution context."""
         data = {key: getattr(row, key) for key in _BATCH_PUBLIC_FIELDS}
+        if not is_ordinary_batch_spec(row.execution_spec):
+            data["read_only"] = True
         for key in _BATCH_TIMESTAMP_FIELDS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
@@ -209,6 +213,54 @@ class SubagentBatchRepository:
             rows = (await session.execute(select(SubagentBatchRow).where(SubagentBatchRow.user_id == user_id, SubagentBatchRow.status.in_(BATCH_ACTIVE_STATUSES)))).scalars()
             return [self._batch_dict(row) for row in rows]
 
+    async def list_unavailable_bound_batches(self, *, after: str | None, limit: int) -> list[str]:
+        """Page startup candidates by stable ID; cancel revalidates the entire scope."""
+        if limit <= 0:
+            return []
+        async with self._sf() as session, startup_lock_budget(session):
+            query = select(SubagentBatchRow.id).where(self._promises_work(), known_scope_candidate(session))
+            if after is not None:
+                query = query.where(SubagentBatchRow.id > after)
+            return list((await session.scalars(query.order_by(SubagentBatchRow.id).limit(limit))).all())
+
+    @staticmethod
+    def _promises_work():
+        return or_(SubagentBatchRow.status.in_(BATCH_ACTIVE_STATUSES), SubagentBatchRow.continuation_status.in_(("pending", "dispatching")))
+
+    async def cancel_unavailable_bound_batch(self, batch_id: str) -> bool:
+        """End the remaining promise and invalidate the dispatch fence in one commit."""
+        async with self._sf.begin() as session:
+            async with startup_lock_budget(session, write=True):
+                batch = await session.scalar(select(SubagentBatchRow).where(SubagentBatchRow.id == batch_id, self._promises_work(), known_scope_candidate(session)).with_for_update())
+                if batch is None or known_agent_batch_scope(batch.execution_spec) is None:
+                    return False
+                if batch.continuation_json is not None and not isinstance(batch.continuation_json, dict):
+                    # The startup caller logs this row and continues without destroying its future fields.
+                    raise ValueError("Unrecognised batch continuation document")
+                now = datetime.now(UTC)
+                batch.status = batch.continuation_status = "cancelled"
+                batch.updated_at = batch.completed_at = now
+                batch.continuation_json = {**(batch.continuation_json or {}), "outcome": {"version": 1, "reason": "unavailable"}}
+                await session.execute(
+                    update(SubagentBatchItemRow)
+                    .where(SubagentBatchItemRow.batch_id == batch_id, SubagentBatchItemRow.status.in_(("pending", *ITEM_ACTIVE_STATUSES)))
+                    .values(
+                        status="cancelled",
+                        error="Cancelled: this job cannot continue here. Nothing more will run for it.",
+                        cancel_requested_at=now,
+                        completed_at=now,
+                        updated_at=now,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                    )
+                )
+                await session.execute(
+                    update(ExtensionExecutionLeaseRow)
+                    .where(ExtensionExecutionLeaseRow.namespace == BATCH_CONTINUATION_NAMESPACE, ExtensionExecutionLeaseRow.resource_id == batch_id)
+                    .values(expires_at=0, epoch=ExtensionExecutionLeaseRow.epoch + 1)
+                )
+                return True
+
     async def unconfirmed_cancelled_items(self, user_id: str) -> set[str]:
         """Cancelled claims are not worker-stop acknowledgements.
 
@@ -313,6 +365,7 @@ class SubagentBatchRepository:
                 SubagentBatchItemRow.batch_id == batch.id,
                 SubagentBatchItemRow.status.in_(("pending", "queued")),
                 SubagentBatchItemRow.id.in_(select(blocked.c.item_id)),
+                SubagentBatchItemRow.batch_id.in_(select(SubagentBatchRow.id).where(ordinary_batch(session))),
             )
             .values(status="failed", error="A prerequisite did not complete successfully", completed_at=now, updated_at=now)
             .returning(SubagentBatchItemRow.id)
@@ -339,7 +392,7 @@ class SubagentBatchRepository:
                 (
                     await session.execute(
                         select(SubagentBatchRow)
-                        .where(SubagentBatchRow.status.in_(("completed", "failed")), SubagentBatchRow.id.not_in(exclude_batch_ids), ready)
+                        .where(ordinary_batch(session), SubagentBatchRow.status.in_(("completed", "failed")), SubagentBatchRow.id.not_in(exclude_batch_ids), ready)
                         .order_by(SubagentBatchRow.updated_at, SubagentBatchRow.completed_at, SubagentBatchRow.id)
                         .limit(limit)
                         .with_for_update(skip_locked=True)
@@ -350,7 +403,10 @@ class SubagentBatchRepository:
             )
             for batch in rows:
                 changed = await session.execute(
-                    update(SubagentBatchRow).where(SubagentBatchRow.id == batch.id, SubagentBatchRow.status.in_(("completed", "failed")), ready).values(continuation_status="dispatching").execution_options(synchronize_session=False)
+                    update(SubagentBatchRow)
+                    .where(SubagentBatchRow.id == batch.id, ordinary_batch(session), SubagentBatchRow.status.in_(("completed", "failed")), ready)
+                    .values(continuation_status="dispatching")
+                    .execution_options(synchronize_session=False)
                 )
                 if changed.rowcount == 1:
                     await session.refresh(batch)
@@ -380,6 +436,7 @@ class SubagentBatchRepository:
                 update(SubagentBatchRow)
                 .where(
                     SubagentBatchRow.id == batch_id,
+                    ordinary_batch(session),
                     SubagentBatchRow.continuation_status == "dispatching",
                     select(ExtensionExecutionLeaseRow.resource_id)
                     .where(
@@ -396,17 +453,19 @@ class SubagentBatchRepository:
 
     async def list_continuation_batches_for_run(self, run_id: str) -> list[dict]:
         async with self._sf() as session:
-            rows = (await session.execute(select(SubagentBatchRow).where(SubagentBatchRow.run_id == run_id, SubagentBatchRow.continuation_status.in_(("pending", "dispatching"))))).scalars().all()
+            rows = (await session.execute(select(SubagentBatchRow).where(ordinary_batch(session), SubagentBatchRow.run_id == run_id, SubagentBatchRow.continuation_status.in_(("pending", "dispatching"))))).scalars().all()
             return [self._execution_batch_dict(row) for row in rows]
 
     async def continuation_run_id(self, batch_id: str, *, user_id: str) -> str | None:
         async with self._sf() as session:
             return await session.scalar(select(RunRow.run_id).where(RunRow.user_id == user_id, RunRow.idempotency_key == batch_continuation_key(batch_id)))
 
-    async def suppress_thread_continuations(self, thread_id: str, *, goal_created_at: str | None = None) -> None:
+    async def suppress_thread_continuations(self, thread_id: str, *, goal_created_at: str | None = None, teardown: bool = False) -> None:
         """Called while the host owns the thread's Goal/deletion operation."""
         async with self._sf() as session:
             batches = select(SubagentBatchRow.id).where(SubagentBatchRow.thread_id == thread_id, SubagentBatchRow.continuation_status.in_(("pending", "dispatching")))
+            if not teardown:
+                batches = batches.where(ordinary_batch(session))
             if goal_created_at is not None:
                 batches = batches.where(SubagentBatchRow.continuation_json["goal"]["created_at"].as_string() == goal_created_at, SubagentBatchRow.continuation_json["goal"]["status"].as_string() == "active")
             # Match claim/cancel lock order: batch first, then execution fence.
@@ -416,7 +475,10 @@ class SubagentBatchRepository:
             ids = list(
                 (
                     await session.scalars(
-                        update(SubagentBatchRow).where(SubagentBatchRow.id.in_(ids), SubagentBatchRow.continuation_status.in_(("pending", "dispatching"))).values(continuation_status="suppressed").returning(SubagentBatchRow.id)
+                        update(SubagentBatchRow)
+                        .where(SubagentBatchRow.id.in_(ids), True if teardown else ordinary_batch(session), SubagentBatchRow.continuation_status.in_(("pending", "dispatching")))
+                        .values(continuation_status="suppressed")
+                        .returning(SubagentBatchRow.id)
                     )
                 ).all()
             )
@@ -462,7 +524,7 @@ class SubagentBatchRepository:
                 (
                     await session.execute(
                         select(SubagentBatchRow)
-                        .where(or_(SubagentBatchRow.status.in_(("queued", "running")), (SubagentBatchRow.status == "paused") & expired_items.exists()))
+                        .where(ordinary_batch(session), or_(SubagentBatchRow.status.in_(("queued", "running")), (SubagentBatchRow.status == "paused") & expired_items.exists()))
                         .order_by(SubagentBatchRow.created_at, SubagentBatchRow.id)
                         .with_for_update(skip_locked=True)
                     )
@@ -471,7 +533,7 @@ class SubagentBatchRepository:
             for batch in batches:
                 if len(claimed) >= limit:
                     break
-                runnable_batch = select(SubagentBatchRow.id).where(SubagentBatchRow.id == batch.id, SubagentBatchRow.status.in_(("queued", "running")))
+                runnable_batch = select(SubagentBatchRow.id).where(SubagentBatchRow.id == batch.id, ordinary_batch(session), SubagentBatchRow.status.in_(("queued", "running")))
 
                 expired = list(
                     (
@@ -504,6 +566,7 @@ class SubagentBatchRepository:
                             SubagentBatchItemRow.status.in_(("leased", "running")),
                             SubagentBatchItemRow.lease_owner == item.lease_owner,
                             SubagentBatchItemRow.lease_expires_at == item.lease_expires_at,
+                            SubagentBatchItemRow.batch_id.in_(select(SubagentBatchRow.id).where(ordinary_batch(session))),
                         )
                         .values(**values)
                         .execution_options(synchronize_session=False)
@@ -619,6 +682,8 @@ class SubagentBatchRepository:
         if batch_id is None:
             return None, None
         batch = await session.get(SubagentBatchRow, batch_id, with_for_update=True)
+        if batch is None or not is_ordinary_batch_spec(batch.execution_spec):
+            return None, batch
         item = (
             await session.execute(
                 select(SubagentBatchItemRow)
@@ -642,6 +707,7 @@ class SubagentBatchRepository:
                 SubagentBatchItemRow.id == item_id,
                 SubagentBatchItemRow.lease_owner == lease_owner,
                 SubagentBatchItemRow.status.in_(statuses),
+                SubagentBatchItemRow.batch_id.in_(select(SubagentBatchRow.id).where(ordinary_batch(session))),
             )
             .values(**values)
             .execution_options(synchronize_session=False)
@@ -770,14 +836,16 @@ class SubagentBatchRepository:
     async def resume_batch(self, batch_id: str, *, user_id: str) -> dict[str, Any] | None:
         return await self._set_control(batch_id, user_id=user_id, action="resume")
 
-    async def cancel_batch(self, batch_id: str, *, user_id: str, reason: str = "Cancelled by user") -> dict[str, Any] | None:
-        return await self._set_control(batch_id, user_id=user_id, action="cancel", reason=reason)
+    async def cancel_batch(self, batch_id: str, *, user_id: str, reason: str = "Cancelled by user", teardown: bool = False) -> dict[str, Any] | None:
+        return await self._set_control(batch_id, user_id=user_id, action="cancel", reason=reason, teardown=teardown)
 
-    async def _set_control(self, batch_id: str, *, user_id: str, action: str, reason: str = "Cancelled by user") -> dict[str, Any] | None:
+    async def _set_control(self, batch_id: str, *, user_id: str, action: str, reason: str = "Cancelled by user", teardown: bool = False) -> dict[str, Any] | None:
         now = datetime.now(UTC)
         async with self._sf() as session:
             batch = await session.get(SubagentBatchRow, batch_id, with_for_update=True)
             if batch is None or batch.user_id != user_id:
+                return None
+            if not teardown and not is_ordinary_batch_spec(batch.execution_spec):
                 return None
             if action == "cancel" and batch.continuation_status is not None:
                 await session.execute(update(SubagentBatchRow).where(SubagentBatchRow.id == batch.id, SubagentBatchRow.user_id == user_id).values(continuation_status="cancelled").execution_options(synchronize_session=False))
@@ -824,6 +892,8 @@ class SubagentBatchRepository:
             batch = await session.get(SubagentBatchRow, batch_id, with_for_update=True)
             if batch is None or batch.user_id != user_id:
                 return None
+            if not is_ordinary_batch_spec(batch.execution_spec):
+                return None
             item = await session.get(SubagentBatchItemRow, item_id, with_for_update=True)
             if item is None or item.batch_id != batch_id or item.status != "failed":
                 return None
@@ -844,7 +914,7 @@ class SubagentBatchRepository:
             await session.refresh(batch)
             # Cancellation is final; reopening the batch would run work the user
             # stopped. Returning without commit discards the item reset.
-            if batch.status == "cancelled":
+            if batch.status == "cancelled" or not is_ordinary_batch_spec(batch.execution_spec):
                 return None
             if batch.continuation_status in ("pending", "dispatching"):
                 batch.continuation_status = "pending"
