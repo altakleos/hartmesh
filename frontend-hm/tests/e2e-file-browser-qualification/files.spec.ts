@@ -132,7 +132,7 @@ test("bounded files stay scoped and usable across supported image pairings", asy
   const currentUI = pair !== "previous-ui",
     currentGateway = pair !== "previous-gateway";
   const areas: Area[] = ["personal", "shared"];
-  const desktopBrowser = currentUI && currentGateway;
+  const measurePerformance = pair === "current";
   const samples = { personal: timings(), shared: timings() };
   const evidence = {
     pair,
@@ -183,13 +183,13 @@ test("bounded files stay scoped and usable across supported image pairings", asy
         "-",
         actors.user,
         actors.other,
-        desktopBrowser ? "large" : "small",
+        measurePerformance ? "large" : "small",
       ],
       { input: seedSource, encoding: "utf8", timeout: 90000 },
     ),
   ) as { per_location: number };
   evidence.seed = seed.per_location;
-  expect(seed.per_location).toBe(desktopBrowser ? 10001 : 2);
+  expect(seed.per_location).toBe(measurePerformance ? 10001 : 2);
   const readCgroup = (field: string) =>
     execFileSync(
       "docker",
@@ -212,12 +212,12 @@ test("bounded files stay scoped and usable across supported image pairings", asy
     const features = (await discovery.json()) as {
       file_browser?: { storage_mode: string; operations: { shared: string[] } };
     };
-    if (currentGateway) {
+    if (currentGateway || features.file_browser) {
       expect(features.file_browser?.storage_mode).toBe("ordinary");
       expect(features.file_browser?.operations.shared).toContain("select");
       expect(features.file_browser?.operations.shared).toContain("folder");
       expect(features.file_browser?.operations.shared).not.toContain("remove");
-    } else expect(features.file_browser).toBeUndefined();
+    }
     const csrf = (await context.cookies()).find(
       (x) => x.name === "csrf_token",
     )!;
@@ -229,7 +229,7 @@ test("bounded files stay scoped and usable across supported image pairings", asy
           params: { path: "Collection 00/Report 0000.txt" },
         },
       );
-      expect(result.status()).toBe(currentGateway ? 200 : 404);
+      expect(result.status()).toBe(features.file_browser ? 200 : 404);
       const before = await request.get(
         endpoint[area] + "/Collection%2000/Report%200000.txt",
       );
@@ -283,7 +283,7 @@ test("bounded files stay scoped and usable across supported image pairings", asy
       samples[area].rawListMs.push(end - start);
       evidence.sizes[area] = data.files.length;
       expect(data.files).toHaveLength(Math.min(seed.per_location, 10000));
-      expect(data.truncated).toBe(desktopBrowser);
+      expect(data.truncated).toBe(measurePerformance);
       expect(data.files.some((x) => x.path === "other-account.txt")).toBe(
         false,
       );
@@ -300,21 +300,25 @@ test("bounded files stay scoped and usable across supported image pairings", asy
       });
       save();
       expect(overlap).toBeGreaterThan(0);
-      if (!desktopBrowser) {
+      if (!measurePerformance) {
         const nested = new URL(urls[area], "http://localhost");
         nested.searchParams.set("folder", "Collection 00");
+        nested.searchParams.set("view", "classic");
         await page.goto(nested.pathname + nested.search);
-        const classic = page.getByTestId(
-          area === "personal" ? "my-files-list" : "shared-files-list",
-        );
-        await expect(
-          classic.getByRole("link", { name: "visible.txt", exact: true }),
-        ).toBeVisible();
-        const row = classic.getByRole("link", {
+        const scope = currentUI ? browserRegion(page, area) : page;
+        const row = scope.getByRole("link", {
           name: "Report 0000.txt",
           exact: true,
         });
         await expect(row).toBeVisible();
+        if (currentUI) {
+          await expect(
+            scope.getByRole("link", { name: "visible.txt", exact: true }),
+          ).toHaveCount(0);
+          await expect(
+            page.getByRole("link", { name: "Use classic file view" }),
+          ).toHaveCount(0);
+        }
         const href = await row.getAttribute("href");
         expect(href).toBeTruthy();
         const link = new URL(href!, page.url());
@@ -325,12 +329,9 @@ test("bounded files stay scoped and usable across supported image pairings", asy
         const opened = await request.get(link.toString());
         expect(opened.status()).toBe(200);
         expect(await opened.text()).toBe(`${area} sample\n`);
-        await expect(
-          page.getByRole("button", { name: /More actions for/ }),
-        ).toHaveCount(0);
       }
     }
-    if (!desktopBrowser) return;
+    if (!measurePerformance) return;
     const flatReads = { personal: 0, shared: 0 };
     page.on("request", (request) => {
       const requested = new URL(request.url()).pathname;

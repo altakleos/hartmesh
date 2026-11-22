@@ -31,7 +31,6 @@ import {
   type BrowserRow,
 } from "@/core/file-areas/browser";
 import { useBrowserHistory } from "@/core/file-areas/browser-history";
-import { useBrowserRenderer } from "@/core/file-areas/browser-renderer";
 import { useI18n } from "@/core/i18n/hooks";
 
 import { useBrowserCopy } from "./copy";
@@ -89,7 +88,6 @@ export function BrowserView({
     copy = useBrowserCopy(),
     router = useRouter(),
     { user } = useAuth();
-  const renderer = useBrowserRenderer();
   const { view, save, container, heading } = useBrowserHistory(
     area === "agent" ? "agent:" + instance : area,
     scope,
@@ -152,29 +150,16 @@ export function BrowserView({
       !rows.some((row) => row.path.startsWith(ancestor + "/"))
     )
       ancestor = parentFolder(ancestor);
-    router.replace(browserHref(area, ancestor, { view: renderer.choice }), {
+    router.replace(browserHref(area, ancestor), {
       scroll: false,
     });
-  }, [
-    area,
-    folder,
-    folderKnown,
-    rows,
-    router,
-    renderer.choice,
-    waiting,
-    searchMode,
-  ]);
+  }, [area, folder, folderKnown, rows, router, waiting, searchMode]);
   const detail = waiting ? undefined : result.find((r) => r.path === selected);
   const step = (path: string) => {
     setSelected(null);
     setTrail(false);
     if (navigate) navigate(path);
-    else
-      router.push(
-        browserHref(area, path, { instance, view: renderer.choice }),
-        { scroll: false },
-      );
+    else router.push(browserHref(area, path, { instance }), { scroll: false });
   };
   const editing = view.query.trim() !== "",
     parts = folder.split("/").filter(Boolean);
@@ -209,7 +194,7 @@ export function BrowserView({
                 key={a}
                 className={styles.location}
                 aria-current={a === area ? "location" : undefined}
-                href={browserHref(a, "", { view: renderer.choice })}
+                href={browserHref(a, "")}
               >
                 {copy[a]}
               </Link>
@@ -463,12 +448,6 @@ export function BrowserView({
               {copy.more}
             </Button>
           )}
-          <Link
-            className="text-muted-foreground mt-4 inline-flex min-h-11 items-center text-sm underline"
-            href={browserHref(area, folder, { instance, view: "classic" })}
-          >
-            {copy.classic}
-          </Link>
         </div>
       </div>
       <Dialog

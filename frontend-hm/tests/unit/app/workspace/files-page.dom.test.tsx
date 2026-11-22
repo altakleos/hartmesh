@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
   cleanup,
@@ -7,7 +8,7 @@ import {
   screen,
   within,
 } from "@testing-library/react";
-import { useSyncExternalStore } from "react";
+import { type ComponentProps, useSyncExternalStore } from "react";
 
 const pluginState = rs.hoisted(() => ({
   data: [] as LoadedContribution[],
@@ -31,13 +32,6 @@ rs.mock("@/core/file-areas/file-action-lifetime", () => ({
   useFileActionLifetime: () => lifetime,
 }));
 
-/**
- * The Files page: what the person kept, from every conversation.
- *
- * The page is a list and a delete; what it fetches is mocked at the hook so
- * the test is about what is shown and what a click does, not about React
- * Query.
- */
 const files = rs.hoisted(() => ({
   data: undefined as
     | {
@@ -61,6 +55,19 @@ const files = rs.hoisted(() => ({
 }));
 
 const routerReplace = rs.hoisted(() => rs.fn());
+rs.mock("next/link", () => ({
+  default: ({ href, onClick, ...props }: ComponentProps<"a">) => (
+    <a
+      {...props}
+      href={href}
+      onClick={(event) => {
+        event.preventDefault();
+        onClick?.(event);
+        routerReplace(href);
+      }}
+    />
+  ),
+}));
 rs.mock("next/navigation", () => ({
   usePathname: () => "/workspace/files",
   useRouter: () => ({
@@ -92,14 +99,26 @@ const storage = rs.hoisted(() => ({
   dataUpdatedAt: 0,
 }));
 const viewer = rs.hoisted(() => ({
-  user: { id: "default", system_role: "user" as "user" | "admin" },
+  user: {
+    id: "default",
+    system_role: "user" as "user" | "admin",
+    permissions: ["threads:read", "threads:write"],
+  },
 }));
 rs.mock("@/core/auth/AuthProvider", () => ({ useAuth: () => viewer }));
-rs.mock("@/core/file-areas/browser-renderer", () => ({
-  useBrowserRenderer: () => ({ native: false, choice: undefined }),
-}));
+const discovery = rs.hoisted(() => ({ folders: true, legacy: false }));
 rs.mock("@/core/features", () => ({
-  useFeatures: () => ({ data: undefined }),
+  useFeatures: () => ({
+    data: discovery.legacy
+      ? undefined
+      : {
+          personal: discovery.folders ? ["select", "folder"] : ["select"],
+          shared: discovery.folders ? ["select", "folder"] : ["select"],
+        },
+    isPending: false,
+    isError: false,
+  }),
+  useAgentInstances: () => ({ known: true, enabled: false }),
   useDocumentTitle: () => undefined,
   useStorage: () => storage,
   useBranding: () => ({
@@ -144,17 +163,22 @@ const shared = rs.hoisted(() => ({
 }));
 
 const shareWithEveryone = rs.hoisted(() => rs.fn());
+const personalRead = rs.hoisted(() => rs.fn());
+const sharedRead = rs.hoisted(() => rs.fn());
 // Only the hooks are stood in for. Where a file is addressed and which
 // folder it belongs in are the module's own rules and stay real, so this
 // page's tests read the folder the product would share into. (The backend
 // base URL is empty in a test, so the real address is the one asserted.)
 rs.mock("@/core/shared/hooks", () => ({
-  useSharedFiles: () => ({
-    data: shared.data,
-    error: shared.error,
-    isPending: shared.isPending,
-    refetch: shared.refetch,
-  }),
+  useSharedFiles: (path?: string) => {
+    sharedRead(path);
+    return {
+      data: shared.data,
+      error: shared.error,
+      isPending: shared.isPending,
+      refetch: shared.refetch,
+    };
+  },
   useRemoveSharedFile: () => ({
     mutate: shared.removeMutate,
     isPending: shared.removePending,
@@ -167,12 +191,15 @@ rs.mock("@/core/shared/hooks", () => ({
   }),
 }));
 rs.mock("@/core/files/hooks", () => ({
-  useMyFiles: () => ({
-    data: files.data,
-    error: files.error,
-    isPending: files.isPending,
-    refetch: files.refetch,
-  }),
+  useMyFiles: (path?: string) => {
+    personalRead(path);
+    return {
+      data: files.data,
+      error: files.error,
+      isPending: files.isPending,
+      refetch: files.refetch,
+    };
+  },
   useDeleteMyFile: () => ({
     mutate: files.deleteMutate,
     isPending: files.deletePending,
@@ -189,14 +216,23 @@ import { SharedRequestError } from "@/core/shared/api";
 
 import { legacyReportContribution } from "../../../helpers/legacy-report";
 
+const clients: QueryClient[] = [];
 function renderPage() {
-  return render(
-    <I18nContext.Provider
-      value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
-    >
-      <FilesPage />
-    </I18nContext.Provider>,
-  );
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  clients.push(client);
+  return render(<FilesPage />, {
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={client}>
+        <I18nContext.Provider
+          value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+        >
+          {children}
+        </I18nContext.Provider>
+      </QueryClientProvider>
+    ),
+  });
 }
 
 const AUGUST = {
@@ -242,9 +278,39 @@ const PLACED = {
   can_remove: false,
 };
 
+function openLocation(name: string) {
+  const link = screen.queryByRole("link", { name });
+  if (link) fireEvent.click(link);
+  else {
+    fireEvent.click(screen.getByRole("button", { name: "Locations" }));
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "Locations" })).getByRole(
+        "link",
+        { name },
+      ),
+    );
+  }
+}
+
 function openSharedTab() {
-  // A tab trigger activates on pointer down, the way the tab primitive does.
-  fireEvent.mouseDown(screen.getByTestId("files-tab-shared"), { button: 0 });
+  openLocation("Company shared");
+}
+
+function enterFolder(name: string) {
+  fireEvent.click(
+    within(screen.getByRole("list")).getByRole("button", { name }),
+  );
+}
+
+function details(name: string) {
+  fireEvent.click(
+    screen.getByRole("button", { name: `More actions for ${name}` }),
+  );
+  return within(screen.getByRole("dialog", { name }));
+}
+
+function search(value: string) {
+  fireEvent.change(screen.getByRole("searchbox"), { target: { value } });
 }
 
 describe("FilesPage", () => {
@@ -259,6 +325,12 @@ describe("FilesPage", () => {
       isLoading: false,
       dataUpdatedAt: 0,
     });
+    discovery.legacy = false;
+    discovery.folders = false;
+    personalRead.mockClear();
+    sharedRead.mockClear();
+    shareWithEveryone.mockClear();
+    viewer.user.permissions = ["threads:read", "threads:write"];
     viewer.user.id = "default";
     viewer.user.system_role = "user";
     pluginState.data = [legacyReportContribution()];
@@ -283,6 +355,7 @@ describe("FilesPage", () => {
 
   afterEach(() => {
     cleanup();
+    clients.splice(0).forEach((client) => client.clear());
     rs.restoreAllMocks();
   });
 
@@ -300,9 +373,9 @@ describe("FilesPage", () => {
               ? enUS.chat.filesFault("an administrator")
               : enUS.chat.myFilesUnchecked;
       expect(screen.getByText(text)).toBeTruthy();
-      expect(screen.queryByTestId("my-files-list")).toBeNull();
+      expect(screen.queryByRole("list", { name: "My files" })).toBeNull();
       openSharedTab();
-      expect(screen.getByTestId("shared-files-list")).toBeTruthy();
+      expect(screen.getByRole("list", { name: "Company shared" })).toBeTruthy();
     },
   );
 
@@ -314,11 +387,11 @@ describe("FilesPage", () => {
     });
     renderPage();
     expect(screen.getByText(enUS.chat.filesUnavailable)).toBeTruthy();
-    expect(screen.queryByTestId("my-files-list")).toBeNull();
+    expect(screen.queryByRole("list", { name: "My files" })).toBeNull();
     openSharedTab();
     expect(screen.getByText(enUS.chat.filesUnavailable)).toBeTruthy();
-    expect(screen.queryByTestId("shared-files-list")).toBeNull();
-    expect(screen.getAllByRole("tab")).toHaveLength(2);
+    expect(screen.queryByRole("list", { name: "Company shared" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Locations" })).toBeTruthy();
     expect(screen.queryByRole("link", { name: /support/ })).toBeNull();
   });
 
@@ -356,7 +429,7 @@ describe("FilesPage", () => {
     renderPage();
     expect(screen.getByText(enUS.chat.filesUnavailable)).toBeTruthy();
     openSharedTab();
-    expect(screen.queryByTestId("shared-files-list")).toBeNull();
+    expect(screen.queryByRole("list", { name: "Company shared" })).toBeNull();
     expect(screen.getByText(enUS.chat.filesUnavailable)).toBeTruthy();
   });
 
@@ -372,16 +445,10 @@ describe("FilesPage", () => {
     );
     const view = renderPage();
     openSharedTab();
-    expect(screen.queryByTestId("shared-files-list")).toBeNull();
+    expect(screen.queryByRole("list", { name: "Company shared" })).toBeNull();
     storage.dataUpdatedAt = 1;
-    view.rerender(
-      <I18nContext.Provider
-        value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
-      >
-        <FilesPage />
-      </I18nContext.Provider>,
-    );
-    expect(screen.getByTestId("shared-files-list")).toBeTruthy();
+    view.rerender(<FilesPage />);
+    expect(screen.getByRole("list", { name: "Company shared" })).toBeTruthy();
   });
 
   it("clears a deployment refusal when the account changes without inheriting its cached files", () => {
@@ -396,17 +463,11 @@ describe("FilesPage", () => {
     );
     const view = renderPage();
     openSharedTab();
-    expect(screen.queryByTestId("shared-files-list")).toBeNull();
+    expect(screen.queryByRole("list", { name: "Company shared" })).toBeNull();
     viewer.user.id = "another-account";
     shared.data = { files: [], count: 0, truncated: false };
-    view.rerender(
-      <I18nContext.Provider
-        value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
-      >
-        <FilesPage />
-      </I18nContext.Provider>,
-    );
-    expect(screen.getByTestId("shared-files-empty")).toBeTruthy();
+    view.rerender(<FilesPage />);
+    expect(screen.getByText(enUS.shared.emptyHint)).toBeTruthy();
     expect(screen.queryByText(enUS.chat.filesUnavailable)).toBeNull();
   });
 
@@ -428,14 +489,7 @@ describe("FilesPage", () => {
     const view = renderPage();
     files.refetch.mockClear();
     Object.assign(storage, { state: "ready", own: "ready", dataUpdatedAt: 1 });
-    const tree = () => (
-      <I18nContext.Provider
-        value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
-      >
-        <FilesPage />
-      </I18nContext.Provider>
-    );
-    view.rerender(tree());
+    view.rerender(<FilesPage />);
     expect(files.refetch).toHaveBeenCalledTimes(1);
     for (let revision = 2; revision < 8; revision++) {
       storage.dataUpdatedAt = revision;
@@ -448,15 +502,15 @@ describe("FilesPage", () => {
           reason: "disk-too-small",
         }),
       );
-      view.rerender(tree());
+      view.rerender(<FilesPage />);
     }
     expect(files.refetch).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: enUS.files.retry }));
     expect(files.refetch).toHaveBeenCalledTimes(2);
     files.error = null;
     storage.dataUpdatedAt = 8;
-    view.rerender(tree());
-    expect(screen.getByTestId("my-files-list")).toBeTruthy();
+    view.rerender(<FilesPage />);
+    expect(screen.getByRole("list", { name: "My files" })).toBeTruthy();
   });
 
   it("schedules five-second busy retries and clears the actual timer on tab retirement", () => {
@@ -485,10 +539,10 @@ describe("FilesPage", () => {
     });
     shared.error = new SharedRequestError(503, "raw", refusal);
     renderPage();
-    expect(screen.getByTestId("my-files-list")).toBeTruthy();
+    expect(screen.getByRole("list", { name: "My files" })).toBeTruthy();
     openSharedTab();
     expect(screen.getByText(enUS.shared.unchecked)).toBeTruthy();
-    expect(screen.queryByTestId("shared-files-list")).toBeNull();
+    expect(screen.queryByRole("list", { name: "Company shared" })).toBeNull();
   });
 
   it("shows busy and Retry in place of the affected personal list", () => {
@@ -502,92 +556,114 @@ describe("FilesPage", () => {
     fireEvent.click(screen.getByRole("button", { name: enUS.files.retry }));
     expect(files.refetch).toHaveBeenCalledTimes(1);
     openSharedTab();
-    expect(screen.getByTestId("shared-files-list")).toBeTruthy();
+    expect(screen.getByRole("list", { name: "Company shared" })).toBeTruthy();
   });
 
-  it("opens on the person's own files, and a link can ask for Shared", () => {
-    renderPage();
-    expect(screen.getByTestId("my-files-list")).toBeTruthy();
-    expect(screen.queryByTestId("shared-files-list")).toBeNull();
-    cleanup();
+  it.each(["", "?view=classic", "?view=browser"])(
+    "opens the same personal browser for a saved URL %s on an older Gateway",
+    (query) => {
+      discovery.legacy = true;
+      window.history.replaceState(null, "", "/workspace/files" + query);
+      renderPage();
+      expect(screen.getByRole("list", { name: "My files" })).toBeTruthy();
+      expect(screen.queryByRole("tab")).toBeNull();
+      expect(
+        screen.queryByRole("link", {
+          name: /Use classic file view|Use file browser/i,
+        }),
+      ).toBeNull();
+      expect(personalRead).toHaveBeenCalledWith(undefined);
+      enterFolder("Reports");
+      expect(
+        screen.getByRole("link", { name: "august.pdf" }).getAttribute("href"),
+      ).toBe("/api/files/Reports/august.pdf");
+    },
+  );
 
-    window.history.replaceState(null, "", "/workspace/files?tab=shared");
+  it.each(["", "?tab=shared&view=classic"])(
+    "does not list either location without thread read access at %s",
+    (query) => {
+      viewer.user.permissions = ["threads:write"];
+      window.history.replaceState(null, "", "/workspace/files" + query);
+      renderPage();
+      expect(screen.getByRole("alert")).toBeTruthy();
+      expect(screen.queryByRole("list")).toBeNull();
+      expect(personalRead).not.toHaveBeenCalled();
+      expect(sharedRead).not.toHaveBeenCalled();
+    },
+  );
+
+  it("uses the advertised direct folder read on normal entry and the bounded collection for a search", () => {
+    discovery.folders = true;
+    files.data = { files: [NOTES], count: 1, truncated: false };
     renderPage();
-    expect(screen.getByTestId("shared-files-list")).toBeTruthy();
-    // One page, two tabs: the heading names the page, so clicking "My files"
-    // in the sidebar never lands on a page headed something else.
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Files");
+    expect(personalRead).toHaveBeenCalledWith("");
+    expect(personalRead).not.toHaveBeenCalledWith(undefined);
+    search("notes");
+    expect(personalRead).toHaveBeenCalledWith(undefined);
+    expect(screen.getByRole("link", { name: "notes.txt" })).toBeTruthy();
+    openSharedTab();
+    expect(sharedRead).toHaveBeenCalledWith("");
   });
 
-  it("follows same-page links and history query changes without remounting", () => {
-    const view = renderPage();
-    for (const [query, expected] of [
-      ["?tab=shared", "shared-files-list"],
-      ["", "my-files-list"],
-      ["?tab=shared", "shared-files-list"],
-      ["?tab=unknown", "my-files-list"],
-    ]) {
-      act(() =>
-        window.history.replaceState(null, "", `/workspace/files${query}`),
-      );
-      view.rerender(
-        <I18nContext.Provider
-          value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
-        >
-          <FilesPage />
-        </I18nContext.Provider>,
-      );
-      expect(screen.getByTestId(expected!)).toBeTruthy();
+  it("follows the saved location and reacts to history changes without remounting", () => {
+    renderPage();
+    for (const [query, name] of [
+      ["?tab=shared", "Company shared"],
+      ["", "My files"],
+      ["?tab=shared&view=classic", "Company shared"],
+      ["?tab=unknown", "My files"],
+    ] as const) {
+      act(() => {
+        window.history.replaceState(null, "", "/workspace/files" + query);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+      expect(screen.getByRole("list", { name })).toBeTruthy();
     }
+    openSharedTab();
+    expect(window.location.search).toBe("?tab=shared");
+    openLocation("My files");
+    expect(window.location.pathname + window.location.search).toBe(
+      "/workspace/files",
+    );
   });
 
-  it("puts the open tab in the URL, so a copied link lands where the person was", () => {
+  it("shows the original publication and the publisher in the selected file’s actions", () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/workspace/files?tab=shared&folder=Reports",
+    );
     renderPage();
-    routerReplace.mockClear();
-
-    openSharedTab();
-    expect(routerReplace).toHaveBeenCalledWith("/workspace/files?tab=shared");
-
-    fireEvent.mouseDown(screen.getByTestId("files-tab-mine"), { button: 0 });
-    expect(routerReplace).toHaveBeenCalledWith("/workspace/files");
-  });
-
-  it("lists what the company shared, with who put it there", () => {
-    renderPage();
-    openSharedTab();
-
-    const list = screen.getByTestId("shared-files-list");
-    const august = within(list).getByTestId("shared-file-Reports/august.pdf");
     expect(
-      within(august)
-        .getByRole("link", { name: "august.pdf" })
-        .getAttribute("href"),
+      screen.getByRole("link", { name: "august.pdf" }).getAttribute("href"),
     ).toBe("/api/shared/Reports/august.pdf");
-    expect(august.textContent).toContain("Reports");
-    // Who shared it is a column, not a tooltip: it is the first thing asked of
-    // a company folder, and a tooltip is unreachable on a phone.
-    expect(august.textContent).toContain("owner-1");
+    const item = details("august.pdf");
+    expect(item.getByText("Reports/august.pdf")).toBeTruthy();
+    expect(item.getByText(/owner-1/)).toBeTruthy();
     expect(
-      within(august)
-        .getByRole("link", { name: "Download august.pdf" })
-        .getAttribute("href"),
+      item.getByRole("link", { name: "Download" }).getAttribute("href"),
     ).toBe("/api/shared/Reports/august.pdf?download=true");
-    // A file an operator placed by hand says so, and is nobody's to remove.
-    const jobs = within(list).getByTestId("shared-file-Exports/jobs.xlsx");
-    expect(jobs.textContent).toContain("No record of who shared this");
-    expect(within(jobs).queryByRole("button", { name: /Remove/ })).toBeNull();
-  });
-
-  it("withholds an unguarded remove even from a legacy publisher", () => {
-    renderPage();
-    openSharedTab();
-    expect(
-      screen.queryByRole("button", { name: "Remove august.pdf" }),
-    ).toBeNull();
+    // A published file still needs an authorized physical selection to be removable.
+    expect(item.queryByRole("button", { name: /Remove/ })).toBeNull();
     expect(shared.removeMutate).not.toHaveBeenCalled();
   });
+
+  it("identifies an unrecorded Shared file and withholds removal", () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/workspace/files?tab=shared&folder=Exports&view=classic",
+    );
+    discovery.legacy = true;
+    renderPage();
+    const item = details("jobs.xlsx");
+    expect(item.getByText(/No record of who shared this/)).toBeTruthy();
+    expect(item.queryByRole("button", { name: /Remove/ })).toBeNull();
+  });
+
   it.each(["pending", "discovery failure", "module failure"])(
-    "holds sharing during %s",
+    "withholds publishing when filing is %s",
     (failure) => {
       if (failure === "pending") pluginState.isPending = true;
       else if (failure === "discovery failure") pluginState.isError = true;
@@ -600,284 +676,185 @@ describe("FilesPage", () => {
           },
         ];
       renderPage();
-      const button = screen.getByRole<HTMLButtonElement>("button", {
-        name: "Share with everyone august.pdf",
-      });
-      expect(button.disabled).toBe(true);
-      fireEvent.click(button);
+      enterFolder("Reports");
+      const item = details("august.pdf");
+      expect(
+        item.queryByRole("button", { name: "Share with everyone" }),
+      ).toBeNull();
       expect(shareWithEveryone).not.toHaveBeenCalled();
-      if (failure !== "pending")
-        expect(
-          screen.getByText(enUS.extensions.fileDestinationsUnavailable),
-        ).toBeTruthy();
     },
   );
 
-  it("keeps ordinary sharing available when no filing plugin is installed", () => {
-    pluginState.data = [];
-    renderPage();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Share with everyone august.pdf" }),
-    );
-    expect(shareWithEveryone).toHaveBeenCalledWith(
-      ["/mnt/user-data/files/Reports/august.pdf"],
-      undefined,
-    );
-  });
+  it.each([true, false])(
+    "publishes a selected file to the installed collection when enabled=%s",
+    (installed) => {
+      if (!installed) pluginState.data = [];
+      renderPage();
+      enterFolder("Reports");
+      const item = details("august.pdf");
+      expect(
+        item.getByText(/Everyone at the company can open it/),
+      ).toBeTruthy();
+      fireEvent.click(
+        item.getByRole("button", { name: "Share with everyone" }),
+      );
+      expect(shareWithEveryone).toHaveBeenCalledWith(
+        [AUGUST.virtual_path],
+        installed ? "Reports" : undefined,
+      );
+    },
+  );
 
-  it("lets a person hand one of their own files to the whole company", () => {
-    renderPage();
-
-    const list = screen.getByTestId("my-files-list");
-    const august = within(list).getByTestId("my-file-Reports/august.pdf");
-    fireEvent.click(
-      within(august).getByRole("button", {
-        name: "Share with everyone august.pdf",
-      }),
-    );
-
-    // The path the sandbox knows it by, so the server can find the caller's
-    // own copy; no conversation is involved, so no thread.
-    // A report kept in the product's own Reports folder lands beside the
-    // copy the report card would have shared, rather than at the root.
-    expect(shareWithEveryone).toHaveBeenCalledWith(
-      ["/mnt/user-data/files/Reports/august.pdf"],
-      "Reports",
-    );
-  });
-
-  it("keeps the rest of how a person files their own work to themselves", () => {
-    // Sharing one file is not consent to publish a folder named for a
-    // customer or a deal, so nothing but the product's own folder crosses.
+  it("shares a file without disclosing the name of the person's private folder", () => {
+    const path = "Acme-acquisition/terms.pdf";
     files.data = {
       files: [
         {
-          path: "Acme-acquisition/terms.pdf",
+          ...AUGUST,
           name: "terms.pdf",
-          size: 12,
-          modified: 0,
-          virtual_path: "/mnt/user-data/files/Acme-acquisition/terms.pdf",
-          url: "/api/files/Acme-acquisition/terms.pdf",
+          path,
+          url: "/api/files/" + path,
+          virtual_path: "/mnt/user-data/files/" + path,
         },
       ],
       count: 1,
       truncated: false,
     };
     renderPage();
-
+    enterFolder("Acme-acquisition");
     fireEvent.click(
-      within(screen.getByTestId("my-files-list")).getByRole("button", {
-        name: "Share with everyone terms.pdf",
-      }),
+      details("terms.pdf").getByRole("button", { name: "Share with everyone" }),
     );
-
     expect(shareWithEveryone).toHaveBeenCalledWith(
-      ["/mnt/user-data/files/Acme-acquisition/terms.pdf"],
+      ["/mnt/user-data/files/" + path],
       undefined,
     );
   });
 
-  it("keeps the share action live after a share and a trip to the Shared tab", () => {
-    // Whether a file is already shared is the server's answer at the next
-    // click, never this page's memory of its own clicks: a memory is what a
-    // tab switch loses, and the old one let a second click copy `_1`.
-    shareWithEveryone.mockClear();
+  it("keeps sharing live across a round trip to Shared", () => {
     renderPage();
-    const shareButton = () =>
-      within(screen.getByTestId("my-files-list")).getByRole("button", {
-        name: "Share with everyone august.pdf",
-      });
-
-    fireEvent.click(shareButton());
-    openSharedTab();
-    fireEvent.mouseDown(screen.getByTestId("files-tab-mine"), { button: 0 });
-    expect((shareButton() as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(shareButton());
-
+    for (let attempt = 0; attempt < 2; attempt++) {
+      enterFolder("Reports");
+      const item = details("august.pdf");
+      fireEvent.click(
+        item.getByRole("button", { name: "Share with everyone" }),
+      );
+      fireEvent.click(item.getByRole("button", { name: "Close" }));
+      openSharedTab();
+      openLocation("My files");
+    }
     expect(shareWithEveryone).toHaveBeenCalledTimes(2);
     expect(shareWithEveryone).toHaveBeenNthCalledWith(
       2,
-      ["/mnt/user-data/files/Reports/august.pdf"],
+      [AUGUST.virtual_path],
       "Reports",
     );
   });
 
-  it("says when nothing was shared yet, and how something gets here", () => {
-    shared.data = { files: [], count: 0, truncated: false };
+  it("allows readers to download and withholds file mutations", () => {
+    viewer.user.permissions = ["threads:read"];
     renderPage();
-    openSharedTab();
-
-    const empty = screen.getByTestId("shared-files-empty");
-    expect(empty.textContent).toContain("Nothing shared yet");
-    expect(empty.textContent).toContain("Share with everyone");
-  });
-
-  it("offers to try again when Shared could not be loaded", () => {
-    shared.data = undefined;
-    shared.error = new Error("HTTP 503");
-    renderPage();
-    openSharedTab();
-
-    const failure = screen.getByTestId("shared-files-load-error");
-    expect(failure.textContent).toContain("Couldn't load what was shared");
-    fireEvent.click(within(failure).getByRole("button", { name: "Try again" }));
-    expect(shared.refetch).toHaveBeenCalled();
-  });
-
-  it("lists what was kept, with its folder, size and a download", () => {
-    renderPage();
-
-    const list = screen.getByTestId("my-files-list");
-    const august = within(list).getByTestId("my-file-Reports/august.pdf");
+    enterFolder("Reports");
     expect(
-      within(august)
-        .getByRole("link", { name: "august.pdf" })
-        .getAttribute("href"),
+      screen.getByRole("link", { name: "august.pdf" }).getAttribute("href"),
     ).toBe("/api/files/Reports/august.pdf");
-    expect(august.textContent).toContain("Reports");
-    expect(august.textContent).toContain("47.1 KiB");
+    const item = details("august.pdf");
+    expect(item.getByText("Reports/august.pdf")).toBeTruthy();
+    expect(item.getByText("47.1 KiB")).toBeTruthy();
     expect(
-      within(august)
-        .getByRole("link", { name: "Download august.pdf" })
-        .getAttribute("href"),
+      item.getByRole("link", { name: "Download" }).getAttribute("href"),
     ).toBe("/api/files/Reports/august.pdf?download=true");
-    // A file at the root has no folder to name.
-    const notes = within(list).getByTestId("my-file-notes.txt");
-    expect(notes.textContent).toContain("—");
-  });
-
-  it("withholds path-only personal deletion", () => {
-    renderPage();
     expect(
-      screen.queryByRole("button", { name: "Delete august.pdf" }),
+      item.queryByRole("button", { name: /Share with everyone|Delete/ }),
     ).toBeNull();
     expect(files.deleteMutate).not.toHaveBeenCalled();
-  });
-  it("says when there is nothing yet, and how something gets here", () => {
-    files.data = { files: [], count: 0, truncated: false };
-    renderPage();
-
-    const empty = screen.getByTestId("my-files-empty");
-    expect(empty.textContent).toContain("Nothing kept yet");
-    expect(empty.textContent).toContain("Save a report or an upload");
+    expect(shareWithEveryone).not.toHaveBeenCalled();
   });
 
-  it("says when the list stopped short", () => {
-    files.data = { files: [AUGUST], count: 1, truncated: true };
-    renderPage();
+  it.each(["personal", "shared"] as const)(
+    "shows the empty and failed states for %s",
+    (area) => {
+      const location = area === "shared" ? shared : files;
+      location.data = { files: [], count: 0, truncated: false };
+      if (area === "shared")
+        window.history.replaceState(null, "", "/workspace/files?tab=shared");
+      const view = renderPage();
+      const words = area === "shared" ? enUS.shared : enUS.files;
+      expect(screen.getByText(words.emptyHint)).toBeTruthy();
+      location.data = undefined;
+      location.error = new Error("private diagnostic");
+      view.rerender(<FilesPage />);
+      expect(screen.getByRole("alert").textContent).toContain(words.loadFailed);
+      expect(screen.queryByText("private diagnostic")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: enUS.files.retry }));
+      expect(location.refetch).toHaveBeenCalled();
+    },
+  );
 
-    expect(screen.getByText("Showing the first 1 files.")).toBeTruthy();
-  });
-
-  it("offers to try again when the list could not be loaded", () => {
-    files.data = undefined;
-    files.error = new Error("HTTP 503");
-    renderPage();
-
-    const failure = screen.getByTestId("my-files-load-error");
-    expect(failure.textContent).toContain("Couldn't load your files");
-    fireEvent.click(within(failure).getByRole("button", { name: "Try again" }));
-    expect(files.refetch).toHaveBeenCalled();
-  });
-
-  it("finds loaded files by name or folder, and Clear restores focus and rows", () => {
-    renderPage();
-    const filter = screen.getByRole("searchbox", { name: "Find loaded files" });
-    fireEvent.change(filter, { target: { value: "REPORTS/" } });
-    expect(screen.getByTestId("my-file-Reports/august.pdf")).toBeTruthy();
-    expect(screen.queryByTestId("my-file-notes.txt")).toBeNull();
-    expect(screen.getByText("Showing 1 of 2 loaded files")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Clear filter" }));
-    expect(document.activeElement).toBe(filter);
-    expect(screen.getByTestId("my-file-notes.txt")).toBeTruthy();
-  });
-
-  it("distinguishes no matches from empty storage without changing a truncated count", () => {
+  it("searches the bounded file paths, reports no results, and restores the folder on clearing", () => {
     files.data = { files: [AUGUST, NOTES], count: 2, truncated: true };
     renderPage();
-    fireEvent.change(
-      screen.getByRole("searchbox", { name: "Find loaded files" }),
-      { target: { value: "absent" } },
+    expect(
+      screen.getByText("Only the first 2 entries are available here."),
+    ).toBeTruthy();
+    search("REPORTS/");
+    expect(screen.getByRole("link", { name: "august.pdf" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "notes.txt" })).toBeNull();
+    search("absent");
+    expect(screen.getByText(/No matches among the loaded files/)).toBeTruthy();
+    expect(screen.queryByText(enUS.files.emptyHint)).toBeNull();
+    expect(
+      screen.getByText("Only the first 2 entries are available here."),
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: enUS.files.clearFilter }),
     );
-    expect(screen.getByTestId("my-files-no-matches").textContent).toContain(
-      "No loaded files match",
-    );
-    expect(screen.queryByTestId("my-files-empty")).toBeNull();
-    expect(screen.getByText("Showing 0 of 2 loaded files")).toBeTruthy();
-    expect(screen.getByText("Showing the first 2 files.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Reports" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "notes.txt" })).toBeTruthy();
   });
 
-  it("sorts by name or newest and addresses duplicate names by their original path", () => {
-    const older = {
-      ...AUGUST,
-      path: "A/report.pdf",
-      name: "report.pdf",
-      modified: 1,
-    };
-    const newer = {
-      ...AUGUST,
-      path: "B/report.pdf",
-      name: "report.pdf",
-      modified: 3,
-    };
+  it("sorts duplicate names by newest without losing the original paths", () => {
     files.data = {
-      files: [newer, older, { ...NOTES, modified: 2 }],
-      count: 3,
+      files: [
+        { ...AUGUST, path: "A/report.pdf", name: "report.pdf", modified: 1 },
+        { ...AUGUST, path: "B/report.pdf", name: "report.pdf", modified: 3 },
+      ],
+      count: 2,
       truncated: false,
     };
     renderPage();
-    const paths = () =>
-      within(screen.getByTestId("my-files-list"))
-        .getAllByRole("row")
-        .map((row) => row.getAttribute("data-testid"));
-    expect(paths()).toEqual([
-      "my-file-notes.txt",
-      "my-file-A/report.pdf",
-      "my-file-B/report.pdf",
-    ]);
-    fireEvent.change(screen.getByRole("combobox", { name: "Sort files" }), {
-      target: { value: "newest" },
-    });
-    expect(paths()).toEqual([
-      "my-file-B/report.pdf",
-      "my-file-notes.txt",
-      "my-file-A/report.pdf",
+    search("report.pdf");
+    const links = () =>
+      screen
+        .getAllByRole("link", { name: "report.pdf" })
+        .map((el) => el.getAttribute("href"));
+    expect(links()).toEqual([
+      "/api/files/A/report.pdf",
+      "/api/files/B/report.pdf",
     ]);
     fireEvent.change(
-      screen.getByRole("searchbox", { name: "Find loaded files" }),
-      { target: { value: "B/" } },
+      screen.getByRole("combobox", { name: enUS.files.sortLabel }),
+      { target: { value: "newest" } },
     );
-    expect(
-      screen.getByRole("link", { name: "report.pdf" }).getAttribute("href"),
-    ).toContain("B/report.pdf");
+    expect(links()).toEqual([
+      "/api/files/B/report.pdf",
+      "/api/files/A/report.pdf",
+    ]);
   });
 
-  it("matches canonically equivalent Unicode and keeps each tab's filter separate", () => {
+  it("matches canonically equivalent Unicode without carrying a private filter into Shared", () => {
     files.data = {
       files: [{ ...NOTES, path: "Résumé.txt", name: "Résumé.txt" }],
       count: 1,
       truncated: false,
     };
-    shared.data = { files: [PUBLISHED, PLACED], count: 2, truncated: true };
     renderPage();
-    fireEvent.change(
-      screen.getByRole("searchbox", { name: "Find loaded files" }),
-      { target: { value: "RE\u0301SUME\u0301" } },
-    );
-    expect(screen.getByTestId("my-file-Résumé.txt")).toBeTruthy();
+    search("RE\u0301SUME\u0301");
+    expect(screen.getByRole("link", { name: "Résumé.txt" })).toBeTruthy();
     openSharedTab();
-    const filter = screen.getByRole<HTMLInputElement>("searchbox", {
-      name: "Find loaded files",
-    });
-    expect(filter.value).toBe("");
-    fireEvent.change(filter, { target: { value: "Exports" } });
-    expect(screen.getByTestId("shared-file-Exports/jobs.xlsx")).toBeTruthy();
-    expect(screen.queryByTestId("shared-file-Reports/august.pdf")).toBeNull();
-    expect(screen.queryByRole("button", { name: /Remove/ })).toBeNull();
-    expect(screen.getByText("Showing 1 of 2 loaded files")).toBeTruthy();
-    expect(screen.getByText("Showing the first 2 files.")).toBeTruthy();
-    fireEvent.change(filter, { target: { value: "absent" } });
-    expect(screen.getByTestId("shared-files-no-matches")).toBeTruthy();
-    expect(screen.queryByTestId("shared-files-empty")).toBeNull();
+    expect(screen.getByRole<HTMLInputElement>("searchbox").value).toBe("");
+    search("Exports");
+    expect(screen.getByRole("link", { name: "jobs.xlsx" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "august.pdf" })).toBeNull();
   });
 });

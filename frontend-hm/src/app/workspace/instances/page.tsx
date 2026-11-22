@@ -38,7 +38,6 @@ import {
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useAgentInstances, useDocumentTitle } from "@/core/features";
 import { useBrowserProtocol } from "@/core/file-areas/browser-protocol";
-import { useBrowserRenderer } from "@/core/file-areas/browser-renderer";
 import { useI18n } from "@/core/i18n/hooks";
 
 export default function InstancesPage() {
@@ -275,8 +274,7 @@ function InstanceContent({
   const copy = t.agentInstances;
   const search = useSearchParams();
   const feature = useAgentInstances();
-  const browserRenderer = useBrowserRenderer(),
-    protocol = useBrowserProtocol();
+  const protocol = useBrowserProtocol();
   const { pending: changing } = useLifecycleActions();
   const inspect = (current.permissions & INSPECT) !== 0;
   const block = agentBlock(current, feature);
@@ -284,9 +282,7 @@ function InstanceContent({
   return (
     <>
       <DeletedAgentNavigation />
-      {tab === "files" &&
-      browserRenderer.native &&
-      protocol.supports("agent", "folder") ? (
+      {tab === "files" && protocol.supports("agent", "folder") ? (
         <div className="flex min-w-0 flex-wrap items-center gap-3">
           <h2 className="text-lg font-semibold">{current.name}</h2>
           <Link

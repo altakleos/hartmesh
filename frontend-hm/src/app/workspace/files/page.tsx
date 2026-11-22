@@ -1,16 +1,7 @@
 "use client";
 
-import { DownloadIcon, FolderIcon, Trash2Icon, UsersIcon } from "lucide-react";
-import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -22,16 +13,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty";
-import { Input } from "@/components/ui/input";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { formatArtifactBytes } from "@/components/workspace/artifacts/artifact-file-preview";
 import { NativeDownloadLink } from "@/components/workspace/artifacts/native-download-link";
 import { FilesStateNotice } from "@/components/workspace/chats/files-state-notice";
 import { BrowserView } from "@/components/workspace/file-browser/browser-view";
@@ -52,14 +33,9 @@ import {
 import { useFrontendExtensions } from "@/core/extensions/hooks";
 import { useDocumentTitle, useStorage } from "@/core/features";
 import { STORAGE_REASONS, type StorageReason } from "@/core/features/api";
-import { browserFolder, browserHref } from "@/core/file-areas/browser";
+import { browserFolder } from "@/core/file-areas/browser";
 import { useRetireBrowserHistory } from "@/core/file-areas/browser-history";
 import { useBrowserProtocol } from "@/core/file-areas/browser-protocol";
-import { useBrowserRenderer } from "@/core/file-areas/browser-renderer";
-import {
-  selectLoadedFiles,
-  type FileListOrder,
-} from "@/core/file-areas/selection";
 import { useStorageCopy } from "@/core/file-areas/storage-copy";
 import {
   fileAreaNotice,
@@ -81,7 +57,6 @@ import {
 import { useSharing, useSnapshotList } from "@/core/shared-conversations/hooks";
 import { ordinarySharedRows } from "@/core/shared-conversations/protocol";
 import { useSpaceActionSignal } from "@/core/spaces/lifetime";
-import { formatTimeAgo } from "@/core/utils/datetime";
 
 type FilesTab = "mine" | "shared";
 const EMPTY_FILES: readonly never[] = [];
@@ -170,12 +145,6 @@ function useStorageRecovery(
   ]);
 }
 
-/** The folder a file sits in, or nothing for the root. */
-function folderOf(file: { path: string }) {
-  const separator = file.path.lastIndexOf("/");
-  return separator === -1 ? "" : file.path.slice(0, separator);
-}
-
 /** The tab a link asked for (`?tab=shared`), else the person's own files. */
 function tabOf(value: string | null): FilesTab {
   return value === "shared" ? "shared" : "mine";
@@ -183,7 +152,6 @@ function tabOf(value: string | null): FilesTab {
 
 export default function FilesPage() {
   const { t } = useI18n();
-  const router = useRouter();
   const searchParams = useSearchParams();
   const discovered = useStorage();
   const { user } = useAuth();
@@ -215,30 +183,12 @@ export default function FilesPage() {
         }
       : discovered;
   const browserCopy = useBrowserCopy();
-  const browserProtocol = useBrowserProtocol(),
-    renderer = useBrowserRenderer();
-  const legacy =
-    !renderer.native ||
-    !browserProtocol.supports(
-      searchParams?.get("tab") === "shared" ? "shared" : "personal",
-      "select",
-    );
+  const browserProtocol = useBrowserProtocol();
   const folder = browserFolder(searchParams?.get("folder") ?? null);
   const denied = !user || !hasCeiling(user.permissions, "threads:read");
   useRetireBrowserHistory("personal", denied);
   useRetireBrowserHistory("shared", denied);
   const tab = tabOf(searchParams?.get("tab") ?? null);
-  // The tab is also written back to the URL, so a person who copies the link
-  // sends their colleague to the tab they were looking at.
-  const setTab = (next: FilesTab) => {
-    router.push(
-      browserHref(next === "shared" ? "shared" : "personal", "", {
-        view: renderer.choice,
-      }),
-    );
-  };
-  const headingRef = useRef<HTMLHeadingElement>(null);
-
   useDocumentTitle(
     tab === "shared" ? t.shared.title : t.files.title,
     t.pages.appName,
@@ -248,61 +198,7 @@ export default function FilesPage() {
     <WorkspaceContainer>
       <WorkspaceHeader />
       <WorkspaceBody>
-        <div
-          className={
-            legacy
-              ? "mx-auto flex w-full max-w-(--container-width-md) flex-col gap-4 p-6"
-              : "mx-auto w-full max-w-7xl min-w-0 p-3 sm:p-5"
-          }
-        >
-          {legacy && (
-            <>
-              <div>
-                <h1
-                  className="text-2xl font-semibold focus:outline-none"
-                  ref={headingRef}
-                  tabIndex={-1}
-                >
-                  {t.files.pageTitle}
-                </h1>
-                <p className="text-muted-foreground mt-1 text-sm">
-                  {tab === "shared"
-                    ? t.shared.description
-                    : t.files.description}
-                </p>
-              </div>
-
-              <Tabs
-                onValueChange={(value) => setTab(value as FilesTab)}
-                value={tab}
-              >
-                <TabsList variant="line">
-                  <TabsTrigger data-testid="files-tab-mine" value="mine">
-                    {t.files.title}
-                  </TabsTrigger>
-                  <TabsTrigger data-testid="files-tab-shared" value="shared">
-                    {t.shared.title}
-                  </TabsTrigger>
-                </TabsList>
-              </Tabs>
-
-              {browserProtocol.supports(
-                tab === "shared" ? "shared" : "personal",
-                "select",
-              ) && (
-                <Link
-                  className="text-sm underline"
-                  href={browserHref(
-                    tab === "shared" ? "shared" : "personal",
-                    folder ?? "",
-                    { view: "browser" },
-                  )}
-                >
-                  {browserCopy.native}
-                </Link>
-              )}
-            </>
-          )}
+        <div className="mx-auto w-full max-w-7xl min-w-0 p-3 sm:p-5">
           {!user || !hasCeiling(user.permissions, "threads:read") ? (
             <p role="alert">{t.files.loadFailed}</p>
           ) : folder === null ? (
@@ -316,36 +212,17 @@ export default function FilesPage() {
             <p role="status">{t.common.loading}</p>
           ) : tab === "shared" ? (
             <SharedFiles
-              key={
-                identity +
-                JSON.stringify(user?.permissions) +
-                tab +
-                folder +
-                legacy
-              }
-              native={!legacy}
-              directFolder={
-                !legacy && browserProtocol.supports("shared", "folder")
-              }
+              key={identity + JSON.stringify(user?.permissions) + tab + folder}
+              directFolder={browserProtocol.supports("shared", "folder")}
               refreshProtocol={browserProtocol.refresh}
               folder={folder}
               storage={storage}
               onGlobalFailure={reportFailure}
-              onChanged={() => headingRef.current?.focus()}
             />
           ) : (
             <MyFiles
-              key={
-                identity +
-                JSON.stringify(user?.permissions) +
-                tab +
-                folder +
-                legacy
-              }
-              native={!legacy}
-              directFolder={
-                !legacy && browserProtocol.supports("personal", "folder")
-              }
+              key={identity + JSON.stringify(user?.permissions) + tab + folder}
+              directFolder={browserProtocol.supports("personal", "folder")}
               refreshProtocol={browserProtocol.refresh}
               folder={folder}
               storage={storage}
@@ -358,79 +235,13 @@ export default function FilesPage() {
   );
 }
 
-function FileListControls({
-  query,
-  onQuery,
-  order,
-  onOrder,
-  found,
-  loaded,
-}: {
-  query: string;
-  onQuery: (value: string) => void;
-  order: FileListOrder;
-  onOrder: (value: FileListOrder) => void;
-  found: number;
-  loaded: number;
-}) {
-  const { t } = useI18n();
-  const searchId = useId();
-  const sortId = useId();
-  const input = useRef<HTMLInputElement>(null);
-  return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap gap-2">
-        <label className="sr-only" htmlFor={searchId}>
-          {t.files.filterLabel}
-        </label>
-        <Input
-          className="min-w-40 flex-1"
-          id={searchId}
-          onChange={(event) => onQuery(event.target.value)}
-          placeholder={t.files.filterPlaceholder}
-          ref={input}
-          type="search"
-          value={query}
-        />
-        <Button
-          disabled={!query}
-          onClick={() => {
-            onQuery("");
-            input.current?.focus();
-          }}
-          variant="outline"
-        >
-          {t.files.clearFilter}
-        </Button>
-        <label className="sr-only" htmlFor={sortId}>
-          {t.files.sortLabel}
-        </label>
-        <select
-          className="border-input bg-background h-9 rounded-md border px-3 text-sm"
-          id={sortId}
-          onChange={(event) => onOrder(event.target.value as FileListOrder)}
-          value={order}
-        >
-          <option value="name">{t.files.sortName}</option>
-          <option value="newest">{t.files.sortNewest}</option>
-        </select>
-      </div>
-      <p className="text-muted-foreground text-xs" role="status">
-        {t.files.foundCount(found, loaded)}
-      </p>
-    </div>
-  );
-}
-
 function MyFiles({
-  native,
   folder,
   directFolder,
   refreshProtocol,
   storage,
   onGlobalFailure,
 }: {
-  native: boolean;
   directFolder: boolean;
   refreshProtocol: () => unknown;
   folder: string;
@@ -438,7 +249,7 @@ function MyFiles({
   onGlobalFailure: (refusal: StorageRefusal) => void;
 }) {
   const pluginQuery = useFrontendExtensions();
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const { user } = useAuth();
   const words = useBrowserCopy();
   const [searching, setSearching] = useState(false);
@@ -456,14 +267,6 @@ function MyFiles({
   const everyone = useShareWithEveryone();
 
   const loadedFiles = data?.files ?? EMPTY_FILES;
-  const [query, setQuery] = useState("");
-  const [order, setOrder] = useState<FileListOrder>("name");
-  const files = useMemo(
-    () =>
-      native ? [] : selectLoadedFiles(loadedFiles, { query, order, locale }),
-    [native, loadedFiles, query, order, locale],
-  );
-
   const rows = useMemo(
     () => [
       ...(data?.directories ?? []),
@@ -478,7 +281,7 @@ function MyFiles({
         className="space-y-3 rounded-lg border p-4"
         data-testid="my-files-storage-notice"
       >
-        {native && <BrowserLocations area="personal" />}
+        <BrowserLocations area="personal" />
         <FilesStateNotice refusal={notice} />
         {
           <Button size="sm" variant="outline" onClick={() => void refetch()}>
@@ -488,7 +291,7 @@ function MyFiles({
       </div>
     );
 
-  if (native && !error && (data || (directFolder && admitted))) {
+  if (!error && (data || (directFolder && admitted))) {
     const byPath = new Map(
       loadedFiles.map((file) => [file.path, file] as const),
     );
@@ -564,224 +367,39 @@ function MyFiles({
       />
     );
   }
-  if (native)
-    return (
-      <>
-        <BrowserLocations area="personal" />
-        {error && (
-          <p role="alert">
-            {readDenied(error) ? words.denied : t.files.loadFailed}
-          </p>
-        )}
-        {error instanceof FolderRouteMissing && (
-          <Link href={browserHref("personal", folder, { view: "classic" })}>
-            {words.classic}
-          </Link>
-        )}
-        {error ? (
-          <Button onClick={() => void refetch()} variant="outline">
-            {t.files.retry}
-          </Button>
-        ) : (
-          <p role="status">{t.common.loading}</p>
-        )}
-      </>
-    );
   return (
     <>
-      {!pluginQuery.isPending && !isFileFilingReady(pluginQuery) && (
-        <p role="status" className="text-muted-foreground text-sm">
-          {t.extensions.fileDestinationsUnavailable}
+      <BrowserLocations area="personal" />
+      {error && (
+        <p role="alert">
+          {readDenied(error) ? words.denied : t.files.loadFailed}
         </p>
-      )}
-      {!error && !isPending && loadedFiles.length > 0 && (
-        <FileListControls
-          query={query}
-          onQuery={setQuery}
-          order={order}
-          onOrder={setOrder}
-          found={files.length}
-          loaded={loadedFiles.length}
-        />
       )}
       {error ? (
-        <div
-          className="flex items-center justify-between gap-3 rounded-lg border p-4"
-          data-testid="my-files-load-error"
-        >
-          <span className="text-destructive text-sm">{t.files.loadFailed}</span>
-          <Button size="sm" variant="outline" onClick={() => refetch()}>
-            {t.files.retry}
-          </Button>
-        </div>
-      ) : isPending ? (
-        <div className="text-muted-foreground text-sm">{t.common.loading}</div>
-      ) : loadedFiles.length === 0 ? (
-        <Empty className="border" data-testid="my-files-empty">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <FolderIcon />
-            </EmptyMedia>
-            <EmptyTitle>{t.files.empty}</EmptyTitle>
-            <EmptyDescription>{t.files.emptyHint}</EmptyDescription>
-          </EmptyHeader>
-        </Empty>
-      ) : files.length === 0 ? (
-        <Empty className="border" data-testid="my-files-no-matches">
-          <EmptyHeader>
-            <EmptyTitle>{t.files.noMatches}</EmptyTitle>
-            <EmptyDescription>{t.files.noMatchesHint}</EmptyDescription>
-          </EmptyHeader>
-        </Empty>
+        <Button onClick={() => void refetch()} variant="outline">
+          {t.files.retry}
+        </Button>
       ) : (
-        // Focusable so a keyboard-only reader can scroll a wide table at all.
-        <div
-          aria-label={t.files.title}
-          className="focus-visible:ring-ring overflow-x-auto rounded-lg border focus-visible:ring-2 focus-visible:outline-none"
-          role="region"
-          tabIndex={0}
-        >
-          <table className="w-full border-collapse text-sm">
-            <caption className="sr-only">{t.files.title}</caption>
-            <thead>
-              <tr className="bg-muted/50 text-muted-foreground text-left text-xs">
-                <th className="px-3 py-2 font-medium" scope="col">
-                  {t.files.name}
-                </th>
-                <th
-                  className="hidden px-3 py-2 font-medium sm:table-cell"
-                  scope="col"
-                >
-                  {t.files.folder}
-                </th>
-                <th className="px-3 py-2 text-right font-medium" scope="col">
-                  {t.files.size}
-                </th>
-                <th
-                  className="hidden px-3 py-2 font-medium whitespace-nowrap sm:table-cell"
-                  scope="col"
-                >
-                  {t.files.modified}
-                </th>
-                <th className="px-3 py-2" scope="col">
-                  <span className="sr-only">{t.files.actions}</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody data-testid="my-files-list">
-              {files.map((file) => (
-                <tr
-                  className="border-border/60 border-t"
-                  data-testid={`my-file-${file.path}`}
-                  key={file.path}
-                >
-                  <th
-                    className="max-w-[40vw] truncate px-3 py-2 font-normal"
-                    scope="row"
-                  >
-                    <a
-                      className="hover:underline"
-                      href={urlOfMyFile(file.path)}
-                      rel="noopener noreferrer"
-                      target="_blank"
-                      title={file.path}
-                    >
-                      {file.name}
-                    </a>
-                    {folderOf(file) && (
-                      <span
-                        className="text-muted-foreground block truncate text-xs sm:hidden"
-                        title={folderOf(file)}
-                      >
-                        {folderOf(file)}
-                      </span>
-                    )}
-                  </th>
-                  <td className="text-muted-foreground hidden max-w-[25vw] truncate px-3 py-2 sm:table-cell">
-                    {folderOf(file) || "—"}
-                  </td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap tabular-nums">
-                    {formatArtifactBytes(file.size)}
-                  </td>
-                  <td
-                    className="text-muted-foreground hidden px-3 py-2 whitespace-nowrap sm:table-cell"
-                    title={new Date(file.modified * 1000).toLocaleString()}
-                  >
-                    {formatTimeAgo(file.modified * 1000, locale)}
-                  </td>
-                  <td className="px-2 py-1 text-right whitespace-nowrap">
-                    <Button asChild size="icon-sm" variant="ghost">
-                      <NativeDownloadLink
-                        aria-label={`${t.files.download} ${file.name}`}
-                        area="files"
-                        onGlobalFailure={onGlobalFailure}
-                        href={urlOfMyFile(file.path, { download: true })}
-                        rel="noopener noreferrer"
-                        target="_blank"
-                      >
-                        <DownloadIcon className="size-4" />
-                      </NativeDownloadLink>
-                    </Button>
-                    <Button
-                      aria-label={`${t.shared.shareWithEveryone} ${file.name}`}
-                      disabled={
-                        !everyone.available ||
-                        everyone.isPending ||
-                        !isFileFilingReady(pluginQuery)
-                      }
-                      onClick={() => {
-                        const path = `${MY_FILES_VIRTUAL_PREFIX}/${file.path}`;
-                        // No conversation is involved, so the file itself is
-                        // all there is to go on.
-                        void everyone.share(
-                          [path],
-                          installedFileCollection(pluginQuery.data ?? [], {
-                            filepath: path,
-                            destination: "shared",
-                            presented: [],
-                          }),
-                        );
-                      }}
-                      size="icon-sm"
-                      title={t.shared.description}
-                      variant="ghost"
-                    >
-                      <UsersIcon className="size-4" />
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      {data?.truncated && (
-        <p className="text-muted-foreground text-xs">
-          {t.files.truncated(loadedFiles.length)}
-        </p>
+        <p role="status">{t.common.loading}</p>
       )}
     </>
   );
 }
 
 function SharedFiles({
-  native,
   folder,
   directFolder,
   refreshProtocol,
-  onChanged,
   storage,
   onGlobalFailure,
 }: {
-  native: boolean;
   directFolder: boolean;
   refreshProtocol: () => unknown;
   folder: string;
-  onChanged: () => void;
   storage: StorageObservation;
   onGlobalFailure: (refusal: StorageRefusal) => void;
 }) {
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const { user } = useAuth();
   const words = useBrowserCopy();
   const [searching, setSearching] = useState(false);
@@ -840,14 +458,6 @@ function SharedFiles({
     () => ordinarySharedRows(data?.files ?? EMPTY_FILES, fold),
     [data?.files, fold],
   );
-  const [query, setQuery] = useState("");
-  const [order, setOrder] = useState<FileListOrder>("name");
-  const files = useMemo(
-    () =>
-      native ? [] : selectLoadedFiles(loadedFiles, { query, order, locale }),
-    [native, loadedFiles, query, order, locale],
-  );
-
   const rows = useMemo(
     () => [
       ...(data?.directories ?? []),
@@ -862,7 +472,7 @@ function SharedFiles({
         className="space-y-3 rounded-lg border p-4"
         data-testid="shared-files-storage-notice"
       >
-        {native && <BrowserLocations area="shared" />}
+        <BrowserLocations area="shared" />
         <FilesStateNotice refusal={notice} area="shared" />
         {
           <Button size="sm" variant="outline" onClick={() => void refetch()}>
@@ -908,7 +518,6 @@ function SharedFiles({
                   onSuccess: () => {
                     setPendingRemove(null);
                     toast.success(t.shared.removed(name));
-                    onChanged();
                   },
                   onError: (failure) => {
                     if (
@@ -932,7 +541,7 @@ function SharedFiles({
       </DialogContent>
     </Dialog>
   );
-  if (native && !error && (data || (directFolder && admitted))) {
+  if (!error && (data || (directFolder && admitted))) {
     const byPath = new Map(
       loadedFiles.map((file) => [file.path, file] as const),
     );
@@ -1013,205 +622,21 @@ function SharedFiles({
       </>
     );
   }
-  if (native)
-    return (
-      <>
-        <BrowserLocations area="shared" />
-        {error && (
-          <p role="alert">
-            {readDenied(error) ? words.denied : t.files.loadFailed}
-          </p>
-        )}
-        {error instanceof FolderRouteMissing && (
-          <Link href={browserHref("shared", folder, { view: "classic" })}>
-            {words.classic}
-          </Link>
-        )}
-        {error ? (
-          <Button onClick={() => void refetch()} variant="outline">
-            {t.files.retry}
-          </Button>
-        ) : (
-          <p role="status">{t.common.loading}</p>
-        )}
-      </>
-    );
   return (
     <>
-      {canReadSnapshots && (
-        <ConversationGroup listing={snapshots} filter={query} />
-      )}
-      {!error && !isPending && loadedFiles.length > 0 && (
-        <FileListControls
-          query={query}
-          onQuery={setQuery}
-          order={order}
-          onOrder={setOrder}
-          found={files.length}
-          loaded={loadedFiles.length}
-        />
-      )}
-      {error ? (
-        <div
-          className="flex items-center justify-between gap-3 rounded-lg border p-4"
-          data-testid="shared-files-load-error"
-        >
-          <span className="text-destructive text-sm">
-            {t.shared.loadFailed}
-          </span>
-          <Button size="sm" variant="outline" onClick={() => refetch()}>
-            {t.files.retry}
-          </Button>
-        </div>
-      ) : isPending ? (
-        <div className="text-muted-foreground text-sm">{t.common.loading}</div>
-      ) : loadedFiles.length === 0 &&
-        fold &&
-        snapshots.data?.conversations.length ? null : loadedFiles.length ===
-        0 ? (
-        <Empty className="border" data-testid="shared-files-empty">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <UsersIcon />
-            </EmptyMedia>
-            <EmptyTitle>{t.shared.empty}</EmptyTitle>
-            <EmptyDescription>{t.shared.emptyHint}</EmptyDescription>
-          </EmptyHeader>
-        </Empty>
-      ) : files.length === 0 ? (
-        <Empty className="border" data-testid="shared-files-no-matches">
-          <EmptyHeader>
-            <EmptyTitle>{t.files.noMatches}</EmptyTitle>
-            <EmptyDescription>{t.files.noMatchesHint}</EmptyDescription>
-          </EmptyHeader>
-        </Empty>
-      ) : (
-        <div
-          aria-label={t.shared.title}
-          className="focus-visible:ring-ring overflow-x-auto rounded-lg border focus-visible:ring-2 focus-visible:outline-none"
-          role="region"
-          tabIndex={0}
-        >
-          <table className="w-full border-collapse text-sm">
-            <caption className="sr-only">{t.shared.title}</caption>
-            <thead>
-              <tr className="bg-muted/50 text-muted-foreground text-left text-xs">
-                <th className="px-3 py-2 font-medium" scope="col">
-                  {t.files.name}
-                </th>
-                <th
-                  className="hidden px-3 py-2 font-medium sm:table-cell"
-                  scope="col"
-                >
-                  {t.files.folder}
-                </th>
-                <th className="px-3 py-2 text-right font-medium" scope="col">
-                  {t.files.size}
-                </th>
-                <th className="px-3 py-2 font-medium" scope="col">
-                  {t.shared.publisher}
-                </th>
-                <th
-                  className="hidden px-3 py-2 font-medium whitespace-nowrap sm:table-cell"
-                  scope="col"
-                >
-                  {t.shared.published}
-                </th>
-                <th className="px-3 py-2" scope="col">
-                  <span className="sr-only">{t.files.actions}</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody data-testid="shared-files-list">
-              {files.map((file) => {
-                const when = file.published_at
-                  ? new Date(file.published_at).getTime()
-                  : file.modified * 1000;
-                return (
-                  <tr
-                    className="border-border/60 border-t"
-                    data-testid={`shared-file-${file.path}`}
-                    key={file.path}
-                  >
-                    <th
-                      className="max-w-[40vw] truncate px-3 py-2 font-normal"
-                      scope="row"
-                    >
-                      <a
-                        className="hover:underline"
-                        href={urlOfSharedFile(file.path)}
-                        rel="noopener noreferrer"
-                        target="_blank"
-                        title={file.path}
-                      >
-                        {file.name}
-                      </a>
-                      {folderOf(file) && (
-                        <span
-                          className="text-muted-foreground block truncate text-xs sm:hidden"
-                          title={folderOf(file)}
-                        >
-                          {folderOf(file)}
-                        </span>
-                      )}
-                    </th>
-                    <td className="text-muted-foreground hidden max-w-[25vw] truncate px-3 py-2 sm:table-cell">
-                      {folderOf(file) || "—"}
-                    </td>
-                    <td className="px-3 py-2 text-right whitespace-nowrap tabular-nums">
-                      {formatArtifactBytes(file.size)}
-                    </td>
-                    <td className="text-muted-foreground max-w-[25vw] truncate px-3 py-2">
-                      {file.published_by ?? (
-                        <span className="italic">
-                          {t.shared.publishedByNobody}
-                        </span>
-                      )}
-                    </td>
-                    <td
-                      className="text-muted-foreground hidden px-3 py-2 whitespace-nowrap sm:table-cell"
-                      title={new Date(when).toLocaleString()}
-                    >
-                      {formatTimeAgo(when, locale)}
-                    </td>
-                    <td className="px-2 py-1 text-right whitespace-nowrap">
-                      <Button asChild size="icon-sm" variant="ghost">
-                        <NativeDownloadLink
-                          aria-label={`${t.files.download} ${file.name}`}
-                          area="shared"
-                          onGlobalFailure={onGlobalFailure}
-                          href={urlOfSharedFile(file.path, { download: true })}
-                          rel="noopener noreferrer"
-                          target="_blank"
-                        >
-                          <DownloadIcon className="size-4" />
-                        </NativeDownloadLink>
-                      </Button>
-                      {eligible(file) && (
-                        <Button
-                          aria-label={`${t.shared.remove} ${file.name}`}
-                          onClick={() => void pick(file)}
-                          size="icon-sm"
-                          variant="ghost"
-                        >
-                          <Trash2Icon className="size-4" />
-                        </Button>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-      {data?.truncated && (
-        <p className="text-muted-foreground text-xs">
-          {t.shared.truncated(loadedFiles.length)}
+      <BrowserLocations area="shared" />
+      {error && (
+        <p role="alert">
+          {readDenied(error) ? words.denied : t.shared.loadFailed}
         </p>
       )}
-
-      {confirmation}
+      {error ? (
+        <Button onClick={() => void refetch()} variant="outline">
+          {t.files.retry}
+        </Button>
+      ) : (
+        <p role="status">{t.common.loading}</p>
+      )}
     </>
   );
 }

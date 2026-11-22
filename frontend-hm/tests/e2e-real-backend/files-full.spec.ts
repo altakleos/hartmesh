@@ -193,8 +193,12 @@ test("files that are being prepared, an account without a seat and files that di
     await expect(page.getByPlaceholder(/how can i assist you/i)).toBeEnabled();
     await page.goto("/workspace/files");
     await expect(page.getByText(sentence)).toBeVisible();
-    await page.getByTestId("files-tab-shared").click();
-    await expect(page.getByTestId("shared-files-empty")).toBeVisible();
+    await page.getByRole("button", { name: "Locations", exact: true }).click();
+    await page
+      .getByRole("dialog")
+      .getByRole("link", { name: "Company shared" })
+      .click();
+    await expect(page.getByText(enUS.shared.emptyHint)).toBeVisible();
     noGeometry(await page.locator("main").last().innerText());
   }
 });
@@ -225,7 +229,11 @@ test("a deployment whose storage is too small reads differently for a user and a
   ).toHaveCount(0);
   await page.getByRole("link", { name: "Files", exact: true }).click();
   await expect(page.getByText(enUS.chat.filesUnavailable)).toBeVisible();
-  await page.getByTestId("files-tab-shared").click();
+  await page.getByRole("button", { name: "Locations", exact: true }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("link", { name: "Company shared" })
+    .click();
   await expect(page.getByText(enUS.chat.filesUnavailable)).toBeVisible();
   noGeometry(await page.locator("main").last().innerText());
 });
@@ -269,7 +277,7 @@ test("an actual preparing list refusal recovers after newer storage discovery", 
   await page.evaluate(() =>
     document.dispatchEvent(new Event("visibilitychange")),
   );
-  await expect(page.getByTestId("my-files-empty")).toBeVisible({
+  await expect(page.getByText(enUS.files.emptyHint)).toBeVisible({
     timeout: 20_000,
   });
   expect(reads).toBeGreaterThan(1);
@@ -312,10 +320,21 @@ test("a delayed native download survives switching Files tabs", async ({
   );
   await page.goto("/workspace/files");
   const pending = page.waitForEvent("download");
-  await page.getByRole("link", { name: "Download statement.txt" }).click();
+  await page
+    .getByRole("button", { name: "More actions for statement.txt" })
+    .click();
+  await page
+    .getByRole("dialog")
+    .getByRole("link", { name: "Download" })
+    .click();
   await started;
-  await page.getByTestId("files-tab-shared").click();
-  await expect(page.getByTestId("shared-files-empty")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Locations", exact: true }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("link", { name: "Company shared" })
+    .click();
+  await expect(page.getByText(enUS.shared.emptyHint)).toBeVisible();
   release();
   const download = await pending;
   expect(await download.failure()).toBeNull();

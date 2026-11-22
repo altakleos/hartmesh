@@ -185,11 +185,15 @@ test("checking an unanswered folder creation leaves current files in place", asy
     }
   });
   await files(page);
-  const row = page.getByRole("row").filter({ hasText: "current.txt" });
+  await page
+    .getByRole("button", { name: "More actions for current.txt" })
+    .click();
+  const row = page.getByRole("dialog");
   await expect(row).toBeVisible();
   await expect(row.getByRole("button", { name: /Rename|Delete/ })).toHaveCount(
     0,
   );
+  await page.keyboard.press("Escape");
   for (const [index, folder] of ["first-folder", "second-folder"].entries()) {
     await page.getByRole("button", { name: "New folder", exact: true }).click();
     const dialog = page.getByRole("dialog");

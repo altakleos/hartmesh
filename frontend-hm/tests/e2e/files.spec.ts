@@ -26,13 +26,18 @@ test.describe("My files", () => {
       .click();
     await page.waitForURL("**/workspace/files");
 
-    const row = page.getByTestId(`my-file-${AUGUST.path}`);
+    await page.getByRole("button", { name: "Reports", exact: true }).click();
+    await page
+      .getByRole("button", { name: "More actions for " + AUGUST.name })
+      .click();
+    const row = page.getByRole("dialog");
     await expect(row).toBeVisible({ timeout: 15_000 });
     await expect(row).toContainText("Reports");
     await expect(row).toContainText("47.1 KiB");
-    await expect(
-      row.getByRole("link", { name: `Download ${AUGUST.name}` }),
-    ).toHaveAttribute("href", /\/api\/files\/Reports\/.*\?download=true$/);
+    await expect(row.getByRole("link", { name: "Download" })).toHaveAttribute(
+      "href",
+      /\/api\/files\/Reports\/.*\?download=true$/,
+    );
   });
 
   test("older Gateways keep the file available and offer no path-only deletion", async ({
@@ -41,10 +46,14 @@ test.describe("My files", () => {
     mockLangGraphAPI(page, { threads: [], files: [AUGUST] });
     await installLegacyReportPlugin(page);
     await page.goto("/workspace/files");
-    const row = page.getByTestId(`my-file-${AUGUST.path}`);
+    await page.getByRole("button", { name: "Reports", exact: true }).click();
+    await page
+      .getByRole("button", { name: "More actions for " + AUGUST.name })
+      .click();
+    const row = page.getByRole("dialog");
     await expect(row).toBeVisible();
     await expect(
-      row.getByRole("button", { name: `Delete ${AUGUST.name}` }),
+      row.getByRole("button", { name: /Delete|Remove/ }),
     ).toHaveCount(0);
   });
 });
@@ -62,7 +71,10 @@ test("same-page Shared navigation and browser history follow the URL", async ({
     }),
   );
   await page.goto("/workspace/files");
-  await expect(page.getByTestId("my-files-list")).toBeVisible();
+  await page.getByRole("button", { name: "Reports", exact: true }).click();
+  await page
+    .getByRole("button", { name: "More actions for " + AUGUST.name })
+    .click();
   await page.route("**/api/shared/publish", (route) =>
     route.fulfill({
       status: 200,
@@ -76,23 +88,36 @@ test("same-page Shared navigation and browser history follow the URL", async ({
     }),
   );
   await page
-    .getByRole("button", { name: `Share with everyone ${AUGUST.name}` })
+    .getByRole("button", { name: "Share with everyone", exact: true })
     .click();
+  await page.keyboard.press("Escape");
   await page
     .getByRole("button", { name: "Open Company shared", exact: true })
     .click();
-  await expect(page.getByTestId("shared-files-empty")).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Company shared", exact: true }),
+  ).toBeVisible();
   await page.goBack();
-  await expect(page.getByTestId("my-files-list")).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "My files", exact: true }),
+  ).toBeVisible();
   await page.goForward();
-  await expect(page.getByTestId("shared-files-empty")).toBeVisible();
-  await page.getByTestId("files-tab-mine").click();
+  await expect(
+    page.getByRole("region", { name: "Company shared", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("link", { name: "My files", exact: true }).click();
   await expect(page).toHaveURL(/\/workspace\/files$/);
-  await expect(page.getByTestId("my-files-list")).toBeVisible();
-  await page.getByTestId("files-tab-shared").click();
+  await expect(
+    page.getByRole("region", { name: "My files", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("link", { name: "Company shared", exact: true }).click();
   await expect(page).toHaveURL(/\?tab=shared$/);
   await page.reload();
-  await expect(page.getByTestId("shared-files-empty")).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Company shared", exact: true }),
+  ).toBeVisible();
   await page.evaluate(() => window.history.pushState(null, "", "?tab=unknown"));
-  await expect(page.getByTestId("my-files-list")).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "My files", exact: true }),
+  ).toBeVisible();
 });

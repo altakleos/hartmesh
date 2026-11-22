@@ -235,6 +235,7 @@ test("earlier Gateway leaves raw files available", async ({ page }) => {
     if (request.url().includes("/api/shared-conversations")) snapshotReads++;
   });
   await page.goto("/workspace/files?tab=shared&view=classic");
+  await page.getByRole("searchbox").fill("report.pdf");
   await expect(page.getByText("report.pdf", { exact: true })).toBeVisible();
   await expect(page.getByRole("region", { name: "Conversations" })).toHaveCount(
     0,

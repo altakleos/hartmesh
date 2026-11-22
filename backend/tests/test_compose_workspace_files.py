@@ -66,8 +66,8 @@ def region(page, name):
     return page.get_by_role("region", name=re.compile("^" + re.escape(name) + "$", re.I))
 
 
-def location(agent, *, folder="uploads", view="browser"):
-    return "/workspace/instances?" + urlencode({"instance": agent["id"], "tab": "files", "folder": folder, "view": view})
+def location(agent, *, folder="uploads"):
+    return "/workspace/instances?" + urlencode({"instance": agent["id"], "tab": "files", "folder": folder})
 
 
 def http_sample(user, path, params, count):
@@ -102,7 +102,7 @@ def browse(page, base, path, name):
 def measure(bundle, user, page, agent, evidence, record):
     from playwright.sync_api import expect
 
-    surfaces = (("personal", "/workspace/files?view=browser", "My files"), ("shared", "/workspace/files?tab=shared&view=browser", "Company shared"), ("agent", location(agent), TITLE))
+    surfaces = (("personal", "/workspace/files", "My files"), ("shared", "/workspace/files?tab=shared", "Company shared"), ("agent", location(agent), TITLE))
     for key, path, title in surfaces:
         record["ui"][key] = {}
         fresh = page.context.browser.new_context(locale="en-US", viewport={"width": 1280, "height": 800})
@@ -131,7 +131,7 @@ def measure(bundle, user, page, agent, evidence, record):
 
     # Start in an authenticated workspace. Time each actual location link from
     # activation until the first actionable folder of its destination is usable.
-    browse(page, bundle.url, "/workspace/files?view=browser", "My files")
+    browse(page, bundle.url, "/workspace/files", "My files")
     start = time.monotonic()
     window = record["measurement_window"] = {"budget_seconds": 300}
     previous = "My files"
@@ -208,7 +208,7 @@ def phone_geometry(page, base, evidence):
         context.add_cookies([{"url": base, "name": "locale", "value": "zh-CN"}])
         context.add_init_script("localStorage.setItem('theme', 'dark')")
         mobile = context.new_page()
-        reply = mobile.goto(base + "/workspace/files?" + urlencode({"tab": "shared", "folder": LIBRARY, "view": "browser"}), wait_until="domcontentloaded")
+        reply = mobile.goto(base + "/workspace/files?" + urlencode({"tab": "shared", "folder": LIBRARY}), wait_until="domcontentloaded")
         assert reply.ok
         source = region(mobile, "公司共享")
         control = source.get_by_role("button", name=re.compile(r"entry-.* 的更多操作")).first
@@ -298,8 +298,10 @@ def check_upload(bundle, user, page, agent, evidence, result):
         page.locator('input[type="file"]').first.set_input_files({"name": UPLOAD, "mimeType": "text/plain", "buffer": CONTENT})
         expect(page.get_by_text("The result is currently unavailable.", exact=True)).to_be_visible(timeout=30000)
         assert actual and len(writes) == 1
-        page.get_by_role("link", name="Use classic file view", exact=True).click()
-        expect(page.get_by_role("link", name="Use file browser", exact=True)).to_be_visible(timeout=20000)
+        region(page, TITLE).get_by_role("link", name="My files", exact=True).click()
+        expect(region(page, "My files").get_by_role("button", name=LIBRARY, exact=True)).to_be_visible(timeout=20000)
+        page.go_back()
+        expect(region(page, TITLE)).to_be_visible(timeout=20000)
         expect(page.get_by_text("The result is currently unavailable.", exact=True)).to_be_visible()
         result.update({"original_id": writes[0], "requested_path": "uploads/" + UPLOAD, "saved_path": actual["path"], "sha256": digest})
         page.screenshot(path=evidence / "workspace-file-interrupted.png")

@@ -38,8 +38,6 @@ export function useBrowserCopy() {
     parent: (s: string) =>
       zh ? `打开所在文件夹：${s}` : `Open containing folder: ${s}`,
     missing: zh ? "此文件夹已不可用。" : "This folder is no longer available.",
-    classic: zh ? "使用原文件视图" : "Use classic file view",
-    native: zh ? "使用文件浏览器" : "Use file browser",
     personal: zh ? "我的文件" : "My files",
     shared: zh ? "公司共享" : "Company shared",
     partial: (n: number) =>
