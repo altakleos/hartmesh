@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -16,7 +17,7 @@ if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("HARTMESH_VERIFY
 
 from _compose_browser_session import signed_in_browser, verify_image
 from _compose_gateway_restart import start_gateway, stop_gateway
-from test_compose_instance_acceptance import ARTIFACT, MARKER, Bundle, Person, company, eventually, required, sql
+from test_compose_instance_acceptance import ARTIFACT, MARKER, Bundle, Person, await_execution_ready, company, eventually, required, sql
 from test_compose_instance_acceptance import compose as compose
 from test_compose_instance_acceptance import member as member
 from test_compose_instance_acceptance import session as session
@@ -40,12 +41,19 @@ def colleague(compose):
         person.client.close()
 
 
-def grant_chat(manager, instance, person):
+def grant_chat(manager, instance, person, *, snapshot_url=None):
     url = f"{INSTANCES}/{instance['id']}"
     current = manager.request("GET", url).json()
     change = {"action": "grant", "operation_id": uuid.uuid4().hex, "generation": current["generation"], "member_id": person.user["id"], "permissions": 1}
     eventually(lambda: manager.request("POST", url + "/lifecycle", json=change, expected=(200, 202)).json()["complete"], timeout=120, interval=2)
-    assert person.request("GET", url).json()["permissions"] == 1
+    granted = person.request("GET", url).json()
+    assert granted["permissions"] == 1
+    # Changing the active resident's grants contains it before the next run.
+    # The lifecycle receipt confirms the grant; execution readiness is separate.
+    offer = person.request("GET", snapshot_url).json()["answerer"] if snapshot_url else None
+    started = time.monotonic()
+    await_execution_ready(person, timeout=90)
+    return {"permissions": granted["permissions"], "execution_at_grant": granted["execution"], "offer_at_grant": offer, "ready_seconds": round(time.monotonic() - started, 3), "readiness_budget_seconds": 90}
 
 
 def agent_draft(manager, thread):
@@ -158,15 +166,18 @@ def test_manager_shares_a_colleagues_words_and_home_output(compose, session, mem
         publication = session.request("POST", SHARED, json=body, expected=201).json()["publication_id"]
     entry = SHARED + "/" + publication
     before = colleague.request("GET", entry).json()
-    assert before["with"] == draft["with"] and before["answerer"]["kind"] == "assistant"
-    grant_chat(session, instance, colleague)
+    assert before["with"] == draft["with"] and before["answerer"] == {"kind": "assistant", "reason": "no_access"}
+    grant = grant_chat(session, instance, colleague, snapshot_url=entry)
+    detail = colleague.request("GET", entry).json()
+    expected = {"kind": "agent", "id": instance["id"], "name": instance["name"]}
+    assert detail["answerer"] == expected and grant["offer_at_grant"] in (expected, {"kind": "assistant", "reason": "unavailable"})
+    result["grant_readiness"] = {**grant, "offer_before_grant": before["answerer"], "qualified_offer": detail["answerer"]}
+
     old_offer = {"request_id": str(uuid.uuid4()), "answerer": {"kind": "assistant"}}
     previous_threads = compose.psql("SELECT count(*) FROM threads_meta")
     changed = colleague.request("POST", entry + "/continue", json=old_offer, expected=409).json()
     assert changed["detail"]["code"] == "answerer_changed" and changed["detail"]["answerer"]["id"] == instance["id"]
     assert compose.psql("SELECT count(*) FROM threads_meta") == previous_threads
-    detail = colleague.request("GET", entry).json()
-    assert detail["answerer"] == {"kind": "agent", "id": instance["id"], "name": instance["name"]}
     assert len(detail["messages"]) == draft["message_count"] and "audience" not in detail
     (file,) = detail["files"]
     assert file["available"] and file["sha256"] == draft["files"][0]["sha256"]
