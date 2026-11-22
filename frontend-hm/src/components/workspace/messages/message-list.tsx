@@ -27,6 +27,7 @@ import {
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
 import { useConversationFiles } from "@/components/workspace/chats/conversation-files";
+import { useCopiedTurns } from "@/components/workspace/shared-conversations/history";
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { getArtifactArchiveCandidatesByGroupIndex } from "@/core/messages/artifact-archive";
@@ -381,6 +382,7 @@ export function MessageList({
   const sidecar = useMaybeSidecar();
   const [selectionToolbar, setSelectionToolbar] =
     useState<SelectionToolbarState | null>(null);
+  const copiedTurns = useCopiedTurns();
   const messages = thread.messages;
   const groupedMessages = useStableMessageGroups(messages, thread.isLoading);
   // What the activity row says while the turn runs: the stage this thread's
@@ -1044,6 +1046,7 @@ export function MessageList({
               </Tooltip>
             )}
           {enableRegenerateForTurn &&
+            !assistantMessageIds.some((id) => copiedTurns.frozen.has(id)) &&
             actionTarget?.id &&
             onRegenerateMessage && (
               <Tooltip
@@ -1092,6 +1095,7 @@ export function MessageList({
     },
     [
       branchingMessageId,
+      copiedTurns.frozen,
       canBranch,
       canRegenerate,
       isSteeredRun,
@@ -1258,58 +1262,65 @@ export function MessageList({
                   >
                     {group.messages.map((msg) => {
                       const item = (
-                        <MessageListItem
-                          message={msg}
-                          employeeConversation={showPackageOrigins}
-                          isLoading={
-                            thread.isLoading &&
-                            groupIndex === groupedMessages.length - 1
-                          }
-                          threadId={threadId}
-                          artifactPaths={artifactPaths}
-                          runId={
-                            group.type === "assistant"
-                              ? (msg as { run_id?: string }).run_id
-                              : undefined
-                          }
-                          showCopyButton={group.type !== "assistant"}
-                          showWorkspaceChanges={workspaceChangeAnchorGroupIndices.has(
-                            groupIndex,
-                          )}
-                          threadIsLoading={thread.isLoading}
-                          canEdit={
-                            group.type === "human" &&
-                            !msg.additional_kwargs?.run_input_id &&
-                            !isSteeredRun(msg) &&
-                            Boolean(msg.id) &&
-                            msg.id === latestEditableHumanMessageId &&
-                            canEdit &&
-                            !replayActionBusy &&
-                            Boolean(onEditAndRegenerateMessage)
-                          }
-                          isEditPending={editingMessageId === msg.id}
-                          onEditAndRegenerate={
-                            group.type === "human" &&
-                            msg.id &&
-                            onEditAndRegenerateMessage
-                              ? async (replacementText) => {
-                                  const targetId = msg.id;
-                                  if (!targetId) {
-                                    return false;
+                        <>
+                          <MessageListItem
+                            message={msg}
+                            employeeConversation={showPackageOrigins}
+                            isLoading={
+                              thread.isLoading &&
+                              groupIndex === groupedMessages.length - 1
+                            }
+                            threadId={threadId}
+                            artifactPaths={artifactPaths}
+                            runId={
+                              group.type === "assistant"
+                                ? (msg as { run_id?: string }).run_id
+                                : undefined
+                            }
+                            showCopyButton={group.type !== "assistant"}
+                            showWorkspaceChanges={workspaceChangeAnchorGroupIndices.has(
+                              groupIndex,
+                            )}
+                            threadIsLoading={thread.isLoading}
+                            canEdit={
+                              group.type === "human" &&
+                              !msg.additional_kwargs?.run_input_id &&
+                              !isSteeredRun(msg) &&
+                              Boolean(msg.id) &&
+                              !copiedTurns.frozen.has(msg.id!) &&
+                              msg.id === latestEditableHumanMessageId &&
+                              canEdit &&
+                              !replayActionBusy &&
+                              Boolean(onEditAndRegenerateMessage)
+                            }
+                            isEditPending={editingMessageId === msg.id}
+                            onEditAndRegenerate={
+                              group.type === "human" &&
+                              msg.id &&
+                              !copiedTurns.frozen.has(msg.id) &&
+                              onEditAndRegenerateMessage
+                                ? async (replacementText) => {
+                                    const targetId = msg.id;
+                                    if (!targetId) {
+                                      return false;
+                                    }
+                                    setEditingMessageId(targetId);
+                                    try {
+                                      return await onEditAndRegenerateMessage(
+                                        targetId,
+                                        replacementText,
+                                      );
+                                    } finally {
+                                      setEditingMessageId(null);
+                                    }
                                   }
-                                  setEditingMessageId(targetId);
-                                  try {
-                                    return await onEditAndRegenerateMessage(
-                                      targetId,
-                                      replacementText,
-                                    );
-                                  } finally {
-                                    setEditingMessageId(null);
-                                  }
-                                }
-                              : undefined
-                          }
-                        />
+                                : undefined
+                            }
+                          />
+                          {msg.id &&
+                            msg.id === copiedTurns.last &&
+                            copiedTurns.line}
+                        </>
                       );
 
                       if (

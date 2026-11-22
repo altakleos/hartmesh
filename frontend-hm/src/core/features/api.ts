@@ -47,6 +47,7 @@ export const CLOSED_TELEGRAM: TelegramFeature = {
 };
 
 export interface FeaturesResponse {
+  shared_conversations?: { version: number; operations: string[] } | null;
   file_browser?: {
     versions?: unknown;
     storage_mode?: unknown;

@@ -54,6 +54,7 @@ type Props = {
   describe?: (row: BrowserRow) => ReactNode;
   rowStatus?: (row: BrowserRow) => ReactNode;
   tools?: ReactNode;
+  relatedResults?: (query: string) => ReactNode;
   empty?: ReactNode;
   navigate?: (path: string) => void;
   folderKnown?: boolean;
@@ -76,6 +77,7 @@ export function BrowserView({
   describe,
   rowStatus,
   tools,
+  relatedResults,
   empty,
   navigate,
   folderKnown = true,
@@ -308,6 +310,7 @@ export function BrowserView({
               </select>
             </label>
           </div>
+          {!waiting && relatedResults?.(view.query)}
           {!waiting && truncated && (
             <p className="text-muted-foreground text-sm">
               {searchMode === false && rows.length === 0

@@ -44,7 +44,13 @@ its revision, publication and your current access. Undo uses the receipt from a
 new copy. A duplicate returns the existing file. If an operation is missing,
 keep it unavailable.
 
-You can share a frozen copy of your own conversation with everyone who can read Company shared. The copy includes the visible messages and files the conversation presented. Members can find it under Conversations in Company shared. Later edits stay in the original chat.
+An ordinary conversation’s owner can choose **Share conversation with everyone**
+to review the current messages and presented files before publishing a frozen
+copy. Find it in **Files → Shared → Conversations**, in either file view.
+**Continue** opens a private chat with the assistant. The first message can
+include the files copied into that chat. Removing the snapshot leaves existing
+private conversations and their copies intact. The published copy retains the
+messages and files you reviewed if the original chat changes.
 
 Hartmesh clears private workspace caches when the signed-in account changes.
 Artifact, My Files and Shared reads, copies and hashes refuse symlinks throughout the

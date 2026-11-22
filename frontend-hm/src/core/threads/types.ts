@@ -51,6 +51,7 @@ export interface AgentThreadContext extends Record<string, unknown> {
 }
 
 export interface AgentThread extends Thread<AgentThreadState> {
+  owner_user_id?: string | null;
   context?: AgentThreadContext;
   agent_instance?:
     | (Pick<AgentInstance, "id" | "name" | "status" | "custody"> & {

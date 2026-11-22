@@ -69,6 +69,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import { RetryContinuedFiles } from "@/components/workspace/shared-conversations/retry-files";
 import { hasCeiling } from "@/core/agent-instances/presentation";
 import { fetch } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
@@ -82,6 +83,7 @@ import {
 } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { selectAvailableModel } from "@/core/models/selection";
+import { useContinuedDraft } from "@/core/shared-conversations/handoff";
 import {
   buildReferenceMessageMetadata,
   type SidecarContext,
@@ -458,7 +460,30 @@ export function InputBox({
     owner: { scope: string };
     request: number;
   } | null>(null);
-  const imports = useComposerImports(pickerScope);
+  const localImports = useComposerImports(pickerScope);
+  const continued = useContinuedDraft(
+    !agentFiles && conversationFilePicker ? user?.id : undefined,
+    threadId,
+  );
+  const imports = useMemo(
+    () => ({
+      ...localImports,
+      chips: [
+        ...localImports.chips,
+        ...continued.chips.filter(
+          (chip) =>
+            !localImports.chips.some(
+              (local) => local.file.path === chip.file.path,
+            ),
+        ),
+      ],
+      remove(captured: typeof localImports.chips) {
+        localImports.remove(captured);
+        continued.remove(new Set(captured.map((chip) => chip.file.path)));
+      },
+    }),
+    [localImports, continued],
+  );
   const importedBytes = imports.chips.reduce(
     (sum, chip) => sum + chip.file.size,
     0,
@@ -2559,6 +2584,14 @@ export function InputBox({
                 </button>
               )}
             </div>
+          )}
+          {user && continued.draft && continued.draft.missing.length > 0 && (
+            <RetryContinuedFiles
+              key={JSON.stringify([user.id, threadId, continued.draft.request])}
+              account={user.id}
+              thread={threadId}
+              draft={continued.draft}
+            />
           )}
           {imports.chips.map((chip) => (
             <div
