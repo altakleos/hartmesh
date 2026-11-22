@@ -180,7 +180,7 @@ async def attach_captured(request, thread_id, owner, config, captured, *, rechec
 
 
 @require_permission("threads", "write", owner_check=True)
-async def import_into_chat(request: Request, thread_id: str, source: FileSource, config, *, create_destination=False, capture=capture_source, expected_scope=None):
+async def import_into_chat(request: Request, thread_id: str, source: FileSource, config, *, create_destination=False, capture=None, expected_scope=None):
     owner = acting_user_id(request)
     scope = await conversation_scope(request, thread_id, allow_new=create_destination)
     if expected_scope is not None and scope != expected_scope:
@@ -188,7 +188,8 @@ async def import_into_chat(request: Request, thread_id: str, source: FileSource,
     if scope is not None and scope[0] != "ordinary":
         raise HTTPException(501, "Use the AI agent's Home for attachments")
     limits = _get_upload_limits(config)
-    captured = await capture(request, source, maximum_bytes=min(limits.max_file_size, limits.max_total_size))
+    read_source = capture_source if capture is None else capture
+    captured = await read_source(request, source, maximum_bytes=min(limits.max_file_size, limits.max_total_size))
     async with goal_thread_lock(thread_id):
         await captured.recheck()
         if scope is None:
