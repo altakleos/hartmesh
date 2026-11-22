@@ -4748,7 +4748,9 @@ Anyone with access to Company shared can read the published messages and downloa
 
 ### Continue a shared conversation
 
-Open a published conversation in Company shared and choose **Continue** to start a private chat with your ordinary assistant. The new chat includes the published words and copies of the files that are still shared. The result shows the saved filenames and identifies any file that could not be copied. Removing the publication later leaves your chat and saved copies available.
+Open a published conversation in Company shared. The **Continue** button names the assistant who will answer. If you can chat with the original AI assistant or employee and it is available, you can continue with it. Otherwise, your ordinary assistant can answer. The new conversation includes the published words and copies of the files that are still shared.
+
+When you continue with an employee, the copies go into its Home. People who can see the employee’s work can open them, and people who can chat with it can ask for their contents. The result shows the saved filenames and identifies any file that could not be copied. Removing the publication later leaves your chat and saved copies available.
 
 Automatic memory extraction skips copied turns and continues to process your subsequent conversation. A deployment configured with model-operated memory tools uses those tools under its existing policy.
 

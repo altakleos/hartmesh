@@ -287,6 +287,23 @@ Rebuild and remeasure if an image input changes. Repeat the measurement if
 its harness changes. A bundle-only evidence or presentation configuration
 commit can reuse the measured images when all image and harness inputs match.
 
+### Employee conversation sharing
+
+When a release changes conversation sharing, run the mounted snapshot qualification
+on the release branch after committing the signed image pins. The workflow verifies
+both pinned product images and signs in through the public browser. It also starts
+the earlier Gateway against the same store to check that it can read an employee
+snapshot and recover an interrupted publication.
+
+```sh
+gh workflow run compose-instances.yml --repo altakleos/hartmesh --ref <release-branch> \
+  -f backend_image=<backend-repository>@sha256:<digest> -f verify_shared_snapshots=true
+```
+
+Check both `snapshot-publications.json` and `agent-sharing.json` in the run’s
+artifact. The latter records the browser’s first employee run, the copied file,
+and the outcome observed by the earlier reader.
+
 ### Conversation title search measurements
 
 Pull requests changing the title search measurement or its search handler build

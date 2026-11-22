@@ -3,6 +3,7 @@ import { getBackendBaseURL } from "@/core/config";
 
 import type {
   ContinueResult,
+  ContinueTarget,
   PublishResult,
   RetiredSnapshot,
   SharedHistory,
@@ -99,10 +100,11 @@ export const continueSnapshot = (
   id: string,
   request_id: string,
   signal: AbortSignal,
+  answerer: ContinueTarget,
 ) =>
   json<ContinueResult>(entry(id) + "/continue", signal, "POST", {
     request_id,
-    answerer: { kind: "assistant" },
+    answerer,
   });
 export const threadSharedHistory = (thread: string, signal: AbortSignal) =>
   json<SharedHistory | null>(

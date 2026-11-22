@@ -167,7 +167,9 @@ async def test_recognized_document_reads_version_one_agent_metadata_and_only_hos
     detail = client.get("/api/shared-conversations/" + row["publication_id"])
     assert detail.status_code == status
     if version == 1:
-        assert detail.json()["with"] == doc["with"] and detail.json()["answerer"] == {"kind": "assistant"}
+        assert getattr(client.app.state, "agent_instances", None) is None
+        assert detail.json()["with"] == doc["with"]
+        assert detail.json()["answerer"] == {"kind": "assistant", "reason": "unavailable"}
     else:
         assert not client.get("/api/shared-conversations").json()["conversations"]
         assert client.get("/api/shared/" + rel).content == data

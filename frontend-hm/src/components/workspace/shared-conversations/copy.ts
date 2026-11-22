@@ -97,6 +97,30 @@ export function useSnapshotCopy() {
     with: (name: string) =>
       zh ? `与${name}的对话` : `Conversation with ${name}`,
     continue: zh ? `使用${product}继续` : `Continue with ${product}`,
+    continueWith: (name: string) =>
+      zh ? `与${name}继续对话` : `Continue with ${name}`,
+    intoHome: (name: string, n: number) =>
+      zh
+        ? `将把仍可用的文件（${n} 个）复制到${name}的文件区。可查看其工作的成员可打开副本，可与其聊天的成员可向其询问文件内容。从公司共享区移除对话后，这些人仍能访问副本。`
+        : `The available files (${n}) will be copied into ${name}’s files. People who can see this agent’s work can open the copies. People who can chat with the agent can ask for their contents. This access continues after removal from Company shared.`,
+    reason: (name: string, reason?: string) => {
+      if (reason === "no_access")
+        return zh
+          ? `与${name}继续需要“可聊天”权限。接下来可由${product}回答。`
+          : `Continuing with ${name} requires “Can chat” access. ${product} can answer here.`;
+      if (
+        reason === "paused" ||
+        reason === "retired" ||
+        reason === "unavailable"
+      )
+        return zh
+          ? `${name}${reason === "paused" ? "已暂停" : reason === "retired" ? "已停用" : "暂不可用"}。接下来可由${product}回答。`
+          : `${name} is ${reason === "paused" ? "paused" : reason === "retired" ? "retired" : "unavailable"}. ${product} can answer here.`;
+      return null;
+    },
+    changedAnswerer: zh
+      ? "可回答此对话的助手已更改。请确认后再继续。"
+      : "Who can answer has changed. Review the choice before continuing.",
     fallback: (who: string) =>
       zh
         ? `接下来将由${product}而非${who}回答。`
@@ -163,6 +187,14 @@ export function useSnapshotCopy() {
               return zh
                 ? "请等待当前轮次结束后再分享。"
                 : "Finish the current turn before sharing.";
+            case "continuation_interrupted":
+              return zh
+                ? "之前的尝试可能已创建对话或复制了文件。当原先选择的助手可用时，请使用同一选项重试。"
+                : "Your previous attempt may already have created the conversation or copied a file. Retry the original choice when it is available.";
+            case "answerer_changed":
+              return zh
+                ? "可回答此对话的助手已更改。请重新确认。"
+                : "Who can answer has changed. Review the choice again.";
             case "snapshot-acknowledgement-required":
               return zh
                 ? "请确认谁将能够阅读这些消息和文件。"

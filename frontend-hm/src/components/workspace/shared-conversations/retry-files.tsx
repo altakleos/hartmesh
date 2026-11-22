@@ -8,6 +8,10 @@ import {
   saveContinuedDraft,
   type ContinuedDraft,
 } from "@/core/shared-conversations/handoff";
+import {
+  sameTarget,
+  validAnswerer,
+} from "@/core/shared-conversations/protocol";
 import { useSpaceActionSignal } from "@/core/spaces/lifetime";
 
 import { useSnapshotCopy } from "./copy";
@@ -35,9 +39,15 @@ export function RetryContinuedFiles({
         draft.publication,
         draft.request,
         signal,
+        draft.answerer ?? { kind: "assistant" },
       );
       if (signal.aborted) return;
-      if (result.thread_id !== thread) throw new Error("Conversation changed");
+      if (
+        result.thread_id !== thread ||
+        !validAnswerer(result.answerer) ||
+        !sameTarget(result.answerer, draft.answerer ?? { kind: "assistant" })
+      )
+        throw new Error("Conversation changed");
       const current = client.getQueryData<ContinuedDraft>([
         "shared-conversation-draft",
         account,

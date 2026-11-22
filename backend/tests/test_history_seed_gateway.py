@@ -387,6 +387,7 @@ async def test_no_history_does_not_reserve_an_active_thread(history_gateway, emp
 async def test_continued_history_is_owned_and_first_run_accepts_consecutive_answers(history_gateway, monkeypatch):
     from unittest.mock import AsyncMock
 
+    from app.gateway.conversation_snapshots import AssistantAnswerer
     from app.gateway.deps import get_config
     from app.gateway.routers import continued_conversations
     from deerflow.agents.lead_agent import agent as lead_agent
@@ -394,11 +395,12 @@ async def test_continued_history_is_owned_and_first_run_accepts_consecutive_answ
     db = history_gateway
     db.app.include_router(continued_conversations.router)
     db.app.dependency_overrides[get_config] = lambda: SimpleNamespace()
-    snapshot = SimpleNamespace(title="Meeting notes", messages=[SimpleNamespace(type=role, content=word) for role, word in [("human", "Question"), ("ai", "First answer"), ("ai", "Second answer")]], files=[])
+    snapshot = SimpleNamespace(answerer=AssistantAnswerer(), title="Meeting notes", messages=[SimpleNamespace(type=role, content=word) for role, word in [("human", "Question"), ("ai", "First answer"), ("ai", "Second answer")]], files=[])
     monkeypatch.setattr(continued_conversations, "read_snapshot", AsyncMock(return_value=snapshot))
     async with AsyncClient(transport=ASGITransport(app=db.app), base_url="http://test") as client:
         response = await client.post("/api/shared-conversations/example/continue", json={"request_id": str(uuid4()), "answerer": {"kind": "assistant"}})
         assert response.status_code == 200, response.text
+        assert response.json()["answerer"] == {"kind": "assistant"}
         thread_id = response.json()["thread_id"]
         proof = await client.get(f"/api/threads/{thread_id}/shared-history")
         assert proof.json()["publication_id"] == "example"

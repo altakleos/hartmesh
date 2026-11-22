@@ -115,7 +115,7 @@ Ordinary Shared mutations enter `_shared_mutation`; its process mutex and privat
 filesystem advisory lock retain ownership through recovery/settlement.
 Delete authorizes the current publication under that lock; optional
 `expected_publication_id` adds stale-client intent fencing (empty means no record).
-Snapshots reserve the thread and copy presented files from finished visible runs. Bound shares require a session manager with Inspect, Home admin/export and digest-bound company consent. Recheck grants on reads and writes; names stay in the draft. Publish each item separately, host-generated manifest last. Recognize members by live identity, path, hash and time. Hide bound thread IDs in public Shared rows and duplicate receipts.
+Reserve the thread; copy delivered files from finished visible runs. Bound shares require session Manage + Inspect, Home admin/export, and consent to the digest. Recheck on reads/writes. Keep names in drafts and bound thread IDs out of public rows/receipts. Publish separately, manifest last. Match live member ID, path, hash and time.
 Lists/publications carry nullable `publication_id`; Files/Undo pass it back.
 Removal journals stage bytes on the same filesystem before updating the immutable
 publication ID. Recovery matches record ID and path before using saved outcomes;
@@ -298,4 +298,4 @@ alone let the first write fail with `FileNotFoundError` and answer 500. Keep
 reads and deletes permissive: a scope an older release stored under a reserved
 name must stay exportable and clearable. Tests: `test_memory_router.py`.
 
-Shared conversation continuation uses the published snapshot and the caller's own thread capacity and write reservation. Use the state-only writer for title and typed messages and the existing branch seed authority for its durable message feed. Match host seed event metadata and message IDs before attributing copied history. Copy each live member through ordinary upload admission with its original manifest and publication checks. Passive memory filters marked turns at its enqueue boundaries.
+Continue under the caller’s capacity and write fence. Verify agent Use/readiness at offer and admission. Seed the requester’s exact destination/incarnation with the state writer and branch feed. Match seed event and message IDs for attribution; filter copied turns at memory enqueue. Distinguish stale choices from interrupted effects. Import via uploads or Home admission; recheck manifest and member inside the Home transaction and reuse its receipt.
