@@ -80,6 +80,7 @@ from deerflow.runtime.checkpoint_mode import (
 from deerflow.scheduler.runtime import SCHEDULER_CAPABILITY_CONTEXT_KEY, is_scheduler_capability
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import configured_subagent_max_running
+from deerflow.tools.builtins.batch_task_tool import native_batch_tool_names
 from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
@@ -1532,6 +1533,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
             memory_enabled=memory_enabled,
             runtime_scope=build_runtime_scope(tools=authorized_tools, memory_enabled=memory_enabled and resolved_app_config.memory.enabled),
             bash_available=has_bash_tool(authorized_tools),
+            batch_tool_names=native_batch_tool_names(authorized_tools),
         )
         graph_middlewares = normalize_middleware_state_schemas(middlewares, mode)
         verify_declared_tool_view(graph_middlewares, authorized_names=declared_authorized)
@@ -1741,6 +1743,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         interaction_policy=interaction_policy,
         memory_enabled=memory_enabled,
         bash_available=has_bash_tool(authorized_tools),
+        batch_tool_names=native_batch_tool_names(authorized_tools),
         adopted_soul=instance_execution.definition.soul if instance_execution else None,
         runtime_scope=build_runtime_scope(execution=instance_execution, tools=authorized_tools, memory_enabled=memory_enabled and resolved_app_config.memory.enabled),
     )

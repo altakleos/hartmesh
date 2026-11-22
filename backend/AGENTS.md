@@ -43,6 +43,12 @@ the saved role ceiling; demotions and ambiguous custom-role changes refuse.
 OAuth provider and subject must still match after capacity waits; missing users
 retain only the original unbound internal-channel shape.
 
+The Gateway checks the conversation binding on every batch submission. Before
+the ordinary worker starts, it checks for unfinished agent-bound batches, even
+when that worker is disabled. Keep both SQL operations and the overall startup
+sweep bounded. Timed-out database calls retain ownership of their cancellation
+cleanup. The panel receives only a read-only flag for a scoped batch.
+
 ### Documentation Update Policy
 Every code change must keep docs accurate and current: update `README.md` for
 user-facing behavior and the relevant `AGENTS.md` for development changes.

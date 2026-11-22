@@ -19,6 +19,7 @@ from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.subagents.batch_acceptance import check_batch_acceptance
 from deerflow.subagents.batch_lease import BatchItemLease
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
+from deerflow.subagents.batch_scope import is_ordinary_batch_spec
 from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.executor import (
@@ -160,6 +161,7 @@ class SubagentBatchService:
         execution_capacity: SubagentExecutionCapacity | None = None,
         extensions: LoadedExtensions | None = None,
         owner_access: Callable[[dict[str, Any]], Awaitable[bool]] | None = None,
+        classify_submission: Callable[[BatchSubmitRequest], Awaitable[None]] | None = None,
         prepare_continuation=None,
         dispatch_continuation=None,
         cancel_continuation=None,
@@ -184,6 +186,7 @@ class SubagentBatchService:
         self._executions: dict[str, asyncio.Task[None]] = {}
         self._execution_ids: dict[str, str] = {}
         self._item_batches: dict[str, str] = {}
+        self._classify_submission = classify_submission
         self._prepare_continuation = prepare_continuation
         self._dispatch_continuation = dispatch_continuation
         self._cancel_continuation = cancel_continuation
@@ -319,6 +322,10 @@ class SubagentBatchService:
             raise ValueError(f"max_running_items must be between 1 and {self._config.max_running_items_per_batch}")
         if max_running > max_live:
             raise ValueError("max_running_items must not exceed max_live_items")
+        if self._classify_submission is not None:
+            await self._classify_submission(request)
+        if not is_ordinary_batch_spec(request.execution_spec):
+            raise ValueError("The host determines the batch execution scope")
         continuation = None
         if request.continuation:
             if self._prepare_continuation is None or self._dispatch_continuation is None:
@@ -342,6 +349,8 @@ class SubagentBatchService:
         )
 
     async def _continue_batch(self, batch, owner):
+        if not is_ordinary_batch_spec(batch.get("execution_spec")):
+            return
         try:
             outcome = await self._dispatch_continuation(batch) if await self._owner_allowed(batch) else {"status": "suppressed"}
             if outcome and outcome.get("status") == "waiting":
@@ -445,8 +454,8 @@ class SubagentBatchService:
     ) -> dict[str, Any] | None:
         if continuation_authority is not _TRUSTED:
             current = await self._repository.get_batch(batch_id, user_id=user_id)
-            if current is None:
-                return None
+            if current is None or current.get("read_only") is True:
+                return current
             if current.get("continuation_status") is not None:
                 if self._cancel_continuation is None:
                     raise ValueError("Automatic follow-up requires an authorized Gateway runtime")
@@ -473,6 +482,8 @@ class SubagentBatchService:
     async def _execute_item(self, item: dict[str, Any], *, lease_owner: str) -> None:
         from deerflow.runtime.customer_administration import DENIED_CUSTOMER_ADMINISTRATION, CustomerManagementActor, bind_customer_administration_policy, bind_customer_management_actor, bind_customer_management_actor_role
 
+        if not is_ordinary_batch_spec(item["batch"].get("execution_spec")):
+            return
         # Durable rows retain no trusted originating management grant. Do not
         # recover one from serialized user_role or an ambient request context.
         with bind_customer_administration_policy(DENIED_CUSTOMER_ADMINISTRATION), bind_customer_management_actor(CustomerManagementActor()), bind_customer_management_actor_role("user"):

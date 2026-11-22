@@ -7,6 +7,7 @@ from typing import Any
 
 from deerflow.config.app_config import AppConfig
 from deerflow.subagents.acceptance_checks import AcceptanceVerdict, check_acceptance_criteria, parse_file_criterion
+from deerflow.subagents.batch_scope import is_ordinary_batch_spec
 from deerflow.subagents.report_contract import normalize_acceptance_criteria
 
 
@@ -32,6 +33,8 @@ async def check_batch_acceptance(
     from deerflow.sandbox.lease import SANDBOX_LEASE_OWNER_CONTEXT_KEY, acquire_sandbox_client_lease, run_sync_lifecycle_operation
     from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
+    if not is_ordinary_batch_spec(batch.get("execution_spec")):
+        raise PermissionError("Personal workspace acceptance is unavailable for this batch scope")
     criteria = await run_sync_lifecycle_operation(normalize_acceptance_criteria, criteria)
     if not criteria:
         return None

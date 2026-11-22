@@ -30,6 +30,7 @@ export type SubagentBatch = {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  read_only?: boolean;
   continuation_status?:
     | "pending"
     | "dispatching"

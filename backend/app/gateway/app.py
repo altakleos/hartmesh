@@ -1172,7 +1172,9 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if batch_repo is not None:
                 from app.subagent_batches.continuation import BatchContinuations
                 from app.subagent_batches.identity import resolve_batch_principal
+                from app.subagent_batches.recovery import recover_unavailable_batches
 
+                await recover_unavailable_batches(batch_repo)
                 continuations = BatchContinuations(app)
                 app.state.batch_continuations = continuations
                 batch_service = SubagentBatchService(
@@ -1181,6 +1183,7 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     runtime_config=subagent_runtime_config,
                     extensions=getattr(app.state, "extensions", None),
                     owner_access=batch_owner_allowed,
+                    classify_submission=continuations.admit_submission,
                     prepare_continuation=continuations.prepare,
                     dispatch_continuation=continuations.dispatch,
                     cancel_continuation=continuations.cancel,

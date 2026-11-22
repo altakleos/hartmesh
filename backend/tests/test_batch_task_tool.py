@@ -87,8 +87,11 @@ async def test_batch_task_is_explicit_idempotent_submission(
         ),
     )
 
+    runtime = _runtime(thread_incarnation)
+    authority = object()
+    runtime.context[tool_module.AGENT_RUNS_CONTEXT_KEY] = authority
     command = await tool_module.batch_task.coroutine(
-        runtime=_runtime(thread_incarnation),
+        runtime=runtime,
         title="Process records",
         items=[
             BatchTaskItem(key="record-1", prompt="Process one"),
@@ -102,6 +105,8 @@ async def test_batch_task_is_explicit_idempotent_submission(
 
     message = _message(command)
     request = submitter.submit.await_args.args[0]
+    assert request.continuation_authority is authority
+    assert tool_module.AGENT_RUNS_CONTEXT_KEY not in request.execution_spec
     assert request.submission_key == "run-1:call-1"
     assert request.execution_spec["mcp_plugins"] == ["stable-plugin"]
     assert request.user_id == "user-1"

@@ -1240,7 +1240,7 @@ class AccountsCommand:
                         continue
                     work.batches[batch_id] = user_id
                     try:
-                        result = await self._batches.cancel_batch(batch_id, user_id=user_id, reason=BATCH_CANCEL_REASON)
+                        result = await self._batches.cancel_batch(batch_id, user_id=user_id, reason=BATCH_CANCEL_REASON, teardown=True)
                     except Exception as exc:  # noqa: BLE001 - one batch that refuses must not hide the others
                         logger.warning("Failed to cancel subagent batch %s: %s", batch_id, exc)
                         work.failed.add(batch_id)

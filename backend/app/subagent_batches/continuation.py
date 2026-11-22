@@ -10,6 +10,7 @@ from deerflow.agents.human_input import extract_unanswered_human_input_request
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.runtime.goal import goal_waits_for_external_result, read_thread_goal
 from deerflow.runtime.runs.schemas import GOAL_RUN_HARD_STOP_REASONS
+from deerflow.subagents.batch_scope import is_ordinary_batch_spec
 
 logger = logging.getLogger(__name__)
 _TRUSTED = object()
@@ -34,6 +35,15 @@ async def _require_ordinary_source(app, record):
 class BatchContinuations:
     def __init__(self, app):
         self.app = app
+
+    async def admit_submission(self, request):
+        # The Gateway installs a SQL-backed binding reader even when managed
+        # storage is off, so a previously bound conversation stays protected.
+        authority = getattr(self.app.state, "agent_conversations", None)
+        if authority is None:
+            raise AgentRunError(503, "The conversation binding cannot be verified")
+        if await authority.binding(request.thread_id) is not None:
+            raise AgentRunError(422, "Background batches are unavailable for instance conversations")
 
     async def prepare(self, request):
         from app.gateway.services import _CONTEXT_CONFIGURABLE_KEYS, _MODEL_SELECTION_CONTEXT_KEYS
@@ -66,6 +76,8 @@ class BatchContinuations:
         }
 
     async def dispatch(self, batch):
+        if not is_ordinary_batch_spec(batch.get("execution_spec")):
+            return {"status": "suppressed"}
         continuation = batch["continuation"]
         try:
             runs = await self.app.state.agent_runs_host.restore_batch_authority(user_id=batch["user_id"], grant=continuation["grant"])

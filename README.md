@@ -4164,6 +4164,14 @@ Snapshots preserve whole excerpts, not freshly fetched provider content. They in
 
 Explicitly enabled nested `task` delegation propagates omitted opaque source IDs in its captured artifact. Each outer report filters and deduplicates those IDs, and independently captured evidence can restore an omitted source. The durable snapshot publishes only the final count. Legacy task artifacts without omission IDs cannot reconstruct earlier forwarding losses; unknown prose citations are not treated as captured evidence.
 
+The ordinary batch worker runs jobs from personal conversations. A conversation
+with an AI assistant or employee uses that agent's workspace and cannot submit
+work to this worker. The assistant describes durable batch tools only when the
+run can use them. At startup, the Gateway cancels unfinished jobs it recognizes
+as bound to an agent, including when the ordinary worker is off. Completed
+item results remain available in Batches. The panel shows unsupported jobs
+read-only and lets the owner inspect or export their results.
+
 The Gateway rechecks a durable batch's owner before dispatch, during execution,
 and before checking output files. Disabled or missing accounts, a reduced role,
 or an unavailable account check cancel the batch; a later promotion does not

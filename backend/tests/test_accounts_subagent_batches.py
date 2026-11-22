@@ -73,11 +73,18 @@ async def create_batch(repo, owner, batch_id="batch-1"):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("state", ["pending", "paused", "leased", "running"])
+@pytest.mark.parametrize("state", ["pending", "paused", "leased", "running", "unknown-scope"])
 async def test_disable_cancels_owned_batches_without_claiming_running_work_stopped(stores, state):
     users, repo, owner, colleague = stores
     await create_batch(repo, owner)
-    if state == "paused":
+    if state == "unknown-scope":
+        from sqlalchemy import update
+
+        from deerflow.persistence.subagent_batches.model import SubagentBatchRow
+
+        async with repo._sf.begin() as session:
+            await session.execute(update(SubagentBatchRow).where(SubagentBatchRow.id == "batch-1").values(execution_spec={"scope": {"version": 8}}))
+    elif state == "paused":
         await repo.pause_batch("batch-1", user_id=str(owner.id))
     elif state in {"leased", "running"}:
         [item] = await repo.claim_items(now=datetime.now(UTC), lease_owner="worker", lease_seconds=60, limit=1)

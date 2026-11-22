@@ -18,10 +18,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
+from test_batch_dependencies import create as create_batch
+from test_batch_dependencies import repo as _batch_repo_fixture
 
 from deerflow.config.storage_spaces_config import StorageSpacesConfig
 from deerflow.config.tenant_bundle import TenantBundleConfig
 from deerflow.config.ui_config import UiConfig
+
+batch_repository = _batch_repo_fixture
 
 
 @asynccontextmanager
@@ -602,7 +606,8 @@ def test_lifespan_preserves_flush_budget_when_retrieval_warm_is_still_running() 
 
 
 @pytest.mark.asyncio
-async def test_lifespan_pins_batch_service_to_app_extensions(monkeypatch):
+@pytest.mark.parametrize("worker_enabled", [False, True])
+async def test_lifespan_recovers_bound_batches_before_starting_the_worker(monkeypatch, worker_enabled, batch_repository):
     import deerflow.extensions as extensions
     from app.gateway.app import lifespan
     from app.subagent_batches.service import batch_owner_allowed
@@ -622,14 +627,25 @@ async def test_lifespan_pins_batch_service_to_app_extensions(monkeypatch):
     startup_config.memory.enabled = False
     startup_config.scheduler.enabled = False
     startup_config.mcp_tasks.enabled = False
-    startup_config.subagent_batches = SubagentBatchesConfig(enabled=True)
+    startup_config.subagent_batches = SubagentBatchesConfig(enabled=worker_enabled)
     startup_config.subagent_runtime = SubagentRuntimeConfig()
     channel_service = MagicMock()
     channel_service.get_status.return_value = {}
 
+    scoped = {"version": 1, "kind": "agent_conversation", "instance_id": "employee", "principal": {"source": "session", "system_role": "user", "oauth_provider": None, "oauth_id": None, "token_version": 1}}
+    items = [{"key": "part", "prompt": "Check the document"}]
+    await create_batch(batch_repository, items, batch_id="bound", submission_key="bound", execution_spec={"scope": scoped})
+    await create_batch(batch_repository, items, batch_id="personal", submission_key="personal", execution_spec={})
+
+    async def check_settled():
+        assert (await batch_repository.get_batch("bound", user_id="owner"))["status"] == "cancelled"
+        assert (await batch_repository.get_batch("personal", user_id="owner"))["status"] == "queued"
+
+    worker_start = AsyncMock(side_effect=check_settled)
+
     @asynccontextmanager
     async def runtime(app, _config):
-        app.state.subagent_batch_repo = object()
+        app.state.subagent_batch_repo = batch_repository
         yield
 
     with (
@@ -641,12 +657,16 @@ async def test_lifespan_pins_batch_service_to_app_extensions(monkeypatch):
         patch("app.channels.service.stop_channel_service", AsyncMock()),
         patch("deerflow.skills.projection.ensure_public_skill_projection"),
         patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
-        patch("deerflow.subagents.batch_service.SubagentBatchService.start", AsyncMock()),
+        patch("deerflow.subagents.batch_service.SubagentBatchService.start", worker_start),
         patch("deerflow.subagents.batch_service.SubagentBatchService.stop", AsyncMock()),
     ):
         async with lifespan(app):
+            await check_settled()
+            assert worker_start.await_count == int(worker_enabled)
+            assert app.state.subagent_batches_available is worker_enabled
             assert app.state.subagent_batch_service._extensions is snapshot
             assert app.state.subagent_batch_service._owner_access is batch_owner_allowed
+            assert app.state.subagent_batch_service._classify_submission == app.state.batch_continuations.admit_submission
 
 
 def _gateway_lifespan_patches(startup_config, *, pool=None, browser_manager=None):
