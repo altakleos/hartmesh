@@ -104,7 +104,7 @@ def is_notice_assignment(context):
     return isinstance(objective, str) and re.fullmatch(r"acceptance:work:notices:[0-9a-f]{32}", objective) is not None
 
 
-def continued_report(messages, latest, token, offered):
+def continued_report(messages, latest, token, offered, user_text):
     """Confirm an actual continued employee run has the published words and file."""
     earlier = messages[:latest]
     soul = "Use the available file tools for the requested report."
@@ -118,10 +118,7 @@ def continued_report(messages, latest, token, offered):
     if len(messages) == latest + 1:
         if "read_file" not in offered:
             raise ValueError("The continued employee cannot read files")
-        content = messages[latest]["content"]
-        if isinstance(content, list):
-            content = "\n".join(block["text"] for block in content if isinstance(block, dict) and block.get("type") == "text")
-        sections = re.findall(r"<current_uploads>(.*?)</current_uploads>", content, re.S)
+        sections = re.findall(r"<current_uploads>(.*?)</current_uploads>", user_text, re.S)
         paths = re.findall(r"^  Path: (.+)$", sections[0], re.M) if len(sections) == 1 else []
         if len(paths) != 1 or not re.fullmatch(r"/mnt/user-data/uploads/acceptance(?: \([2-9][0-9]*\))?\.txt", paths[0]):
             raise ValueError("The continued message did not present the copied report")
@@ -167,9 +164,12 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
         if previous is not None and messages[previous].get("content") == WORK_ACTIVATION:
             latest = previous
             wrap_up = True
-    continuation = re.search(r"\bacceptance:continued-report:([0-9a-f]{32})\b", str(messages[latest].get("content")))
+    user_text = messages[latest].get("content")
+    if isinstance(user_text, list):
+        user_text = "\n".join(block["text"] for block in user_text if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str))
+    continuation = re.search(r"\bacceptance:continued-report:([0-9a-f]{32})\b", user_text) if isinstance(user_text, str) else None
     if continuation:
-        return continued_report(messages, latest, continuation[1], offered)
+        return continued_report(messages, latest, continuation[1], offered, user_text)
     turn = messages[latest:]
     if not turn:
         raise ValueError("missing acceptance turn")
