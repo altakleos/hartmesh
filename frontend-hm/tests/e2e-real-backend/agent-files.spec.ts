@@ -34,7 +34,7 @@ test("a file from the composer and from the Files tab is saved at once with no w
   expect(state.runs).toBe(0);
   expect(state.executionStarts).toEqual([]);
   await detail(page, "files");
-  await page.getByRole("button", { name: "uploads", exact: true }).click();
+  await page.getByRole("button", { name: "Uploads", exact: true }).click();
   await expect(
     page.getByText("note.txt", { exact: true }).first(),
   ).toBeVisible();
@@ -51,9 +51,12 @@ test("an output shows Produced by", async ({ page }) => {
     accessible: true,
   });
   await detail(page, "files");
-  await page.getByRole("button", { name: "outputs", exact: true }).click();
+  await page.getByRole("button", { name: "Outputs", exact: true }).click();
+  await page
+    .getByRole("button", { name: "More actions for report.txt" })
+    .click();
   await expect(
-    page.getByText(/Produced by Researcher on/).first(),
+    page.getByRole("dialog").getByText(/Produced by Researcher on/),
   ).toBeVisible();
 });
 

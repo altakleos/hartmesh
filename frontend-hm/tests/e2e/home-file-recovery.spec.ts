@@ -128,7 +128,7 @@ test("a manager accepts one unfinished Home change and sees refreshed readiness"
   await page.goto(`/workspace/instances?instance=${resident.id}&tab=files`);
   const files = page.getByRole("tabpanel", { name: "Files" });
   await expect(
-    files.getByRole("button", { name: "uploads", exact: true }),
+    files.getByRole("button", { name: "Uploads", exact: true }),
   ).toBeVisible();
   await expect(files.getByText(/saving uploads\/example\.txt/i)).toBeVisible();
   const accept = { name: "Accept the files as they are", exact: true };

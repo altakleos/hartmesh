@@ -82,7 +82,7 @@ for (const inspect of [true, false]) {
       await refreshAccount(page);
       if (inspect) {
         await page
-          .getByRole("button", { name: "outputs", exact: true })
+          .getByRole("button", { name: "Outputs", exact: true })
           .click();
         await expect(
           page.getByText("report.txt", { exact: true }).first(),
