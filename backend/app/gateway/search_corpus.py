@@ -34,6 +34,11 @@ def available_message_search_provider(request):
     if not providers or auth is None or not auth.has_permission("runs", "read"):
         return None
     provider = providers[0][1]
+    if getattr(provider, "requires_relational_history", False) is True:
+        from app.gateway.search_storage import shared_journal
+
+        if not shared_journal(getattr(request.app.state, "thread_store", None), getattr(request.app.state, "run_event_store", None)):
+            return None
     return provider if getattr(provider, "ready", True) is True else None
 
 
@@ -46,10 +51,37 @@ class GatewaySearchCorpus:
         self.request = request
 
     async def threads(self) -> tuple[SearchThread, ...]:
+        from app.gateway.search_storage import can_list_sql, sql_threads
+
+        if can_list_sql(self):
+            return tuple([thread async for thread in sql_threads(self, check_actor=True)])
         return tuple([thread async for thread in self.listed_threads() if await self.owns(thread)])
+
+    async def index_heads(self, threads, *, session=None):
+        from app.gateway.search_storage import index_heads
+
+        return await index_heads(self, threads, session=session)
+
+    async def admit_index_write(self, session, thread):
+        from app.gateway.search_storage import admit_index_write
+
+        return await admit_index_write(self, session, thread)
+
+    async def _evidence_user(self, thread_id):
+        if self.request is None:
+            return self.user_id
+        from app.gateway.agent_conversations import evidence_user_id
+
+        return await evidence_user_id(self.request, thread_id, self.user_id)
 
     async def listed_threads(self):
         """List store-scoped candidates. The caller checks selected hits before disclosure."""
+        from app.gateway.search_storage import can_list_sql, sql_threads
+
+        if can_list_sql(self):
+            async for thread in sql_threads(self, check_actor=False):
+                yield thread
+            return
         offset = 0
         while True:
             rows = await self.thread_store.search(user_id=self.user_id, limit=200, offset=offset)
@@ -123,9 +155,15 @@ class GatewaySearchCorpus:
     async def revision(self, thread: SearchThread) -> str | None:
         if not await self.owns(thread):
             return None
+        try:
+            user_id = await self._evidence_user(thread.thread_id)
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                return None
+            raise
         await self.seed_legacy_history(thread)
-        latest = await self.event_store.list_messages(thread.thread_id, limit=1, user_id=self.user_id)
-        hidden = await default_history_hidden_run_ids(self.run_manager, thread.thread_id, user_id=self.user_id)
+        latest = await self.event_store.list_messages(thread.thread_id, limit=1, user_id=user_id)
+        hidden = await default_history_hidden_run_ids(self.run_manager, thread.thread_id, user_id=user_id)
         if not await self.owns(thread):
             return None
         revision = [thread.incarnation, thread.updated_at, latest[-1]["seq"] if latest else 0, sorted(hidden)]
@@ -143,6 +181,8 @@ class GatewaySearchCorpus:
     async def messages(self, thread: SearchThread, *, before_seq: int | None) -> SearchMessagePage:
         if not await self.owns(thread):
             return SearchMessagePage()
+        if before_seq is None:
+            await self.seed_legacy_history(thread)
         rows, more = await self._page(thread.thread_id, limit=200, before_seq=before_seq)
         if not await self.owns(thread):
             return SearchMessagePage()
@@ -150,11 +190,17 @@ class GatewaySearchCorpus:
         return SearchMessagePage(items, rows[0]["seq"] if more else None)
 
     async def _page(self, thread_id: str, *, limit: int, before_seq=None, after_seq=None):
+        try:
+            user_id = await self._evidence_user(thread_id)
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                return [], False
+            raise
         return await read_visible_message_page(
             event_store=self.event_store,
             run_manager=self.run_manager,
             thread_id=thread_id,
-            user_id=self.user_id,
+            user_id=user_id,
             limit=limit,
             before_seq=before_seq,
             after_seq=after_seq,
@@ -180,7 +226,7 @@ class GatewaySearchCorpus:
         # Recheck ownership/incarnation after the asynchronous history reads.
         if not await self.owns(thread):
             return None
-        return {"data": older + [target] + newer, "target_seq": seq, "has_before": has_before, "has_after": has_after}
+        return {"incarnation": thread.incarnation, "data": older + [target] + newer, "target_seq": seq, "has_before": has_before, "has_after": has_after}
 
     async def latest_rows(self, thread_id: str) -> list[dict]:
         latest = {}
@@ -195,14 +241,24 @@ class GatewaySearchCorpus:
         return sorted(latest.values(), key=lambda row: row["seq"])
 
     async def latest_message(self, thread: SearchThread, message_id: str) -> SearchMessage | None:
+        return (await self.latest_messages(thread, {message_id})).get(message_id)
+
+    async def latest_messages(self, thread: SearchThread, message_ids: set[str]) -> dict[str, SearchMessage]:
+        """Resolve current versions from the authoritative feed once per thread."""
         if not await self.owns(thread):
-            return None
+            return {}
+        remaining = {f"message:{message_id}" for message_id in message_ids}
+        found = {}
         before = None
-        while True:
+        while remaining:
             rows, more = await self._page(thread.thread_id, limit=200, before_seq=before)
             for row in reversed(rows):
-                if message_identity(row["content"]) == f"message:{message_id}":
-                    return self.project(thread, row) if await self.owns(thread) else None
+                identity = message_identity(row["content"])
+                if identity in remaining:
+                    remaining.remove(identity)
+                    if message := self.project(thread, row):
+                        found[message.message_id] = message
             if not more:
-                return None
+                break
             before = rows[0]["seq"]
+        return found if await self.owns(thread) else {}

@@ -1416,6 +1416,25 @@ class AccountsCommand:
             )
         return document
 
+    @staticmethod
+    async def _purge_released_search_rows(session, account_id, assistant_ids):
+        """The offline command and the Gateway serialize on the seat and assistant parents."""
+        from sqlalchemy import column, delete, inspect, or_, select, table
+
+        from deerflow.persistence.agent_instances.model import AgentConversationRow
+        from deerflow.persistence.thread_meta.model import ThreadMetaRow
+
+        connection = await session.connection()
+        ordinary = select(ThreadMetaRow.thread_id).where(
+            ThreadMetaRow.user_id == account_id,
+            ~select(AgentConversationRow.thread_id).where(AgentConversationRow.thread_id == ThreadMetaRow.thread_id).exists(),
+        )
+        personal = select(AgentConversationRow.thread_id).where(AgentConversationRow.instance_id.in_(assistant_ids))
+        for name in ("hm_message_search_words", "hm_message_search_threads"):
+            if await connection.run_sync(lambda sync, name=name: inspect(sync).has_table(name)):
+                index = table(name, column("thread_id"))
+                await session.execute(delete(index).where(or_(index.c.thread_id.in_(ordinary), index.c.thread_id.in_(personal))))
+
     async def release_seat(self, identity, account):
         """Retain account rows; host cleanup empties the marked Space in a later pass."""
         from sqlalchemy import select
@@ -1481,6 +1500,7 @@ class AccountsCommand:
                 if space is not None:
                     space.status = "deleted"
                     SpaceRecovery._advance(session, space, PrincipalRef("human", account_id), "delete", {"retained_backups": False, "retained_binding": True, "by": "host", "cause": "seat-released"})
+            await self._purge_released_search_rows(session, account_id, list(homes))
             for assistant in assistants:
                 if assistant.home_id is None:
                     if assistant.status != "provisioning":

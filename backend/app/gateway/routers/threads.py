@@ -938,16 +938,20 @@ async def _delete_thread_data_impl(thread_id: str, request: Request, *, native_r
     except Exception:
         logger.debug("Could not evict in-memory runs for thread %s (not critical)", sanitize_log_param(thread_id))
 
-    # Remove persisted run events (best-effort). These are the user-visible
-    # conversation history, not a cache: leaving them behind makes a deleted
-    # thread's feed readable again through GET /threads/{id}/messages. A legacy
-    # store that predates the owner-scoped signature is still called, with the
-    # old contract.
+    # History is authoritative. Once this step succeeds the SQL foreign key
+    # has also removed every corresponding message-search row.
+    from deerflow.runtime.events.store.db import DbRunEventStore
+
     try:
-        delete_events = get_run_event_store(request).delete_by_thread
-        await delete_events(thread_id, **_event_delete_owner_kwargs(delete_events, user_id))
-    except Exception:
-        logger.debug("Could not delete run events for thread %s (not critical)", sanitize_log_param(thread_id))
+        events = get_run_event_store(request)
+        if getattr(type(events), "delete_by_thread", None) is DbRunEventStore.delete_by_thread:
+            await events.delete_by_thread(thread_id, user_id=user_id, require_complete=True)
+        else:
+            delete_events = events.delete_by_thread
+            await delete_events(thread_id, **_event_delete_owner_kwargs(delete_events, user_id))
+    except Exception as exc:
+        logger.exception("Failed to delete conversation history for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(500, "Failed to delete thread history.") from exc
 
     # Remove persisted feedback best-effort. This cleans existing rows; fencing
     # already-admitted writes across thread deletion is a separate lifecycle

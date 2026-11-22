@@ -1,0 +1,17 @@
+[project]
+name = "hartmesh-message-search"
+version = "0.1.0"
+description = "Search visible conversation messages using PostgreSQL"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["deerflow-extension-api>=0.2.13,<0.3", "sqlalchemy[asyncio]>=2,<3"]
+
+[project.entry-points."deerflow.extensions"]
+message-search = "hartmesh_message_search:install"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["hartmesh_message_search"]

@@ -557,4 +557,8 @@ Installed packages may ship bounded public `deerflow-extension.json` usage. Read
 only beside the already imported entry point; malformed optional documentation
 is attributed without removing otherwise valid contributions. Never project
 private deployment configuration. The generic registry allows one optional async
-workspace search provider; it must retain the host-bound owner/scope contract.
+workspace search provider. Its candidates require the host's current visible-message check.
+The optional PostgreSQL message index verifies both cascading keys and its
+source-deletion trigger before each write. The trigger invalidates conversation
+coverage inside an event deletion, including when a previous Gateway deletes a
+visible revision. Host SQL admission serializes index writes with seat release. Keep the provider's package and the deployment's activation entry independently selectable.

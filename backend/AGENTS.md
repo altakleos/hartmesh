@@ -209,6 +209,10 @@ Per-service commands and the frontend's backend URL variables:
 
 ## Key Features
 
+### Conversation search
+
+The durable message provider uses the host SQL journal. Search and message context use the same visible transcript and current Inspect authority as the conversation. Search rechecks each hit before disclosure. Hold the agent parent and reader's seat through each index write so offline seat release can purge the derived rows atomically. Keep the optional PostgreSQL package and its storage lifecycle in `extensions/sources/hartmesh-message-search/`.
+
 ### Web Search Recency
 
 Optional `web_search` `time_range=day|week|month|year` mappings:

@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import logging
+from collections import defaultdict
 from dataclasses import asdict
 from typing import Literal
 
@@ -114,7 +115,8 @@ async def search_workspace(body: WorkspaceSearchRequest, request: Request):
     async def admitted_response():
         # A provider/history read can yield while an instance's Inspect grant
         # is revoked. Recheck titles and message snippets at the response edge.
-        response["items"] = [item for item in response["items"] if await corpus.owns(lookup[item["thread_id"]])]
+        admitted = {thread_id for thread_id in dict.fromkeys(item["thread_id"] for item in response["items"]) if await corpus.owns(lookup[thread_id])}
+        response["items"] = [item for item in response["items"] if item["thread_id"] in admitted]
         return response
 
     def thread_hit(thread):
@@ -176,12 +178,17 @@ async def search_workspace(body: WorkspaceSearchRequest, request: Request):
             logger.exception("Workspace search provider failed")
             raise HTTPException(503, "Message search is temporarily unavailable") from None
         response["indexing"] = page.indexing
+        requested = defaultdict(set)
         for candidate in page.items:
             thread = lookup.get(candidate.thread_id)
-            if thread is None or candidate.incarnation != thread.incarnation or not await corpus.owns(thread):
+            if thread is not None and candidate.incarnation == thread.incarnation:
+                requested[thread.thread_id].add(candidate.message_id)
+        current_by_thread = {tid: await corpus.latest_messages(lookup[tid], ids) for tid, ids in requested.items()}
+        for candidate in page.items:
+            thread = lookup.get(candidate.thread_id)
+            if thread is None or candidate.incarnation != thread.incarnation:
                 continue
-            # Re-read authoritative visible text before returning ANY snippet.
-            current = await corpus.latest_message(thread, candidate.message_id)
+            current = current_by_thread[thread.thread_id].get(candidate.message_id)
             if current is None or current.seq != candidate.seq or query.casefold() not in current.text.casefold():
                 continue
             hit = thread_hit(thread)
@@ -207,7 +214,7 @@ async def message_context(thread_id: ThreadId, request: Request, message_id: str
     if window is None:
         raise HTTPException(404, "Message is unavailable")
     thread = await corpus.thread(thread_id)
-    if thread is None:
+    if thread is None or thread.incarnation != window.pop("incarnation"):
         raise HTTPException(404, "Message is unavailable")
     messages = [asdict(message) for row in window.pop("data") if (message := corpus.project(thread, row)) is not None]
     return {**window, "messages": messages}

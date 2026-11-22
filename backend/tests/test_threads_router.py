@@ -35,6 +35,7 @@ from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMeta
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.goal import build_goal_outcome, build_goal_state, write_thread_goal
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.uploads.companions import companion_names, register_companion, resolve_companion
@@ -100,6 +101,7 @@ def _build_thread_app() -> tuple[FastAPI, InMemoryStore, InMemorySaver]:
     app.state.store = store
     app.state.checkpointer = checkpointer
     app.state.run_manager = _ThreadTestRunManager()
+    app.state.run_event_store = MemoryRunEventStore()
     app.state.thread_store = _PermissiveThreadMetaStore(store)
     app.include_router(threads.router)
     return app, store, checkpointer
@@ -542,6 +544,7 @@ def test_delete_thread_route_cleans_thread_directory(tmp_path):
 
     app = make_authed_test_app(user_factory=lambda: owner, bind_current_user=True)
     app.state.run_manager = _ThreadTestRunManager()
+    app.state.run_event_store = MemoryRunEventStore()
     app.include_router(threads.router)
 
     with patch("app.gateway.routers.threads.get_paths", return_value=paths):
@@ -560,6 +563,7 @@ def test_delete_thread_route_closes_browser_session(tmp_path):
 
     app = make_authed_test_app()
     app.state.run_manager = _ThreadTestRunManager()
+    app.state.run_event_store = MemoryRunEventStore()
     app.include_router(threads.router)
 
     manager = SimpleNamespace(close_session=AsyncMock(return_value=True))
@@ -587,6 +591,7 @@ def test_delete_thread_route_closes_mcp_sessions(tmp_path):
 
     app = make_authed_test_app(user_factory=lambda: owner, bind_current_user=True)
     app.state.run_manager = _ThreadTestRunManager()
+    app.state.run_event_store = MemoryRunEventStore()
     app.include_router(threads.router)
 
     pool = SimpleNamespace(close_thread_scope=AsyncMock(return_value=None))
@@ -615,6 +620,7 @@ def test_delete_thread_route_isolates_failing_mcp_cleanup(tmp_path):
 
     app = make_authed_test_app()
     app.state.run_manager = _ThreadTestRunManager()
+    app.state.run_event_store = MemoryRunEventStore()
     app.include_router(threads.router)
 
     pool = SimpleNamespace(close_thread_scope=AsyncMock(side_effect=RuntimeError("simulated MCP teardown failure")))
@@ -5215,6 +5221,7 @@ def _build_project_threads_app(tmp_path) -> FastAPI:
     app.state.project_repo = ProjectRepository(session_factory)
     app.state.checkpointer = InMemorySaver()
     app.state.run_manager = _ThreadTestRunManager()
+    app.state.run_event_store = MemoryRunEventStore()
     app.include_router(threads.router)
     return app
 
@@ -5663,6 +5670,7 @@ def _unread_app(tmp_path, *, owner_check_passes: bool = True):
     app.state.store = store
     app.state.checkpointer = InMemorySaver()
     app.state.run_manager = _ThreadTestRunManager()
+    app.state.run_event_store = MemoryRunEventStore()
     app.state.thread_store = _PermissiveThreadMetaStore(store)
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'unread.db'}")
 
@@ -5793,3 +5801,57 @@ def test_delete_thread_route_keeps_owner_row_when_checkpoint_delete_fails(tmp_pa
         assert retried.status_code == 200, retried.text
         assert anyio.run(lambda: checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})) is None
         assert client.get(f"/api/threads/{thread_id}", headers=other).status_code == 404
+
+
+def test_delete_reports_event_failure_and_allows_retry_with_original_ownership(tmp_path):
+    app = _build_project_threads_app(tmp_path)
+    events = SimpleNamespace(delete_by_thread=AsyncMock(side_effect=[RuntimeError("failed write"), 1]))
+    app.state.run_event_store = events
+    owner = {"x-test-user": "user-a"}
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)), TestClient(app) as client:
+        thread_id = client.post("/api/threads", json={}, headers=owner).json()["thread_id"]
+        failed = client.delete(f"/api/threads/{thread_id}", headers=owner)
+        assert failed.status_code == 500
+        assert anyio.run(lambda: app.state.thread_store.check_access(thread_id, "user-a", require_existing=True))
+        retried = client.delete(f"/api/threads/{thread_id}", headers=owner)
+        assert retried.status_code == 200
+        assert events.delete_by_thread.await_count == 2
+
+
+def test_deleting_owned_conversation_removes_differently_attributed_events(tmp_path):
+    from deerflow.runtime.events.store.db import DbRunEventStore
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+    app = _build_project_threads_app(tmp_path)
+    events = DbRunEventStore(get_session_factory())
+    app.state.run_event_store = events
+    owner = {"x-test-user": "user-a"}
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)), TestClient(app) as client:
+        thread_id = client.post("/api/threads", json={}, headers=owner).json()["thread_id"]
+
+        async def write():
+            token = set_current_user(SimpleNamespace(id="user-b"))
+            try:
+                await events.put(thread_id=thread_id, run_id="other-run", event_type="message", category="message", content={"type": "ai", "id": "a", "content": "answer"})
+            finally:
+                reset_current_user(token)
+
+        anyio.run(write)
+        assert client.delete(f"/api/threads/{thread_id}", headers={"x-test-user": "user-b"}).status_code == 404
+        assert len(anyio.run(lambda: events.list_messages(thread_id, user_id=None))) == 1
+        assert client.delete(f"/api/threads/{thread_id}", headers=owner).status_code == 200
+        assert anyio.run(lambda: events.list_messages(thread_id, user_id=None)) == []
+
+
+def test_conversation_delete_accepts_relational_subclass_with_legacy_signature(tmp_path):
+    from deerflow.runtime.events.store.db import DbRunEventStore
+
+    class LegacyJournal(DbRunEventStore):
+        async def delete_by_thread(self, thread_id):
+            self.deleted = thread_id
+
+    events = LegacyJournal(None)
+    app = _persistence_cleanup_app(tmp_path, run_store=SimpleNamespace(), event_store=events, feedback_repo=None)
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)), TestClient(app) as client:
+        assert client.delete("/api/threads/legacy-journal").status_code == 200
+    assert events.deleted == "legacy-journal"

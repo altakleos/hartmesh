@@ -1,0 +1,6 @@
+name: message-search
+package: hartmesh-message-search
+use: hartmesh_message_search:install
+table_prefix: hm_message_search_
+enabled: true
+required: false

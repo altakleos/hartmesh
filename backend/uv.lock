@@ -935,6 +935,7 @@ dev = [
 ]
 extensions = [
     { name = "hartmesh-legacy-report" },
+    { name = "hartmesh-message-search" },
     { name = "hartmesh-office-preview" },
 ]
 
@@ -993,12 +994,13 @@ dev = [
 ]
 extensions = [
     { name = "hartmesh-legacy-report", directory = "extensions/sources/hartmesh-legacy-report" },
+    { name = "hartmesh-message-search", directory = "extensions/sources/hartmesh-message-search" },
     { name = "hartmesh-office-preview", directory = "extensions/sources/hartmesh-office-preview" },
 ]
 
 [[package]]
 name = "deerflow-extension-api"
-version = "0.2.12"
+version = "0.2.13"
 source = { editable = "packages/extension-api" }
 
 [[package]]
@@ -1724,6 +1726,21 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "deerflow-extension-api", specifier = ">=0.2.5,<0.3" }]
+
+[[package]]
+name = "hartmesh-message-search"
+version = "0.1.0"
+source = { directory = "extensions/sources/hartmesh-message-search" }
+dependencies = [
+    { name = "deerflow-extension-api" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "deerflow-extension-api", specifier = ">=0.2.13,<0.3" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2,<3" },
+]
 
 [[package]]
 name = "hartmesh-office-preview"
