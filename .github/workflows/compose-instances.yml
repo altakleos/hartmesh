@@ -18,6 +18,10 @@ on:
       frontend_image:
         description: Signed frontend digest required for connection qualification
         type: string
+      verify_shared_snapshots:
+        description: Interrupt and recover all three publications in a shared conversation
+        type: boolean
+        default: false
       verify_file_browser:
         description: Qualify the managed workspace browser and a lost upload using both source-built or both signed images
         type: boolean
@@ -28,7 +32,7 @@ on:
         default: false
 
 concurrency:
-  group: compose-instances-${{ github.event.pull_request.number || github.ref }}${{ inputs.verify_file_browser && '-file-browser' || '' }}
+  group: compose-instances-${{ github.event.pull_request.number || github.ref }}${{ inputs.verify_file_browser && '-file-browser' || '' }}${{ inputs.verify_shared_snapshots && '-shared-snapshots' || '' }}
   cancel-in-progress: true
 
 permissions:
@@ -41,7 +45,7 @@ jobs:
     name: Storage and agents in the Compose bundle (Linux Docker)
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-26.04
-    timeout-minutes: ${{ (inputs.verify_file_browser || inputs.verify_home_rollback || (github.event_name == 'workflow_dispatch' && inputs.connections != 'skip')) && 110 || 60 }}
+    timeout-minutes: ${{ (inputs.verify_file_browser || inputs.verify_shared_snapshots || inputs.verify_home_rollback || (github.event_name == 'workflow_dispatch' && inputs.connections != 'skip')) && 110 || 60 }}
     env:
       C: docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env
       EVIDENCE: ${{ github.workspace }}/bundle-evidence
@@ -58,6 +62,21 @@ jobs:
         run: |
           test "$CONNECTIONS" = skip && test "$HOME_ROLLBACK" = false
           test -n "$BACKEND" || test -z "$FRONTEND"
+
+      - name: Check snapshot qualification mode
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_shared_snapshots
+        env:
+          CONNECTIONS: ${{ inputs.connections }}
+          HOME_ROLLBACK: ${{ inputs.verify_home_rollback }}
+          FILE_BROWSER: ${{ inputs.verify_file_browser }}
+          FRONTEND: ${{ inputs.frontend_image }}
+          BACKEND: ${{ inputs.backend_image }}
+        run: |
+          test "$CONNECTIONS" = skip && test "$HOME_ROLLBACK" = false && test "$FILE_BROWSER" = false && test -z "$FRONTEND"
+          if [ -z "$BACKEND" ]; then
+            echo "SNAPSHOT_BACKEND_REVISION=$GITHUB_SHA" >> "$GITHUB_ENV"
+            echo "SNAPSHOT_QUALIFICATION_MODE=source" >> "$GITHUB_ENV"
+          fi
 
       - name: 1 Require Docker Engine 28 or later
         run: |
@@ -135,8 +154,21 @@ jobs:
           cat "$EVIDENCE/backend-tools.txt"
 
       - name: Install crane for signed candidates
-        if: github.event_name == 'workflow_dispatch' && (inputs.connections != 'skip' || (inputs.verify_file_browser && inputs.backend_image != ''))
+        if: github.event_name == 'workflow_dispatch' && (inputs.connections != 'skip' || ((inputs.verify_file_browser || inputs.verify_shared_snapshots) && inputs.backend_image != ''))
         uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+
+      - name: Verify the signed snapshot backend
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_shared_snapshots && inputs.backend_image != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BACKEND: ${{ inputs.backend_image }}
+        run: |
+          image=$(grep -Ex 'ghcr\.io/altakleos/hartmesh-backend@sha256:[0-9a-f]{64}' deploy/compose/images.txt)
+          test "$BACKEND" = "$image" && grep -Fq "image: $image" deploy/compose/compose.yaml
+          python3 scripts/release_artifacts.py verify-candidate --repository "$GITHUB_REPOSITORY" --version "$(jq -r .version frontend-hm/package.json)" --component backend --image "$image" --revision "$GITHUB_SHA"
+          revision=$(crane config --platform linux/amd64 "$image" | jq -er '.config.Labels["org.opencontainers.image.revision"]')
+          echo "SNAPSHOT_BACKEND_REVISION=$revision" >> "$GITHUB_ENV"
+          echo "SNAPSHOT_QUALIFICATION_MODE=signed" >> "$GITHUB_ENV"
 
       - name: Verify connection candidate images
         if: github.event_name == 'workflow_dispatch' && inputs.connections != 'skip'
@@ -320,7 +352,7 @@ jobs:
           tail -n 1 "$EVIDENCE/prepare-again.json" | jq -e '.command == "prepare" and .returncode == 0 and .verdict == "nothing-to-do" and (.prepared_now | add) == 0 and .prepared == {"user": 3, "assistant": 3, "employee": 2, "company": 1} and .fstab.changed == false and (.problems | length) == 0'
 
       - name: 13 Run the acceptance tests
-        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser)
+        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots)
         working-directory: backend
         run: |
           env PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 \
@@ -374,8 +406,24 @@ jobs:
           assert not tree.findall(".//failure") and not tree.findall(".//error")
           PY
 
+      - name: Recover each interrupted snapshot publication
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_shared_snapshots
+        env:
+          HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
+          HARTMESH_VERIFY_SHARED_SNAPSHOTS: '1'
+          HARTMESH_BUNDLE_URL: http://localhost:2026
+          HARTMESH_BUNDLE_PROJECT_DIR: /opt/hartmesh
+          HARTMESH_BUNDLE_ENV_FILE: /srv/hartmesh/.env
+          HARTMESH_BUNDLE_ADMIN_EMAIL: admin@example.com
+          HARTMESH_BUNDLE_ADMIN_PASSWORD: 'Acceptance-Admin-2026!'
+          HARTMESH_BUNDLE_RUNTIME: hartmesh-ci
+        working-directory: backend
+        run: |
+          PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 .venv/bin/python -m pytest tests/test_compose_snapshot_publications.py -q --tb=short --maxfail=1 --junitxml="$EVIDENCE/snapshot-publications.xml"
+          jq -e --arg image "$BACKEND_REF" --arg mode "$SNAPSHOT_QUALIFICATION_MODE" --arg rev "$SNAPSHOT_BACKEND_REVISION" '.backend.ref == $image and .mode == $mode and .revision == $rev and .pending_after == 0 and .retried_without_duplicates and .continuation.file_count == 1 and .continuation.seed_count == .visible_messages and .continuation.artifact_sha256 == .operations[0].sha256 and (.operations | length) == 3 and all(.operations[]; .settled == "complete|host-reconciled" and .publication_order == "fact-before-name")' "$EVIDENCE/snapshot-publications.json"
+
       - name: Qualify interrupted Shared operations
-        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser)
+        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots)
         env:
           HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
           HARTMESH_BUNDLE_URL: http://localhost:2026
@@ -399,7 +447,7 @@ jobs:
           sudo python3 ../docker/acceptance/mounted_devices.py after-gateway --previous "$EVIDENCE/mounted-devices-before.json" > "$EVIDENCE/mounted-devices-after-gateway.json"
 
       - name: Measure Home settlement and the first fresh answer
-        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser)
+        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots)
         env:
           HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
           HARTMESH_BUNDLE_URL: http://localhost:2026
@@ -462,7 +510,7 @@ jobs:
           PY
 
       - name: Observe manager acceptance during the last model call
-        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser)
+        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots)
         working-directory: backend
         env:
           HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
@@ -542,7 +590,7 @@ jobs:
 
       - name: 14 Check that the stack stops cleanly
         env:
-          SHARED_MEASURED: ${{ github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser) }}
+          SHARED_MEASURED: ${{ github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots) }}
         run: |
           $C logs --no-color > "$EVIDENCE/compose-before-down.log" 2>&1
           $C ps -a > "$EVIDENCE/services-before-down.txt"
