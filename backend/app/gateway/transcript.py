@@ -239,7 +239,7 @@ def weave(feed: list[dict[str, Any]], checkpoint: list[dict[str, Any]]) -> list[
     return woven
 
 
-async def read_conversation(scope: Any, thread_id: str, record: dict[str, Any] | None, *, user_id: str | None, visible_runs: set[str] | None = None) -> Conversation | None:
+async def read_conversation(scope: Any, thread_id: str, record: dict[str, Any] | None, *, user_id: str | None, visible_runs: set[str] | None = None, visible_human_runs: set[str] | None = None) -> Conversation | None:
     """The conversation as the page draws it; ``None`` when nothing was recorded.
 
     ``scope`` needs only ``app``. ``record`` is the thread's row: its agent
@@ -248,9 +248,12 @@ async def read_conversation(scope: Any, thread_id: str, record: dict[str, Any] |
 
     def observe(run_id, message):
         if message.get("type") in {"ai", "human"} and is_visible(message) and visible_text(message):
-            visible_runs.add(run_id)
+            if visible_runs is not None:
+                visible_runs.add(run_id)
+            if visible_human_runs is not None and message.get("type") == "human":
+                visible_human_runs.add(run_id)
 
-    feed = await feed_messages(get_run_event_store(scope), get_run_manager(scope), thread_id, user_id=user_id, **({"observe": observe} if visible_runs is not None else {}))
+    feed = await feed_messages(get_run_event_store(scope), get_run_manager(scope), thread_id, user_id=user_id, **({"observe": observe} if visible_runs is not None or visible_human_runs is not None else {}))
     from app.gateway.agent_conversations import inspection_for_read
 
     inspection = await inspection_for_read(scope, thread_id, user_id=user_id)

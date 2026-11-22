@@ -23,6 +23,48 @@ export function useSnapshotCopy() {
       zh
         ? `${company ?? "公司"}的所有人及其助手都可以阅读此副本及其文件。`
         : `Everyone at ${company ?? "the company"} and their assistants can read this copy and its files.`,
+    needInspect: (supervisor: string) =>
+      zh
+        ? `分享还需要“可查看所有工作”权限。请联系${supervisor}。`
+        : `Sharing also requires “Can see all work”. Ask ${supervisor}.`,
+    needManager: (name: string, supervisor: string) =>
+      zh
+        ? `只有能管理${name}的人可以分享此对话。请联系${supervisor}。`
+        : `Only someone who can manage ${name} can share this conversation. Ask ${supervisor}.`,
+    after: (company: string | null) =>
+      zh
+        ? `分享后，${company ?? "公司"}中可读取公司共享区的所有人及其助手都能阅读这些消息并打开文件。`
+        : `After sharing, everyone with access to Company shared at ${company ?? "the company"}, and their assistants, can read these messages and open these files.`,
+    currentAudience: (
+      name: string,
+      starter: string | null,
+      starterCanRead: boolean,
+      inspect: number,
+      chat: number,
+    ) => {
+      const reader = starter
+        ? zh
+          ? `发起人（${starter}）`
+          : `the conversation starter (${starter})`
+        : zh
+          ? "发起人"
+          : "the conversation starter";
+      return zh
+        ? `目前，可查看${name}所有工作的成员（${inspect} 人）能阅读消息并打开文件。${starterCanRead ? reader + "也能阅读这些消息。" : ""}可与${name}对话的成员（${chat} 人）可以向其询问文件内容。`
+        : `Today people who can see all of ${name}’s work (${inspect}) can read the messages and open the files.${starterCanRead ? " " + reader.charAt(0).toUpperCase() + reader.slice(1) + " can read the messages." : ""} People who can chat with ${name} (${chat}) can ask about the files’ contents.`;
+    },
+    authors: (names: string[]) =>
+      zh
+        ? `消息作者：${names.join("、")}`
+        : `Messages written by ${names.join(", ")}.`,
+    currentFiles: (name: string) =>
+      zh
+        ? `以下文件按${name}的文件区中当前版本分享。未作为结果提供的附件仍留在该文件区。`
+        : `The listed files are shared as they are now in ${name}’s files. Attachments that were never presented remain in that file area.`,
+    acknowledge: (company: string | null) =>
+      zh
+        ? `我确认${company ?? "公司"}中可读取公司共享区的所有人都能阅读这些消息和文件。`
+        : `I understand that everyone with access to Company shared at ${company ?? "the company"} will be able to read these messages and files.`,
     freeze: zh
       ? "仅分享当前可见的消息和对话中提供的文件。后续消息、工具步骤以及未作为结果提供的附件不会被包含。"
       : "This copy includes the visible messages and the files presented in the conversation. Later messages, tool steps and attachments that were never presented stay out.",
@@ -121,6 +163,10 @@ export function useSnapshotCopy() {
               return zh
                 ? "请等待当前轮次结束后再分享。"
                 : "Finish the current turn before sharing.";
+            case "snapshot-acknowledgement-required":
+              return zh
+                ? "请确认谁将能够阅读这些消息和文件。"
+                : "Confirm who will be able to read these messages and files.";
             case "snapshot-changed":
               return zh
                 ? "对话已更改，请重新确认。"

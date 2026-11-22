@@ -452,7 +452,7 @@ class AgentConversations:
 
         return _bridge(execution.owner_loop, self.context_admission(execution, mark_memory=True))
 
-    async def admit_file_export(self, session, inspection, home_generation):
+    async def admit_file_export(self, session, inspection, home_generation, *, manage=False):
         """Fresh human inspection while the source Home's READ/EXPORT transaction is held."""
         thread = await session.get(ThreadMetaRow, inspection.thread_id, with_for_update=True)
         instance = await session.get(AgentInstanceRow, inspection.instance.id, with_for_update=True)
@@ -473,6 +473,7 @@ class AgentConversations:
             or type(grant.permissions) is not int
             or not 1 <= grant.permissions <= 7
             or not grant.permissions & int(AgentPermission.INSPECT)
+            or (manage and (not grant.permissions & int(AgentPermission.MANAGE) or instance.name != inspection.instance.name or instance.custody != inspection.instance.custody))
         ):
             raise AgentDenied("Agent output is unavailable")
         await self.instances._human(inspection.requester, session=session)

@@ -103,7 +103,7 @@ class FileBrowserFeature(BaseModel):
 
 class SharedConversationsFeature(BaseModel):
     version: Literal[1] = 1
-    operations: list[Literal["read", "publish", "continue"]] = Field(default_factory=lambda: ["read", "publish", "continue"])
+    operations: list[Literal["read", "publish", "continue", "agent_publish"]] = Field(default_factory=lambda: ["read", "publish", "continue"])
 
 
 class BrowserControlFeature(BaseModel):
@@ -306,12 +306,16 @@ async def list_features(request: Request, response: Response, config: AppConfig 
         support = ProviderSupport(display_name=bundle.provider_name, support_url=bundle.support_url)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
     storage, accounts, instances = await _storage_features(request, config)
+    sharing = SharedConversationsFeature()
+    if instances.enabled:
+        sharing.operations.append("agent_publish")
     try:
         people_search = "exact" if await run_file_io(local_registration_open) else "prefix"
     except Exception:
         logger.exception("People-search availability could not be read")
         people_search = "exact"
     return FeaturesResponse(
+        shared_conversations=sharing,
         file_browser=FileBrowserFeature.for_storage(storage, instances),
         storage_spaces=storage,
         accounts=accounts,

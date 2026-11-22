@@ -1,8 +1,17 @@
 import type { FeaturesResponse } from "@/core/features/api";
 import type { ImportReceipt } from "@/core/threads/conversation-file-import";
 
-export type SharingOperation = "read" | "publish" | "continue";
-const operations: SharingOperation[] = ["read", "publish", "continue"];
+export type SharingOperation =
+  | "read"
+  | "publish"
+  | "continue"
+  | "agent_publish";
+const operations: SharingOperation[] = [
+  "read",
+  "publish",
+  "continue",
+  "agent_publish",
+];
 export function sharedConversationOperations(
   features: Pick<FeaturesResponse, "shared_conversations">,
 ) {
@@ -42,13 +51,48 @@ export interface RetiredSnapshot {
   publisher: string | null;
   published_at: string;
 }
+export type SnapshotOrigin = NonNullable<Snapshot["with"]>;
+export interface SnapshotAudience {
+  starter: string | null;
+  starter_can_read: boolean;
+  authors: string[];
+  inspect_count: number;
+  chat_count: number;
+}
+
 export interface SnapshotDraft {
+  with?: SnapshotOrigin;
+  audience?: SnapshotAudience;
   title: string;
   snapshot: string;
   message_count: number;
   files: SnapshotFile[];
   already_shared: boolean;
   publication_id: string | null;
+}
+export function reviewedAgentAudience(
+  draft: SnapshotDraft | undefined,
+  instanceId: string,
+) {
+  const a = draft?.audience;
+  if (
+    !a ||
+    draft?.with?.id !== instanceId ||
+    !["assistant", "employee"].includes(draft.with.kind) ||
+    typeof draft.with.name !== "string" ||
+    !draft.with.name.trim() ||
+    !/^[0-9a-f]{64}$/.test(draft.snapshot) ||
+    !(a.starter === null || typeof a.starter === "string") ||
+    typeof a.starter_can_read !== "boolean" ||
+    !Array.isArray(a.authors) ||
+    !a.authors.every((n) => typeof n === "string") ||
+    !Number.isSafeInteger(a.inspect_count) ||
+    a.inspect_count < 0 ||
+    !Number.isSafeInteger(a.chat_count) ||
+    a.chat_count < 0
+  )
+    return null;
+  return a;
 }
 export interface PublishResult {
   publication_id: string;

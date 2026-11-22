@@ -9,20 +9,26 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import { useFeatures } from "@/core/features";
 
 import { snapshotDetail, snapshotList } from "./api";
-import { sharedConversationOperations } from "./protocol";
+import {
+  sharedConversationOperations,
+  type SharingOperation,
+} from "./protocol";
 
 export function useSharing() {
   const { user } = useAuth();
   const discovery = useFeatures(sharedConversationOperations);
   return {
     account: user?.id,
+    agentPublishing:
+      !discovery.isError && discovery.data?.includes("agent_publish") === true,
     canUndo: !!user && hasCeiling(user.permissions, "threads:delete"),
     scope: JSON.stringify([user?.id, user?.system_role, user?.permissions]),
-    can: (action: "read" | "publish" | "continue") =>
+    can: (action: SharingOperation) =>
       !!user &&
       hasCeiling(user.permissions, "threads:read") &&
       (action === "read" || hasCeiling(user.permissions, "threads:write")) &&
-      (action !== "publish" || hasCeiling(user.permissions, "runs:read")) &&
+      (!["publish", "agent_publish"].includes(action) ||
+        hasCeiling(user.permissions, "runs:read")) &&
       !discovery.isError &&
       Array.isArray(discovery.data) &&
       discovery.data.includes(action),

@@ -7,9 +7,11 @@ import json
 import os
 import tempfile
 import time
+from typing import Literal
 
 from fastapi import HTTPException, Request, Response
 
+from app.gateway.agent_snapshot_source import AgentSnapshotSource
 from app.gateway.auth.config import get_auth_config
 from app.gateway.authz import require_permission
 from app.gateway.conversation_file_import import conversation_scope, read_presented, receipt_paths, require_scope
@@ -27,20 +29,36 @@ from deerflow.utils.file_io import await_drained, run_file_io
 from deerflow.utils.thread_id import ThreadId
 
 
+class AudienceAcknowledgement(SnapshotModel):
+    snapshot: Digest
+    audience: Literal["company"]
+
+
 class ShareRequest(SnapshotModel):
     thread_id: ThreadId
     snapshot: Digest
+    acknowledge: AudienceAcknowledgement | None = None
 
 
 def _refuse(code, status=409, **details):
     return HTTPException(status, {"code": code, **details})
 
 
-async def ordinary(request, thread_id):
+async def share_scope(request, thread_id):
+    agent_source = await AgentSnapshotSource.for_thread(request, thread_id)
+    if agent_source is not None:
+        return agent_source.scope, agent_source
     scope = await conversation_scope(request, thread_id)
     if scope[0] != "ordinary":
         raise _refuse("conversation-unavailable", 404)
-    return scope
+    return scope, None
+
+
+async def require_share_scope(request, thread_id, expected, agent_source):
+    if agent_source is None:
+        await require_scope(request, thread_id, expected)
+    else:
+        await agent_source.recheck()
 
 
 @require_permission("threads", "write")
@@ -64,9 +82,12 @@ async def inspect_destination(request: Request, plans: list[str], *, preflight: 
     return records
 
 
-async def _read_output(request, thread_id, path, limit, *, changed=False):
+async def _read_output(request, thread_id, path, limit, *, changed=False, agent_source=None):
     try:
-        data, _ = await read_presented(request, thread_id, path, maximum_bytes=limit)
+        if agent_source is not None:
+            data, _ = await agent_source.read(path, limit)
+        else:
+            data, _ = await read_presented(request, thread_id, path, maximum_bytes=limit)
     except HTTPException as exc:
         if exc.status_code in {404, 409} or (changed and exc.status_code == 413):
             raise _refuse("snapshot-file-changed") from None
@@ -74,31 +95,35 @@ async def _read_output(request, thread_id, path, limit, *, changed=False):
     return data
 
 
-async def prepare(request, thread_id, scope):
-    record = await get_thread_store(request).get(thread_id, user_id=scope[1])
+async def prepare(request, thread_id, scope, agent_source, *, authors=None):
+    owner = None if agent_source else scope[1]
+    record = await get_thread_store(request).get(thread_id, user_id=acting_user_id(request))
     if record is None:
         raise _refuse("conversation-unavailable", 404)
     runs = set()
-    conversation = await read_conversation(request, thread_id, record, user_id=scope[1], visible_runs=runs)
+    human_runs = set()
+    conversation = await read_conversation(request, thread_id, record, user_id=owner, visible_runs=runs, **({"visible_human_runs": human_runs} if authors is not None else {}))
     if conversation is None:
         raise _refuse("conversation-empty")
     paths = set()
     for run in sorted(runs):
-        row = await get_run_store(request).get(run, user_id=scope[1])
-        if not row or row.get("thread_id") != thread_id or row.get("user_id") != scope[1] or row.get("operation_kind", "run") != "run" or row.get("status") not in {"success", "error", "timeout", "interrupted"}:
+        row = await get_run_store(request).get(run, user_id=owner)
+        if not row or row.get("thread_id") != thread_id or (owner is not None and row.get("user_id") != owner) or row.get("operation_kind", "run") != "run" or row.get("status") not in {"success", "error", "timeout", "interrupted"}:
             continue
+        if authors is not None and run in human_runs and (sender := row.get("user_id")):
+            authors.add(sender)
         paths.update(await receipt_paths(request, thread_id, run, scope))
         if len(paths) > 64:
             raise _refuse("snapshot-file-count", 413)
     files = []
     total = 0
     for path in sorted(paths):
-        content = await _read_output(request, thread_id, path, min(FILE_LIMIT, TOTAL_LIMIT - total))
+        content = await _read_output(request, thread_id, path, min(FILE_LIMIT, TOTAL_LIMIT - total), agent_source=agent_source)
         total += len(content)
         files.append(SnapshotMember(path="files/" + path.removeprefix("/mnt/user-data/outputs/"), size=len(content), sha256=await run_file_io(digest_of_bytes, content)))
-    await require_scope(request, thread_id, scope)
+    await require_share_scope(request, thread_id, scope, agent_source)
     try:
-        snapshot = await run_file_io(freeze_manifest, conversation.title, conversation.messages, files)
+        snapshot = await run_file_io(freeze_manifest, conversation.title, conversation.messages, files, with_agent=agent_source.agent if agent_source else None)
     except ValueError:
         raise _refuse("snapshot-limit", 413) from None
     if any(len((snapshot.folder + "/" + entry.path).rsplit("/", 1)[0]) > 1024 for entry in snapshot.manifest.files):
@@ -136,15 +161,18 @@ class SharedWait:
 
 
 async def draft(request, thread_id):
-    scope = await ordinary(request, thread_id)
+    scope, agent_source = await share_scope(request, thread_id)
     # Apply current Shared publishing permission even when there are no files.
     await inspect_destination(request=request, plans=[])
-    frozen = await prepare(request, thread_id, scope)
+    authors = set() if agent_source else None
+    frozen = await prepare(request, thread_id, scope, agent_source, authors=authors)
     path = frozen.folder + "/conversation.json"
     existing = (await inspect_destination(request=request, plans=[path])).get(path)
     shared = existing and existing["from_path"] == MANIFEST_SOURCE and existing["sha256"] == frozen.digest and await exact_manifest(request=request, row=existing)
-    await require_scope(request, thread_id, scope)
+    audience = await agent_source.audience(authors) if agent_source else None
+    await require_share_scope(request, thread_id, scope, agent_source)
     return {
+        **({"with": agent_source.agent, "audience": audience} if agent_source else {}),
         "title": frozen.manifest.title,
         "message_count": len(frozen.manifest.messages),
         "snapshot": frozen.digest,
@@ -167,18 +195,20 @@ def _undo_mac(key, person, manifest_id, ids):
 
 
 async def publish_snapshot(request, body):
-    scope = await ordinary(request, body.thread_id)
+    scope, agent_source = await share_scope(request, body.thread_id)
+    if agent_source is not None and (body.acknowledge is None or body.acknowledge.snapshot != body.snapshot):
+        raise _refuse("snapshot-acknowledgement-required")
     await inspect_destination(request=request, plans=[])
     try:
-        async with get_run_manager(request).reserve_thread_operation(body.thread_id, kind=ThreadOperationKind.branch, user_id=scope[1]):
-            await require_scope(request, body.thread_id, scope)
-            return await _share(request, body, scope)
+        async with get_run_manager(request).reserve_thread_operation(body.thread_id, kind=ThreadOperationKind.branch, user_id=acting_user_id(request)):
+            await require_share_scope(request, body.thread_id, scope, agent_source)
+            return await _share(request, body, scope, agent_source)
     except ConflictError:
         raise _refuse("finish-current-turn") from None
 
 
-async def _share(request, body, scope):
-    frozen = await prepare(request, body.thread_id, scope)
+async def _share(request, body, scope, agent_source):
+    frozen = await prepare(request, body.thread_id, scope, agent_source)
     if frozen.digest != body.snapshot:
         raise _refuse("snapshot-changed")
     docs = frozen.manifest
@@ -188,6 +218,7 @@ async def _share(request, body, scope):
     wait = SharedWait(request)
     manifest = (await wait.call(inspect_destination, request=request, plans=absolute[-1:])).get(absolute[-1])
     if manifest and manifest["sha256"] == frozen.digest and await exact_manifest(request=request, row=manifest):
+        await require_share_scope(request, body.thread_id, scope, agent_source)
         return {"publication_id": manifest["publication_id"], "created_publication_ids": [], "undo_receipt": None, "already_shared": True}
     await wait.call(inspect_destination, request=request, plans=absolute, preflight=True)
     repo = get_shared_publications_repo(request)
@@ -195,12 +226,12 @@ async def _share(request, body, scope):
     current_id = None
     try:
         for (member, source, content), path in zip(files, absolute, strict=True):
-            await require_scope(request, body.thread_id, scope)
+            await require_share_scope(request, body.thread_id, scope, agent_source)
             write = PublishRequest(path=source, folder=path.rsplit("/", 1)[0], thread_id=body.thread_id)
             response = Response(status_code=201)
             generated = content is not None
             if not generated:
-                content = await _read_output(request, body.thread_id, source, member.size, changed=True)
+                content = await _read_output(request, body.thread_id, source, member.size, changed=True, agent_source=agent_source)
                 if len(content) != member.size or await run_file_io(digest_of_bytes, content) != member.sha256:
                     raise _refuse("snapshot-file-changed")
 
@@ -218,7 +249,7 @@ async def _share(request, body, scope):
 
             with await await_drained(run_file_io(stage)) as fd:
                 descriptor = DescriptorSource(fd.fileno(), generated_name(source) if generated else source.rsplit("/", 1)[-1])
-                item = await wait.call(publish_snapshot_file, body=write, request=request, response=response, generated=descriptor)
+                item = await wait.call(publish_snapshot_file, body=write, request=request, response=response, generated=descriptor, **({"agent_source": agent_source} if agent_source else {}))
             current_id = item.publication_id
             if response.status_code == 201:
                 added.append((item.path, current_id))
@@ -237,9 +268,10 @@ async def _share(request, body, scope):
             for path, identifier in reversed(added):
                 await wait.call(remove_shared, request=request, path=path, expected_publication_id=identifier)
         raise
+    await require_share_scope(request, body.thread_id, scope, agent_source)
     ids = [identifier for _, identifier in added]
     signing = await run_file_io(get_auth_config)
-    return {"publication_id": current_id, "created_publication_ids": ids, "already_shared": not ids, "undo_receipt": _undo_mac(signing.jwt_secret, scope[1], current_id, ids) if ids else None}
+    return {"publication_id": current_id, "created_publication_ids": ids, "already_shared": not ids, "undo_receipt": _undo_mac(signing.jwt_secret, acting_user_id(request), current_id, ids) if ids else None}
 
 
 async def remove_snapshot(request, publication_id, *, undo=None):

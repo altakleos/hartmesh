@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { refreshAccount } from "../e2e-real-backend/utils/compose-agents";
+import { workInstance } from "../fixtures/agent-work";
 
 import {
   mockLangGraphAPI,
@@ -522,4 +523,165 @@ test("a thread owner without history-read permission cannot preview or publish a
   await expect(
     page.getByRole("button", { name: "Share conversation with everyone" }),
   ).toHaveCount(0);
+});
+
+async function agentSource(
+  page: Page,
+  permissions: number,
+  agentPublishing = true,
+) {
+  const agent = { ...workInstance(), permissions };
+  mockLangGraphAPI(page, {
+    features: { agentInstancesEnabled: true },
+    threads: [
+      {
+        thread_id: MOCK_THREAD_ID,
+        title: summary.title,
+        messages: [{ id: "h", type: "human", content: "Source words" }],
+        agent_instance: {
+          id: agent.id,
+          name: agent.name,
+          custody: agent.custody,
+          status: agent.status,
+          requester_id: "default",
+        },
+      },
+    ],
+  });
+  await page.route("**/api/features", (route) =>
+    route.fulfill({
+      json: {
+        agents_api: { enabled: true },
+        agent_instances: { enabled: true, execution: "ready" },
+        shared_conversations: {
+          version: 1,
+          operations: [
+            "read",
+            "continue",
+            "publish",
+            ...(agentPublishing ? ["agent_publish"] : []),
+          ],
+        },
+      },
+    }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/agent-instances/" + agent.id,
+    (route) => route.fulfill({ json: agent }),
+  );
+  return agent;
+}
+for (const state of [
+  { permissions: 4, supports: true, description: /Can see all work/ },
+  {
+    permissions: 3,
+    supports: true,
+    description: /Only someone who can manage/,
+  },
+  { permissions: 7, supports: false, description: null },
+]) {
+  test(`agent share discovery and read-only access ${state.permissions}/${state.supports}`, async ({
+    page,
+  }) => {
+    await agentSource(page, state.permissions, state.supports);
+    const requests: string[] = [];
+    page.on("request", (r) => {
+      if (
+        r.url().includes("/api/shared-conversations/draft") ||
+        (r.method() === "POST" && r.url().endsWith("/api/shared-conversations"))
+      )
+        requests.push(r.url());
+    });
+    await page.goto("/workspace/chats/" + MOCK_THREAD_ID);
+    await expect(
+      page.getByText("Source words", { exact: true }).last(),
+    ).toBeVisible();
+    const share = page.getByRole("button", {
+      name: "Share conversation with everyone",
+    });
+    if (state.description) {
+      await expect(share).toBeDisabled();
+      await share.focus();
+      await expect(share).toHaveAccessibleDescription(state.description);
+      await page.keyboard.press("Enter");
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+    } else await expect(share).toHaveCount(0);
+    expect(requests).toEqual([]);
+  });
+}
+test("agent manager reviews current audiences and explicitly accepts each changed snapshot", async ({
+  page,
+}) => {
+  const agent = await agentSource(page, 7);
+  const writes: unknown[] = [];
+  const digests = ["a".repeat(64), "b".repeat(64)];
+  await page.route("**/api/shared-conversations/draft?**", (route) =>
+    route.fulfill({
+      json: {
+        title: summary.title,
+        snapshot: digests[writes.length ? 1 : 0],
+        message_count: 2,
+        files: [member],
+        already_shared: false,
+        publication_id: null,
+        with: { kind: "employee", id: agent.id, name: agent.name },
+        audience: {
+          starter: "Jo",
+          starter_can_read: writes.length === 0,
+          authors: ["Jo", "Kim"],
+          inspect_count: 3,
+          chat_count: 7,
+        },
+      },
+    }),
+  );
+  await page.route("**/api/shared-conversations", (route) => {
+    writes.push(route.request().postDataJSON());
+    return writes.length === 1
+      ? route.fulfill({
+          status: 409,
+          json: { detail: { code: "snapshot-changed" } },
+        })
+      : route.fulfill({
+          status: 201,
+          json: {
+            publication_id: publication,
+            created_publication_ids: [publication],
+            already_shared: false,
+            undo_receipt: null,
+          },
+        });
+  });
+  await page.goto("/workspace/chats/" + MOCK_THREAD_ID);
+  await page
+    .getByRole("button", { name: "Share conversation with everyone" })
+    .click();
+  const d = page.getByRole("dialog");
+  await expect(d).toContainText(/conversation starter \(Jo\) can read/i);
+  await expect(d).toContainText("Messages written by Jo, Kim");
+  await expect(d).toContainText("work (3)");
+  await expect(d).toContainText("Researcher (7)");
+  await expect(d).toContainText("other/report.pdf");
+  const submit = d.getByRole("button", { name: "Share", exact: true }),
+    ack = d.getByRole("checkbox");
+  for (const digest of digests) {
+    if (digest === digests[1]) {
+      await expect(d).not.toContainText(/starter \(Jo\) can read/i);
+      await expect(d).toContainText("Messages written by Jo, Kim");
+      await expect(d).toContainText("can ask about the files’ contents");
+    }
+    await expect(ack).not.toBeChecked();
+    await expect(submit).toBeDisabled();
+    await ack.check();
+    await submit.click();
+    await expect
+      .poll(() => writes.at(-1))
+      .toEqual({
+        thread_id: MOCK_THREAD_ID,
+        snapshot: digest,
+        acknowledge: { audience: "company", snapshot: digest },
+      });
+  }
+  await expect(d).toHaveCount(0);
+  expect(writes).toHaveLength(2);
 });

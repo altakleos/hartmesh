@@ -175,6 +175,22 @@ async def _publisher_names(records: list[dict | None]) -> dict[str, str]:
     return names
 
 
+async def private_snapshot_origins(request, origins):
+    """Only the durable publication record needs the bound conversation's ID."""
+    possible = {thread for path, thread in origins if thread and path.startswith("Conversations/")}
+    if not possible:
+        return set()
+    from app.gateway.agent_conversations import _authority
+    from deerflow.agent_instances.conversations import AgentConversations
+
+    authority = _authority(request)
+    if not isinstance(authority, AgentConversations):
+        return possible
+    # Bindings survive conversation deletion. Query the distinct sources once
+    # per page and retain provenance for ordinary conversations.
+    return set(await authority.bindings(sorted(possible)))
+
+
 def _may_remove(record: dict | None, *, user_id: str, admin: bool) -> bool:
     """The publisher may take it back, and an admin may take anything back; a file with no record is an admin's."""
     if admin:
@@ -213,8 +229,11 @@ async def list_shared(request: Request) -> SharedFileListResponse:
     from app.gateway.conversation_snapshots import snapshot_memberships
 
     marks = await snapshot_memberships(repo, records)
+    private = await private_snapshot_origins(request, ((item.path, item.from_thread_id) for item in files))
     for item in files:
         item.snapshot_publication_id = marks.get(item.path)
+        if item.from_thread_id in private:
+            item.from_thread_id = None
     return SharedFileListResponse(files=files, count=len(entries), truncated=truncated)
 
 
@@ -237,17 +256,20 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
     taken are kept beside it with the next free ``_N`` suffix; nothing is
     overwritten, and the source is untouched.
     """
-    return await _publish(body, request, response)
+    result = await _publish(body, request, response)
+    if result.from_thread_id in await private_snapshot_origins(request, [(result.path, result.from_thread_id)]):
+        result.from_thread_id = None
+    return result
 
 
 @require_permission("threads", "write")
 @storage_feature("hm.shared", write=True, workflow_name="publish")
-async def publish_snapshot_file(body: PublishRequest, request: Request, response: Response, generated: DescriptorSource) -> SharedFileInfo:
+async def publish_snapshot_file(body: PublishRequest, request: Request, response: Response, generated: DescriptorSource, agent_source=None) -> SharedFileInfo:
     """Publish a server-owned descriptor with the standard ordered Shared workflow."""
-    return await _publish(body, request, response, generated=generated)
+    return await _publish(body, request, response, generated=generated, agent_source=agent_source)
 
 
-async def _publish(body, request, response, *, generated=None):
+async def _publish(body, request, response, *, generated=None, agent_source=None):
     repo = get_shared_publications_repo(request)
     user_id = acting_user_id(request)
     normalized = "/" + body.path.lstrip("/")
@@ -262,7 +284,11 @@ async def _publish(body, request, response, *, generated=None):
         name = generated_name(normalized) or name
         if not isinstance(generated, DescriptorSource) or generated.name != name or body.thread_id is None:
             raise ValueError("Invalid host-generated publication")
-    if generated is not None and generated_name(normalized):
+    if agent_source is not None:
+        if native is None or generated is None or native.source is not generated or native.sources.source is not agent_source:
+            raise HTTPException(404, "Conversation or file is unavailable")
+        thread_id, source = validate_thread_id(body.thread_id), generated
+    elif generated is not None and generated_name(normalized):
         thread_id, source = validate_thread_id(body.thread_id), generated
     elif normalized.startswith(USER_FILES_VIRTUAL_PREFIX + "/"):
         source = native.source if native is not None else await asyncio.to_thread(_own_file_source, user_id, normalized)

@@ -75,7 +75,13 @@ export const publishSnapshot = (
   thread_id: string,
   snapshot: string,
   signal: AbortSignal,
-) => json<PublishResult>(root, signal, "POST", { thread_id, snapshot });
+  acknowledge?: { snapshot: string; audience: "company" },
+) =>
+  json<PublishResult>(root, signal, "POST", {
+    thread_id,
+    snapshot,
+    ...(acknowledge ? { acknowledge } : {}),
+  });
 export const undoSnapshot = (
   id: string,
   publication_ids: string[],
