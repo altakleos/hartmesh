@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.73] - 2026-11-22
+
+### Share a conversation with an AI employee
+
+- People who can manage an employee or personal assistant and see all its work can share one of its conversations. The preview shows the conversation participants known to HartMesh and the files the agent handed back. Before publishing, the manager confirms that everyone who can read Company shared may read the snapshot. The manager is named as its publisher.
+- A colleague who can chat with the same agent can continue the snapshot in a separate conversation with it. Available files are copied to the agent’s Home. The confirmation explains who can ask the agent about those files and who can inspect them. Removing the snapshot leaves those copies in Home under its usual permissions.
+- Readers who cannot use the agent can continue with the ordinary assistant. If the available assistant changes before work starts, the reader can review the new choice. If an attempt is interrupted after work starts, the dialog explains that a conversation or file copies may already exist.
+
+### Rollback
+
+- The normal rollback target is `2.2.0+hartmesh.72`. The oldest supported snapshot reader is `2.2.0+hartmesh.71`. Both versions can read employee snapshots, remove them with the appropriate permissions and continue them with the ordinary assistant. Employee conversations and Home copies created before rollback remain subject to their usual permissions.
+- On these older versions, the Shared file list can include the original conversation’s opaque ID. Opening that conversation still requires permission.
+- If publication is interrupted before the snapshot is complete, files already published can remain individually visible in Company shared under the manager’s name. When rolling back below the supported reader floor, settle pending Shared operations first. Earlier releases lack snapshot and continuation support, and some can leave interrupted writes pending.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.72.
+
 ## [2.2.0+hartmesh.72] - 2026-11-22
 
 ### Background batches
