@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { ConversationMessageResults } from "@/components/workspace/conversation-message-results";
 import {
   ConversationLink,
   ConversationTitleResults,
@@ -14,7 +15,8 @@ import {
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
-import { useDocumentTitle } from "@/core/features";
+import { useAuth } from "@/core/auth/AuthProvider";
+import { useDocumentTitle, useFeatures } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { useInfiniteThreads } from "@/core/threads/hooks";
@@ -26,6 +28,17 @@ import {
 } from "@/core/threads/utils";
 
 export default function ChatsPage() {
+  const { user } = useAuth();
+  if (isStaticWebsiteOnly()) return <ChatList messageSearch={false} />;
+  return <LiveChatList key={JSON.stringify([user?.id, user?.system_role])} />;
+}
+
+function LiveChatList() {
+  const feature = useFeatures((data) => data.message_search === true);
+  return <ChatList messageSearch={feature.data === true && !feature.isError} />;
+}
+
+function ChatList({ messageSearch }: { messageSearch: boolean }) {
   const { t } = useI18n();
   const {
     data: infiniteThreads,
@@ -40,6 +53,15 @@ export default function ChatsPage() {
   const { threads } = threadListModel;
   const [search, setSearch] = useState("");
   const query = search.trim();
+  const [unavailableQuery, setUnavailableQuery] = useState<string | null>(null);
+  const retireMessageResults = useCallback(
+    () => setUnavailableQuery(query),
+    [query],
+  );
+  const showMessages = messageSearch && unavailableQuery !== query;
+  const searchLabel = showMessages
+    ? t.chats.searchConversations
+    : t.chats.searchTitles;
   const isSearching = query.length > 0;
   const staticDemo = isStaticWebsiteOnly();
 
@@ -55,6 +77,7 @@ export default function ChatsPage() {
     [threads, query, staticDemo],
   );
 
+  const titleSection = useRef<HTMLElement | null>(null);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const element = sentinelRef.current;
@@ -82,23 +105,48 @@ export default function ChatsPage() {
             <Input
               type="search"
               className="h-12 w-full max-w-(--container-width-md) text-xl"
-              aria-label={t.chats.searchTitles}
-              placeholder={t.chats.searchTitles}
+              aria-label={searchLabel}
+              placeholder={searchLabel}
               maxLength={256}
               autoFocus
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setUnavailableQuery(null);
+              }}
             />
           </header>
           <main className="min-h-0 flex-1">
             <ScrollArea className="size-full py-4">
               <div className="mx-auto flex size-full max-w-(--container-width-md) flex-col">
                 {isSearching && !staticDemo ? (
-                  <ConversationTitleResults
-                    key={query}
-                    query={query}
-                    knownThreads={threadListModel.byId}
-                  />
+                  <>
+                    <section
+                      ref={titleSection}
+                      aria-label={
+                        showMessages ? t.chats.conversations : undefined
+                      }
+                    >
+                      {showMessages && (
+                        <h2 className="px-4 pt-4 font-medium">
+                          {t.chats.conversations}
+                        </h2>
+                      )}
+                      <ConversationTitleResults
+                        key={query}
+                        query={query}
+                        knownThreads={threadListModel.byId}
+                      />
+                    </section>
+                    {showMessages && (
+                      <ConversationMessageResults
+                        key={query}
+                        query={query}
+                        onUnavailable={retireMessageResults}
+                        precedingSection={titleSection}
+                      />
+                    )}
+                  </>
                 ) : (
                   <VirtualThreadList
                     estimateSize={76}

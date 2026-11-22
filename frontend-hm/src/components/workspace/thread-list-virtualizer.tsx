@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from "react";
 
 const VIRTUALIZATION_THRESHOLD = 60;
@@ -22,13 +23,17 @@ export function calculateScrollMargin(
 export function VirtualThreadList<T extends { thread_id: string }>({
   estimateSize,
   gap = 0,
+  itemKey,
   items,
+  precedingSection,
   renderItem,
   scrollParentSelector,
 }: {
   estimateSize: number;
   gap?: number;
+  itemKey?: (item: T) => string;
   items: readonly T[];
+  precedingSection?: RefObject<HTMLElement | null>;
   renderItem: (thread: T, index: number) => ReactNode;
   scrollParentSelector: string;
 }) {
@@ -42,18 +47,28 @@ export function VirtualThreadList<T extends { thread_id: string }>({
     const root = rootRef.current;
     const scrollParent = getScrollElement();
     if (!root || !scrollParent) return;
-    setScrollMargin(
-      calculateScrollMargin(
-        root.getBoundingClientRect().top,
-        scrollParent.getBoundingClientRect().top,
-        scrollParent.scrollTop,
-      ),
-    );
-  }, [getScrollElement, items.length]);
+    const measure = () =>
+      setScrollMargin(
+        calculateScrollMargin(
+          root.getBoundingClientRect().top,
+          scrollParent.getBoundingClientRect().top,
+          scrollParent.scrollTop,
+        ),
+      );
+    measure();
+    const section = precedingSection?.current;
+    if (items.length < VIRTUALIZATION_THRESHOLD || !section) return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(section);
+    return () => observer.disconnect();
+  }, [getScrollElement, items.length, precedingSection]);
   const virtualizer = useVirtualizer({
     count: items.length,
     estimateSize: () => estimateSize,
-    getItemKey: (index) => items[index]?.thread_id ?? index,
+    getItemKey: (index) => {
+      const item = items[index];
+      return item ? (itemKey?.(item) ?? item.thread_id) : index;
+    },
     getScrollElement,
     overscan: 8,
     scrollMargin,

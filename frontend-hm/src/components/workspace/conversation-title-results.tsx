@@ -2,7 +2,6 @@
 
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { useEffect, useState } from "react";
 import { z } from "zod";
 
 import { Button } from "@/components/ui/button";
@@ -11,10 +10,13 @@ import {
   ThreadChannelIcon,
 } from "@/components/workspace/thread-channel-source";
 import { VirtualThreadList } from "@/components/workspace/thread-list-virtualizer";
-import { fetch } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
-import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
+import {
+  searchWorkspace,
+  useSearchReady,
+  SearchReadError,
+} from "@/core/threads/conversation-search";
 import type { AgentThread } from "@/core/threads/types";
 import {
   channelSourceForProvider,
@@ -23,8 +25,6 @@ import {
   type ChannelThreadSource,
 } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
-
-class TemporarySearchError extends Error {}
 
 const titlePage = z.object({
   items: z.array(
@@ -78,41 +78,31 @@ export function ConversationTitleResults({
   const { user } = useAuth();
   // The page keys this component by input. Retiring it cancels both this delay
   // and the query observer's request, including an outstanding next page.
-  const [ready, setReady] = useState(false);
-  useEffect(() => {
-    const timer = setTimeout(() => setReady(true), 250);
-    return () => clearTimeout(timer);
-  }, []);
+  const ready = useSearchReady();
   const client = useQueryClient();
-  const queryKey = ["conversation-titles", user?.id, user?.system_role, query];
+  const queryKey = [
+    "workspace-search",
+    "titles",
+    user?.id,
+    user?.system_role,
+    query,
+  ];
   const search = useInfiniteQuery({
     queryKey,
     enabled: ready,
     gcTime: 0,
     retry: false,
     initialPageParam: null as string | null,
-    queryFn: async ({ pageParam, signal }) => {
-      const response = await fetch(`${getBackendBaseURL()}/api/search`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query,
-          types: ["thread"],
-          limit: 20,
-          ...(pageParam && { cursor: pageParam }),
-        }),
-        signal,
-      });
-      if (response.status >= 500) throw new TemporarySearchError();
-      if (!response.ok) throw new Error("Could not search conversation titles");
-      return titlePage.parse(await response.json());
-    },
+    queryFn: async ({ pageParam, signal }) =>
+      titlePage.parse(
+        await searchWorkspace(query, "thread", pageParam, signal),
+      ),
     getNextPageParam: (last, _pages, _previous, used) =>
       last.cursor && !used.includes(last.cursor) ? last.cursor : undefined,
   });
   const pageUnavailable =
     search.isFetchNextPageError &&
-    (search.error instanceof TemporarySearchError ||
+    ((search.error instanceof SearchReadError && search.error.status >= 500) ||
       search.error instanceof TypeError);
   if (search.isError && !pageUnavailable) {
     return (
