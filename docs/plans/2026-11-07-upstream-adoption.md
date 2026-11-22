@@ -51,6 +51,9 @@ complete reference frontend. Product UI changes belong in `frontend-hm/`.
   native/resident sandbox ownership, output-capture proof and shutdown behavior.
   Batch follow-ups carry revocable authority through delegated capabilities;
   they cannot regain management rights through a descendant extension.
+- The ordinary batch worker selects personal jobs. The Gateway checks the
+  conversation binding at submission and settles unfinished jobs with a
+  recognized agent scope at startup. [PR #598](https://github.com/altakleos/hartmesh/pull/598)
 - Artifact handoffs refuse unsupported storage before new admission and still
   reconcile recorded idempotent runs. Goal finalization preserves the live
   reservation until authoritative terminal acknowledgement. HarnessGuard keeps

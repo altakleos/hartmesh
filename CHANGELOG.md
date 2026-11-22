@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.72] - 2026-11-22
+
+### Background batches
+
+- In installations that enable background batches, the assistant describes the batch tools available in the current conversation. Personal chats can submit batches. Employee and personal assistant chats cannot send work to the personal batch worker. The standard Compose bundle keeps background batches off.
+- When the Gateway starts, it looks for unfinished batches it recognizes as belonging to an agent conversation, even if the worker is off. It cancels the remaining work and automatic follow-up, and preserves completed item results for inspection or export. A database error or exhausted startup time budget can leave a batch for the next startup. The worker leaves unrecognized batch scopes untouched.
+
+### Rollback
+
+- The normal rollback target is `2.2.0+hartmesh.71`. This release creates no agent-conversation batches. Personal batches and completed results keep their existing format. Earlier releases can read cancellations already recorded by this Gateway. If a database contains unfinished agent-conversation batches from a newer writer, verify their cancellation on this release before rolling back. With the older worker off, the panel can continue to show a pending follow-up. With it on, the outcome can depend on the job state and remaining attempts.
+- On a deployment with batches enabled, rolling back can again make an agent describe a batch tool it cannot call.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.71.
+
 ## [2.2.0+hartmesh.71] - 2026-11-22
 
 ### Share a conversation
