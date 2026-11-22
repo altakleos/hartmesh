@@ -16,7 +16,6 @@ import { hasCeiling, INSPECT } from "@/core/agent-instances/presentation";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useAgentInstances } from "@/core/features";
 import { browserHref, type BrowserArea } from "@/core/file-areas/browser";
-import { useBrowserRenderer } from "@/core/file-areas/browser-renderer";
 import { useI18n } from "@/core/i18n/hooks";
 
 import { useBrowserCopy } from "./copy";
@@ -30,7 +29,6 @@ function AgentLocations({
   filter: string;
   current?: string;
 }) {
-  const renderer = useBrowserRenderer();
   const { user } = useAuth(),
     feature = useAgentInstances(),
     { t, locale } = useI18n(),
@@ -89,7 +87,6 @@ function AgentLocations({
             aria-current={current === a.id ? "location" : undefined}
             href={browserHref("agent", "", {
               instance: a.id,
-              view: renderer.choice,
             })}
           >
             {a.name}
@@ -125,8 +122,7 @@ export function BrowserLocations({
   instance?: string;
 }) {
   const copy = useBrowserCopy(),
-    { user } = useAuth(),
-    renderer = useBrowserRenderer();
+    { user } = useAuth();
   const [open, setOpen] = useState(false),
     [filter, setFilter] = useState("");
   return (
@@ -154,7 +150,7 @@ export function BrowserLocations({
               className="aria-current:bg-muted block min-h-11 rounded-md px-2 py-2"
               key={a}
               aria-current={a === area ? "location" : undefined}
-              href={browserHref(a, "", { view: renderer.choice })}
+              href={browserHref(a, "")}
               onClick={() => setOpen(false)}
             >
               {copy[a]}

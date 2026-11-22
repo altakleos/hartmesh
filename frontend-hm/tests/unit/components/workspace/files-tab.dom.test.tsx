@@ -12,6 +12,7 @@ import {
 
 const state = rs.hoisted(() => ({
   changed: rs.fn(),
+  versionedReads: false,
   feature: {
     known: true,
     enabled: true,
@@ -21,7 +22,7 @@ const state = rs.hoisted(() => ({
 }));
 rs.mock("next/navigation", () => ({
   useRouter: () => ({ push: rs.fn() }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(window.location.search),
   usePathname: () => "/workspace/instances",
 }));
 rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
@@ -34,14 +35,17 @@ rs.mock("@/core/auth/AuthProvider", () => ({
     },
   }),
 }));
-rs.mock("@/core/file-areas/browser-renderer", () => ({
-  useBrowserRenderer: () => ({ native: false, choice: undefined }),
-}));
 rs.mock("@/core/agent-instances/home-transfer-access", () => ({
   checkHomeTransferAccess: rs.fn(async () => true),
 }));
 rs.mock("@/core/features", () => ({
-  useFeatures: () => ({ data: undefined }),
+  useFeatures: () => ({
+    data: state.versionedReads
+      ? { agent: ["folder", "content", "text"] }
+      : undefined,
+    isPending: false,
+    isError: false,
+  }),
   useAgentInstances: () => state.feature,
   useStorage: () => null,
   useBranding: () => ({ providerName: "Provider", supportURL: null }),
@@ -108,7 +112,9 @@ const instance: AgentInstanceDetail = {
   execution: { execution: "ready", reason: null },
 };
 function show(change: Partial<AgentInstanceDetail> = {}, initialFolder = "") {
-  const client = new QueryClient();
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   clients.push(client);
   const ui = (current: Partial<AgentInstanceDetail>) => (
     <QueryClientProvider client={client}>
@@ -139,6 +145,8 @@ async function choose(fileToSend = new File(["hello"], "note.txt")) {
 beforeEach(() => {
   rs.mocked(fetcher).mockReset();
   state.changed.mockReset();
+  state.versionedReads = false;
+  window.history.replaceState(null, "", "/workspace/instances");
   state.feature = {
     known: true,
     enabled: true,
@@ -260,7 +268,7 @@ test("a manager without current Home administration cannot read recovery rows", 
     permissions: 19,
   });
   show({ home_generation: 3 });
-  await screen.findByRole("navigation");
+  await screen.findByRole("list", { name: "Researcher" });
   expect(fetcher).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: acceptLabel })).toBeNull();
 });
@@ -288,7 +296,7 @@ test("an inspector receives only supervisor guidance after a second pending Home
   rs.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
   rs.mocked(spaces.getSpace).mockResolvedValue(pendingHome);
   show({ home_generation: 3, permissions: 2 });
-  await screen.findByRole("navigation");
+  await screen.findByRole("list", { name: "Researcher" });
   expect(screen.queryByText(/waiting for a change to be settled/i)).toBeNull();
   await act(async () => {
     await rs.advanceTimersByTimeAsync(61_000);
@@ -485,7 +493,7 @@ test("a reader without Space WRITE sees files and the conversation hint without 
   });
   show();
   await screen.findByRole("button", { name: "note.txt" });
-  expect(screen.queryByRole("button", { name: "Add files" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Upload" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
   expect(
     screen.getByText(
@@ -501,7 +509,7 @@ test("busy files replace the list and expose no recovery or write action", () =>
     ),
   ).toBeDefined();
   expect(spaces.listSpaceFiles).not.toHaveBeenCalled();
-  expect(screen.queryByRole("button", { name: "Add files" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Upload" })).toBeNull();
   expect(screen.queryByText(/backup|restore|repair/i)).toBeNull();
 });
 test("legacy missing Space access produces the named access-save guidance", async () => {
@@ -606,6 +614,15 @@ test("a Gateway without guarded replacement checks offers no rename or delete", 
   });
   show();
   await screen.findByRole("button", { name: "note.txt" });
+  fireEvent.click(
+    screen.getByRole("button", { name: "More actions for note.txt" }),
+  );
+  expect(
+    within(screen.getByRole("dialog", { name: "note.txt" })).getByRole(
+      "button",
+      { name: "Download" },
+    ),
+  ).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
   expect(transfers.changeAgentFile).not.toHaveBeenCalled();
@@ -705,7 +722,9 @@ test("the root prioritizes uploads and outputs, hides tool packages, and reports
   const names = screen
     .getAllByRole("button")
     .map((button) => button.textContent);
-  expect(names.indexOf("uploads")).toBeLessThan(names.indexOf("outputs"));
+  expect(names).toContain("Uploads");
+  expect(names).toContain("Outputs");
+  expect(names.indexOf("Uploads")).toBeLessThan(names.indexOf("Outputs"));
   expect(screen.queryByText(".agent-skill-packages")).toBeNull();
   expect(screen.queryByText(/capacity|room left|Space|Home|MiB/)).toBeNull();
 });
@@ -836,7 +855,7 @@ test("the actual nested busy envelope replaces the list and recovers through rea
     "Researcher's files are being changed right now and cannot be used. Try again in a few minutes.",
   );
   expect(screen.queryByText("private storage diagnostic")).toBeNull();
-  expect(screen.queryByRole("button", { name: "Add files" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Upload" })).toBeNull();
   await screen.findByRole("button", { name: "note.txt" }, { timeout: 4500 });
   expect(fetcher).toHaveBeenCalledTimes(2);
 });
@@ -866,4 +885,80 @@ test("a conversation attachment link opens the uploads folder directly", async (
   show({}, "uploads");
   await waitFor(() => expect(spaces.listSpaceFiles).toHaveBeenCalled());
   expect(rs.mocked(spaces.listSpaceFiles).mock.calls[0]![1]).toBe("uploads");
+});
+
+test("a saved classic link opens a versioned nested folder in the common browser", async () => {
+  state.versionedReads = true;
+  const path = "outputs/nested";
+  window.history.replaceState(
+    null,
+    "",
+    "/workspace/instances?" +
+      new URLSearchParams({
+        instance: id,
+        tab: "files",
+        folder: path,
+        view: "classic",
+      }).toString(),
+  );
+  rs.mocked(fetcher).mockResolvedValue(
+    Response.json({
+      files: [{ ...file, path: path + "/note.txt" }],
+      truncated: false,
+    }),
+  );
+  show({}, path);
+  const list = await screen.findByRole("list", { name: "Researcher" });
+  expect(within(list).getByRole("button", { name: "note.txt" })).toBeTruthy();
+  const [url] = rs.mocked(fetcher).mock.calls[0]!;
+  expect(url).toBe(
+    `/api/file-browser/v1/agents/${id}/folder?path=outputs%2Fnested`,
+  );
+  expect(spaces.listSpaceFiles).not.toHaveBeenCalled();
+  expect(
+    screen.queryByRole("link", {
+      name: /Use classic file view|Use file browser/,
+    }),
+  ).toBeNull();
+});
+
+test("an older Gateway does not receive an unverified nested deep link as a Home path", async () => {
+  window.history.replaceState(
+    null,
+    "",
+    "/workspace/instances?" +
+      new URLSearchParams({
+        instance: id,
+        tab: "files",
+        folder: "private/deep",
+        view: "classic",
+      }).toString(),
+  );
+  show({}, "private/deep");
+  await screen.findByRole("list", { name: "Researcher" });
+  expect(spaces.listSpaceFiles).toHaveBeenCalledWith(
+    home,
+    "",
+    expect.any(AbortSignal),
+  );
+  expect(
+    rs
+      .mocked(spaces.listSpaceFiles)
+      .mock.calls.some(([, path]) => path === "private/deep"),
+  ).toBe(false);
+  expect(fetcher).not.toHaveBeenCalled();
+});
+
+test("a versioned folder refusal does not fall back to the older Home read", async () => {
+  state.versionedReads = true;
+  rs.mocked(fetcher).mockResolvedValue(
+    Response.json({ detail: "private diagnostic" }, { status: 403 }),
+  );
+  show({}, "outputs");
+  await waitFor(() => expect(fetcher).toHaveBeenCalled());
+  await screen.findByRole("alert");
+  expect(screen.queryByText("private diagnostic")).toBeNull();
+  expect(screen.queryByRole("list", { name: "Researcher" })).toBeNull();
+  expect(spaces.listSpaceFiles).not.toHaveBeenCalled();
+  expect(transfers.putAgentFile).not.toHaveBeenCalled();
 });

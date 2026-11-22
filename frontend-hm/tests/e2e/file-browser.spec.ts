@@ -121,7 +121,7 @@ test("bounded search and Back preserve a later result's row control", async ({
   await expect(page.getByRole("searchbox")).toHaveValue("report-");
   await expect(parent).toBeFocused();
 });
-test("classic view remains selectable, and unavailable destructive actions send no request", async ({
+test("saved classic URLs use the browser and unavailable destructive actions send no request", async ({
   page,
 }) => {
   await setup(page, ["report.pdf"]);
@@ -129,7 +129,7 @@ test("classic view remains selectable, and unavailable destructive actions send 
   page.on("request", (r) => {
     if (r.method() === "DELETE") writes.push(r.url());
   });
-  await page.goto("/workspace/files");
+  await page.goto("/workspace/files?view=classic");
   await page
     .getByRole("button", { name: "More actions for report.pdf" })
     .click();
@@ -140,27 +140,30 @@ test("classic view remains selectable, and unavailable destructive actions send 
     "Everyone at the company",
   );
   await page.keyboard.press("Escape");
-  await page.getByRole("link", { name: "Use classic file view" }).click();
-  await expect(page.getByTestId("my-file-report.pdf")).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Use classic file view" }),
+  ).toHaveCount(0);
   expect(writes).toEqual([]);
 });
 
-test.describe("touch deployment fallback", () => {
+test.describe("touch file browser", () => {
   test.use({
     hasTouch: true,
     userAgent:
       "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile Safari",
     viewport: { width: 390, height: 844 },
   });
-  test("classic is the default while the opt-in follows folder navigation", async ({
+  test("opens the browser by default and preserves a saved folder URL", async ({
     page,
   }) => {
     await setup(page, ["papers/note.txt"]);
     await page.goto("/workspace/files");
-    await expect(page.getByTestId("my-file-papers/note.txt")).toBeVisible();
-    await page.getByRole("link", { name: "Use file browser" }).click();
+    await expect(
+      page.getByRole("link", { name: "Use file browser" }),
+    ).toHaveCount(0);
     await page.getByRole("button", { name: "papers", exact: true }).click();
-    await expect(page).toHaveURL(/view=browser/);
+    await expect(page).toHaveURL(/folder=papers/);
+    await page.goto("/workspace/files?view=classic&folder=papers");
     await expect(
       page.getByRole("button", { name: "More actions for note.txt" }),
     ).toBeVisible();
@@ -425,34 +428,30 @@ test("missing a Shared row keeps other eligible publications removable", async (
   ).toContainText("other.txt");
 });
 
-test("positive pointer changes update the default while an explicit choice persists", async ({
+test("keyboard navigation works without a pointer or a versioned Gateway", async ({
   page,
 }) => {
-  await page.addInitScript(() => {
-    const original = window.matchMedia.bind(window);
-    const fine = original("(any-pointer: fine)");
-    let positive = false;
-    Object.defineProperty(fine, "matches", { get: () => positive });
-    window.matchMedia = (query) =>
-      query === "(any-pointer: fine)" ? fine : original(query);
-    window.addEventListener("fixture-fine", () => {
-      positive = !positive;
-      fine.dispatchEvent(new Event("change"));
-    });
-  });
-  await setup(page, ["note.txt"]);
-  await page.goto("/workspace/files");
-  await expect(page.getByTestId("my-file-note.txt")).toBeVisible();
-  await page.evaluate(() => window.dispatchEvent(new Event("fixture-fine")));
-  await expect(
-    page.getByRole("button", { name: "More actions for note.txt" }),
-  ).toBeVisible();
-  await page.getByRole("link", { name: "Use classic file view" }).click();
-  await page.evaluate(() => {
-    window.dispatchEvent(new Event("fixture-fine"));
-    window.dispatchEvent(new Event("fixture-fine"));
-  });
-  await expect(page.getByTestId("my-file-note.txt")).toBeVisible();
+  await setup(page, ["folder/note.txt"]);
+  await page.route("**/api/features", (route) =>
+    route.fulfill({
+      json: {
+        storage_spaces: {
+          enabled: false,
+          state: "off",
+          reason: null,
+          own: "ready",
+          user_spaces: false,
+        },
+      },
+    }),
+  );
+  await page.goto("/workspace/files?view=classic&folder=folder");
+  const menu = page.getByRole("button", { name: "More actions for note.txt" });
+  await menu.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toContainText("folder/note.txt");
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeFocused();
 });
 
 for (const area of ["personal", "shared"] as const) {
@@ -572,9 +571,7 @@ test("distinguishes unverified, missing and unsupported folders without a flat p
     page.getByText("This folder is no longer available.", { exact: false }),
   ).toBeVisible();
   await page.goto("/workspace/files?folder=absent");
-  await expect(
-    page.getByRole("link", { name: "Use classic file view" }),
-  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
   await expect(
     page.getByText("This folder is no longer available.", { exact: false }),
   ).toHaveCount(0);

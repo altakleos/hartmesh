@@ -229,7 +229,7 @@ for (const scenario of ["denied", "offline", "retired account"] as const) {
   });
 }
 
-test("native and classic rows retain the same collision-safe upload receipt", async ({
+test("agent navigation retains the same collision-safe upload receipt", async ({
   page,
 }) => {
   const state = await setupAgents(page);
@@ -276,9 +276,10 @@ test("native and classic rows retain the same collision-safe upload receipt", as
     .getByRole("listitem")
     .filter({ has: page.getByRole("button", { name: filename, exact: true }) });
   await expect(row.getByRole("status")).toContainText(filename);
-  await page.getByRole("link", { name: "Use classic file view" }).click();
-  await expect(
-    page.getByRole("row").filter({ hasText: filename }).getByRole("status"),
-  ).toContainText(filename);
+  await page.getByRole("link", { name: "My files", exact: true }).click();
+  await expect(page).toHaveURL(/\/workspace\/files$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/folder=uploads/);
+  await expect(row.getByRole("status")).toContainText(filename);
   expect(writes).toBe(1);
 });

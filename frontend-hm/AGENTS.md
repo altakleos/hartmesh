@@ -454,13 +454,13 @@ retain real-service outage checks. See the
 An admitted composer send anchors its visible human row until reader input.
 History, replay and busy-run inputs never initiate that anchor.
 
-Workspace and agent Files share `components/workspace/file-browser`. Default to
-classic without a qualified fine pointer or protocol. Negotiate each source’s
+Workspace and agent Files share `components/workspace/file-browser`. Use one
+renderer on every device. Read older Gateways through the authorized file lists. Negotiate each source’s
 operations, recheck restored paths and keep history in account memory. A refused
 versioned operation has no path-only fallback.
 
-Shared conversations use discovery and the server’s publication IDs in both
-file views. Fold only marked members after the collection read succeeds.
+Shared conversations use discovery and the server’s publication IDs in the
+file browser. Fold only marked members after the collection read succeeds.
 Undo sends its exact receipt and created IDs. Copied-turn attribution needs the
 thread’s verified seed IDs. Continued attachment chips use the returned uploads
 path and belong to the signed-in account and private thread.

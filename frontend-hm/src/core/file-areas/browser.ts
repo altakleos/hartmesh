@@ -24,7 +24,7 @@ export function browserFolder(raw: string | null): string | null {
 export function browserHref(
   area: BrowserArea,
   folder: string,
-  options: { instance?: string; view?: "classic" | "browser" } = {},
+  options: { instance?: string } = {},
 ) {
   const params = new URLSearchParams();
   const route = area === "agent" ? "/workspace/instances" : "/workspace/files";
@@ -35,7 +35,6 @@ export function browserHref(
     params.set("tab", "files");
   } else if (area === "shared") params.set("tab", "shared");
   if (folder && browserFolder(folder) !== null) params.set("folder", folder);
-  if (options.view) params.set("view", options.view);
   return route + (params.size ? "?" + params.toString() : "");
 }
 
@@ -94,5 +93,11 @@ export function boundedBrowserRows<T extends BrowserRow>(
     result.filter((r) => r.kind === "directory"),
     { query: "", order: "name", locale },
   );
+  // The two standard Home directories are the primary entry points for an agent.
+  if (!virtual && !folder) {
+    const priority = (name: string) =>
+      name === "uploads" ? 0 : name === "outputs" ? 1 : 2;
+    folders.sort((a, b) => priority(a.name) - priority(b.name));
+  }
   return [...folders, ...result.filter((r) => r.kind !== "directory")];
 }

@@ -46,7 +46,7 @@ keep it unavailable.
 
 An ordinary conversation’s owner can choose **Share conversation with everyone**
 to review the current messages and presented files before publishing a frozen
-copy. Find it in **Files → Shared → Conversations**, in either file view.
+copy. Find it in **Files → Shared → Conversations**, in the file browser.
 **Continue** opens a private chat with the assistant. The first message can
 include the files copied into that chat. Removing the snapshot leaves existing
 private conversations and their copies intact. The published copy retains the
@@ -328,7 +328,7 @@ formats. The report model schema ships with the skill. Generic business starters
 cover documents and spreadsheets; the report-enabled Compose provider explicitly
 selects the monthly-review starter, and tenant starter overrides still take priority.
 
-Workspace Files and an agent’s Files tab use the same file browser on supported
+Workspace Files and an agent’s Files tab use the same file browser on phones, tablets and
 desktops. **Locations** opens My files, Company shared, and the agent homes
 you can inspect. Open a folder or search the loaded files; **More actions**
 shows the full path, current audience, and available actions. The address and
@@ -337,9 +337,13 @@ On supported Gateways, opening My files or Company shared loads the current
 folder, including groups that contain a visible file. Entering a search loads the available files across that location. Folder
 listings and search results each indicate when they reach their own limit.
 
-Touch devices open the classic view. Use **Use file browser** to switch on a
-supported Gateway, or **Use classic file view** to return. Sharing publishes
-a company-visible copy. Eligible new publications offer **Undo** when the
+To add a chat file to My files, choose **Save to My files**. In the developer workspace with
+managed Storage Spaces, choose **Spaces → your personal Space → files**, then
+**Upload file** or **New folder**. The Files
+browser shows the folder once it contains a visible file. In an agent’s Files
+tab, **Upload** and **New folder** use the current writable Home folder.
+Use **Share with everyone** to publish a company-visible copy. Older Gateways
+supply their existing file lists to the browser. Eligible new publications offer **Undo** when the
 Gateway can verify that exact copy. If report download availability cannot be
 checked, the card offers **Retry check**; it checks the files again without
 regenerating them.
