@@ -319,6 +319,11 @@ def test_the_feed_leaves_out_what_the_page_never_draws(monkeypatch) -> None:
         response = client.get("/api/threads/thread-1/export", params={"format": "json"})
 
     assert _texts(response) == ["question", "regenerated answer"]
+    from types import SimpleNamespace
+
+    visible_runs = set()
+    asyncio.run(transcript.read_conversation(SimpleNamespace(app=app), "thread-1", {}, user_id=str(CALLER.id), visible_runs=visible_runs))
+    assert visible_runs == {"run-1", "run-new"}
 
 
 def test_a_turn_not_yet_in_the_feed_follows_the_messages_before_it(monkeypatch) -> None:

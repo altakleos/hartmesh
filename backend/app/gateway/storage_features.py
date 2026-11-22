@@ -50,10 +50,11 @@ def current_feature_service(request, namespace):
     return _installed(request, namespace)[0]
 
 
-def storage_feature(namespace, *, write=False, selected_remove=False):
+def storage_feature(namespace, *, write=False, selected_remove=False, workflow_name=None, export=False):
     """HTTP parsing/legacy permission guards run before this feature boundary."""
 
     def decorate(function):
+        operation = workflow_name or function.__name__
         signature = inspect.signature(function)
         hints = get_type_hints(function, include_extras=True)
 
@@ -87,9 +88,9 @@ def storage_feature(namespace, *, write=False, selected_remove=False):
             actor = await _actor(request)
             with storage_actor_scope(actor):
                 try:
-                    async with prepare_feature_source(request, actor, function.__name__, bound.arguments) as native:
+                    async with prepare_feature_source(request, actor, operation, bound.arguments) as native:
                         space = await service.resource()
-                        permission = Permission.READ | Permission.EXPORT if write and service.host_written else Permission.WRITE if write else Permission.READ
+                        permission = Permission.READ | Permission.EXPORT if export or (write and service.host_written) else Permission.WRITE if write else Permission.READ
                         requests = {space.id: (permission, space.generation)}
                         associations = {namespace: space.id}
                         body = bound.arguments.get("body")
@@ -143,7 +144,7 @@ def storage_feature(namespace, *, write=False, selected_remove=False):
                                 await admit_removal_authority(session)
                                 yield
 
-                        ordered_publish = native is not None and service.host_written and function.__name__ == "publish"
+                        ordered_publish = native is not None and service.host_written and operation == "publish"
 
                         async def invoke(volumes):
                             paths = FeaturePaths(get_paths(), actor.subject_id, {name: volumes[identifier] for name, identifier in associations.items()})
@@ -193,7 +194,7 @@ def storage_feature(namespace, *, write=False, selected_remove=False):
                                             from app.gateway.native_shared_publications import NativeSharedCopy
 
                                             shared_owner = NativeSharedCopy(sources, volumes[space.id], admission)
-                                        if function.__name__ == "promote_thread_file_to_shelf":
+                                        if operation == "promote_thread_file_to_shelf":
                                             from app.gateway.native_project_documents import stage_native_document
                                             from deerflow.projects.documents import add_staged_document
 
@@ -263,7 +264,7 @@ def storage_feature(namespace, *, write=False, selected_remove=False):
                                 request={
                                     "action": "feature-workflow",
                                     "namespace": namespace,
-                                    "operation": "remove_shared" if selected_remove else function.__name__,
+                                    "operation": "remove_shared" if selected_remove else operation,
                                     "parameters": parameters,
                                     "source": source_parameters,
                                 },

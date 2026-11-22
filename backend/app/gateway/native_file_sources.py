@@ -69,6 +69,18 @@ async def prepare_feature_source(request, actor, operation, arguments):
         yield await NativeFileSources.prepare(request, actor), None
         return
     body = arguments["body"]
+    if operation == "publish" and (generated := arguments.get("generated")) is not None:
+        from app.gateway.snapshot_manifest import generated_name
+        from deerflow.files.store import DescriptorSource
+
+        if not isinstance(generated, DescriptorSource):
+            raise ValueError("Expected a confirmed snapshot file")
+        if name := generated_name(body.path):
+            if generated.name != name:
+                raise ValueError("Unrecognized host-generated document")
+            yield await NativeFileSources.prepare(request, actor), generated
+            return
+        # A confirmed output still requires the original conversation gate and live source grant.
     if operation == "promote_thread_file_to_shelf":
         if "/" in body.name or "\\" in body.name or body.name in {".", ".."}:
             raise HTTPException(404, "Thread file not found")

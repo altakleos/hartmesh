@@ -101,6 +101,11 @@ class FileBrowserFeature(BaseModel):
         return cls(storage_mode="spaces", operations=FileBrowserOperations(personal=["select", "folder"], shared=["select", "folder", "remove"], agent=["select", "folder", "content", "text"] if instances.enabled else []))
 
 
+class SharedConversationsFeature(BaseModel):
+    version: Literal[1] = 1
+    operations: list[Literal["read", "publish", "continue"]] = Field(default_factory=lambda: ["read", "publish"])
+
+
 class BrowserControlFeature(BaseModel):
     """Availability of live agentic browser control."""
 
@@ -251,6 +256,7 @@ class FeaturesResponse(BaseModel):
 
     customer_administration: CustomerAdministrationFeature = Field(default_factory=CustomerAdministrationFeature)
     file_browser: FileBrowserFeature
+    shared_conversations: SharedConversationsFeature = Field(default_factory=SharedConversationsFeature)
     storage_spaces: StorageSpacesFeature = Field(default_factory=StorageSpacesFeature)
     accounts: AccountsFeature = Field(default_factory=AccountsFeature)
     agent_instances: AgentInstancesFeature = Field(default_factory=AgentInstancesFeature)
