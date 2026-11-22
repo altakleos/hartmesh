@@ -618,12 +618,27 @@ export default function ChatPage() {
                     user &&
                     threadMetadata.isSuccess &&
                     !threadMetadata.isError &&
-                    threadMetadata.data?.agent_instance === null &&
-                    threadMetadata.data.owner_user_id === user.id &&
-                    hasCeiling(user.permissions, "threads:write") && (
+                    ((threadMetadata.data?.agent_instance === null &&
+                      threadMetadata.data.owner_user_id === user.id &&
+                      hasCeiling(user.permissions, "threads:write")) ||
+                      !!binding) && (
                       <ShareConversationTrigger
                         thread={threadId}
                         company={branding.companyName}
+                        agent={
+                          binding
+                            ? {
+                                id: binding.id,
+                                name: binding.name,
+                                supervisor,
+                                permissions:
+                                  resident.status === "ready" &&
+                                  instance?.id === binding.id
+                                    ? instance.permissions
+                                    : null,
+                              }
+                            : undefined
+                        }
                       />
                     )}
                   <ExportTrigger threadId={threadId} />

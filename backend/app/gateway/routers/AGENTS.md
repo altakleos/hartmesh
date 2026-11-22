@@ -115,7 +115,7 @@ Ordinary Shared mutations enter `_shared_mutation`; its process mutex and privat
 filesystem advisory lock retain ownership through recovery/settlement.
 Delete authorizes the current publication under that lock; optional
 `expected_publication_id` adds stale-client intent fencing (empty means no record).
-Shared conversation snapshots reserve the owned thread, use finished visible runs’ delivered files, and publish each item separately. Only host-generated transcript and manifest descriptors may use the reserved sources. The manifest lands last. Readers check its live identity, declared path, digest and publication time before grouping or removing any file.
+Snapshots reserve the thread and copy presented files from finished visible runs. Bound shares require a session manager with Inspect, Home admin/export and digest-bound company consent. Recheck grants on reads and writes; names stay in the draft. Publish each item separately, host-generated manifest last. Recognize members by live identity, path, hash and time. Hide bound thread IDs in public Shared rows and duplicate receipts.
 Lists/publications carry nullable `publication_id`; Files/Undo pass it back.
 Removal journals stage bytes on the same filesystem before updating the immutable
 publication ID. Recovery matches record ID and path before using saved outcomes;

@@ -97,7 +97,7 @@ def parse_manifest(data: bytes) -> SnapshotManifest:
     return SnapshotManifest.model_validate(value)
 
 
-def freeze_manifest(title: str, messages: Iterable[dict], files: Iterable[SnapshotMember]) -> FrozenManifest:
+def freeze_manifest(title: str, messages: Iterable[dict], files: Iterable[SnapshotMember], *, with_agent: SnapshotAgent | None = None) -> FrozenManifest:
     rows = []
     for message in messages:
         if message.get("type") in {"human", "ai"} and is_visible(message) and (text := visible_text(message)):
@@ -117,7 +117,7 @@ def freeze_manifest(title: str, messages: Iterable[dict], files: Iterable[Snapsh
             grouped[key].also_named.append(path.name)
         else:
             grouped[key] = item.model_copy(deep=True)
-    manifest = SnapshotManifest(title=title, messages=rows, transcript=SnapshotMember(path="transcript.md", size=len(transcript), sha256=digest_of_bytes(transcript)), files=list(grouped.values()))
+    manifest = SnapshotManifest(title=title, with_agent=with_agent, messages=rows, transcript=SnapshotMember(path="transcript.md", size=len(transcript), sha256=digest_of_bytes(transcript)), files=list(grouped.values()))
     document = json.dumps(manifest.model_dump(by_alias=True, exclude_none=True), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     if len(document) > MANIFEST_LIMIT:
         raise ValueError("Snapshot manifest is too large")

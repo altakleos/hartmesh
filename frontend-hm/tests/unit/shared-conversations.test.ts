@@ -55,3 +55,16 @@ describe("shared conversation views", () => {
     expect(readSharedHistory([message("last")], null).copied.size).toBe(0);
   });
 });
+
+describe("agent snapshots", () => {
+  it("negotiates agent publishing independently from ordinary publishing", () => {
+    expect(
+      sharedConversationOperations({
+        shared_conversations: {
+          version: 1,
+          operations: ["publish", "agent_publish"],
+        },
+      }),
+    ).toEqual(["publish", "agent_publish"]);
+  });
+});

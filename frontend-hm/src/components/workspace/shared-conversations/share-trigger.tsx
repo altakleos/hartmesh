@@ -3,7 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Share2Icon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,7 @@ import {
   DialogFooter,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { canManageInstance, MANAGE } from "@/core/agent-instances/presentation";
 import { useFileActionLifetime } from "@/core/file-areas/file-action-lifetime";
 import {
   publishSnapshot,
@@ -27,22 +28,67 @@ import {
   useSharing,
   useRefreshShared,
 } from "@/core/shared-conversations/hooks";
+import { reviewedAgentAudience } from "@/core/shared-conversations/protocol";
 import { useSpaceActionSignal } from "@/core/spaces/lifetime";
 
 import { useSnapshotCopy } from "./copy";
 
+interface ShareAgent {
+  id: string;
+  name: string;
+  supervisor: string;
+  permissions: number | null;
+}
 export function ShareConversationTrigger({
   thread,
   company,
+  agent,
 }: {
+  agent?: ShareAgent;
   thread: string;
   company: string | null;
 }) {
   const access = useSharing();
-  if (!access.can("publish")) return null;
+  const w = useSnapshotCopy();
+  const reasonId = useId();
+  if (agent && !access.agentPublishing) return null;
+  if (agent?.permissions != null && !canManageInstance(agent.permissions)) {
+    const reason =
+      agent.permissions & MANAGE
+        ? w.needInspect(agent.supervisor)
+        : w.needManager(agent.name, agent.supervisor);
+    return (
+      <span className="group relative inline-flex">
+        <Button
+          size="icon"
+          variant="ghost"
+          type="button"
+          aria-disabled="true"
+          aria-label={w.shareConversation}
+          aria-describedby={reasonId}
+          title={reason}
+        >
+          <Share2Icon />
+        </Button>
+        <span
+          id={reasonId}
+          className="bg-popover text-popover-foreground absolute end-0 top-full z-50 hidden w-60 rounded border p-2 text-sm shadow group-focus-within:block group-hover:block"
+        >
+          {reason}
+        </span>
+      </span>
+    );
+  }
+  if (!access.can("publish") || agent?.permissions === null) return null;
   return (
     <ShareDialog
-      key={JSON.stringify([access.scope, thread])}
+      key={JSON.stringify([
+        access.scope,
+        thread,
+        agent?.id,
+        agent?.permissions,
+      ])}
+      agent={agent}
       thread={thread}
       company={company}
       scope={access.scope}
@@ -55,7 +101,9 @@ function ShareDialog({
   company,
   scope,
   canUndo,
+  agent,
 }: {
+  agent?: ShareAgent;
   thread: string;
   company: string | null;
   scope: string;
@@ -70,20 +118,33 @@ function ShareDialog({
     [pending, setPending] = useState(false),
     [failure, setFailure] = useState<string | null>(null);
   const draft = useQuery({
-    queryKey: ["shared-conversations", scope, "draft", thread],
+    queryKey: ["shared-conversations", scope, "draft", thread, agent?.id],
     queryFn: ({ signal }) => snapshotDraft(thread, signal),
     enabled: open,
     retry: false,
     gcTime: 0,
   });
   const data = draft.data;
+  const audience = agent ? reviewedAgentAudience(data, agent.id) : null;
+  const [ack, setAck] = useState<string | null>(null);
+  const reviewKey =
+    audience && data
+      ? JSON.stringify([data.snapshot, data.with, audience, company])
+      : null;
+  const confirmed = !agent || (reviewKey !== null && ack === reviewKey);
   async function publish() {
-    if (!data || pending || draft.isFetching || draft.isError) return;
+    if (!data || pending || draft.isFetching || draft.isError || !confirmed)
+      return;
     const signal = capture();
     setPending(true);
     setFailure(null);
     try {
-      const result = await publishSnapshot(thread, data.snapshot, signal);
+      const result = await publishSnapshot(
+        thread,
+        data.snapshot,
+        signal,
+        agent ? { snapshot: data.snapshot, audience: "company" } : undefined,
+      );
       if (signal.aborted) return;
       setOpen(false);
       void refresh();
@@ -120,6 +181,7 @@ function ShareDialog({
       );
     } catch (e) {
       if (!signal.aborted) {
+        setAck(null);
         setFailure(w.error(e));
         void draft.refetch();
         void refresh();
@@ -134,6 +196,7 @@ function ShareDialog({
       onOpenChange={(next) => {
         if (!pending) {
           setFailure(null);
+          setAck(null);
           setOpen(next);
         }
       }}
@@ -151,7 +214,9 @@ function ShareDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{w.share}</DialogTitle>
-          <DialogDescription>{w.audience(company)}</DialogDescription>
+          <DialogDescription>
+            {agent ? w.after(company) : w.audience(company)}
+          </DialogDescription>
         </DialogHeader>
         <p>{w.freeze}</p>
         {draft.isFetching ? (
@@ -164,9 +229,29 @@ function ShareDialog({
             </Button>
           </p>
         ) : (
-          data && (
+          data &&
+          (agent && !audience ? (
+            <p role="alert">{w.unavailable}</p>
+          ) : (
             <div className="max-h-60 overflow-auto">
               <h3 className="font-medium">{data.title || w.untitled}</h3>
+              {agent && audience && (
+                <div className="space-y-2">
+                  <p>
+                    {w.currentAudience(
+                      data.with!.name,
+                      audience.starter,
+                      audience.starter_can_read,
+                      audience.inspect_count,
+                      audience.chat_count,
+                    )}
+                  </p>
+                  {audience.authors.length > 0 && (
+                    <p>{w.authors(audience.authors)}</p>
+                  )}
+                  <p>{w.currentFiles(data.with!.name)}</p>
+                </div>
+              )}
               <p>{w.count(data.message_count)}</p>
               <ul>
                 {data.files.map((f) => (
@@ -185,8 +270,22 @@ function ShareDialog({
                 ))}
               </ul>
             </div>
-          )
+          ))
         )}
+        {agent &&
+          audience &&
+          !data?.already_shared &&
+          !draft.isFetching &&
+          !draft.isError && (
+            <label className="flex items-start gap-2">
+              <input
+                type="checkbox"
+                checked={confirmed}
+                onChange={(e) => setAck(e.target.checked ? reviewKey : null)}
+              />
+              {w.acknowledge(company)}
+            </label>
+          )}
         {failure && <p role="alert">{failure}</p>}
         <DialogFooter>
           <Button
@@ -196,7 +295,8 @@ function ShareDialog({
           >
             {w.cancel}
           </Button>
-          {data?.already_shared &&
+          {(!agent || audience) &&
+          data?.already_shared &&
           data.publication_id &&
           !draft.isFetching &&
           !draft.isError ? (
@@ -207,7 +307,13 @@ function ShareDialog({
             </Button>
           ) : (
             <Button
-              disabled={pending || draft.isFetching || draft.isError || !data}
+              disabled={
+                pending ||
+                draft.isFetching ||
+                draft.isError ||
+                !data ||
+                !confirmed
+              }
               onClick={() => void publish()}
             >
               {w.confirm}

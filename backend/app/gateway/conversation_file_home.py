@@ -26,18 +26,23 @@ async def admit_agent_presented_source(request, thread_id):
 
 
 async def read_agent_presented_file(request, thread_id, path, *, maximum_bytes=None):
-    prefix = "/mnt/user-data/outputs/"
-    if not path.startswith(prefix):
-        raise HTTPException(404, "Conversation or file is unavailable")
     inspection = await inspection_for_read(request, thread_id)
     if inspection is None:
         raise HTTPException(404, "Conversation or file is unavailable")
     home = inspection.instance.home_id
-    files = inspection.authority.instances.files
 
     async def admit(session, rows):
         await inspection.authority.admit_file_export(session, inspection, rows[home][0].generation)
 
+    return await export_presented_output(inspection, path, maximum_bytes, admit)
+
+
+async def export_presented_output(inspection, path, maximum_bytes, admit):
+    prefix = "/mnt/user-data/outputs/"
+    if not path.startswith(prefix):
+        raise HTTPException(404, "Conversation or file is unavailable")
+    files = inspection.authority.instances.files
+    home = inspection.instance.home_id
     if maximum_bytes is not None:
         maximum_bytes = min(maximum_bytes, MAX_TRANSFER_BYTES)
     try:

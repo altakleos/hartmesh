@@ -13,7 +13,7 @@ from app.gateway.deps import get_shared_publications_repo, is_admin_user
 from app.gateway.routers._file_http import acting_user_id
 from app.gateway.routers.agent_instances import _service as instance_service
 from app.gateway.routers.files import UserFileInfo
-from app.gateway.routers.shared import SharedFileInfo, _may_remove, _publisher_names, _shared_mutation
+from app.gateway.routers.shared import SharedFileInfo, _may_remove, _publisher_names, _shared_mutation, private_snapshot_origins
 from app.gateway.routers.spaces import MAX_TEXT_BYTES, SpaceFileResponse, StorageRoute, StrictRequest, _actor, text_result
 from app.gateway.storage_features import current_feature_service, storage_feature
 from deerflow.agent_instances.contract import AgentDenied
@@ -131,7 +131,10 @@ async def shared_folder(request: Request, response: Response, path: str = Query(
     from app.gateway.conversation_snapshots import snapshot_memberships
 
     marks = await snapshot_memberships(repo, records)
+    private = await private_snapshot_origins(request, ((item["path"], item.get("from_thread_id")) for item in files))
     for item in files:
+        if item.get("from_thread_id") in private:
+            item["from_thread_id"] = None
         if item["path"] in marks:
             item["snapshot_publication_id"] = marks[item["path"]]
     return _folder_result(response, page, files)

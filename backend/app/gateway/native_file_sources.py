@@ -75,6 +75,10 @@ async def prepare_feature_source(request, actor, operation, arguments):
 
         if not isinstance(generated, DescriptorSource):
             raise ValueError("Expected a confirmed snapshot file")
+        agent_source = arguments.get("agent_source")
+        if agent_source is not None:
+            yield await agent_source.native_files(actor, body, generated)
+            return
         if name := generated_name(body.path):
             if generated.name != name:
                 raise ValueError("Unrecognized host-generated document")
@@ -226,7 +230,19 @@ class NativeFileSources:
         finally:
             await await_drained(run_file_io(close))
 
-    async def copy_to(self, source, destination, *, root_relative, name, admission, folder=None, folder_mode=0o777, file_mode=0o666, retain_stage=None, prepare_names=None):
+    def verify_source(self):
+        current_source = self.files.catalog.verify(self.user.spec.slot_id, previous=self.user)
+        self.files._check_incarnation(self.snapshot[1], current_source)
+        from deerflow.spaces.incarnations import BoundVolume
+
+        with BoundVolume(current_source, self.snapshot[1].backing_handle).filesystem():
+            pass
+
+    async def copy_to(self, source, destination, **kwargs):
+        return await self.copy_verified_file(self.files, self.verify_source, source, destination, **kwargs)
+
+    @staticmethod
+    async def copy_verified_file(files, verify_source, source, destination, *, root_relative, name, admission, folder=None, folder_mode=0o777, file_mode=0o666, retain_stage=None, prepare_names=None):
         """Stage bounded pinned bytes, refresh authority, then publish exclusively.
 
         The caller supplies its parent workflow admission, including its own
@@ -274,13 +290,10 @@ class NativeFileSources:
                 os.close(descriptor)
 
         def reverify():
-            current_source = self.files.catalog.verify(self.user.spec.slot_id, previous=self.user)
-            self.files._check_incarnation(self.snapshot[1], current_source)
+            verify_source()
             from deerflow.spaces.incarnations import BoundVolume
 
-            with BoundVolume(current_source, self.snapshot[1].backing_handle).filesystem():
-                pass
-            current_destination = self.files.catalog.verify(destination.spec.slot_id, previous=destination)
+            current_destination = files.catalog.verify(destination.spec.slot_id, previous=destination)
             with BoundVolume(current_destination, destination.backing_handle).filesystem() as filesystem:
                 for current_fd, held_fd in ((filesystem._data_fd, stage.filesystem._data_fd), (filesystem._control_fd, stage.filesystem._control_fd)):
                     current, held = os.fstat(current_fd), os.fstat(held_fd)

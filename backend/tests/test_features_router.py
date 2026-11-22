@@ -187,6 +187,7 @@ async def test_features_report_storage_allowances_and_only_the_callers_assistant
     response = await _managed_features(startup)
     assert response["storage_spaces"] == {"enabled": True, "backend": "fixed-ext4", "native_attachments": False, "editor_concurrency": "shared", "user_spaces": False, "state": "ready", "reason": None, "own": "not-assigned"}
     assert response["file_browser"] == {"versions": [1], "storage_mode": "spaces", "operations": {"personal": ["select", "folder"], "shared": ["select", "folder", "remove"], "agent": ["select", "folder", "content", "text"]}}
+    assert response["shared_conversations"]["operations"] == ["read", "publish", "continue", "agent_publish"]
     assert response["accounts"]["seats"] == {"allowed": 1, "in_use": 2}
     assert response["agent_instances"] == {
         "connections": False,

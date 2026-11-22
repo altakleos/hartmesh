@@ -4740,6 +4740,12 @@ in the composer and in the transcript. There is no automatic history search. See
 [configuration](backend/docs/CONFIGURATION.md#reading-referenced-conversations)
 and the [request contract](backend/docs/API.md#referencing-a-previous-conversation).
 
+### Share a conversation with your company
+
+Open the conversation and select **Share with everyone**. For a conversation with an AI assistant or AI employee, you need both **Can manage** and **Can see all work**. The confirmation lists the participants HartMesh can identify and which files the agent handed back in that conversation. Review their current names and sizes before confirming. A file in the agent’s Home can change after the message that first presented it.
+
+Anyone with access to Company shared can read the published messages and download those files. Later messages and edits stay in the original conversation. You can remove the published copy from Company shared.
+
 ### Continue a shared conversation
 
 Open a published conversation in Company shared and choose **Continue** to start a private chat with your ordinary assistant. The new chat includes the published words and copies of the files that are still shared. The result shows the saved filenames and identifies any file that could not be copied. Removing the publication later leaves your chat and saved copies available.
