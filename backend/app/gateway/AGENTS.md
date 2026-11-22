@@ -65,8 +65,8 @@ checkpoint reads. Inspect root head/parent and leaf writes only; protect selecto
 require equal channel versions and invalidate caches before deletion. No scans,
 stats or blob GC; failures stay non-fatal.
 
-Opt-in conversation access (`conversation_access.py`, `conversation_reader.py`,
-`conversation_references`): [details](../../docs/gateway-guidance-details.md#conversation-access).
+Opt-in conversation access and run-bound attachment tools (`conversation_access.py`,
+`conversation_reader.py`, `conversation_file_tools.py`): [details](../../docs/gateway-guidance-details.md#conversation-access).
 
 Health, readiness and API-docs exposure: [details](../../docs/gateway-guidance-details.md#health-and-readiness).
 

@@ -401,6 +401,7 @@ scheduler:
   queue_timeout_seconds: 7200
 
 tool_groups:
+  - name: conversation
   - name: web
   - name: file:read
   - name: file:write
@@ -418,6 +419,9 @@ tool_groups:
 # checked and pinned before it is touched. The hosted reader it replaced
 # answered a tenant's address with a 401 for every page.
 tools:
+  - name: read_conversation
+    group: conversation
+    use: deerflow.tools.conversation:read_conversation
   - name: show_web_page
     group: web
     use: deerflow.agent_instances.chat_tools:show_web_page

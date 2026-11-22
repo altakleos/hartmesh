@@ -1009,6 +1009,12 @@ export interface Translations {
 
   // Input Box
   inputBox: {
+    conversationReference: {
+      label: (title: string) => string;
+      remove: (title: string) => string;
+      imported: (filename: string, title: string, size: string) => string;
+      untitled: string;
+    };
     conversationFile: {
       menu: string;
       device: string;

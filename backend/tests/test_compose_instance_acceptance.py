@@ -285,7 +285,7 @@ class Person:
     def upload(self, thread_id, content=MARKER, *, name="input.txt", expected=200):
         return self.request("POST", f"/api/threads/{thread_id}/uploads", files={"files": (name, content, "text/plain")}, expected=expected)
 
-    def run(self, thread_id, *, success=True, files=None, message="acceptance:file", helpers=False):
+    def run(self, thread_id, *, success=True, files=None, message="acceptance:file", helpers=False, references=()):
         response = self.request(
             "POST",
             f"/api/langgraph/threads/{thread_id}/runs/stream",
@@ -293,6 +293,7 @@ class Person:
                 "assistant_id": "lead_agent",
                 "input": {"messages": [{"type": "human", "content": message, **({"additional_kwargs": {"files": files}} if files is not None else {})}]},
                 "context": {"mode": "flash", "model_name": "acceptance-model", "thinking_enabled": False, "subagent_enabled": helpers},
+                **({"conversation_references": list(references)} if references else {}),
                 "stream_mode": ["values", "messages-tuple", "updates"],
             },
         )
@@ -770,6 +771,19 @@ def test_ordinary_chat_works_with_storage_spaces_on(compose, session):
         bind = mounted(entry, destination)
         assert bind["Source"] == source and bind["RW"] is writable
     compose.state["admin_thread"] = thread_id
+
+    assert session.request("GET", "/api/features").json()["conversation_references"]["enabled"]
+    destination = session.thread()
+    session.run(destination, message="acceptance:linked-report — bring the report here and read it", references=[thread_id])
+    state = session.request("GET", f"/api/threads/{destination}/state").json()["values"]["messages"]
+    imports = [m for m in state if m.get("type") == "tool" and m.get("name") == "import_conversation_file"]
+    (result,) = imports
+    (receipt,) = result["additional_kwargs"]["imported_files"]
+    assert receipt["sha256"] == hashlib.sha256(ARTIFACT).hexdigest() and receipt["virtual_path"] == "/mnt/user-data/uploads/acceptance.txt"
+    assert session.request("GET", f"/api/threads/{destination}/artifacts/mnt/user-data/uploads/acceptance.txt").content == ARTIFACT
+    assert session.request("GET", f"/api/threads/{destination}/presented-files").json()["files"] == []
+    assert any(m.get("type") == "ai" and "I imported and read the linked report." in str(m.get("content")) for m in state)
+    session.request("DELETE", f"/api/threads/{destination}")
 
 
 def test_my_files_shared_and_projects_work_with_storage_spaces_on(compose, session):

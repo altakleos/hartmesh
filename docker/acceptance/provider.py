@@ -131,6 +131,53 @@ def continued_report(messages, latest, token, offered, user_text):
     return {"content": "I read the shared report in my files."}
 
 
+def message_text(message):
+    content = message.get("content")
+    if isinstance(content, list):
+        return "\n".join(block["text"] for block in content if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str))
+    return content if isinstance(content, str) else ""
+
+
+def linked_report(messages, latest, offered):
+    """Discover source selectors and copied bytes solely through the tools."""
+    hint = re.search(r'Read-only conversation references for this run: (\["[a-f0-9-]{36}"\])', message_text(messages[latest]))
+    if not hint:
+        return None
+    if "acceptance:linked-report" not in message_text(messages[latest]):
+        older = next((m for m in reversed(messages[:latest]) if m.get("role") == "user"), {})
+        if "acceptance:linked-report" not in message_text(older):
+            return None
+    source, = json.loads(hint[1])
+    tools = ("read_conversation", "list_conversation_files", "import_conversation_file", "read_file")
+    turn = messages[latest + 1:]
+    results = []
+    for i, message in enumerate(turn):
+        if message.get("role") == "tool":
+            n = len(results)
+            if n >= len(tools) or i == 0 or scripted_tool(turn[i-1], message, f"call_linked_{n}") != tools[n]:
+                raise ValueError("Unexpected linked report tool result")
+            results.append(tool_result_content(message.get("content")))
+    if len(results) == 4:
+        if results[3].rstrip("\n") != ARTIFACT.rstrip("\n"):
+            raise ValueError("Unexpected imported bytes")
+        return {"content": "I imported and read the linked report."}
+    name = tools[len(results)]
+    arguments = {"thread_id": source}
+    if len(results) == 1:
+        page = json.loads(results[0])
+        if page.get("thread_id") != source or not any(m.get("role") == "assistant" and FINAL in m.get("text", "") for m in page["messages"]):
+            raise ValueError("The reader did not return the linked report conversation")
+    elif len(results) == 2:
+        file, = [f for f in json.loads(results[1])["files"] if f["available"] and f["filename"] == "acceptance.txt"]
+        arguments.update(run_id=file["run_id"], path=file["path"])
+    elif len(results) == 3:
+        receipt, = json.loads(results[2])["imported_files"]
+        arguments = {"path": receipt["virtual_path"]}
+    if name not in offered:
+        raise ValueError(f"Linked report tool unavailable: {name}")
+    return {"tool_calls": [{"id": f"call_linked_{len(results)}", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}]}
+
+
 def reply(body: dict[str, Any]) -> dict[str, Any]:
     messages = body.get("messages", [])
     if not body.get("tools"):
@@ -164,9 +211,11 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
         if previous is not None and messages[previous].get("content") == WORK_ACTIVATION:
             latest = previous
             wrap_up = True
-    user_text = messages[latest].get("content")
-    if isinstance(user_text, list):
-        user_text = "\n".join(block["text"] for block in user_text if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str))
+    user_text = message_text(messages[latest])
+    if "Read-only conversation references for this run:" in user_text:
+        imported = linked_report(messages, latest, offered)
+        if imported is not None:
+            return imported
     continuation = re.search(r"\bacceptance:continued-report:([0-9a-f]{32})\b", user_text) if isinstance(user_text, str) else None
     if continuation:
         return continued_report(messages, latest, continuation[1], offered, user_text)

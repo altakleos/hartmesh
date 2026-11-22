@@ -24,7 +24,7 @@ from deerflow.spaces.contract import Permission, PrincipalRef
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source_kind", ["conversation", "shared_publication"])
-async def test_native_import_captures_the_assigned_source_and_rechecks_in_the_home_sql_writer(feature_app, source_kind):
+async def test_native_import_captures_the_assigned_source_and_rechecks_in_the_home_sql_writer(feature_app, source_kind, monkeypatch):  # noqa: F811 (shared fixture)
     client, app, files, catalog, base, alice, _, _ = feature_app
     native_request(app)
     app.include_router(conversation_files.router)
@@ -68,6 +68,31 @@ async def test_native_import_captures_the_assigned_source_and_rechecks_in_the_ho
     async with sf() as session, session.begin():
         session.add(ThreadMetaRow(thread_id="earlier", user_id=owner, incarnation="earlier"))
 
+    async def bound_tools(request):
+        import asyncio
+
+        from app.gateway.conversation_file_tools import bind_conversation_files
+        from deerflow.config.tool_output_config import ToolOutputConfig
+
+        return await bind_conversation_files(
+            request=request,
+            source_ids=("earlier",),
+            reader=None,
+            destination=rows["later"],
+            run=SimpleNamespace(user_id=owner, thread_id="later", status="running", abort_event=asyncio.Event()),
+            config=SimpleNamespace(uploads={}, tool_output=ToolOutputConfig()),
+        )
+
+    @app.get("/test-bound-files")
+    async def bound_files(request: Request):
+        access = await bound_tools(request)
+        return await access.list_files(thread_id="earlier")
+
+    @app.post("/test-bound-copy")
+    async def bound_copy(request: Request):
+        access = await bound_tools(request)
+        return await access.import_file(thread_id="earlier", run_id="answer", path=path)
+
     @app.post("/test-import")
     async def do_import(request: Request):
         return await import_into_chat(request=request, thread_id="later", source=source, config=config)
@@ -92,6 +117,17 @@ async def test_native_import_captures_the_assigned_source_and_rechecks_in_the_ho
             await capture.admit_home_publication(session)
         return {"sha256": capture.sha256}
 
+    if source_kind == "conversation":
+        from app.gateway import conversation_file_tools as host
+
+        monkeypatch.setattr(host, "get_local_provider", lambda: SimpleNamespace(get_user=AsyncMock(return_value=alice)))
+        monkeypatch.setattr(host, "resolve_route_permissions", AsyncMock(return_value={"threads:read", "threads:write", "runs:read"}))
+        monkeypatch.setattr(host, "account_refusal", lambda _: None)
+        page = await client.get("/test-bound-files")
+        assert page.status_code == 200 and page.json()["files"] == [{"run_id": "answer", "path": path, "filename": "notes.txt", "size": len(data), "available": True}]
+        copied = await client.post("/test-bound-copy")
+        assert copied.status_code == 200 and copied.json()["sha256"] == sha
+
     answer = await client.post("/test-import")
     assert answer.status_code == 200, answer.text
     assert answer.json()["sha256"] == sha
@@ -103,3 +139,12 @@ async def test_native_import_captures_the_assigned_source_and_rechecks_in_the_ho
     assert (await client.post("/test-admit/none")).status_code == 200
     assert (await client.post("/test-admit/remove")).status_code in (404, 409)
     assert (await client.post("/test-admit/revoke")).status_code == 403
+    if source_kind == "conversation":
+        async with sf() as session, session.begin():
+            grant = await session.get(SpaceGrantRow, (user.id, "human", owner))
+            grant.permissions = int(Permission.READ)
+        charged = personal / "conversations/later/user-data/uploads/notes.txt"
+        charged.unlink()
+        assert (await client.get("/test-bound-files")).json() is None
+        assert (await client.post("/test-bound-copy")).json() is None
+        assert not charged.exists()

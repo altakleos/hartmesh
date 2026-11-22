@@ -74,7 +74,12 @@ import { hasCeiling } from "@/core/agent-instances/presentation";
 import { fetch } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
-import { useBranding, useWorkspacePresentation } from "@/core/features";
+import {
+  useFeatures,
+  selectConversationReferenceLimit,
+  useBranding,
+  useWorkspacePresentation,
+} from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
 import {
@@ -104,6 +109,7 @@ import {
   writeComposerDraft,
 } from "@/core/threads/composer-draft";
 import { useComposerImports } from "@/core/threads/composer-imports";
+import { useComposerReferences } from "@/core/threads/composer-references";
 import { useComposerStorageRefusal } from "@/core/threads/composer-storage";
 import type { ImportDestination } from "@/core/threads/conversation-file-import";
 import type {
@@ -490,6 +496,23 @@ export function InputBox({
     0,
   );
   const instanceId = agentFiles?.id;
+  const referenceFeature = useFeatures(selectConversationReferenceLimit);
+  const references = useComposerReferences(
+    user?.id,
+    threadId,
+    instanceId,
+    JSON.stringify([
+      user?.system_role,
+      user?.permissions,
+      agentFiles?.homeScope,
+      context.agent_name,
+    ]),
+    !isMock &&
+      !referenceFeature.isError &&
+      hasCeiling(user?.permissions, "runs:read")
+      ? (referenceFeature.data ?? 0)
+      : 0,
+  );
   const instanceName = agentFiles?.name;
   const destination = useMemo<ImportDestination>(
     () => ({
@@ -1328,7 +1351,13 @@ export function InputBox({
       const quoteIds = quotes.map((quote) => quote.id);
       const quoteContexts = quotes.map((quote) => quote.context);
       pendingDraftSubmissionKeyRef.current = draftKey;
+      const selectedReferences = references.references;
       const submitOptions: InputBoxSubmitOptions = {
+        ...(selectedReferences.length
+          ? {
+              conversationReferences: selectedReferences.map((item) => item.id),
+            }
+          : {}),
         ...(imports.chips.length
           ? { savedFiles: imports.chips.map((chip) => chip.file) }
           : {}),
@@ -1360,6 +1389,7 @@ export function InputBox({
             invalidateDraftSaveTimer();
             clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
           }
+          if (selectedReferences.length) references.remove(selectedReferences);
           if (imports.chips.length) imports.remove(imports.chips);
           sidecar?.clearConversationQuotes(quoteIds);
         },
@@ -1387,6 +1417,7 @@ export function InputBox({
       imports,
       refused,
       agentRefused,
+      references,
       textInput.value,
       attachmentParts,
       reportUploadLimitViolations,
@@ -1411,6 +1442,7 @@ export function InputBox({
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
+      references.cancelLookups();
       if (agentFiles?.uploading)
         return Promise.reject(new Error("Files are still being saved."));
       if (status === "streaming") {
@@ -1423,6 +1455,7 @@ export function InputBox({
             !message.text.trim() ||
             message.files.length ||
             restoredFileCount ||
+            references.references.length ||
             selectedSlashSkill ||
             (sidecar?.conversationQuotes.length ?? 0) ||
             message.text.trimStart().startsWith("/")
@@ -1528,6 +1561,7 @@ export function InputBox({
       agentFiles?.uploading,
       context.mode,
       context.reasoning_effort,
+      references,
       restoredFileCount,
       handleCompactCommand,
       handleGoalCommand,
@@ -2527,16 +2561,34 @@ export function InputBox({
                 }
               }
         }
-        onPasteCapture={
-          allowAttachments && !attachmentsUnavailable
-            ? undefined
-            : (event) => {
-                if (event.clipboardData.files.length) {
-                  event.preventDefault();
-                  event.stopPropagation();
-                }
-              }
-        }
+        onPasteCapture={(event) => {
+          if (
+            event.clipboardData.files.length ||
+            Array.from(event.clipboardData.items).some(
+              (item) => item.kind === "file",
+            )
+          ) {
+            if (!allowAttachments || attachmentsUnavailable) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+            return;
+          }
+          const target = event.target;
+          if (
+            !composerLocked &&
+            target instanceof HTMLElement &&
+            (target.tagName === "TEXTAREA" ||
+              target.closest('[contenteditable="true"]'))
+          ) {
+            void references.pasted(
+              event.clipboardData.getData("text/plain"),
+              target,
+              readInputText,
+              setTextInput,
+            );
+          }
+        }}
         multiple
         onSubmit={handleSubmit}
         {...props}
@@ -2567,6 +2619,28 @@ export function InputBox({
           </div>
         )}
         <PromptInputHeader className="flex-wrap px-3 pt-3 pb-0 empty:hidden">
+          {references.references.map((reference) => {
+            const title =
+              reference.title ?? t.inputBox.conversationReference.untitled;
+            return (
+              <span
+                key={reference.id}
+                className="bg-muted inline-flex max-w-full items-center gap-1 rounded-md px-2 text-sm"
+              >
+                <span className="truncate">
+                  {t.inputBox.conversationReference.label(title)}
+                </span>
+                <button
+                  type="button"
+                  aria-label={t.inputBox.conversationReference.remove(title)}
+                  onClick={() => references.remove([reference])}
+                  className="shrink-0 px-1"
+                >
+                  ×
+                </button>
+              </span>
+            );
+          })}
           {modelSubmitError && (
             <div
               role="status"

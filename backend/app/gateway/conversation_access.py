@@ -120,7 +120,7 @@ def _json(value: dict) -> str:
     return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c")
 
 
-def _inline_output_limit(app_config: AppConfig) -> int | None:
+def conversation_output_limit(app_config: AppConfig, tool_name: str = CONVERSATION_TOOL_NAME) -> int | None:
     """Largest result ToolOutputBudgetMiddleware leaves inline for this tool.
 
     Mirrors its trigger: an exempt tool or disabled budget has no limit;
@@ -128,9 +128,9 @@ def _inline_output_limit(app_config: AppConfig) -> int | None:
     and the fallback truncation cap applies.
     """
     budget = app_config.tool_output
-    if not budget.enabled or CONVERSATION_TOOL_NAME in budget.exempt_tools:
+    if not budget.enabled or tool_name in budget.exempt_tools:
         return None
-    limits = [limit for limit in (budget.tool_overrides.get(CONVERSATION_TOOL_NAME, budget.externalize_min_chars), budget.fallback_max_chars) if limit > 0]
+    limits = [limit for limit in (budget.tool_overrides.get(tool_name, budget.externalize_min_chars), budget.fallback_max_chars) if limit > 0]
     return min(limits) if limits else None
 
 
@@ -230,7 +230,7 @@ def _prepare_owner_bound_conversation_reader(
 ) -> tuple[Callable[..., Awaitable[str]], tuple[str, ...]]:
     """Construct the non-serializable grant shared by authenticated hosts."""
     allowed_ids = frozenset(ids)
-    output_limit = _inline_output_limit(app_config)
+    output_limit = conversation_output_limit(app_config)
     thread_store = run_context.thread_store
     event_store = run_context.event_store
     from deerflow.agent_instances.conversations import AgentExecution

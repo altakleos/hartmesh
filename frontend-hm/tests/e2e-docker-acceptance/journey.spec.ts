@@ -66,6 +66,60 @@ async function openSharedFiles(page: Page) {
   await expect(details).toBeHidden();
 }
 
+async function importFromLinkedConversation(page: Page, sourceUrl: string) {
+  await page.goto("/workspace/chats/new");
+  const input = page.getByPlaceholder(/how can i assist you/i);
+  await expect(input).toBeVisible();
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: new URL(sourceUrl).origin,
+  });
+  await page.evaluate((url) => navigator.clipboard.writeText(url), sourceUrl);
+  await input.focus();
+  await input.press("Control+v");
+  await expect(
+    page.getByRole("button", { name: /^Remove conversation reference:/ }),
+  ).toBeVisible();
+  await input.fill(
+    "acceptance:linked-report — bring the report here and read it.",
+  );
+  const admitted = page.waitForResponse(
+    (r) =>
+      r.request().method() === "POST" &&
+      new URL(r.url()).pathname.endsWith("/runs/stream"),
+  );
+  await page.getByRole("button", { name: "Submit", exact: true }).click();
+  const stream = await admitted;
+  expect(stream.status()).toBe(200);
+  const source = new URL(sourceUrl).pathname.split("/").at(-1)!;
+  const body = stream.request().postDataJSON() as {
+    context: { conversation_references: string[] };
+  };
+  expect(body.context.conversation_references).toEqual([source]);
+  await expect(
+    page.getByText("I imported and read the linked report.", { exact: true }),
+  ).toBeVisible({ timeout: 60_000 });
+  await expect(page).toHaveURL(/\/workspace\/chats\/[a-f0-9-]+$/);
+  const target = new URL(page.url()).pathname.split("/").at(-1)!;
+  expect(target).not.toBe(source);
+  await page.reload();
+  const receipt = page.getByTestId("conversation-file-import-receipt");
+  await expect(receipt).toContainText("acceptance.txt");
+  await page.screenshot({
+    path: test.info().outputPath("linked-conversation-import.png"),
+  });
+  const file = await page.request.get(
+    `/api/threads/${target}/artifacts/mnt/user-data/uploads/acceptance.txt`,
+  );
+  expect(file.ok(), await file.text()).toBe(true);
+  expect(await file.text()).toBe(artifact);
+  const presented = await page.request.get(
+    `/api/threads/${target}/presented-files`,
+  );
+  expect(presented.ok()).toBe(true);
+  expect(await presented.json()).toMatchObject({ files: [], has_more: false });
+  return target;
+}
+
 async function attachFromFirstConversation(page: Page, sourceThread: string) {
   await page.goto("/workspace/chats/new");
   await page.getByTestId("add-attachments-button").click();
@@ -165,6 +219,7 @@ test("production Docker login, upload, streamed tools, files, history and confir
   page,
   context,
 }) => {
+  test.setTimeout(180_000);
   const email = "acceptance@example.com";
   const password = "synthetic-acceptance-password-123";
   const initialized = await context.request.post("/api/v1/auth/initialize", {
@@ -287,6 +342,8 @@ test("production Docker login, upload, streamed tools, files, history and confir
   });
 
   const destination = await attachFromFirstConversation(page, thread);
+  const linkedDestination = await importFromLinkedConversation(page, chatUrl);
+  expect(linkedDestination).not.toBe(destination);
   await page.goto(chatUrl);
 
   const exportStarted = await context.request.post("/api/account/export", {
@@ -414,11 +471,13 @@ print("export verified")`,
   await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
   expect((await context.request.get(artifactUrl)).status()).toBe(404);
   await expect(row).toHaveCount(0);
-  const importedDownload = await context.request.get(
-    `/api/threads/${destination}/artifacts/mnt/user-data/uploads/acceptance.txt`,
-  );
-  expect(importedDownload.status()).toBe(200);
-  expect(await importedDownload.text()).toBe(artifact);
+  for (const peer of [destination, linkedDestination]) {
+    const importedDownload = await context.request.get(
+      `/api/threads/${peer}/artifacts/mnt/user-data/uploads/acceptance.txt`,
+    );
+    expect(importedDownload.status()).toBe(200);
+    expect(await importedDownload.text()).toBe(artifact);
+  }
 
   // Kept and published copies survive removal of their source conversation.
   await page.goto("/workspace/files");

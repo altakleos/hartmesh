@@ -134,6 +134,7 @@ export type SendMessageOptions = {
   /** Ordinary web composer submissions can request viewport alignment after admission. */
   keepSentMessageInView?: boolean;
   savedFiles?: FileInMessage[];
+  conversationReferences?: string[];
   /** The composer's current catalog resolution, independent of settings effects. */
   modelContext?: Pick<
     LocalSettings["context"],
@@ -3184,6 +3185,9 @@ export function useThreadStream({
           context: {
             ...extraContext,
             ...context,
+            ...(options?.conversationReferences?.length
+              ? { conversation_references: options.conversationReferences }
+              : {}),
             ...options?.modelContext,
             ...runFlagsForMode(
               options?.modelContext?.mode ?? context.mode,

@@ -140,10 +140,17 @@ def test_make_lead_agent_signature_matches_langgraph_server_factory_abi():
         (lambda: None, False, False, True),
         (lambda: None, True, False, False),
         (lambda: None, False, True, False),
+        ("file-access", False, False, True),
+        ("file-access", True, False, False),
+        ("file-access", False, True, False),
     ],
 )
 def test_lead_conversation_tool_requires_callable_host_reader(monkeypatch, reader, is_subagent, is_bootstrap, expected):
     import deerflow.tools as tools_module
+    from deerflow.tools.conversation_import import ConversationFileAccess
+
+    if reader == "file-access":
+        reader = ConversationFileAccess(read=MagicMock(), list_files=MagicMock(), import_file=MagicMock())
 
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
     get_available_tools = MagicMock(return_value=[])
@@ -161,6 +168,7 @@ def test_lead_conversation_tool_requires_callable_host_reader(monkeypatch, reade
     )
 
     kwargs = get_available_tools.call_args.kwargs
+    assert kwargs.get("conversation_file_access") is (reader if isinstance(reader, ConversationFileAccess) and expected else None)
     if is_bootstrap:
         assert "include_conversation_reader" not in kwargs
     else:

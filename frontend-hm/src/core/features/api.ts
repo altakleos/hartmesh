@@ -46,7 +46,24 @@ export const CLOSED_TELEGRAM: TelegramFeature = {
   voiceProvider: null,
 };
 
+export function selectConversationReferenceLimit(
+  features: Pick<FeaturesResponse, "conversation_references">,
+) {
+  const capability = features.conversation_references;
+  const limit = capability?.max_references;
+  return capability?.enabled === true &&
+    typeof limit === "number" &&
+    Number.isSafeInteger(limit) &&
+    limit > 0
+    ? limit
+    : 0;
+}
+
 export interface FeaturesResponse {
+  conversation_references?: {
+    enabled?: unknown;
+    max_references?: unknown;
+  } | null;
   shared_conversations?: { version: number; operations: string[] } | null;
   file_browser?: {
     versions?: unknown;

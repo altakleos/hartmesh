@@ -1204,6 +1204,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
     from deerflow.tools.builtins import setup_agent, update_agent
     from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
     from deerflow.tools.conversation import CONVERSATION_READER_CONTEXT_KEY
+    from deerflow.tools.conversation_import import conversation_file_access
 
     cfg = _get_runtime_config(config)
     resolved_app_config = app_config
@@ -1618,6 +1619,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         groups=agent_config.tool_groups if agent_config else None,
         mcp_plugins=getattr(agent_config, "mcp_plugins", None),
         subagent_enabled=subagent_enabled,
+        **({"conversation_file_access": file_access} if (file_access := conversation_file_access(cfg)) is not None else {}),
         include_conversation_reader=callable(cfg.get(CONVERSATION_READER_CONTEXT_KEY)) and not bool(cfg.get("is_subagent")),
         **({"scheduler_capability": scheduler_capability} if scheduler_capability is not None else {}),
         app_config=resolved_app_config,

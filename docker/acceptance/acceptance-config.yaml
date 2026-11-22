@@ -19,7 +19,11 @@ tool_groups:
   - name: file:read
   - name: file:write
   - name: bash
+  - name: conversation
 tools:
+  - name: read_conversation
+    group: conversation
+    use: deerflow.tools.conversation:read_conversation
   - name: read_file
     group: file:read
     use: deerflow.sandbox.tools:read_file_tool
