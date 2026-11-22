@@ -38,6 +38,7 @@ from app.gateway.routers import (
     channel_connections,
     channels,
     console,
+    continued_conversations,
     conversation_files,
     features,
     feedback,
@@ -814,11 +815,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Bind host policy to lifecycle work without carrying tokens across yield."""
     app.state.gateway_started_at = datetime.now(UTC)
     from app.gateway.customer_administration import customer_administration_host_scope
+    from app.gateway.snapshot_shutdown import snapshot_lifetime
     from deerflow.runtime.customer_administration import capture_customer_administration_policy
 
     # The policy capture below is already a startup step that reads config, so
     # sandbox shutdown is claimed before it (the claim nests; see _lifespan_resources).
-    with hold_sandbox_shutdown_ownership():
+    with hold_sandbox_shutdown_ownership(), snapshot_lifetime(app):
         if getattr(app.state, "customer_administration_policy", None) is None:
             config = await asyncio.to_thread(get_app_config)
             app.state.customer_administration_policy = capture_customer_administration_policy(config)
@@ -1650,6 +1652,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Uploads API is mounted at /api/threads/{thread_id}/uploads
     app.include_router(uploads.router)
     app.include_router(conversation_files.router)
+    app.include_router(continued_conversations.router)
 
     # The person's own files: /api/files, plus /api/threads/{thread_id}/files to keep one
     app.include_router(file_browser.router)
@@ -1657,7 +1660,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(spaces.router)
 
     # The company's Shared area at /api/shared
+    from app.gateway.routers import shared_conversations
+
     app.include_router(shared.router)
+    app.include_router(shared_conversations.router)
 
     # Thread cleanup API is mounted at /api/threads/{thread_id}
     app.include_router(search.router)

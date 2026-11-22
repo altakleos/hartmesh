@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from deerflow.agents.memory import get_memory_manager
 from deerflow.agents.memory.locale import with_memory_locale
-from deerflow.agents.middlewares.memory_middleware import redact_queued_messages
+from deerflow.agents.middlewares.memory_middleware import personal_memory_messages, redact_queued_messages
 from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
@@ -25,12 +25,16 @@ def memory_flush_hook(event: SummarizationEvent, pii_redaction_config: PiiRedact
     if not get_memory_config().enabled or not event.thread_id:
         return
 
+    messages = personal_memory_messages(event.messages_to_summarize)
+    if not messages:
+        return
+
     user_id = resolve_runtime_user_id(event.runtime)
     from deerflow.agent_instances.memory import runtime_memory_manager
 
     runtime_memory_manager(event.runtime, get_memory_manager).add_nowait(
         event.thread_id,
-        with_memory_locale(redact_queued_messages(list(event.messages_to_summarize), pii_redaction_config), getattr(event.runtime, "context", None)),
+        with_memory_locale(redact_queued_messages(messages, pii_redaction_config), getattr(event.runtime, "context", None)),
         agent_name=event.agent_name,
         user_id=user_id,
     )

@@ -21,6 +21,7 @@ import type { StorageRefusal } from "../file-areas/storage-state";
 export const SHARED_VIRTUAL_PREFIX = "/mnt/user-data/shared";
 
 export interface SharedFileInfo {
+  snapshot_publication_id?: string | null;
   /** Relative to the Shared root, e.g. `Documents/summary.pdf`. */
   path: string;
   name: string;

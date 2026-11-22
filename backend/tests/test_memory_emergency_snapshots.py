@@ -145,3 +145,34 @@ def test_scoped_cancellation_removes_all_snapshots_without_touching_other_scopes
         ("alice", "writer", ["other agent"]),
         (None, "researcher", ["legacy scope"]),
     ]
+
+
+def test_shared_words_are_excluded_through_compaction_and_durable_memory(tmp_path, monkeypatch):
+    from deerflow.agents.middlewares import memory_middleware
+
+    extractor = _BlockingExtractor()
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path), "retrieval_adapter": "", "host_llm": extractor})
+    monkeypatch.setattr(memory_middleware, "get_memory_manager", lambda: manager)
+    monkeypatch.setattr(HOOK_MODULE + ".get_memory_manager", lambda: manager)
+    monkeypatch.setattr(HOOK_MODULE + ".get_memory_config", lambda: MemoryConfig(enabled=True))
+    summary_model = MagicMock()
+    summary_model.with_config.return_value = summary_model
+    summary_model.invoke.return_value = SimpleNamespace(text=PREFERENCES[0])
+    summarizer = DeerFlowSummarizationMiddleware(model=summary_model, trigger=("messages", 4), keep=("messages", 2), token_counter=len, before_summarization=[memory_flush_hook])
+    runtime = SimpleNamespace(context={"thread_id": "continued", "user_id": "reader", "agent_name": "researcher"})
+    copied = [m.model_copy(update={"additional_kwargs": {"shared_history": {"publication_id": "copy"}}}) for m in _pair(PREFERENCES[0], "copied")]
+    personal = _pair(PREFERENCES[1], "personal")
+    try:
+        with patch(QUEUE_MODULE + ".threading.Timer"):
+            result = summarizer.compact_state({"messages": copied + personal}, runtime, force=True)
+            assert result is not None and list(result.messages_to_summarize) == copied
+            assert result.summary_text and PREFERENCES[0] in result.summary_text
+            passive = memory_middleware.MemoryMiddleware(agent_name="researcher", memory_config=MemoryConfig(enabled=True))
+            passive.after_agent({"messages": list(result.preserved_messages), "summary_text": result.summary_text}, runtime)
+            assert manager._queue.flush_sync(10)
+        facts = [item["content"] for item in manager.get_memory(agent_name="researcher", user_id="reader")["facts"]]
+        assert facts == [PREFERENCES[1]]
+        assert all(PREFERENCES[0] not in text for text in extractor.conversations)
+    finally:
+        manager._queue.clear()
+        manager._storage.close()

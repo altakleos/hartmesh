@@ -128,6 +128,12 @@ async def shared_folder(request: Request, response: Response, path: str = Query(
         if not observed or not service:
             row.pop("publication_id")
         files.append({"kind": "file", **row})
+    from app.gateway.conversation_snapshots import snapshot_memberships
+
+    marks = await snapshot_memberships(repo, records)
+    for item in files:
+        if item["path"] in marks:
+            item["snapshot_publication_id"] = marks[item["path"]]
     return _folder_result(response, page, files)
 
 

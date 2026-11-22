@@ -7,6 +7,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 ORIGINAL_USER_CONTENT_KEY = "original_user_content"
+SHARED_HISTORY_KEY = "shared_history"
 SUMMARY_MESSAGE_NAME = "summary"
 SUBAGENT_RESULT_MESSAGE_NAME = "subagent-result"
 

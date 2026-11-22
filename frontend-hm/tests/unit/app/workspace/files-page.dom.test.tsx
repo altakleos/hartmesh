@@ -17,6 +17,11 @@ const pluginState = rs.hoisted(() => ({
 rs.mock("@/core/extensions/hooks", () => ({
   useFrontendExtensions: () => pluginState,
 }));
+// These existing file scenarios exercise the host before conversation publications.
+rs.mock("@/core/shared-conversations/hooks", () => ({
+  useSharing: () => ({ scope: "legacy", can: () => false }),
+  useSnapshotList: () => ({ data: undefined, isError: false }),
+}));
 const lifetime = rs.hoisted(() => ({
   active: true,
   signal: new AbortController().signal,

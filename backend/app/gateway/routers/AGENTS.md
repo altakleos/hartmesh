@@ -111,10 +111,11 @@ staging ownership/mode before writing; the worker owns cleanup. Unsupported
 atomic publication fails closed.
 Shared publication drains copying, its database record and failure rollback as
 one operation under the deduplication lock before propagating cancellation.
-Every Shared access enters `_shared_mutation`; its process mutex and private
+Ordinary Shared mutations enter `_shared_mutation`; its process mutex and private
 filesystem advisory lock retain ownership through recovery/settlement.
 Delete authorizes the current publication under that lock; optional
 `expected_publication_id` adds stale-client intent fencing (empty means no record).
+Shared conversation snapshots reserve the owned thread, use finished visible runs’ delivered files, and publish each item separately. Only host-generated transcript and manifest descriptors may use the reserved sources. The manifest lands last. Readers check its live identity, declared path, digest and publication time before grouping or removing any file.
 Lists/publications carry nullable `publication_id`; Files/Undo pass it back.
 Removal journals stage bytes on the same filesystem before updating the immutable
 publication ID. Recovery matches record ID and path before using saved outcomes;
@@ -296,3 +297,5 @@ The scope is a host directory (`agents/{name}/facts`), so the character class
 alone let the first write fail with `FileNotFoundError` and answer 500. Keep
 reads and deletes permissive: a scope an older release stored under a reserved
 name must stay exportable and clearable. Tests: `test_memory_router.py`.
+
+Shared conversation continuation uses the published snapshot and the caller's own thread capacity and write reservation. Use the state-only writer for title and typed messages and the existing branch seed authority for its durable message feed. Match host seed event metadata and message IDs before attributing copied history. Copy each live member through ordinary upload admission with its original manifest and publication checks. Passive memory filters marked turns at its enqueue boundaries.

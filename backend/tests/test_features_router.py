@@ -117,6 +117,7 @@ def test_features_reports_agents_api_enabled(monkeypatch) -> None:
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json() == {
+        "shared_conversations": {"version": 1, "operations": ["read", "publish", "continue"]},
         "file_browser": {"versions": [1], "storage_mode": "ordinary", "operations": {"personal": ["select", "folder"], "shared": ["select", "folder"], "agent": []}},
         "storage_spaces": {"enabled": False, "backend": None, "native_attachments": False, "editor_concurrency": None, "user_spaces": False, "state": "off", "reason": None, "own": "ready"},
         "accounts": {"seats": {"allowed": 0, "in_use": 0}},
@@ -318,6 +319,7 @@ def test_features_reports_agents_api_disabled(monkeypatch) -> None:
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json() == {
+        "shared_conversations": {"version": 1, "operations": ["read", "publish", "continue"]},
         "file_browser": {"versions": [1], "storage_mode": "ordinary", "operations": {"personal": ["select", "folder"], "shared": ["select", "folder"], "agent": []}},
         "storage_spaces": {"enabled": False, "backend": None, "native_attachments": False, "editor_concurrency": None, "user_spaces": False, "state": "off", "reason": None, "own": "ready"},
         "accounts": {"seats": {"allowed": 0, "in_use": 0}},

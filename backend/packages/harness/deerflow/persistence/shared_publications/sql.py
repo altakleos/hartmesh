@@ -11,7 +11,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.shared_publications.model import SharedPublicationRow
@@ -112,6 +112,19 @@ class SharedPublicationRepository:
             stmt = select(SharedPublicationRow).where(SharedPublicationRow.sha256 == sha256, SharedPublicationRow.removed_at.is_(None)).order_by(SharedPublicationRow.published_at.asc())
             rows = (await session.execute(stmt)).scalars().all()
         return [self._row_to_dict(row) for row in rows if _folder_of(row.path) == folder]
+
+    async def live_by_source(self, source: str, *, limit: int, before: dict | None = None) -> list[dict]:
+        async with self._session() as session:
+            stmt = (
+                select(SharedPublicationRow)
+                .where(SharedPublicationRow.removed_at.is_(None), SharedPublicationRow.from_path == source)
+                .order_by(SharedPublicationRow.published_at.desc(), SharedPublicationRow.publication_id.desc())
+                .limit(limit)
+            )
+            if before:
+                stamp = datetime.fromisoformat(before["published_at"])
+                stmt = stmt.where(tuple_(SharedPublicationRow.published_at, SharedPublicationRow.publication_id) < (stamp, before["publication_id"]))
+            return [self._row_to_dict(row) for row in (await session.scalars(stmt)).all()]
 
     async def live_publications(self, *, paths: list[str] | None = None) -> dict[str, dict]:
         """Live publications keyed by path, optionally limited to a bounded folder response."""

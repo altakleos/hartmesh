@@ -38,7 +38,7 @@ from deerflow.config.paths import USER_FILES_VIRTUAL_PREFIX, VIRTUAL_PATH_PREFIX
 from deerflow.files import SharedFile, SharedFileError, digest_of, list_shared_files, normalize_relative_path, publish_file, remove_shared_file, resolve_shared_file, resolve_user_file, shared_file_holding
 from deerflow.files.shared import shared_mutation_state
 from deerflow.files.shared_attribution import SharedPublicationChanged, observed_file, stage_observed, visible_records
-from deerflow.files.store import SafeFileAccessUnavailable
+from deerflow.files.store import DescriptorSource, SafeFileAccessUnavailable
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -103,6 +103,7 @@ class SharedFileInfo(BaseModel):
     can_remove: bool = False
     # A stale Remove/Undo must not act on a newer publication of the same path.
     publication_id: str | None = None
+    snapshot_publication_id: str | None = None
     revision: str | None = None  # Present only on an observed new managed publication.
 
     @classmethod
@@ -209,6 +210,11 @@ async def list_shared(request: Request) -> SharedFileListResponse:
         record = records.get(entry.path)
         publisher = None if record is None else names.get(record.get("published_by", ""))
         files.append(SharedFileInfo.of(entry, record, can_remove=_may_remove(record, user_id=user_id, admin=admin), publisher=publisher))
+    from app.gateway.conversation_snapshots import snapshot_memberships
+
+    marks = await snapshot_memberships(repo, records)
+    for item in files:
+        item.snapshot_publication_id = marks.get(item.path)
     return SharedFileListResponse(files=files, count=len(entries), truncated=truncated)
 
 
@@ -231,6 +237,17 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
     taken are kept beside it with the next free ``_N`` suffix; nothing is
     overwritten, and the source is untouched.
     """
+    return await _publish(body, request, response)
+
+
+@require_permission("threads", "write")
+@storage_feature("hm.shared", write=True, workflow_name="publish")
+async def publish_snapshot_file(body: PublishRequest, request: Request, response: Response, generated: DescriptorSource) -> SharedFileInfo:
+    """Publish a server-owned descriptor with the standard ordered Shared workflow."""
+    return await _publish(body, request, response, generated=generated)
+
+
+async def _publish(body, request, response, *, generated=None):
     repo = get_shared_publications_repo(request)
     user_id = acting_user_id(request)
     normalized = "/" + body.path.lstrip("/")
@@ -238,7 +255,16 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
 
     native = native_feature_input()
     thread_id: str | None = None
-    if normalized.startswith(USER_FILES_VIRTUAL_PREFIX + "/"):
+    name = Path(normalized).name
+    if generated is not None:
+        from app.gateway.snapshot_manifest import generated_name
+
+        name = generated_name(normalized) or name
+        if not isinstance(generated, DescriptorSource) or generated.name != name or body.thread_id is None:
+            raise ValueError("Invalid host-generated publication")
+    if generated is not None and generated_name(normalized):
+        thread_id, source = validate_thread_id(body.thread_id), generated
+    elif normalized.startswith(USER_FILES_VIRTUAL_PREFIX + "/"):
         source = native.source if native is not None else await asyncio.to_thread(_own_file_source, user_id, normalized)
     elif normalized.startswith(_CONVERSATION_PREFIXES):
         if body.thread_id is None:
@@ -259,6 +285,8 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
 
         await reject_legacy_binding(request, thread_id)
         source = native.source if native is not None else await asyncio.to_thread(_keepable_source, thread_id, normalized, user_id)
+        if generated is not None:
+            source = generated
     else:
         raise HTTPException(status_code=400, detail=f"Only files under {USER_FILES_VIRTUAL_PREFIX}, {' or '.join(prefix.rstrip('/') for prefix in _CONVERSATION_PREFIXES)} can be published")
     service = current_feature_service(request, "hm.shared")
@@ -270,7 +298,7 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
                 "publish",
                 repo=repo,
                 source=source,
-                name=Path(normalized).name,
+                name=name,
                 folder=body.folder,
                 thread_id=thread_id,
                 source_path=normalized,
@@ -312,7 +340,7 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
             from deerflow.features.publications import copy_and_record as controller_publish
 
             try:
-                return await controller_publish(repo, source, name=Path(normalized).name, folder=folder, user_id=user_id, thread_id=thread_id, source_path=normalized, copy=publish_file, remove=remove_shared_file)
+                return await controller_publish(repo, source, name=name, folder=folder, user_id=user_id, thread_id=thread_id, source_path=normalized, copy=publish_file, remove=remove_shared_file)
             except SharedFileError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from None
             except PublicationUnavailable as exc:

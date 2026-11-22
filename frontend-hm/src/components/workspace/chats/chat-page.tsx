@@ -28,6 +28,8 @@ import {
   useSupervisorName,
   usePersonName,
 } from "@/components/workspace/person-name";
+import { SharedHistoryBoundary } from "@/components/workspace/shared-conversations/history";
+import { ShareConversationTrigger } from "@/components/workspace/shared-conversations/share-trigger";
 import {
   SidecarProvider,
   SidecarTrigger,
@@ -52,6 +54,7 @@ import {
   hasFinalAgentAnswer,
   useNewestAgentRun,
 } from "@/core/agent-instances/newest-run";
+import { hasCeiling } from "@/core/agent-instances/presentation";
 import { agentBlock, INSPECT } from "@/core/agent-instances/presentation";
 import { useAuth } from "@/core/auth/AuthProvider";
 import {
@@ -610,6 +613,19 @@ export default function ChatPage() {
                       </Link>
                     )}
                   {browserEnabled && <BrowserTrigger />}
+                  {!isNewThread &&
+                    !isMock &&
+                    user &&
+                    threadMetadata.isSuccess &&
+                    !threadMetadata.isError &&
+                    threadMetadata.data?.agent_instance === null &&
+                    threadMetadata.data.owner_user_id === user.id &&
+                    hasCeiling(user.permissions, "threads:write") && (
+                      <ShareConversationTrigger
+                        thread={threadId}
+                        company={branding.companyName}
+                      />
+                    )}
                   <ExportTrigger threadId={threadId} />
                   {!isMock && threadMetadata.data && (
                     <ConversationExtensionActions
@@ -632,67 +648,73 @@ export default function ChatPage() {
                       threadId={threadId}
                     />
                   ) : (
-                    <MessageList
-                      sentTurn={sentTurn}
-                      activeRunId={activeRunId}
-                      activeRunStartedAt={activeRunStartedAt}
-                      agentTarget={agentTarget}
-                      showPackageOrigins={
-                        !isMock && agentTarget?.kind === "agent"
-                      }
-                      archiveDownloadsEnabled={
-                        legacyCapabilities &&
-                        (isNewThread || isMock || threadMetadata.data != null)
-                      }
-                      className={cn(
-                        "size-full",
-                        !isWelcomeMode && (binding ? "pt-16" : "pt-10"),
-                      )}
-                      testId="main-message-list"
-                      threadId={threadId}
-                      thread={thread}
-                      enableConversationOutline
-                      paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
-                      hasMoreHistory={hasMoreHistory}
-                      loadMoreHistory={loadMoreHistory}
-                      isHistoryLoading={isHistoryLoading}
-                      tokenUsageInlineMode={tokenUsageInlineMode}
-                      canRegenerate={
-                        !isNewThread &&
-                        !isMock &&
-                        env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
-                        !isUploading &&
-                        !thread.isLoading
-                      }
-                      onRegenerateMessage={handleRegenerate}
-                      canEdit={
-                        !isNewThread &&
-                        !isMock &&
-                        env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
-                        !isUploading &&
-                        !thread.isLoading &&
-                        !branchThread.isPending &&
-                        !hasGoal &&
-                        !hasOpenHumanInputCard
-                      }
-                      onEditAndRegenerateMessage={handleEditAndRegenerate}
-                      onSubmitHumanInput={
-                        isMock ||
-                        agentDisabled ||
-                        env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
-                          ? undefined
-                          : handleSubmitHumanInput
-                      }
-                      canBranch={
-                        !isNewThread &&
-                        !isMock &&
-                        env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
-                        !isUploading &&
-                        !thread.isLoading &&
-                        !branchThread.isPending
-                      }
-                      onBranchTurn={handleBranchTurn}
-                    />
+                    <SharedHistoryBoundary
+                      thread={threadId}
+                      messages={thread.messages}
+                      agent={binding}
+                    >
+                      <MessageList
+                        sentTurn={sentTurn}
+                        activeRunId={activeRunId}
+                        activeRunStartedAt={activeRunStartedAt}
+                        agentTarget={agentTarget}
+                        showPackageOrigins={
+                          !isMock && agentTarget?.kind === "agent"
+                        }
+                        archiveDownloadsEnabled={
+                          legacyCapabilities &&
+                          (isNewThread || isMock || threadMetadata.data != null)
+                        }
+                        className={cn(
+                          "size-full",
+                          !isWelcomeMode && (binding ? "pt-16" : "pt-10"),
+                        )}
+                        testId="main-message-list"
+                        threadId={threadId}
+                        thread={thread}
+                        enableConversationOutline
+                        paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
+                        hasMoreHistory={hasMoreHistory}
+                        loadMoreHistory={loadMoreHistory}
+                        isHistoryLoading={isHistoryLoading}
+                        tokenUsageInlineMode={tokenUsageInlineMode}
+                        canRegenerate={
+                          !isNewThread &&
+                          !isMock &&
+                          env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+                          !isUploading &&
+                          !thread.isLoading
+                        }
+                        onRegenerateMessage={handleRegenerate}
+                        canEdit={
+                          !isNewThread &&
+                          !isMock &&
+                          env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+                          !isUploading &&
+                          !thread.isLoading &&
+                          !branchThread.isPending &&
+                          !hasGoal &&
+                          !hasOpenHumanInputCard
+                        }
+                        onEditAndRegenerateMessage={handleEditAndRegenerate}
+                        onSubmitHumanInput={
+                          isMock ||
+                          agentDisabled ||
+                          env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
+                            ? undefined
+                            : handleSubmitHumanInput
+                        }
+                        canBranch={
+                          !isNewThread &&
+                          !isMock &&
+                          env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+                          !isUploading &&
+                          !thread.isLoading &&
+                          !branchThread.isPending
+                        }
+                        onBranchTurn={handleBranchTurn}
+                      />
+                    </SharedHistoryBoundary>
                   )}
                 </div>
                 <div

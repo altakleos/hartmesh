@@ -11,6 +11,7 @@ runs a regenerate or an edit replaced -- and a transcript reads the same rows
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 #: Rows read per journal query while walking a whole conversation.
@@ -40,7 +41,7 @@ async def history_hidden_run_ids(run_mgr: Any, thread_id: str, *, user_id: str |
     return set(superseded_run_ids) | set(edit_visibility.hidden_source_run_ids) | set(edit_visibility.hidden_attempt_run_ids)
 
 
-async def feed_messages(event_store: Any, run_mgr: Any, thread_id: str, *, user_id: str | None) -> list[dict[str, Any]]:
+async def feed_messages(event_store: Any, run_mgr: Any, thread_id: str, *, user_id: str | None, observe: Callable[[str, dict], None] | None = None) -> list[dict[str, Any]]:
     """Every message of the conversation's feed, oldest first, as the page's history pages hold them."""
     hidden_runs = await history_hidden_run_ids(run_mgr, thread_id, user_id=user_id)
     messages: list[dict[str, Any]] = []
@@ -51,6 +52,8 @@ async def feed_messages(event_store: Any, run_mgr: Any, thread_id: str, *, user_
             content = row.get("content")
             if isinstance(content, dict) and not is_history_hidden_row(row) and row.get("run_id") not in hidden_runs:
                 messages.append(content)
+                if observe is not None and isinstance(run_id := row.get("run_id"), str):
+                    observe(run_id, content)
         if len(rows) < FEED_SCAN_BATCH:
             return messages
         next_seq = max(row["seq"] for row in rows)

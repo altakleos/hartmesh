@@ -37,6 +37,7 @@ import { FilesStateNotice } from "@/components/workspace/chats/files-state-notic
 import { BrowserView } from "@/components/workspace/file-browser/browser-view";
 import { useBrowserCopy } from "@/components/workspace/file-browser/copy";
 import { BrowserLocations } from "@/components/workspace/file-browser/locations";
+import { ConversationGroup } from "@/components/workspace/shared-conversations/group";
 import {
   WorkspaceBody,
   WorkspaceContainer,
@@ -77,6 +78,8 @@ import {
   selectSharedFile,
   type PublicationSelection,
 } from "@/core/shared";
+import { useSharing, useSnapshotList } from "@/core/shared-conversations/hooks";
+import { ordinarySharedRows } from "@/core/shared-conversations/protocol";
 import { useSpaceActionSignal } from "@/core/spaces/lifetime";
 import { formatTimeAgo } from "@/core/utils/datetime";
 
@@ -828,7 +831,15 @@ function SharedFiles({
       }
     }
   };
-  const loadedFiles = data?.files ?? EMPTY_FILES;
+  const sharing = useSharing();
+  const canReadSnapshots =
+    sharing.can("read") && !!data && !error && storage.state !== "unavailable";
+  const snapshots = useSnapshotList(canReadSnapshots, sharing.scope);
+  const fold = canReadSnapshots && !snapshots.isError && !!snapshots.data;
+  const loadedFiles = useMemo(
+    () => ordinarySharedRows(data?.files ?? EMPTY_FILES, fold),
+    [data?.files, fold],
+  );
   const [query, setQuery] = useState("");
   const [order, setOrder] = useState<FileListOrder>("name");
   const files = useMemo(
@@ -928,6 +939,12 @@ function SharedFiles({
     return (
       <>
         <BrowserView
+          relatedResults={(query) =>
+            canReadSnapshots &&
+            (!folder || query.trim() !== "") && (
+              <ConversationGroup listing={snapshots} filter={query} />
+            )
+          }
           area="shared"
           title={words.shared}
           audience={words.companyAudience}
@@ -1021,6 +1038,9 @@ function SharedFiles({
     );
   return (
     <>
+      {canReadSnapshots && (
+        <ConversationGroup listing={snapshots} filter={query} />
+      )}
       {!error && !isPending && loadedFiles.length > 0 && (
         <FileListControls
           query={query}
@@ -1045,7 +1065,10 @@ function SharedFiles({
         </div>
       ) : isPending ? (
         <div className="text-muted-foreground text-sm">{t.common.loading}</div>
-      ) : loadedFiles.length === 0 ? (
+      ) : loadedFiles.length === 0 &&
+        fold &&
+        snapshots.data?.conversations.length ? null : loadedFiles.length ===
+        0 ? (
         <Empty className="border" data-testid="shared-files-empty">
           <EmptyHeader>
             <EmptyMedia variant="icon">

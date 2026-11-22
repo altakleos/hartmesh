@@ -44,6 +44,14 @@ its revision, publication and your current access. Undo uses the receipt from a
 new copy. A duplicate returns the existing file. If an operation is missing,
 keep it unavailable.
 
+An ordinary conversation’s owner can choose **Share conversation with everyone**
+to review the current messages and presented files before publishing a frozen
+copy. Find it in **Files → Shared → Conversations**, in either file view.
+**Continue** opens a private chat with the assistant. The first message can
+include the files copied into that chat. Removing the snapshot leaves existing
+private conversations and their copies intact. The published copy retains the
+messages and files you reviewed if the original chat changes.
+
 Hartmesh clears private workspace caches when the signed-in account changes.
 Artifact, My Files and Shared reads, copies and hashes refuse symlinks throughout the
 source path; these operations require descriptor-relative no-follow filesystem
@@ -4714,6 +4722,12 @@ conversations, and they are attached to the next message only, shown as chips
 in the composer and in the transcript. There is no automatic history search. See
 [configuration](backend/docs/CONFIGURATION.md#reading-referenced-conversations)
 and the [request contract](backend/docs/API.md#referencing-a-previous-conversation).
+
+### Continue a shared conversation
+
+Open a published conversation in Company shared and choose **Continue** to start a private chat with your ordinary assistant. The new chat includes the published words and copies of the files that are still shared. The result shows the saved filenames and identifies any file that could not be copied. Removing the publication later leaves your chat and saved copies available.
+
+Automatic memory extraction skips copied turns and continues to process your subsequent conversation. A deployment configured with model-operated memory tools uses those tools under its existing policy.
 
 ### Current Task Notes
 

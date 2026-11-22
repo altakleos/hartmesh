@@ -65,12 +65,12 @@ def host(compose, *args):
     return compose.invoke(["sudo", "-n", *map(str, args)]).stdout.strip()
 
 
-def snapshot(compose, shared, action, filename):
+def snapshot(compose, shared, action, filename, *, source_path=None):
     criteria = (
         "space_id="
         + sql(shared["space"])
         + " AND phase='pending' AND request->>'namespace'='hm.shared' AND "
-        + ("request->'source'->>'path'=" + sql("/mnt/user-data/uploads/" + filename) if action == "publish" else "request->'parameters'->>'path'=" + sql(filename))
+        + ("request->'source'->>'path'=" + sql(source_path or "/mnt/user-data/uploads/" + filename) if action == "publish" else "request->'parameters'->>'path'=" + sql(filename))
     )
     raw = compose.psql("SELECT json_build_object('operation',operation_id,'request',request,'actor',actor_id) FROM storage_space_file_operations WHERE " + criteria)
     assert raw, "the native writer did not leave an exact pending intent"
