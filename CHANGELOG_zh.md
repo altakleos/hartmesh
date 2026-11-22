@@ -150,6 +150,30 @@
   ——它先对整个 `config.yaml` 取摘要，再对 `extensions_config.json` 做同样的事——所以在有人打开
   会话视图前刚好改了配置，就会让运行、消息流与其他线程共用的网关事件循环整段停顿。响应内容不变。([#7727])
 
+## [2.2.0+hartmesh.75] - 2026-11-22
+
+### 搜索对话历史
+
+- 网关新增可选的 PostgreSQL 消息搜索组件。部署启用该组件后，**对话**页面会显示匹配的消息、发言人、时间和高亮文字。选择一条结果即可阅读前后消息，也可以打开原对话。
+- 搜索结果遵循当前用户对个人对话和 AI 员工对话的访问权限。删除原消息会清除对应的索引文本。释放席位会清除该用户普通对话及其个人 AI 助手对话的搜索副本。有权访问公司对话的同事仍可搜索这些对话。
+- 如果无法清除消息历史，删除对话会报告失败。普通对话的所有者可以重试。
+
+### 数据库结构变更
+
+使用随包分发的 Compose 配置时，数据库结构与 v2.2.0+hartmesh.74 相同。管理员如自行启用可选的 PostgreSQL 消息搜索组件，网关会在首次启用时创建以下对象，不经过 Alembic 迁移。
+
+两张表为 `hm_message_search_words` 和 `hm_message_search_threads`。用于级联删除的两个外键分别为引用 `run_events(thread_id, seq)` 的 `hm_message_search_event_fk`，以及引用 `threads_meta(thread_id)` 的 `hm_message_search_thread_fk`。如果删除原消息后较早版本可能重新可见，触发器 `hm_message_search_source_removed` 和函数 `hm_message_search_forget_coverage()` 会将该对话的索引标记为需要重建。启用组件后，每次启动都会重试尚未建立的外键。每个外键的 PostgreSQL 锁等待超时为 1.75 秒，整次尝试的截止时间为 1.90 秒，验收以每次实测不超过 2 秒为准。建立外键可能延迟启动和对相应父表的写入。
+
+### 回退
+
+请同时恢复先前版本的部署包和镜像。如果曾启用消息搜索，请移除插件配置项并重启所有网关。旧版本释放席位时会保留该用户已有的搜索索引副本。请在暂停对话流量的维护窗口中依次执行下列语句。删除索引表的事务会持有 `run_events` 和 `threads_meta` 的 `ACCESS EXCLUSIVE` 锁，直到事务提交。手动清理的等待时间可能超过网关启动时的截止时间。日后重新启用组件时，网关可以根据保留的对话重建索引。
+
+```sql
+DROP TABLE IF EXISTS hm_message_search_words;
+DROP TABLE IF EXISTS hm_message_search_threads;
+DROP FUNCTION IF EXISTS hm_message_search_forget_coverage();
+```
+
 ## [2.2.0+hartmesh.74] - 2026-11-22
 
 ### 使用关联对话中的文件

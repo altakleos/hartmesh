@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.75] - 2026-11-22
+
+### Search conversation history
+
+- The Gateway includes an optional PostgreSQL message-search provider. When a deployment enables it, **Chats** shows matching messages with their speaker, time and highlighted text. Select a match to read its surrounding messages or open the conversation.
+- Message results follow the caller’s current access to personal and AI employee conversations. Removing a source message clears its indexed words. Releasing a seat removes the search copies of the person’s ordinary chats and personal AI assistants, and preserves company conversations for their authorized readers.
+- A conversation delete reports a failure if its message history could not be removed. The owner of an ordinary conversation can retry.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.74. This applies to the distributed Compose configuration. Administrators who explicitly enable the optional PostgreSQL provider create the following objects on first enabled startup, outside Alembic.
+
+The two tables are `hm_message_search_words` and `hm_message_search_threads`. Their cascading foreign keys are `hm_message_search_event_fk`, which references `run_events(thread_id, seq)`, and `hm_message_search_thread_fk`, which references `threads_meta(thread_id)`. The `hm_message_search_source_removed` trigger and `hm_message_search_forget_coverage()` function invalidate a conversation’s index coverage when a source deletion can reveal an earlier revision. An enabled startup retries missing keys. Each installation uses a 1.75-second PostgreSQL lock timeout and a 1.90-second attempt deadline against a two-second measured budget per key. Installation may delay startup and writes to the corresponding parent.
+
+### Rollback
+
+Restore the previous bundle and images together. If you enabled message search, remove its plugin entry and restart every Gateway. A seat released on the older version leaves existing search copies behind. Run the following statements in order during a quiet interval with conversation traffic paused. Dropping the tables holds `ACCESS EXCLUSIVE` locks on `run_events` and `threads_meta` until commit. Manual cleanup can wait longer than the startup deadline. A later enabled Gateway can rebuild the index from surviving conversations.
+
+```sql
+DROP TABLE IF EXISTS hm_message_search_words;
+DROP TABLE IF EXISTS hm_message_search_threads;
+DROP FUNCTION IF EXISTS hm_message_search_forget_coverage();
+```
+
 ## [2.2.0+hartmesh.74] - 2026-11-22
 
 ### Use a file from a linked conversation
