@@ -459,7 +459,6 @@ classic without a qualified fine pointer or protocol. Negotiate each source’s
 operations, recheck restored paths and keep history in account memory. A refused
 versioned operation has no path-only fallback.
 
-
 Shared conversations use discovery and the server’s publication IDs in both
 file views. Fold only marked members after the collection read succeeds.
 Undo sends its exact receipt and created IDs. Copied-turn attribution needs the
