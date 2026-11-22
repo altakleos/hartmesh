@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.71] - 2026-11-22
+
+### Share a conversation
+
+- From your own ordinary conversation, choose **Share conversation with everyone** to review its visible messages and presented files. The published snapshot appears under **Files → Company shared → Conversations**. Everyone who can read Company shared can open the snapshot. The original chat stays private.
+- **Continue** creates a private chat with your ordinary assistant. It copies the published messages and the files still available. You can attach those files to your first message. Removing the snapshot leaves existing private chats and their uploads intact. Copied turns are labeled in the chat and skipped by automatic memory capture.
+
+### Files and Telegram
+
+- Workspace Files and agent Files tabs now use the same folder browser on phones, tablets and desktops. Saved classic links open in this browser. Older Gateways supply their existing authorized listings. Uploads to an agent Home keep their original receipt when you navigate away and return.
+- An unused Telegram installation can accept its first bot after an empty template moves to a new Docker engine. The first successful connection records the engine ID when available. Existing bot links, retained owner settings, explicit host adoption and polling-conflict holds continue to protect configured installations. When confirmation is needed, Settings explains who can confirm the polling server.
+
+### Rollback
+
+- The normal rollback target is `2.2.0+hartmesh.70`. Older clients can read the published transcript and files individually. Private chats and uploads persist, while earlier Gateways lack the copied-history display and automatic memory exclusion. The .70 client restores its previous device-dependent file views. An older Gateway can again require host confirmation for an unused Telegram template.
+- Before rolling back to .68 or earlier, stop incoming writes and let the current Gateway settle pending Shared operations. The .68 reader can leave an interrupted generated transcript or manifest pending even when its bytes landed. On .60 and .62, an interrupted publication that had not yet landed also stays pending. Pending operations can block subsequent Shared writes. The .69 and .70 readers settle both ordinary and generated snapshot files.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.70.
+
 ## [2.2.0+hartmesh.70] - 2026-11-21
 
 ### Workspace files
