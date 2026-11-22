@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Search conversation history
 
-- The Gateway includes an optional PostgreSQL message-search provider. When a deployment enables it, **Chats** shows matching messages with their speaker, time and highlighted text. Select a match to read its surrounding messages or open the conversation.
+- The Gateway includes an optional PostgreSQL message-search provider. The distributed Compose template leaves it off. Chats continues to search titles by default. When a deployment enables it, **Chats** shows matching messages with their speaker, time and highlighted text. Select a match to read its surrounding messages or open the conversation.
 - Message results follow the caller’s current access to personal and AI employee conversations. Removing a source message clears its indexed words. Releasing a seat removes the search copies of the person’s ordinary chats and personal AI assistants, and preserves company conversations for their authorized readers.
 - A conversation delete reports a failure if its message history could not be removed. The owner of an ordinary conversation can retry.
 

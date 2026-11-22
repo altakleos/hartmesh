@@ -1869,6 +1869,37 @@ PostgreSQL had 768 MiB, with synchronous commits off and a 200 ms WAL
 writer delay. Both containers had zero swap allowance. Timings describe
 the hosted Docker runner. Tenant hardware and workloads can differ.
 
+### Conversation message search in v2.2.0+hartmesh.75
+
+This release’s Compose template leaves message search off. Chats searches conversation titles. The hosted measurement exceeded chat duration during catch-up, index size, PostgreSQL memory.
+
+The qualification loaded 800,000 visible messages across 20 accounts. The busiest account could search 2,000 conversations containing 400,000 messages. Each search p95 covers 60 warm requests through nginx. The baseline, enabled run and disabled replay used the same two images. Timings describe the hosted runner. Tenant storage, CPU contention and concurrent sandboxes can differ.
+
+| Measurement | Limit | Observed |
+| --- | ---: | ---: |
+| Message search p95 | 1,000 ms | 594.963323 ms |
+| Title search p95 | 300 ms | 159.102666 ms |
+| Busiest account’s initial catch-up | 300 s | 118.335531 s |
+| Median chat duration during catch-up / baseline | 1.10× | 1.536289× |
+| Added median time to delete a 500-message conversation | 50 ms | 11.845433 ms |
+| Index and table bytes / visible UTF-8 bytes | 1.30× | 1.352325× |
+| Longest attempt to install either foreign key | 2.00 s | 1.757211 s |
+| Peak PostgreSQL cgroup memory | 805,306,368 bytes, zero OOM events and zero restarts | 806,334,464 bytes, 0 OOM events, 0 OOM kills and 0 PostgreSQL restarts observed in the service log |
+
+With writers holding the source tables, the event foreign-key attempt returned in 1.757211 s and the thread foreign-key attempt in 1.756937 s. On restart after each writer released its lock, installation took 0.387188 s and 0.010521 s respectively. The browser opened an older matching message with the provider enabled and returned to title search after the provider was disabled.
+
+Measurement source `b7bc72c640a0d52bc35a8cc6dbbbed3d1b23bf66`. Running Gateway `sha256:e27eec943d62fc9c568068b323f33eb8d5c58714d88be708339c9c374feab816` from `ghcr.io/altakleos/hartmesh-backend@sha256:e27eec943d62fc9c568068b323f33eb8d5c58714d88be708339c9c374feab816`. Running frontend `sha256:cd92dd7021e38114ed3a6991df19c986d1bc4a6c7a3b06e1a2cdd8c226add6f5` from `ghcr.io/altakleos/hartmesh-frontend@sha256:cd92dd7021e38114ed3a6991df19c986d1bc4a6c7a3b06e1a2cdd8c226add6f5`. Archive SHA-256 `e25c1cdb5cad2228fe214feaf8325047449991afd29fc17222ccf4a63206c38a`. [Hosted measurement, attempt 1](https://github.com/altakleos/hartmesh/actions/runs/45080166618/attempts/1)
+
+**Startup.** The optional provider creates its tables outside Alembic. It uses a 1.75-second PostgreSQL lock timeout and a 1.90-second deadline for each missing foreign key, with a two-second measured budget per attempt. One key references `run_events`, the other `threads_meta`. Installing either can delay Gateway startup and competing writes to its parent. Later restarts retry missing keys. Once both keys and the invalidation trigger are installed, normal startup checks the catalog. Title search stays available if the provider cannot start.
+
+**Rollback.** Restore the previous bundle and images together. If message search was enabled, remove its plugin entry and restart every Gateway before cleanup. Version .74 returns to title search. PostgreSQL continues to cascade source-message deletions, but releasing a seat on the older Gateway leaves that person’s existing indexed words and completion markers behind. Run these statements in order against the application database during a quiet interval with conversation traffic paused. Dropping the tables takes `ACCESS EXCLUSIVE` locks on `run_events` and `threads_meta` until commit. The startup timeout does not apply to manual cleanup. The original conversations remain intact and a later enabled Gateway can rebuild the index.
+
+```sql
+DROP TABLE IF EXISTS hm_message_search_words;
+DROP TABLE IF EXISTS hm_message_search_threads;
+DROP FUNCTION IF EXISTS hm_message_search_forget_coverage();
+```
+
 ### Preview measurements for v2.2.0+hartmesh.64
 
 Office previews stay off in this profile. On the release images, file listing
