@@ -4717,6 +4717,12 @@ in the composer and in the transcript. There is no automatic history search. See
 [configuration](backend/docs/CONFIGURATION.md#reading-referenced-conversations)
 and the [request contract](backend/docs/API.md#referencing-a-previous-conversation).
 
+### Continue a shared conversation
+
+Open a published conversation in Company shared and choose **Continue** to start a private chat with your ordinary assistant. The new chat includes the published words and copies of the files that are still shared. The result shows the saved filenames and identifies any file that could not be copied. Removing the publication later leaves your chat and saved copies available.
+
+Automatic memory extraction skips copied turns and continues to process your subsequent conversation. A deployment configured with model-operated memory tools uses those tools under its existing policy.
+
 ### Current Task Notes
 
 Enable [task notes and history recall](docs/task-continuity.md) with `task_continuity.enabled: true`.

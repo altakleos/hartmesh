@@ -133,6 +133,8 @@ async def _reuse(session, captured):
             raise
         if same:
             info = {"filename": name, "size": len(captured.content), "virtual_path": virtual, "artifact_url": uploads.upload_artifact_url(session._thread_id, name)}
+            if name != original:
+                info["original_filename"] = original
             if native is None:
                 synchronize = session._sync_to_sandbox and session._sandbox is not None
                 companion, markdown = await run_file_io(_companion_for_retry, session._uploads_dir / name, synchronize=synchronize, maximum_bytes=session.limits.max_file_size)
@@ -178,13 +180,15 @@ async def attach_captured(request, thread_id, owner, config, captured, *, rechec
 
 
 @require_permission("threads", "write", owner_check=True)
-async def import_into_chat(request: Request, thread_id: str, source: FileSource, config, *, create_destination=False):
+async def import_into_chat(request: Request, thread_id: str, source: FileSource, config, *, create_destination=False, capture=capture_source, expected_scope=None):
     owner = acting_user_id(request)
     scope = await conversation_scope(request, thread_id, allow_new=create_destination)
+    if expected_scope is not None and scope != expected_scope:
+        raise HTTPException(404, "Thread not found")
     if scope is not None and scope[0] != "ordinary":
         raise HTTPException(501, "Use the AI agent's Home for attachments")
     limits = _get_upload_limits(config)
-    captured = await capture_source(request, source, maximum_bytes=min(limits.max_file_size, limits.max_total_size))
+    captured = await capture(request, source, maximum_bytes=min(limits.max_file_size, limits.max_total_size))
     async with goal_thread_lock(thread_id):
         await captured.recheck()
         if scope is None:

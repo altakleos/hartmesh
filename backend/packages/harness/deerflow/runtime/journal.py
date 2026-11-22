@@ -272,6 +272,13 @@ def _build_history_seed_events(
     return events
 
 
+def build_shared_history_seed_events(messages: Sequence[Any], *, thread_id: str, publication_id: str) -> list[dict]:
+    """Persist independently copied turns under the existing host seed grant."""
+    from deerflow.utils.messages import SHARED_HISTORY_KEY
+
+    return _build_history_seed_events(messages, thread_id=thread_id, run_id_prefix=f"branch-seed-{thread_id}", seed_metadata={SHARED_HISTORY_KEY: publication_id})
+
+
 def build_branch_history_seed_events(
     messages: Sequence[Any],
     *,

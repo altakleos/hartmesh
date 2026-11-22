@@ -103,7 +103,7 @@ class FileBrowserFeature(BaseModel):
 
 class SharedConversationsFeature(BaseModel):
     version: Literal[1] = 1
-    operations: list[Literal["read", "publish", "continue"]] = Field(default_factory=lambda: ["read", "publish"])
+    operations: list[Literal["read", "publish", "continue"]] = Field(default_factory=lambda: ["read", "publish", "continue"])
 
 
 class BrowserControlFeature(BaseModel):

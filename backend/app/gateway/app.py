@@ -38,6 +38,7 @@ from app.gateway.routers import (
     channel_connections,
     channels,
     console,
+    continued_conversations,
     conversation_files,
     features,
     feedback,
@@ -1651,6 +1652,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Uploads API is mounted at /api/threads/{thread_id}/uploads
     app.include_router(uploads.router)
     app.include_router(conversation_files.router)
+    app.include_router(continued_conversations.router)
 
     # The person's own files: /api/files, plus /api/threads/{thread_id}/files to keep one
     app.include_router(file_browser.router)

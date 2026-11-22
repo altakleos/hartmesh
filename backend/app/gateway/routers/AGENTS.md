@@ -297,3 +297,5 @@ The scope is a host directory (`agents/{name}/facts`), so the character class
 alone let the first write fail with `FileNotFoundError` and answer 500. Keep
 reads and deletes permissive: a scope an older release stored under a reserved
 name must stay exportable and clearable. Tests: `test_memory_router.py`.
+
+Shared conversation continuation uses the published snapshot and the caller's own thread capacity and write reservation. Use the state-only writer for title and typed messages and the existing branch seed authority for its durable message feed. Match host seed event metadata and message IDs before attributing copied history. Copy each live member through ordinary upload admission with its original manifest and publication checks. Passive memory filters marked turns at its enqueue boundaries.

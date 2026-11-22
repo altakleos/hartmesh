@@ -381,3 +381,38 @@ async def test_no_history_does_not_reserve_an_active_thread(history_gateway, emp
     assert await db.events.list_messages(record.thread_id, user_id=None) == []
     async with db.sf() as session:
         assert list(await session.scalars(select(RunRow.run_id).where(RunRow.thread_id == record.thread_id))) == [record.run_id]
+
+
+@pytest.mark.asyncio
+async def test_continued_history_is_owned_and_first_run_accepts_consecutive_answers(history_gateway, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.gateway.deps import get_config
+    from app.gateway.routers import continued_conversations
+    from deerflow.agents.lead_agent import agent as lead_agent
+
+    db = history_gateway
+    db.app.include_router(continued_conversations.router)
+    db.app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    snapshot = SimpleNamespace(title="Meeting notes", messages=[SimpleNamespace(type=role, content=word) for role, word in [("human", "Question"), ("ai", "First answer"), ("ai", "Second answer")]], files=[])
+    monkeypatch.setattr(continued_conversations, "read_snapshot", AsyncMock(return_value=snapshot))
+    async with AsyncClient(transport=ASGITransport(app=db.app), base_url="http://test") as client:
+        response = await client.post("/api/shared-conversations/example/continue", json={"request_id": str(uuid4()), "answerer": {"kind": "assistant"}})
+        assert response.status_code == 200, response.text
+        thread_id = response.json()["thread_id"]
+        proof = await client.get(f"/api/threads/{thread_id}/shared-history")
+        assert proof.json()["publication_id"] == "example"
+    rows = await db.events.list_messages(thread_id, user_id=db.user_id)
+    assert [r["content"]["id"] for r in rows] == proof.json()["message_ids"]
+    assert [r["content"]["content"] for r in rows] == ["Question", "First answer", "Second answer"]
+    assert all(r["user_id"] == db.user_id for r in rows)
+    row = await db.app.state.thread_store.get(thread_id, user_id=db.user_id)
+    assert row["display_name"] == "Meeting notes"
+    assert not {"deerflow_branch", "branch_parent_thread_id"} & row["metadata"].keys()
+    model = FakeToolCallingModel(responses=[AIMessage(id="fresh-answer", content="Fresh answer")])
+    monkeypatch.setattr(lead_agent, "create_chat_model", lambda **kwargs: model)
+    record = await services.start_run(RunCreateRequest(assistant_id="lead_agent", input={"messages": [{"role": "user", "id": "personal", "content": "A new question"}]}, context={"thinking_enabled": False}), thread_id, _request(db))
+    await asyncio.wait_for(asyncio.shield(record.task), timeout=20)
+    assert (await db.runs.get(record.run_id, user_id=db.user_id))["status"] == "success"
+    rows = await db.events.list_messages(thread_id, user_id=db.user_id)
+    assert rows[-1]["content"]["id"] == "fresh-answer"

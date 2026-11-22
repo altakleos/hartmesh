@@ -196,3 +196,11 @@ async def test_redaction_error_fails_the_check_instead_of_sending_raw_text(monke
     model.ainvoke.assert_not_awaited()
     assert latest_goal["status"] == "active"
     assert latest_goal["last_evaluation"]["stand_down_reason"] == "evaluator_failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", [_DISABLED, _ENABLED])
+async def test_goal_evaluator_still_sees_shared_turns(policy):
+    marked = HumanMessage(content="The example target is green.", additional_kwargs={"shared_history": {"publication_id": "example"}})
+    _, prompt = await _evaluator_input([marked, AIMessage(content="It was reached.")], policy)
+    assert marked.content in prompt

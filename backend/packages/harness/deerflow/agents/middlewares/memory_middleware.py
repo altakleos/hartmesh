@@ -18,12 +18,17 @@ from deerflow.config.memory_config import get_memory_config
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, SHARED_HISTORY_KEY
 
 if TYPE_CHECKING:
     from deerflow.config.memory_config import MemoryConfig
 
 logger = logging.getLogger(__name__)
+
+
+def personal_memory_messages(messages):
+    """Exclude turns copied from a shared conversation from passive memory."""
+    return [message for message in messages if SHARED_HISTORY_KEY not in getattr(message, "additional_kwargs", {})]
 
 
 def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionConfig | None) -> list:
@@ -209,7 +214,7 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             return None
 
         # Get messages from state
-        messages = state.get("messages", [])
+        messages = personal_memory_messages(state.get("messages") or [])
         if not messages:
             logger.debug("No messages in state, skipping memory update")
             return None
