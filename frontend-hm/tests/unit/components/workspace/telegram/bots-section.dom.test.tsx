@@ -204,7 +204,7 @@ describe("the Telegram section", () => {
     const reasons: [string, string][] = [
       ["secret-missing", "the setting that encrypts their tokens is missing"],
       ["secret-invalid", "the setting that encrypts their tokens is not valid"],
-      ["host-changed", "the service moved to a new server"],
+      ["host-changed", "confirms which server should connect to Telegram"],
       ["polled-elsewhere", "several bots conflict with another program"],
       ["misconfigured", "Telegram is not available right now."],
     ];

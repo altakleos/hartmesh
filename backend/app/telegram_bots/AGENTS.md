@@ -601,12 +601,12 @@ Transport facts use narrow `update_if_current`; health callbacks supply
 caches are revision-scoped and publish after commit; one live supervisor owns
 ordinary health causes. SQL revision fences support rotation through another
 repository, but do not merge independent hidden cause sets at the same revision.
-`deployment.py` shares static refusal precedence and owns the persisted CopyGuard.
-Host discovery uses only the forced-local Docker CLI off-loop, outside writers.
-Guard writers share the capacity singleton lock. `peek` is SELECT-only and may
-borrow an active read session; `resume` uses stored state without a host read.
-The startup heuristic is conditional, never an ownership election: concurrent
-copies must have Telegram off before first boot, including same-engine-ID copies.
+`deployment.py`: static gates and SQL CopyGuard. Read the local Docker CLI ID
+off-loop before writers. First Connect validates outside SQL, binds under the
+capacity lock, then activates after webhook handoff. Owner settings survive
+removal. Idle setup cannot poll. SELECT-only `peek` accepts a borrowed session;
+`resume` uses stored state. Disable concurrent copies before boot, even with
+matching engine IDs. Polling conflicts cannot elect an owner.
 `cli.py` prints one sorted JSON document for every invocation and starts no bot,
 Gateway or provider service. Its existing-only engine path performs no bootstrap,
 DDL or stamping; status is read-only and captures one real multi-query snapshot.

@@ -1,5 +1,6 @@
 """The browser's Telegram routes over real repositories, with Telegram itself scripted."""
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -11,13 +12,13 @@ import pytest_asyncio
 from _telegram_repository_test_support import add_link, code_of
 from _telegram_repository_test_support import db as db
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import select, text
 from telegram.error import InvalidToken, NetworkError
 
 from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
 from app.telegram_bots import router as module
 from app.telegram_bots.links import CONNECT_CODES_MAX
-from deerflow.persistence.telegram_bots.model import TelegramBotLinkEventRow, TelegramBotLinkRow, TelegramPersonSettingsRow
+from deerflow.persistence.telegram_bots.model import TelegramBotLinkEventRow, TelegramBotLinkRow, TelegramDeploymentRow, TelegramPersonSettingsRow
 
 OWNER = "owner-a"
 TOKEN = ":".join(("123456789", "A" * 35))
@@ -126,6 +127,108 @@ async def test_add_creates_the_link_and_its_connect_address(api):
     assert body["connect"]["url"].startswith("https://t.me/fixture_bot?start=")
     api.supervisor.add.assert_awaited_once()
     assert TOKEN not in json.dumps(body)
+
+
+@pytest.mark.asyncio
+async def test_competing_template_connections_validate_without_blocking_other_writes_and_only_the_winner_polls(api, monkeypatch):
+    from test_telegram_copy_guard_supervisor import environment, stop_environment, wait_until
+
+    async with api.db.sessions.begin() as session:
+        session.add(TelegramDeploymentRow(id=1, host_id="template-engine", polling_state="host_changed", updated_at=datetime.now(UTC)))
+    first = environment(api.db, monkeypatch, host="first-engine", script=lambda _link, _normal, updates: updates.enqueue("getUpdates", result=[], release=asyncio.Event()))
+    other = environment(api.db, monkeypatch, host="other-engine")
+    async with api.db.engine.begin() as connection:
+        await connection.execute(text("CREATE TABLE unrelated_activity (id INTEGER PRIMARY KEY)"))
+    for env in (first, other):
+        env.updates.enqueue_get_me(bot_id=123456789)
+        env.updates.enqueue("getWebhookInfo", result={"url": "https://fixture.example/hook", "has_custom_certificate": False, "pending_update_count": 0})
+    first.updates.enqueue_get_me(bot_id=123456789)
+    clearing = first.updates.enqueue("deleteWebhook", release=asyncio.Event())
+    entered, release = asyncio.Event(), asyncio.Event()
+    inspected_other, release_other = asyncio.Event(), asyncio.Event()
+    original_inspect = first.supervisor.inspect_token
+    original_other = other.supervisor.inspect_token
+
+    async def hold_inspection(token):
+        entered.set()
+        await release.wait()
+        return await original_inspect(token)
+
+    async def hold_other(token):
+        observed = await original_other(token)
+        inspected_other.set()
+        await release_other.wait()
+        return observed
+
+    async def save_unrelated():
+        async with api.db.engine.begin() as connection:
+            await connection.execute(text("INSERT INTO unrelated_activity VALUES (1)"))
+
+    monkeypatch.setattr(first.supervisor, "inspect_token", hold_inspection)
+    monkeypatch.setattr(other.supervisor, "inspect_token", hold_other)
+    try:
+        for env in (first, other):
+            await env.supervisor.check()
+            await env.supervisor.start()
+            assert env.supervisor.reason() is None and env.supervisor.awaiting_first_link
+            assert not env.supervisor.channels() and not env.health.called.is_set()
+        api.app.state.telegram_bots = first.supervisor
+        add_first = asyncio.create_task(api.client.post("/api/telegram-bots", json=added(take_over_webhook=True)))
+        await asyncio.wait_for(entered.wait(), 5)
+        await asyncio.wait_for(save_unrelated(), 2)
+        api.app.state.telegram_bots = other.supervisor
+        add_other = asyncio.create_task(api.client.post("/api/telegram-bots", json=added(take_over_webhook=True)))
+        await asyncio.wait_for(inspected_other.wait(), 5)
+        release.set()
+        await asyncio.wait_for(clearing.started.wait(), 10)
+        # Simulate the activation timer waking after SQL committed and while
+        # the explicitly requested webhook handoff is still incomplete.
+        first.supervisor.first_link_written()
+        await asyncio.sleep(0)
+        assert first.supervisor.awaiting_first_link and not first.channels.created
+        assert not first.health.called.is_set()
+        clearing.release.set()
+        winner = await asyncio.wait_for(add_first, 30)
+        release_other.set()
+        refused = await asyncio.wait_for(add_other, 10)
+        assert winner.status_code == 201, winner.text
+        assert refused.status_code == 409 and refused.json()["reason"] == "host-changed"
+        link_id = winner.json()["bot"]["id"]
+        await wait_until(lambda: first.supervisor.poll_task(link_id) is not None)
+        other.supervisor.first_link_written()
+        await wait_until(lambda: other.supervisor.reason() == "host-changed")
+        assert [item.endpoint for item in other.updates.calls] == ["getMe", "getWebhookInfo"]
+        assert not other.normal.calls and not other.channels.created
+        replay = await api.client.post("/api/telegram-bots", json=added(take_over_webhook=True))
+        assert replay.status_code == 409 and replay.json()["reason"] == "host-changed"
+        assert len(other.updates.calls) == 2
+        async with api.db.sessions() as session:
+            binding = await session.get(TelegramDeploymentRow, 1)
+            assert (binding.host_id, binding.polling_state, binding.adopted_at) == ("first-engine", "running", None)
+        assert [link.id for link in await api.db.links.list_all()] == [link_id]
+    finally:
+        release.set()
+        release_other.set()
+        clearing.release.set()
+        await asyncio.gather(stop_environment(first), stop_environment(other))
+
+
+@pytest.mark.asyncio
+async def test_first_connect_invalid_token_rolls_back_template_binding(api):
+    from app.telegram_bots.deployment import CopyGuard
+
+    async with api.db.sessions.begin() as session:
+        session.add(TelegramDeploymentRow(id=1, host_id="original-engine", polling_state="running", updated_at=datetime.now(UTC)))
+    api.supervisor.copy_guard = CopyGuard(api.db.sessions, host_reader=lambda: "new-engine")
+    await api.supervisor.copy_guard.at_start()
+    api.supervisor.awaiting_first_link = True
+    api.state.identity = InvalidToken()
+    response = await api.client.post("/api/telegram-bots", json=added())
+    assert response.status_code == 400 and response.json()["reason"] == "token-invalid"
+    async with api.db.sessions() as session:
+        row = await session.get(TelegramDeploymentRow, 1)
+        assert (row.host_id, row.polling_state, row.adopted_at) == ("original-engine", "running", None)
+    assert await stored(api) == ([], [])
 
 
 @pytest.mark.asyncio

@@ -3261,7 +3261,7 @@ export function createEnUS(product: string): Translations {
         secretInvalid:
           "Telegram bots cannot be added right now: the setting that encrypts their tokens is not valid.",
         hostChanged: ({ provider }) =>
-          `Telegram is paused: the service moved to a new server, and ${provider} has to confirm the move. Your bots are kept.`,
+          `Telegram is paused until ${provider} confirms which server should connect to Telegram. Existing bot settings are saved.`,
         polledElsewhere:
           "Telegram is paused here because several bots conflict with another program. Your bots are kept.",
         unknown: "Telegram is not available right now.",

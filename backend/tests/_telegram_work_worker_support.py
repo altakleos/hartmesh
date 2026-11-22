@@ -41,6 +41,7 @@ from app.gateway.stream_cleanup import StreamCleanupRegistry
 from app.telegram_bots import turns
 from app.telegram_bots.cipher import token_cipher, wrap_token
 from app.telegram_bots.config import load_config
+from app.telegram_bots.deployment import CopyGuard
 from app.telegram_bots.gateway_client import GatewayClientOwner
 from app.telegram_bots.supervisor import TelegramSupervisor
 from deerflow.agent_instances.contract import DefinitionSnapshot, Refusal
@@ -252,11 +253,16 @@ async def installed_worker(e, monkeypatch, tmp_path, *, custody="personal"):
     monkeypatch.setattr(normal, "do_request", sdk_request)
     clock = ManualClock(datetime.now(UTC))
     env = {"HARTMESH_PROVIDER_KEYS_SECRET": secrets.token_urlsafe(48)}
+    # This worker fixture installs its bot through the repository after startup.
+    # Explicitly select its disposable host before exercising that lifecycle.
+    guard = CopyGuard(e.sf, host_reader=lambda: "work-fixture-engine", clock=clock.now)
+    await guard.adopt()
     host = TelegramSupervisor(
         app,
         config=load_config(config),
         channel_service=service,
         session_factory=e.sf,
+        copy_guard=guard,
         app_config=config,
         environ=env,
         thread_client=gateway,

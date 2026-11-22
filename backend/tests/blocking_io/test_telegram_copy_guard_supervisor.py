@@ -24,7 +24,8 @@ def cold_probe(tmp_path):
     return path
 
 
-async def test_cold_host_and_configuration_callbacks_stay_off_gateway_loop(db, monkeypatch, cold_probe):
+@pytest.mark.parametrize("adopted", [False, True])
+async def test_cold_host_and_configuration_callbacks_stay_off_gateway_loop(db, monkeypatch, cold_probe, adopted):
     from app.telegram_bots import supervisor as module
 
     await asyncio.to_thread(ZoneInfo, "America/New_York")
@@ -45,11 +46,15 @@ async def test_cold_host_and_configuration_callbacks_stay_off_gateway_loop(db, m
     monkeypatch.setattr(module, "get_app_config", read_config)
     e.supervisor._app_config = None
     e.supervisor.copy_guard = CopyGuard(db.sessions, host_reader=read_host, clock=e.clock.now)
+    if adopted:
+        await CopyGuard(db.sessions, host_reader=lambda: "fixture-host").adopt()
     try:
         await e.supervisor.check()
         await e.supervisor.start()
         assert threads and all(thread != owner for thread in threads)
-        assert e.supervisor.cause() is None and e.supervisor.send_allowed()
+        assert e.supervisor.cause() is None
+        assert e.supervisor.send_allowed() is adopted
+        assert e.supervisor.awaiting_first_link is (not adopted)
         assert e.supervisor.copy_guard.this_host_id == "fixture-host"
     finally:
         await stop_environment(e)
