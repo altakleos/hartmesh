@@ -51,6 +51,7 @@ import {
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
+import { importedFileReceipt } from "@/core/messages/imported-file";
 import {
   getMessageRunId,
   getRunDurationDisplaysByGroupIndex,
@@ -98,6 +99,7 @@ import {
   useTurnProgress,
   useWorkspaceStartingLong,
 } from "@/core/turn-progress";
+import { formatUploadSize } from "@/core/uploads/file-validation";
 import { cn } from "@/lib/utils";
 
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
@@ -1439,6 +1441,27 @@ export function MessageList({
                   );
                 }
                 return withRunDuration(group, groupIndex, null);
+              } else if (group.type === "assistant:imported-file") {
+                const message = group.messages[0];
+                const receipt = message && importedFileReceipt(message);
+                return receipt
+                  ? withRunDuration(
+                      group,
+                      groupIndex,
+                      <p
+                        data-testid="conversation-file-import-receipt"
+                        className="text-muted-foreground text-sm break-words"
+                      >
+                        {t.inputBox.conversationReference.imported(
+                          receipt.filename,
+                          receipt.source_title?.trim()
+                            ? receipt.source_title.trim()
+                            : t.inputBox.conversationReference.untitled,
+                          formatUploadSize(receipt.size),
+                        )}
+                      </p>,
+                    )
+                  : null;
               } else if (group.type === "assistant:present-files") {
                 const files = new Set<string>();
                 for (const message of group.messages) {

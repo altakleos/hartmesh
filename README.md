@@ -99,7 +99,11 @@ attachments save immediately in the agent's files. **From a conversation** in
 the attach menu copies a file presented in another chat. In a personal chat,
 you can also browse an agent’s conversations when you have **Can see all work**,
 including conversations a colleague started. The composer shows the source
-conversation beside the attachment. Giving a file
+conversation beside the attachment. You can also paste a conversation link
+into the composer and ask about that conversation on your next turn. In an
+ordinary personal chat, ask the assistant to bring over a file from a linked
+answer. A confirmation shows the copied filename, and the copy stays in the
+receiving chat's uploads. Giving a file
 to an AI assistant or employee asks for confirmation. The copy stays in the
 agent's files, and anyone who can chat with the agent can ask about it.
 If a manager gives the agent a company connection, it can send the copy to that

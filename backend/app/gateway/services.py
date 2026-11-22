@@ -199,6 +199,7 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             SCHEDULED_ORIGIN_KEY,
             PACKAGE_MESSAGE_KEY,
             SHARED_HISTORY_KEY,
+            "imported_files",
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
@@ -3193,6 +3194,30 @@ async def _start_run(
                 except Exception:
                     logger.warning("Scheduler tool capability is unavailable for this run", exc_info=True)
             execution_context = replace(run_ctx, scheduler_capability=scheduler_capability) if scheduler_capability is not None else run_ctx
+            if (
+                conversation_references
+                and instance_execution is None
+                and agent_config is None
+                and scope_assistant_id == _DEFAULT_ASSISTANT_ID
+                and body.assistant_id in (None, _DEFAULT_ASSISTANT_ID)
+                and not scope_runtime_config.get("is_bootstrap")
+                and origin is None
+                and scheduled_task_runtime is None
+                and not is_internal_caller
+                and not getattr(request.state, "durable_batch_followup", False)
+                and metadata_record is not None
+            ):
+                from app.gateway.conversation_file_tools import bind_conversation_files
+
+                file_access = await bind_conversation_files(
+                    request=request,
+                    source_ids=source_ids,
+                    reader=run_ctx.conversation_reader,
+                    destination=metadata_record,
+                    run=record,
+                    config=app_config,
+                )
+                execution_context = replace(execution_context, conversation_reader=file_access)
             artifact_imports = getattr(request.state, "extension_artifact_imports", None)
             artifact_lifetime = None
             if artifact_imports:

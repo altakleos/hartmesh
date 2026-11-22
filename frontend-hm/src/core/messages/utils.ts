@@ -2,6 +2,7 @@ import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
 import { extractAssignmentCard } from "./chat-tools";
 import { extractHumanInputRequest } from "./human-input";
+import { importedFileReceipt } from "./imported-file";
 
 interface GenericMessageGroup<T = string> {
   type: T;
@@ -26,6 +27,7 @@ interface AssistantAssignmentGroup extends GenericMessageGroup<"assistant:assign
 export type MessageGroup =
   | HumanMessageGroup
   | AssistantProcessingGroup
+  | GenericMessageGroup<"assistant:imported-file">
   | AssistantMessageGroup
   | AssistantPresentFilesGroup
   | AssistantClarificationGroup
@@ -87,7 +89,8 @@ export function getMessageGroups(
     for (let index = groups.length - 1; index >= 0; index--) {
       const group = groups[index]!;
       if (
-        group.type === "assistant:present-files" &&
+        (group.type === "assistant:imported-file" ||
+          group.type === "assistant:present-files") &&
         group.messages[0]?.type === "tool"
       ) {
         continue;
@@ -123,6 +126,13 @@ export function getMessageGroups(
         groups.push({
           id: message.id,
           type: "assistant:clarification",
+          messages: [message],
+        });
+      } else if (importedFileReceipt(message)) {
+        lastOpenGroup()?.messages.push(message);
+        groups.push({
+          id: message.id,
+          type: "assistant:imported-file",
           messages: [message],
         });
       } else if (extractAssignmentCard(message)) {

@@ -1272,6 +1272,13 @@ export function createEnUS(product: string): Translations {
 
     // Input Box
     inputBox: {
+      conversationReference: {
+        label: (title) => `Conversation: ${title}`,
+        remove: (title) => `Remove conversation reference: ${title}`,
+        imported: (filename, title, size) =>
+          `Imported ${filename} from ${title} (${size})`,
+        untitled: "Untitled conversation",
+      },
       conversationFile: {
         menu: "From a conversation",
         device: "Upload from device",

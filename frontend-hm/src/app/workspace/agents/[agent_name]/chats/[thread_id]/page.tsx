@@ -198,7 +198,11 @@ export default function AgentChatPage() {
         { agent_name },
         { ...options, keepSentMessageInView: true },
       );
-      if (message.files.length > 0 || options?.savedFiles?.length) {
+      if (
+        message.files.length > 0 ||
+        options?.savedFiles?.length ||
+        options?.conversationReferences?.length
+      ) {
         return sendPromise;
       }
       void sendPromise;

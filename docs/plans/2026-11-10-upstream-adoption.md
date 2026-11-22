@@ -83,8 +83,9 @@ intent is retained below, together with concrete requirements for revisiting the
   The reference frontend still contains the complete upstream implementation.
 - **Cross-thread artifact tool (part of 3f9a78e):** do not register or ship the
   legacy `present_shared_artifact` implementation. It lacks current source-thread
-  and Space/instance authority and verified output-inventory integration. Add an
-  authorized storage adapter and exact-byte receipt qualification first. Existing
+  and Space/instance authority and verified output-inventory integration. HartMesh
+  uses its authorized presented-file listing and copies verified bytes into the
+  receiving personal conversation’s uploads. Existing
   extension-owned artifact handoffs keep their supported-scope restrictions.
 - Prior scope decisions were revisited: upstream public pages/model catalogue do
   not gain product routes; durable batch followups and extension handoffs retain
@@ -97,7 +98,7 @@ behavior. Ancestry alone is not adoption evidence.
 
 | Upstream commit | Decision | Intention / compatibility |
 | --- | --- | --- |
-| [`3f9a78e02`](https://github.com/bytedance/deer-flow/commit/3f9a78e02e719896dab7b48e7f856d0cd717b24d) | Adapt | Verify Goal completion. The Gateway can copy files from a finished answer into a personal conversation using current access and a delivery receipt. Model-initiated imports remain deferred. [#570](https://github.com/altakleos/hartmesh/pull/570) |
+| [`3f9a78e02`](https://github.com/bytedance/deer-flow/commit/3f9a78e02e719896dab7b48e7f856d0cd717b24d) | Adapt | Verify Goal completion. The Gateway can copy files from a finished answer into a personal conversation using current access and a delivery receipt. The assistant can also discover and import a presented file from an explicitly referenced conversation into the current personal chat. [#570](https://github.com/altakleos/hartmesh/pull/570) |
 | [`a99cd299f`](https://github.com/bytedance/deer-flow/commit/a99cd299f9633caeacd15e772dae640e87be59ed) | Adopt | trim inherited guidance below hard limit (#7976) |
 | [`2bd60d1e6`](https://github.com/bytedance/deer-flow/commit/2bd60d1e6f5167b95da035e2b57605d90d9237ca) | Adopt | build the chat model off the event loop (#7967) |
 | [`372baf762`](https://github.com/bytedance/deer-flow/commit/372baf762f69ca05a8bc6de843dea10252ca40f0) | Adopt | prevent todo reminders from resuming runs after hard stops (#7955) |

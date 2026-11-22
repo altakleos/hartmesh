@@ -16,6 +16,15 @@ locations and keeps `merge_run_context_overrides` clear. Admission and
 `/api/features` use `conversation_references_enabled()` as the sole configured
 predicate.
 
+An interactive personal lead can also receive file discovery and import for its
+explicit references. Bind the live session account, source and destination
+incarnations, and run lifetime in `conversation_file_tools.py`. Discovery reads
+terminal delivery receipts, checks export authority, and returns a bounded page
+with a cursor that can resume within one answer. Import uses the existing
+attachment writer and repeats authorization and presentation checks before
+publishing. Keep `imported_files` server-owned on external messages and state
+updates. Custom, employee, helper and background runs retain their existing tools.
+
 ## Health and readiness
 
 FastAPI listens on 8001. `GET /health` is liveness; `GET /health/ready` concurrently

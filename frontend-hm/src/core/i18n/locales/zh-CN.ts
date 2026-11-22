@@ -1186,6 +1186,13 @@ export function createZhCN(product: string): Translations {
 
     // Input Box
     inputBox: {
+      conversationReference: {
+        label: (title) => `对话：${title}`,
+        remove: (title) => `移除对话引用：${title}`,
+        imported: (filename, title, size) =>
+          `已从“${title}”导入 ${filename}（${size}）`,
+        untitled: "未命名对话",
+      },
       conversationFile: {
         menu: "从对话中选择",
         device: "从设备上传",

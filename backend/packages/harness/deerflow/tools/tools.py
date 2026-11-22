@@ -2,6 +2,7 @@ import copy
 import itertools
 import logging
 import threading
+from typing import TYPE_CHECKING
 
 from langchain.tools import BaseTool
 from langchain_core.language_models import BaseChatModel
@@ -30,6 +31,9 @@ from deerflow.tools.builtins import (
 from deerflow.tools.mcp_metadata import get_mcp_source, tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 
+if TYPE_CHECKING:
+    from deerflow.tools.conversation_import import ConversationFileAccess
+
 logger = logging.getLogger(__name__)
 
 BUILTIN_TOOLS = [
@@ -47,6 +51,8 @@ SUBAGENT_TOOLS = [
 # Registering a tool path in YAML cannot widen that grant or its interaction mode.
 _HOST_GRANTED_TOOL_USES = frozenset(
     {
+        "deerflow.tools.conversation_import:import_conversation_file",
+        "deerflow.tools.conversation_import:list_conversation_files",
         "deerflow.tools.scheduled_tasks:schedule_task",
         "deerflow.tools.scheduled_tasks:stop_scheduled_task",
     }
@@ -167,6 +173,7 @@ def get_available_tools(
     mcp_plugins: list[str] | None = None,
     include_upload_tool: bool = True,
     include_conversation_reader: bool = False,
+    conversation_file_access: "ConversationFileAccess | None" = None,
     scheduler_capability: SchedulerRunCapability | None = None,
     app_config: AppConfig | None = None,
     extensions=None,
@@ -192,6 +199,7 @@ def get_available_tools(
         include_conversation_reader: Allow the configured conversation reader
             only when the host provides its authorized runtime capability.
             Defaults to false for embedded callers and subagents.
+        conversation_file_access: Interactive host capability for file discovery and copying.
         scheduler_capability: Current-run host grant for conversation schedule
             management or own-schedule stopping. Omitted for embedded,
             bootstrap and subagent assembly.
@@ -233,6 +241,11 @@ def get_available_tools(
             if "PER-RESPONSE BUDGET:" not in description:
                 loaded = _clone_tool_with_description(loaded, f"{description}{budget_note}")
         loaded_tools.append(loaded)
+        if cfg.use == CONVERSATION_TOOL_USE and conversation_file_access is not None:
+            from deerflow.tools.conversation_import import ConversationFileAccess, import_conversation_file, list_conversation_files
+
+            if isinstance(conversation_file_access, ConversationFileAccess):
+                loaded_tools.extend((list_conversation_files, import_conversation_file))
 
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()

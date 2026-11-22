@@ -197,6 +197,14 @@ def _base_environ() -> dict[str, str]:
     return {"DATABASE_URL": "postgresql://deerflow:x@postgres:5432/deerflow", "DEER_FLOW_STREAM_BRIDGE_REDIS_URL": "redis://:x@redis:6379/0", LOCAL_PASSWORDS_KEY: "allowed", "HARTMESH_LOCAL_REGISTRATION": "closed"}
 
 
+def test_rendered_bundle_enables_referenced_conversations(render_config):
+    rendered, _ = render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), _base_environ())
+    config = yaml.safe_load(rendered)
+    (reader,) = [entry for entry in config["tools"] if entry["use"] == "deerflow.tools.conversation:read_conversation"]
+    assert reader["name"] == "read_conversation"
+    assert reader["group"] in {group["name"] for group in config["tool_groups"]}
+
+
 def _open_runsc_environ() -> dict[str, str]:
     return {**_base_environ(), "SANDBOX_EGRESS": "open", "DEER_FLOW_SANDBOX_RUNTIME": "runsc", "HARTMESH_SANDBOX_RESOLV_CONF": "/run/systemd/resolve/resolv.conf"}
 

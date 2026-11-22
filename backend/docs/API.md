@@ -541,6 +541,17 @@ key together returns 422. `GET /api/features` reports
 `conversation_references.enabled` (the tool is configured) and `max_references`,
 so a client can hide its entry point on deployments without the tool.
 
+The distributed Compose configuration enables this reader. In an ordinary
+interactive personal chat, the same explicit references also enable
+`list_conversation_files` and `import_conversation_file` when the caller
+has the required file permissions. The listing returns files presented by
+finished answers along with their run IDs and paths. Importing one copies
+the current bytes into this chat's uploads. A successful tool message
+includes one typed `additional_kwargs.imported_files` receipt with the
+final filename, virtual upload path, byte count and SHA-256. The source
+title is optional. Helpers, managed agents and scheduled runs have no
+import capability. The import creates no presented output in this run.
+
 The request requires `runs:read` as well as the normal run-creation permission.
 The tool rechecks source ownership on each read; foreign, deleted and unowned
 legacy threads are unavailable. `read_conversation(thread_id, cursor?, limit?)`

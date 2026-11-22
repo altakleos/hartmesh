@@ -58,6 +58,11 @@ subagent assembly withhold it. The tool requires the worker-owned
 `__conversation_reader` capability and rejects subagents. Hosts enforce the
 current run's explicit references and user permissions. Do not import Gateway
 routers into the harness or recover this capability from persisted messages.
+For an ordinary interactive run the Gateway may wrap its reader in
+`ConversationFileAccess` with host-bound listing and import. Only that lead
+can discover and copy presented files from its explicit references; the tools
+have no filesystem or grant of their own. A successful copy returns a typed
+`imported_files` tool receipt. It never updates presented outputs or delivery.
 Reads use live visible history; expiry/deletion does not erase destination copies.
 The Gateway sizes pages to the `CONVERSATION_TOOL_NAME` tool-output budget so
 results stay inline. Cut messages carry a `message_seq`/`offset` continuation that

@@ -247,6 +247,18 @@ async def _check_shared(request: Request, source: SharedPublicationSource):
     return await _live_publication(repo, source)
 
 
+async def require_presented_file(request, source, scope):
+    """Require a terminal source answer and its authoritative file presentation."""
+    user_id = None if scope[0] == "agent" else scope[1]
+    record = await get_run_store(request).get(source.run_id, user_id=user_id)
+    if record is None or record.get("thread_id") != source.thread_id or record.get("operation_kind", "run") != "run" or (user_id is not None and record.get("user_id") != user_id):
+        raise _missing()
+    if record["status"] not in (RunStatus.success, RunStatus.error, RunStatus.timeout, RunStatus.interrupted):
+        raise HTTPException(409, "This answer has not finished")
+    if source.path not in await receipt_paths(request, source.thread_id, source.run_id, scope):
+        raise _missing()
+
+
 @require_permission("threads", "read")
 @storage_feature("hm.shared")
 async def _shared_capture(request: Request, source: SharedPublicationSource, maximum_bytes: int):
@@ -320,14 +332,7 @@ async def _conversation_capture(request: Request, source: ConversationSource, ma
         if not acknowledge_disclosure:
             raise HTTPException(409, {"code": "disclosure-needs-confirmation"})
     await admit_presented_source(request, source.thread_id, scope)
-    user_id = None if scope[0] == "agent" else scope[1]
-    record = await get_run_store(request).get(source.run_id, user_id=user_id)
-    if record is None or record.get("thread_id") != source.thread_id or record.get("operation_kind", "run") != "run" or (user_id is not None and record.get("user_id") != user_id):
-        raise _missing()
-    if record["status"] not in (RunStatus.success, RunStatus.error, RunStatus.timeout, RunStatus.interrupted):
-        raise HTTPException(409, "This answer has not finished")
-    if source.path not in await receipt_paths(request, source.thread_id, source.run_id, scope):
-        raise _missing()
+    await require_presented_file(request, source, scope)
     role = await _SourceRole.capture(request, shared=False) if scope[0] == "ordinary" else None
     payload, _ = await read_presented(request, source.thread_id, source.path, maximum_bytes=maximum_bytes)
 
