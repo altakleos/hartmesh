@@ -3052,7 +3052,7 @@ export function createZhCN(product: string): Translations {
         secretMissing: "目前无法添加 Telegram 机器人：缺少用于加密令牌的设置。",
         secretInvalid: "目前无法添加 Telegram 机器人：用于加密令牌的设置无效。",
         hostChanged: ({ provider }) =>
-          `Telegram 已暂停：服务已迁移到新服务器，需要 ${provider} 确认此次迁移。你的机器人会保留。`,
+          `Telegram 已暂停，需由 ${provider} 确认应由哪台服务器连接 Telegram。已有的机器人设置已保留。`,
         polledElsewhere:
           "Telegram 在这里已暂停，因为多个机器人与另一个程序冲突。你的机器人会保留。",
         unknown: "Telegram 目前不可用。",

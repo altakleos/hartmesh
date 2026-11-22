@@ -193,6 +193,7 @@ async def status(session_factory, *, config: AppConfig, guard: CopyGuard, owner:
             for row, token in zip(links, classifications, strict=True)
         ]
         host_id = deployment.host_id if deployment else None
+        recorded_polling_state = deployment.polling_state if deployment else None
         totals = {
             "people": len({row.owner_user_id for row in links}),
             "by_state": {key: sum(row.state == key for row in links) for key in _STATES},
@@ -216,6 +217,7 @@ async def status(session_factory, *, config: AppConfig, guard: CopyGuard, owner:
         bots="ready" if cause is None else "unavailable",
         reason=reason,
         polling_state=polling_state,
+        recorded_polling_state=recorded_polling_state,
         host_id=host_id,
         this_host_id=guard.this_host_id,
         secret=secret,

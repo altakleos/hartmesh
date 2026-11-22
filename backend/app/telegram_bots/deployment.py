@@ -22,7 +22,7 @@ from app.gateway.provider_keys.cipher import WrappingKeyInvalid
 from app.telegram_bots.cipher import token_cipher
 from app.telegram_bots.config import TelegramBotsConfig
 from deerflow.config.app_config import AppConfig
-from deerflow.persistence.telegram_bots.model import TelegramDeploymentRow
+from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramDeploymentRow, TelegramPersonSettingsRow
 from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
@@ -174,6 +174,7 @@ class CopyGuard:
         self.sessions = session_factory
         self._host_reader, self._clock = host_reader if host_reader is not None else host_identity, clock
         self._this_host_id: str | None = None
+        self.awaiting_first_link = False
 
     @property
     def this_host_id(self) -> str | None:
@@ -194,6 +195,57 @@ class CopyGuard:
             return "host_changed"
         return row.polling_state
 
+    @staticmethod
+    def _used():
+        return select(TelegramBotLinkRow.id).exists() | select(TelegramPersonSettingsRow.owner_user_id).exists()
+
+    @staticmethod
+    def _can_enroll(row) -> bool:
+        # Every successful bot creation requires owner settings. Removal and
+        # retention keep those settings, even when no live links remain.
+        return row is not None and row.adopted_at is None and row.polling_state != "polled_elsewhere"
+
+    @staticmethod
+    def _identity_available(row, host) -> bool:
+        return host is not None or row.host_id is None and row.polling_state == "running"
+
+    async def _unused(self, session, row) -> bool:
+        return self._can_enroll(row) and not await session.scalar(select(self._used()))
+
+    async def _snapshot(self, session):
+        # Under READ COMMITTED another engine may enroll between statements.
+        # Keep its identity and evidence of first use in the same observation.
+        columns = TelegramDeploymentRow
+        with session.no_autoflush:
+            return (await session.execute(select(columns.host_id, columns.polling_state, columns.adopted_at, self._used().label("used")).where(columns.id == 1))).one_or_none()
+
+    async def first_link_state(self) -> PollingState | None:
+        """None while this process may enroll the first link but cannot poll."""
+        async with self.sessions() as session:
+            row = await self._snapshot(session)
+            if row is None:
+                return None
+            if self._can_enroll(row) and not row.used:
+                return None if self._identity_available(row, self.this_host_id) else "host_changed"
+            if row.host_id != self.this_host_id:
+                return "host_changed"
+            return self._state(row, self.this_host_id)
+
+    async def bind_first_link(self, session: AsyncSession) -> None:
+        """Bind verified input under the capacity writer before settings or link insertion."""
+        self._borrow_read(session)
+        row = await session.get(TelegramDeploymentRow, 1, populate_existing=True)
+        if await self._unused(session, row):
+            if not self._identity_available(row, self.this_host_id):
+                raise GuardRefused("host-changed")
+            row.host_id, row.polling_state, row.updated_at = self.this_host_id, "running", self._clock()
+            return
+        if row is None or row.host_id != self.this_host_id:
+            raise GuardRefused("host-changed")
+        state = self._state(row, self.this_host_id)
+        if state != "running":
+            raise GuardRefused(state.replace("_", "-"))
+
     def _borrow_read(self, session: AsyncSession) -> None:
         bound = self.sessions.kw.get("bind")
         if not session.in_transaction() or not session.is_active or bound is None or session.get_bind() is not getattr(bound, "sync_engine", bound):
@@ -211,9 +263,10 @@ class CopyGuard:
     async def _peek(self, session: AsyncSession, host: str | None) -> PollingState:
         # A borrowed read must neither flush the caller's pending mutations nor
         # replace its ORM identity-map values while reading persisted facts.
-        with session.no_autoflush:
-            row = (await session.execute(select(TelegramDeploymentRow.host_id, TelegramDeploymentRow.polling_state).where(TelegramDeploymentRow.id == 1))).one_or_none()
-            return self._state(row, host)
+        row = await self._snapshot(session)
+        if self._can_enroll(row) and not row.used:
+            return "running" if self._identity_available(row, host) else "host_changed"
+        return self._state(row, host)
 
     @asynccontextmanager
     async def _writer(self, *, ensure: bool):
@@ -228,15 +281,19 @@ class CopyGuard:
                 row = TelegramDeploymentRow(id=1, host_id=None, polling_state="running", adopted_at=None, updated_at=self._clock())
                 session.add(row)
                 await session.flush()
-            yield row
+            yield session, row
 
     async def at_start(self) -> PollingState:
         host = await self._observe_host()
-        async with self._writer(ensure=True) as row:
+        async with self._writer(ensure=True) as (session, row):
+            if await self._unused(session, row):
+                self.awaiting_first_link = self._identity_available(row, host)
+                return "running" if self.awaiting_first_link else "host_changed"
+            self.awaiting_first_link = False
             state = self._state(row, host)
             if row.host_id is None and host is not None:
                 row.host_id, row.updated_at = host, self._clock()
-            if state != row.polling_state:
+            if state != row.polling_state and row.polling_state != "polled_elsewhere":
                 row.polling_state, row.updated_at = state, self._clock()
             return state
 
@@ -271,7 +328,7 @@ class CopyGuard:
         return candidates >= 2 and candidates > floor
 
     async def stop_for_broad_conflict(self) -> None:
-        async with self._writer(ensure=True) as row:
+        async with self._writer(ensure=True) as (_, row):
             if row.polling_state != "polled_elsewhere":
                 row.polling_state, row.updated_at = "polled_elsewhere", self._clock()
 
@@ -279,11 +336,11 @@ class CopyGuard:
         host = await self._observe_host()
         if host is None:
             raise GuardRefused("host-unreadable")
-        async with self._writer(ensure=True) as row:
+        async with self._writer(ensure=True) as (session, row):
             before = row.host_id
             if before == host and row.polling_state == "polled_elsewhere":
                 raise GuardRefused("polled-elsewhere")
-            if before == host and row.polling_state == "running":
+            if before == host and row.polling_state == "running" and not await self._unused(session, row):
                 return {"from": before, "host_id": host, "verdict": "already_adopted"}
             row.host_id, row.polling_state, row.adopted_at, row.updated_at = host, "running", self._clock(), self._clock()
             return {"from": before, "host_id": host, "verdict": "adopted"}
@@ -291,7 +348,7 @@ class CopyGuard:
     async def resume(self) -> dict:
         # This verb is an operator statement about the persisted latch only.
         # peek/at_start still independently refuse a known unadopted host.
-        async with self._writer(ensure=False) as row:
+        async with self._writer(ensure=False) as (_, row):
             if row is None or row.polling_state == "running":
                 return {"verdict": "already_running"}
             if row.polling_state == "host_changed":

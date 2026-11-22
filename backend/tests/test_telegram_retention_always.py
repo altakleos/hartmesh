@@ -72,6 +72,7 @@ async def retention_wait_diagnostics(request, capsys, caplog):
 
 
 class Verdict:
+    awaiting_first_link = False
     this_host_id = "fixture-host"
 
     def __init__(self, verdict):

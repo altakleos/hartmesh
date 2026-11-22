@@ -164,6 +164,8 @@ class TelegramSupervisor:
         self._cause: str | None = None
         self._checked, self._stopping, self._stopped = False, False, False
         self._start_started = False
+        self._first_link_written = asyncio.Event()
+        self.first_link_handoff = asyncio.Lock()
         self._check_lock = asyncio.Lock()
         self._health_barrier, self._ready = asyncio.Event(), False
         self._send_event, self._send_ready = asyncio.Event(), False
@@ -330,6 +332,45 @@ class TelegramSupervisor:
                 await self._sleep(min(HEALTH_WAIT_INTERVAL_SECONDS, remaining))
         return False
 
+    @property
+    def awaiting_first_link(self) -> bool:
+        return bool(self.copy_guard and self.copy_guard.awaiting_first_link)
+
+    async def _wait_for_first_link(self) -> None:
+        # The committing request wakes this process. The periodic check also
+        # covers a dropped HTTP response, another worker, and explicit adoption.
+        try:
+            while not self._stopping:
+                self._first_link_written.clear()
+                async with self.first_link_handoff:
+                    state = await self.copy_guard.first_link_state()
+                if state is not None:
+                    if state != "running":
+                        self._refuse(state.replace("_", "-"))
+                        return
+                    self.copy_guard.awaiting_first_link = False
+                    rows = await self.links.list_all()
+                    self._initial_links = {link.id: link for link in rows}
+                    self._rows = dict(self._initial_links)
+                    self._copy_decision = False if len(rows) <= 1 else None
+                    self._start_started = False
+                    await self.start()
+                    return
+                try:
+                    await asyncio.wait_for(self._first_link_written.wait(), self.config.reconcile_interval_seconds)
+                except TimeoutError:
+                    pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._event("supervisor_start_failed", error=type(error).__name__, level=logging.ERROR)
+            self._refuse("channel-service-failed")
+        finally:
+            self._health_barrier.set()
+
+    def first_link_written(self) -> None:
+        self._first_link_written.set()
+
     async def start(self) -> None:
         if self._start_started:
             return
@@ -339,8 +380,17 @@ class TelegramSupervisor:
         began = self._time()
         try:
             await self.check()
-            self._start_sweeps()
+            if not self._sweeps:
+                self._start_sweeps()
             if self._cause is not None or self._stopping:
+                return
+            if self.awaiting_first_link:
+                # Offer Connect, but never load tokens, poll, send, or subscribe
+                # to the bus before SQL commits a credential for this host.
+                logger.info("telegram: on, awaiting the first bot connection")
+                waiting = asyncio.create_task(self._wait_for_first_link(), name="telegram-first-link")
+                self._background.add(waiting)
+                waiting.add_done_callback(self._background.discard)
                 return
             self.channel_service.bus.subscribe_outbound(self._listener)
             self._subscribed = True
@@ -435,7 +485,7 @@ class TelegramSupervisor:
         finally:
             if self._start_task is asyncio.current_task():
                 self._start_task = None
-            if not self._ready:
+            if not self._ready and (self._cause is not None or not self.awaiting_first_link):
                 self._health_barrier.set()
 
     def _copy_results(self) -> dict[str, PollRecord]:

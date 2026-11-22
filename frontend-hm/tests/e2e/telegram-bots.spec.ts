@@ -704,7 +704,7 @@ test.describe("Telegram bots", () => {
       ],
       [
         { enabled: true, bots: "unavailable", reason: "host-changed" },
-        /the service moved to a new server/,
+        /confirms which server should connect to Telegram/,
       ],
       [
         { enabled: true, bots: "unavailable", reason: "polled-elsewhere" },
@@ -772,6 +772,29 @@ test.describe("Telegram bots", () => {
     await page.reload();
     await expect(page.getByRole("textbox").first()).toBeVisible();
     await expect(card).toHaveCount(0);
+  });
+
+  test("the welcome card respects the server's decision for the first connection", async ({
+    page,
+  }) => {
+    await mockTelegram(page, {
+      telegram: { enabled: true, bots: "unavailable", reason: "host-changed" },
+    });
+    await page.goto("/workspace/chats/new");
+    const card = page.getByTestId("telegram-welcome-card");
+    const connect = card.getByRole("button", { name: strings.action.connect });
+    await expect(connect).toBeDisabled();
+    await expect(card).toContainText(
+      /confirms which server should connect to Telegram/,
+    );
+
+    await page.unrouteAll({ behavior: "ignoreErrors" });
+    await mockTelegram(page);
+    await page.reload();
+    await connect.click();
+    await expect(
+      page.getByRole("heading", { name: strings.setup.title({ name: NAME }) }),
+    ).toBeVisible();
   });
 
   test("the welcome card leaves Home where it was on a laptop", async ({

@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import re
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -28,6 +29,7 @@ from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
 from app.gateway.authz import get_auth_context, resolve_route_permissions_for_request
 from app.gateway.deps import get_current_user_from_request, require_admin_user
 from app.telegram_bots.config import load_config, section_present
+from app.telegram_bots.deployment import GuardRefused
 from app.telegram_bots.links import CONNECT_CODES_MAX, AgentLinked, BotLinked, BotLinkRepository, LimitDeployment, LimitPerson, TooManyCodes
 from app.telegram_bots.token_pattern import TOKEN_IN_TEXT
 from app.telegram_bots.voice import resolve_transcriber
@@ -164,12 +166,21 @@ def _links(request: Request) -> BotLinkRepository:
     return BotLinkRepository(sessions, ChannelConnectionRepository(sessions), _config(request))
 
 
-def _live(request: Request):
+async def _live(request: Request, *, first_link=False):
     """Routes that need Telegram refuse with the deployment's reason."""
     supervisor = _supervisor(request)
     reason = "telegram-off" if supervisor is None else supervisor.reason()
     if reason is not None:
         raise Refusal("telegram-off" if reason == "off" else reason)
+    if not first_link and getattr(supervisor, "awaiting_first_link", False):
+        state = await supervisor.copy_guard.first_link_state()
+        if state is None:
+            raise Refusal("not-found")
+        if state != "running":
+            raise Refusal(state.replace("_", "-"))
+        supervisor.first_link_written()
+        if not await supervisor._available():
+            raise Refusal(supervisor.reason() or "telegram-off")
     return supervisor
 
 
@@ -423,12 +434,12 @@ async def _instance_target(request, owner, ref, *, writer=None, expected_service
     return agents
 
 
-async def _confirm_instance_target(request, owner, agents, writer):
+async def _confirm_instance_target(request, owner, agents, writer, *, first_link=False):
     """Final borrowed account authority after target/owner/capacity reads."""
     from deerflow.agent_instances.contract import AgentDenied
     from deerflow.spaces.contract import PrincipalRef
 
-    _live(request)
+    await _live(request, first_link=first_link)
     await _require(request, "threads:write", "runs:create", "agents:read")
     if getattr(request.app.state, "agent_instances", None) is not agents:
         raise Refusal("agent-not-found")
@@ -657,7 +668,7 @@ async def add_bot(request: Request, owner: str = Depends(_caller)) -> dict:
     if type(kind) is not str or type(ref) is not str:
         raise Refusal("invalid-request")
     await _require(request, "threads:write", "runs:create", *(("agents:read",) if kind == "instance" else ()))
-    supervisor = _live(request)
+    supervisor = await _live(request, first_link=True)
     target_service = await await_drained(_target(request, owner, kind, ref))
     timezone, locale = None, None
     if await supervisor.settings.get(owner) is None:
@@ -665,39 +676,55 @@ async def add_bot(request: Request, owner: str = Depends(_caller)) -> dict:
             raise Refusal("timezone-required")
         timezone = await _zone(body["timezone"])
         locale = _locale(body.get("locale", "en-US"))
+    first_link = getattr(supervisor, "awaiting_first_link", False)
+    if first_link:
+        state = await supervisor.copy_guard.first_link_state()
+        if state is not None and state != "running":
+            raise Refusal(state.replace("_", "-"))
+    # Read only the submitted credential, outside the database-wide SQLite writer.
     token, bot_id, username = await _inspect(supervisor, body["token"], takeover=takeover)
     encrypted = await supervisor.encrypt_token(bot_id, token)
     if kind == "instance":
         await _require(request, "threads:write", "runs:create", "agents:read")
-        _live(request)
+        await _live(request, first_link=True)
         await await_drained(_target(request, owner, kind, ref, expected_service=target_service))
     links = supervisor.links
 
     async def admit(session):
-        _live(request)
-        await _require(request, "threads:write", "runs:create", "agents:read")
-        await await_drained(_target(request, owner, kind, ref, writer=session, expected_service=target_service))
+        await _live(request, first_link=True)
+        if kind == "instance":
+            await _require(request, "threads:write", "runs:create", "agents:read")
+            await await_drained(_target(request, owner, kind, ref, writer=session, expected_service=target_service))
+        if first_link:
+            await supervisor.copy_guard.bind_first_link(session)
 
     async def confirm(session):
-        await await_drained(_confirm_instance_target(request, owner, target_service, session))
+        await await_drained(_confirm_instance_target(request, owner, target_service, session, first_link=True))
 
-    try:
-        async with links.capacity_writer(owner, timezone=timezone, locale=locale, **({"admit": admit, "confirm": confirm} if kind == "instance" else {})) as session:
-            link = await links.add(owner_user_id=owner, agent_kind=kind, agent_ref=ref, bot_id=bot_id, bot_username=username, encrypted_token=encrypted, actor_id=owner, session=session)
-            connect = await links.mint_code(link, session=session)
-    except BotLinked as refusal:
-        raise _bot_linked(refusal, await _linked_name(request, bot_id)) from None
-    except AgentLinked:
-        existing = next((row for row in await links.list_for_owner(owner) if (row.agent_kind, row.agent_ref) == (kind, ref)), None)
-        raise Refusal("agent-linked", link_id=existing.id if existing is not None else None) from None
-    except LimitPerson:
-        raise Refusal("limit-person") from None
-    except LimitDeployment:
-        raise Refusal("limit-deployment") from None
-    except TooManyCodes:
-        raise Refusal("too-many-codes") from None
-    if takeover:
-        await _settled(supervisor.clear_webhook(token))
+    # Keep startup behind an explicitly requested webhook removal, including
+    # a periodic first-link check that runs after SQL commits.
+    async with supervisor.first_link_handoff if first_link else nullcontext():
+        try:
+            async with links.capacity_writer(owner, timezone=timezone, locale=locale, admit=admit if first_link or kind == "instance" else None, confirm=confirm if kind == "instance" else None) as session:
+                link = await links.add(owner_user_id=owner, agent_kind=kind, agent_ref=ref, bot_id=bot_id, bot_username=username, encrypted_token=encrypted, actor_id=owner, session=session)
+                connect = await links.mint_code(link, session=session)
+        except GuardRefused as refused:
+            raise Refusal(refused.reason) from None
+        except BotLinked as refusal:
+            raise _bot_linked(refusal, await _linked_name(request, bot_id)) from None
+        except AgentLinked:
+            existing = next((row for row in await links.list_for_owner(owner) if (row.agent_kind, row.agent_ref) == (kind, ref)), None)
+            raise Refusal("agent-linked", link_id=existing.id if existing is not None else None) from None
+        except LimitPerson:
+            raise Refusal("limit-person") from None
+        except LimitDeployment:
+            raise Refusal("limit-deployment") from None
+        except TooManyCodes:
+            raise Refusal("too-many-codes") from None
+        if takeover:
+            await await_drained(_settled(supervisor.clear_webhook(token)))
+        if first_link:
+            supervisor.first_link_written()
     await _settled(supervisor.add(link, token))
     return {"bot": await _bot(request, await links.get(link.id) or link), "connect": _connect(connect)}
 
@@ -709,7 +736,7 @@ async def replace_token(link_id: str, request: Request, owner: str = Depends(_ca
     if type(operation) is not str or _OPERATION.match(operation) is None:
         raise Refusal("invalid-request")
     await _require(request, "threads:write", "runs:create")
-    supervisor = _live(request)
+    supervisor = await _live(request)
     match = _TOKEN.search(body["token"])
     if match is None:
         raise Refusal("token-invalid")
@@ -735,11 +762,11 @@ async def replace_token(link_id: str, request: Request, owner: str = Depends(_ca
             creating = bot_id != current.bot_id
             if current.agent_kind == "instance":
                 await _require(request, "threads:write", "runs:create", "agents:read")
-                _live(request)
+                await _live(request)
                 await await_drained(_target(request, owner, current.agent_kind, current.agent_ref, expected_service=target_service, creating=creating))
 
             async def admit(session):
-                _live(request)
+                await _live(request)
                 await _require(request, "threads:write", "runs:create", "agents:read")
                 await await_drained(_target(request, owner, current.agent_kind, current.agent_ref, writer=session, expected_service=target_service, creating=creating))
 
@@ -784,7 +811,7 @@ async def replace_token(link_id: str, request: Request, owner: str = Depends(_ca
 
 @router.post("/{link_id}/connect")
 async def connect(link_id: str, request: Request, owner: str = Depends(_caller)) -> dict:
-    supervisor = _live(request)
+    supervisor = await _live(request)
     link = await _own(request, link_id, owner)
     links = supervisor.links
     if link.state == "held":
@@ -836,7 +863,7 @@ class _Retry(BaseModel):
 
 @router.post("/{link_id}/retry")
 async def retry(link_id: str, request: Request, change: _Retry | None = None, owner: str = Depends(_caller)) -> dict:
-    supervisor = _live(request)
+    supervisor = await _live(request)
     link = await _own(request, link_id, owner)
     try:
         saved = await supervisor.retry(link.id, take_over_webhook=change is not None and change.take_over_webhook)
@@ -848,7 +875,7 @@ async def retry(link_id: str, request: Request, change: _Retry | None = None, ow
 
 @router.post("/{link_id}/profile")
 async def apply_profile(link_id: str, request: Request, owner: str = Depends(_caller)) -> dict:
-    supervisor = _live(request)
+    supervisor = await _live(request)
     link = await _own(request, link_id, owner)
     if not await supervisor.profile_sync.push(link):
         raise Refusal("telegram-unreachable")

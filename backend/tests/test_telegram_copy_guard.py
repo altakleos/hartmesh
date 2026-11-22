@@ -146,7 +146,7 @@ async def test_host_observation_holds_no_capacity_writer_lock(db):
     ],
 )
 async def test_peek_precedence_does_not_write_any_row(db, stored_host, current_host, state, expected):
-    await seed(db, host=stored_host, state=state)
+    await seed(db, host=stored_host, state=state, adopted=NOW)
     before = await saved(db)
     assert await guard(db, current_host).peek() == expected
     after = await saved(db)
@@ -154,11 +154,11 @@ async def test_peek_precedence_does_not_write_any_row(db, stored_host, current_h
 
 
 @pytest.mark.parametrize("host", ["engine-a", None])
-async def test_at_start_creates_singleton_without_adopting_a_missing_host(db, host):
+async def test_empty_start_defers_binding_until_the_first_link(db, host):
     instance = guard(db, host)
     assert await instance.at_start() == "running"
     row = await saved(db)
-    assert row.host_id == host and row.polling_state == "running" and row.adopted_at is None
+    assert instance.awaiting_first_link and row.host_id is None and row.polling_state == "running" and row.adopted_at is None
 
 
 async def test_first_readable_host_is_captured_without_clearing_existing_latch(db):
@@ -169,7 +169,7 @@ async def test_first_readable_host_is_captured_without_clearing_existing_latch(d
 
 
 async def test_changed_known_host_stays_refused_until_explicit_adoption(db):
-    await seed(db, host="old-engine")
+    await seed(db, host="old-engine", adopted=NOW)
     instance = guard(db, "new-engine")
     assert await instance.at_start() == "host_changed"
     row = await saved(db)
@@ -178,8 +178,47 @@ async def test_changed_known_host_stays_refused_until_explicit_adoption(db):
     assert await instance.at_start() == "running"
 
 
+@pytest.mark.parametrize("old_state", ["running", "host_changed"])
+async def test_unused_template_can_set_up_on_another_engine_without_adopting_at_start(db, old_state):
+    await seed(db, host="template-engine", state=old_state)
+    instance = guard(db, "new-engine")
+    assert await instance.peek() == "running"
+    assert await instance.at_start() == "running"
+    assert instance.awaiting_first_link
+    before = await saved(db)
+    assert (before.host_id, before.polling_state, before.adopted_at) == ("template-engine", old_state, None)
+
+
+async def test_unreadable_engine_cannot_recover_prebound_template_or_latched_unknown(db):
+    await seed(db, host="template-engine", state="running")
+    instance = guard(db, None)
+    assert await instance.at_start() == "host_changed"
+    assert not instance.awaiting_first_link and await instance.peek() == "host_changed"
+    async with db.sessions.begin() as session:
+        row = await session.get(TelegramDeploymentRow, 1)
+        row.host_id, row.polling_state = None, "host_changed"
+    assert await instance.at_start() == "host_changed"
+    assert not instance.awaiting_first_link
+
+
+async def test_template_setup_keeps_previous_use_explicit_adoption_and_conflict_fenced(db):
+    await seed(db, host="template-engine", state="polled_elsewhere")
+    instance = guard(db, "new-engine")
+    assert await instance.at_start() == "host_changed"
+    assert (await saved(db)).polling_state == "polled_elsewhere"
+    assert await guard(db, "template-engine").at_start() == "polled_elsewhere"
+    await instance.adopt()
+    assert await guard(db, "third-engine").at_start() == "host_changed"
+    link = await add_link(db)
+    await db.links.remove(link.id, actor_id="owner-a")
+    async with db.sessions.begin() as session:
+        row = await session.get(TelegramDeploymentRow, 1)
+        row.adopted_at = None
+    assert await guard(db, "third-engine").at_start() == "host_changed"
+
+
 async def test_unreadable_host_does_not_replace_a_known_host(db):
-    await seed(db)
+    await seed(db, adopted=NOW)
     assert await guard(db, None).at_start() == "running"
     assert (await saved(db)).host_id == "engine-a"
 
@@ -190,14 +229,23 @@ async def test_concurrent_first_start_uses_one_shared_singleton_writer(db):
     assert result == ["running", "running"]
     async with db.sessions() as session:
         rows = list(await session.scalars(select(TelegramDeploymentRow)))
-    assert len(rows) == 1 and rows[0].host_id == "engine-a"
+    assert len(rows) == 1 and rows[0].host_id is None
 
 
-async def test_concurrent_different_hosts_cannot_both_publish_a_first_running_state(db):
-    result = await asyncio.gather(guard(db, "engine-a").at_start(), guard(db, "engine-b").at_start())
-    assert sorted(result) == ["host_changed", "running"]
-    row = await saved(db)
-    assert row.host_id in {"engine-a", "engine-b"} and row.polling_state == "host_changed"
+async def test_different_hosts_with_no_links_can_only_offer_setup(db):
+    instances = [guard(db, "engine-a"), guard(db, "engine-b")]
+    assert await asyncio.gather(*(item.at_start() for item in instances)) == ["running", "running"]
+    assert all(item.awaiting_first_link for item in instances)
+    assert (await saved(db)).host_id is None
+
+
+async def test_explicit_same_engine_adoption_protects_unused_legacy_template(db):
+    await seed(db, host="template-engine", state="running")
+    current = guard(db, "template-engine")
+    assert (await current.adopt())["verdict"] == "adopted"
+    assert (await current.adopt())["verdict"] == "already_adopted"
+    assert (await saved(db)).adopted_at.replace(tzinfo=UTC) == NOW
+    assert await guard(db, "other-engine").at_start() == "host_changed"
 
 
 async def test_adopt_is_atomic_and_idempotent_with_exact_previous_host(db):
@@ -252,7 +300,7 @@ async def test_resume_refuses_only_a_persisted_host_changed_state(db):
 
 
 async def test_resume_before_start_does_not_repair_an_unadopted_host_mismatch(db):
-    await seed(db, host="old-engine", state="polled_elsewhere")
+    await seed(db, host="old-engine", state="polled_elsewhere", adopted=NOW)
     instance = guard(db, "new-engine")
     assert await instance.resume() == {"verdict": "resumed"}
     assert await instance.peek() == "host_changed"

@@ -500,7 +500,8 @@ async def test_operator_guard_verbs_use_real_persistence_without_tokens(cli, db,
     assert (await cli.run_command("resume", app_config=config))["verdict"] == "already_running"
     assert len(observed) == before_resume
     current[0] = "host-b"
-    assert (await cli.run_command("status", app_config=config))["polling_state"] == "host_changed"
+    status = await cli.run_command("status", app_config=config)
+    assert (status["polling_state"], status["recorded_polling_state"]) == ("host_changed", "running")
     assert (await cli.run_command("resume", app_config=config))["verdict"] == "already_running"
     moved = await cli.run_command("adopt", app_config=config)
     assert moved["from"] == "host-a" and moved["host_id"] == "host-b"

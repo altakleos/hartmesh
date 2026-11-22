@@ -2111,6 +2111,11 @@ cleanup when migrating from legacy metadata credentials.
 
 ##### Telegram bots
 
+A fresh installation offers **Connect Telegram** before it has a bot. Its first
+successful connection records the local Docker engine when its ID is available. An unused
+template can start on a new engine. An installation with current or previous
+bot connections keeps its host protection. See the [Compose operator guide](deploy/compose/README.md#a-copy-of-a-deployment).
+
 Assistant and employee pages offer Connect Telegram, Open in Telegram, or
 Telegram settings according to the current bot state. The header explains
 current access, policy and execution availability. A paused agent or busy files

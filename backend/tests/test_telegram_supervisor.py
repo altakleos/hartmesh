@@ -45,6 +45,7 @@ class ImmediateCopyDecision:
     Dedicated CopyGuard tests supply the real SQL-backed guard instead.
     """
 
+    awaiting_first_link = False
     this_host_id = "offline-lifecycle-fixture"
 
     async def at_start(self):
