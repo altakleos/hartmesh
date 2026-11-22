@@ -174,7 +174,10 @@ async def http_client(sf, *, user=_OWNER, owner_check_passes=True, with_threads=
             async def reserve_thread_operation(self, _thread_id, **_kwargs):
                 yield
 
+        from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
         app.state.run_manager = _RunManager()
+        app.state.run_event_store = MemoryRunEventStore()
         app.include_router(threads.router)
     with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path or ".")):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://events.test") as client:

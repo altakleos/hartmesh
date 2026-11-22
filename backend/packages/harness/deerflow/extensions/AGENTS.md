@@ -1,7 +1,7 @@
 ### Python Extension System (Runtime and Distribution)
 
 HartMesh and upstream each spent extension API patch numbers 0.2.5–0.2.7 on
-different contracts; the merged host's `API_VERSION` (0.2.12) provides both sets,
+different contracts; the 0.2.12 host combined both sets,
 so a version below means "added in that line's history", not a shared order.
 
 Artifact presentations use the existing trusted plugin contribution and startup
