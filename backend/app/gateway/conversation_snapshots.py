@@ -9,17 +9,21 @@ from typing import Literal
 
 from fastapi import HTTPException, Request
 from pydantic import Field, ValidationError
+from sqlalchemy import select
 
 from app.gateway.authz import get_auth_context, require_permission
 from app.gateway.conversation_file_import import SharedPublicationSource, capture_source
 from app.gateway.deps import get_shared_publications_repo, is_admin_user
 from app.gateway.routers._file_http import acting_user_id
+from app.gateway.routers.agent_instances import _actor, _require_ready, _service
 from app.gateway.snapshot_manifest import MANIFEST_LIMIT, MANIFEST_SOURCE, SnapshotAgent, SnapshotManifest, SnapshotMember, SnapshotMessage, SnapshotModel, digest_of_bytes, member_record, parse_manifest
 from app.gateway.storage_features import current_feature_service, storage_feature
+from deerflow.agent_instances.contract import AgentDenied, AgentPermission, ExecutionUnavailable
 from deerflow.config.paths import get_paths
 from deerflow.features.paths import FeaturePaths
 from deerflow.files import resolve_shared_file
 from deerflow.files.store import StoreError, open_regular_source
+from deerflow.persistence.shared_publications.model import SharedPublicationRow
 from deerflow.spaces.contract import Permission
 from deerflow.spaces.filesystem import UnsafeSpacePath
 from deerflow.utils.file_io import run_file_io
@@ -38,8 +42,50 @@ class SharedMember(SnapshotMember):
     shared_path: str | None
 
 
-class Answerer(SnapshotModel):
+class AssistantAnswerer(SnapshotModel):
     kind: Literal["assistant"] = "assistant"
+    reason: Literal["no_access", "paused", "retired", "unavailable"] | None = Field(default=None, exclude_if=lambda v: v is None)
+
+
+class AgentAnswerer(SnapshotModel):
+    kind: Literal["agent"] = "agent"
+    id: str
+    name: str
+
+
+Answerer = AssistantAnswerer | AgentAnswerer
+
+
+async def snapshot_answerer(request: Request, agent: SnapshotAgent | None) -> Answerer:
+    if agent is None:
+        return AssistantAnswerer()
+    auth = get_auth_context(request)
+    if not auth or not auth.has_permission("agents", "read"):
+        return AssistantAnswerer(reason="no_access")
+    try:
+        service = await _service(request)
+    except HTTPException as exc:
+        if exc.status_code in (403, 501):
+            return AssistantAnswerer(reason="unavailable")
+        raise
+    try:
+        actor = await _actor(request)
+        view = await service.get(actor=actor, instance_id=agent.id, permission=AgentPermission.USE, include_deleted=True)
+        if view.status != "active":
+            reason = {"suspended": "paused", "archived": "retired"}.get(view.status, "unavailable")
+            return AssistantAnswerer(reason=reason)
+        if getattr(request.app.state, "agent_conversations", None) is None:
+            return AssistantAnswerer(reason="unavailable")
+        await _require_ready(request, service, view.id)
+    except AgentDenied:
+        return AssistantAnswerer(reason="no_access")
+    except ExecutionUnavailable:
+        return AssistantAnswerer(reason="unavailable")
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            return AssistantAnswerer(reason="no_access")
+        raise
+    return AgentAnswerer(id=view.id, name=view.name)
 
 
 class SharedSnapshot(SnapshotSummary):
@@ -48,7 +94,7 @@ class SharedSnapshot(SnapshotSummary):
     transcript: SharedMember
     files: list[SharedMember]
     can_remove: bool
-    answerer: Answerer = Field(default_factory=Answerer)
+    answerer: Answerer = Field(default_factory=AssistantAnswerer)
 
 
 def _not_found():
@@ -155,7 +201,16 @@ async def _reader(request, publication_id):
         space = await service.resource()
         may_remove = space.status == "active" and bool(space.permissions & Permission.EXPORT)
     return SharedSnapshot(
-        publication_id=publication_id, title=doc.title, published_at=row["published_at"], publisher=publisher, with_agent=doc.with_agent, messages=doc.messages, transcript=members[0], files=members[1:], can_remove=may_remove
+        publication_id=publication_id,
+        title=doc.title,
+        published_at=row["published_at"],
+        publisher=publisher,
+        with_agent=doc.with_agent,
+        messages=doc.messages,
+        transcript=members[0],
+        files=members[1:],
+        can_remove=may_remove,
+        answerer=await snapshot_answerer(request, doc.with_agent),
     )
 
 
@@ -222,7 +277,7 @@ async def _require_member(request: Request, publication_id: str, member: SharedM
             if item:
                 selected = await repo.live_publication(row["path"].rsplit("/", 1)[0] + "/" + item.path)
                 if member_record(row, item, selected) and selected["publication_id"] == member.publication_id:
-                    return
+                    return row["path"]
     raise HTTPException(409, {"code": "snapshot-member-unavailable"})
 
 
@@ -230,7 +285,7 @@ async def capture_snapshot_member(request: Request, publication_id: str, member:
     if not member.available or not member.publication_id:
         raise _not_found()
     source = SharedPublicationSource(publication_id=member.publication_id, sha256=member.sha256)
-    await _require_member(request=request, publication_id=publication_id, member=member)
+    manifest_path = await _require_member(request=request, publication_id=publication_id, member=member)
     captured = await capture_source(request, source, maximum_bytes=maximum_bytes)
 
     async def check():
@@ -238,4 +293,15 @@ async def capture_snapshot_member(request: Request, publication_id: str, member:
         await _require_member(request=request, publication_id=publication_id, member=member)
 
     await check()
-    return replace(captured, recheck=check)
+
+    async def admit_home_publication(session):
+        # A withdrawal can retire the manifest while its member is still live.
+        # Use the same transaction that authorizes the pending Home write.
+        latest = await session.scalar(
+            select(SharedPublicationRow.publication_id).where(SharedPublicationRow.path == manifest_path, SharedPublicationRow.removed_at.is_(None)).order_by(SharedPublicationRow.published_at.desc()).limit(1).with_for_update(read=True)
+        )
+        if latest != publication_id:
+            raise HTTPException(409, {"code": "snapshot-member-unavailable"})
+        await captured.admit_home_publication(session)
+
+    return replace(captured, recheck=check, admit_home_publication=admit_home_publication)

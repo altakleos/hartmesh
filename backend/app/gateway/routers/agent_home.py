@@ -244,11 +244,14 @@ class HomeFileSelection(PresentedFileSelection):
 
 @require_permission("threads", "write")
 @require_permission("agents", "read")
-async def import_into_home(*, request: Request, instance_id, thread_id, operation_id, source, acknowledge_disclosure=False):
+async def import_into_home(*, request: Request, instance_id, thread_id, operation_id, source, acknowledge_disclosure=False, capture=None):
     await require_execution(request.app, instance_id)
     service = await _service(request)
     execution = await _conversation(request, instance_id, thread_id)
-    captured = await capture_source(request, source, maximum_bytes=MAX_TRANSFER_BYTES, home_destination=True, acknowledge_disclosure=acknowledge_disclosure)
+    if capture is None:
+        captured = await capture_source(request, source, maximum_bytes=MAX_TRANSFER_BYTES, home_destination=True, acknowledge_disclosure=acknowledge_disclosure)
+    else:
+        captured = await capture(request, source, maximum_bytes=MAX_TRANSFER_BYTES)
     name = _filename(captured.name)
     if name != captured.name:
         raise AgentFileRefusal("invalid-name")

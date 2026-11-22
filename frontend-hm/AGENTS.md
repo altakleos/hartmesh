@@ -463,4 +463,4 @@ Fold marked snapshot members after authorized discovery and collection reads.
 Agent publication requires agent_publish, Manage + Inspect and consent to the previewed company audience.
 Undo sends its exact receipt and created IDs. Copied-turn attribution needs the
 thread’s verified seed IDs. Continued attachment chips use the returned uploads
-path and belong to the signed-in account and private thread.
+path for that account, thread and confirmed answerer. Retry transport with the same request; a changed answerer requires a new click.

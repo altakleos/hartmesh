@@ -104,6 +104,36 @@ def is_notice_assignment(context):
     return isinstance(objective, str) and re.fullmatch(r"acceptance:work:notices:[0-9a-f]{32}", objective) is not None
 
 
+def continued_report(messages, latest, token, offered):
+    """Confirm an actual continued employee run has the published words and file."""
+    earlier = messages[:latest]
+    soul = "Use the available file tools for the requested report."
+    if not any(m.get("role") == "system" and soul in str(m.get("content")) for m in earlier):
+        raise ValueError("The continued turn did not receive the adopted employee identity")
+    first = "acceptance:file:shared-" + token
+    if not any(m.get("role") == "user" and first in str(m.get("content")) for m in earlier):
+        raise ValueError("The continued turn did not receive the published human message")
+    if not any(m.get("role") == "assistant" and FINAL in str(m.get("content")) for m in earlier):
+        raise ValueError("The continued turn did not receive the published employee reply")
+    if len(messages) == latest + 1:
+        if "read_file" not in offered:
+            raise ValueError("The continued employee cannot read files")
+        content = messages[latest]["content"]
+        if isinstance(content, list):
+            content = "\n".join(block["text"] for block in content if isinstance(block, dict) and block.get("type") == "text")
+        sections = re.findall(r"<current_uploads>(.*?)</current_uploads>", content, re.S)
+        paths = re.findall(r"^  Path: (.+)$", sections[0], re.M) if len(sections) == 1 else []
+        if len(paths) != 1 or not re.fullmatch(r"/mnt/user-data/uploads/acceptance(?: \([2-9][0-9]*\))?\.txt", paths[0]):
+            raise ValueError("The continued message did not present the copied report")
+        function = {"name": "read_file", "arguments": json.dumps({"path": paths[0]})}
+        return {"tool_calls": [{"id": "call_shared_upload", "type": "function", "function": function}]}
+    result = messages[-1]
+    text = tool_result_content(result.get("content"))
+    if scripted_tool(messages[-2], result, "call_shared_upload") != "read_file" or UPLOAD_MARKER not in text or "Synthetic acceptance artifact." not in text:
+        raise ValueError("The continued employee did not read the copied Home file")
+    return {"content": "I read the shared report in my files."}
+
+
 def reply(body: dict[str, Any]) -> dict[str, Any]:
     messages = body.get("messages", [])
     if not body.get("tools"):
@@ -137,6 +167,9 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
         if previous is not None and messages[previous].get("content") == WORK_ACTIVATION:
             latest = previous
             wrap_up = True
+    continuation = re.search(r"\bacceptance:continued-report:([0-9a-f]{32})\b", str(messages[latest].get("content")))
+    if continuation:
+        return continued_report(messages, latest, continuation[1], offered)
     turn = messages[latest:]
     if not turn:
         raise ValueError("missing acceptance turn")

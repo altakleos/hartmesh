@@ -20,6 +20,7 @@ import { useFileActionLifetime } from "@/core/file-areas/file-action-lifetime";
 import { urlOfSharedFile } from "@/core/shared/api";
 import {
   continueSnapshot,
+  SnapshotError,
   removeSnapshot,
 } from "@/core/shared-conversations/api";
 import { saveContinuedDraft } from "@/core/shared-conversations/handoff";
@@ -28,9 +29,14 @@ import {
   useSnapshotDetail,
   useRefreshShared,
 } from "@/core/shared-conversations/hooks";
-import type {
-  Snapshot,
-  SharedMember,
+import {
+  continueTarget,
+  sameTarget,
+  validAnswerer,
+  type Answerer,
+  type ContinueTarget,
+  type Snapshot,
+  type SharedMember,
 } from "@/core/shared-conversations/protocol";
 import { useSpaceActionSignal } from "@/core/spaces/lifetime";
 import { getSessionComposerDraftStorage } from "@/core/threads/composer-draft";
@@ -129,11 +135,25 @@ function ActiveSnapshot({
   const [pending, setPending] = useState(false),
     [removing, setRemoving] = useState(false),
     [failure, setFailure] = useState<string | null>(null);
-  const requestId = useRef<string | null>(null);
+  const requestRef = useRef<{ id: string; target: ContinueTarget } | null>(
+    null,
+  );
+  const [changed, setChanged] = useState<{
+    at: Snapshot;
+    value: Answerer | null;
+  } | null>(null);
+  const choice = changed?.at === row ? changed.value : row.answerer;
+  const answerer =
+    validAnswerer(choice) &&
+    (choice.kind === "assistant" || choice.id === row.with?.id)
+      ? choice
+      : null;
   const keepCopies = row.with
     ? w.copies + " " + w.agentCopies(row.with.name)
     : w.copies;
   const onContinue = async () => {
+    if (!answerer || pending) return;
+    const target = continueTarget(answerer);
     const signal = capture();
     setPending(true);
     setFailure(null);
@@ -144,36 +164,52 @@ function ActiveSnapshot({
         row.publication_id,
       ]);
     try {
-      if (!requestId.current) {
-        let stored: string | null = null;
+      let attempt = requestRef.current;
+      if (!attempt) {
         try {
-          stored = store?.getItem(key) ?? null;
+          const raw = store?.getItem(key);
+          if (raw && /^[a-f0-9-]{36}$/.test(raw))
+            attempt = { id: raw, target: { kind: "assistant" } };
+          else if (raw) {
+            const v = JSON.parse(raw) as { id: string; target: ContinueTarget };
+            if (
+              /^[a-f0-9-]{36}$/.test(v.id) &&
+              v.target &&
+              (v.target.kind === "assistant" ||
+                (v.target.kind === "agent" && typeof v.target.id === "string"))
+            )
+              attempt = v;
+          }
         } catch {
-          /* use this visit's key */
+          /* use this visit's request */
         }
-        requestId.current =
-          stored && /^[a-f0-9-]{36}$/.test(stored)
-            ? stored
-            : crypto.randomUUID();
-        try {
-          store?.setItem(key, requestId.current);
-        } catch {
-          /* use this visit's key */
-        }
+      }
+      if (!attempt || !sameTarget(attempt.target, target))
+        attempt = { id: crypto.randomUUID(), target };
+      requestRef.current = attempt;
+      try {
+        store?.setItem(key, JSON.stringify(attempt));
+      } catch {
+        /* retain in memory */
       }
       const result = await continueSnapshot(
         row.publication_id,
-        requestId.current,
+        attempt.id,
         signal,
+        target,
       );
       if (signal.aborted) return;
-      if (result.answerer.kind !== "assistant" || !result.thread_id)
+      if (
+        !validAnswerer(result.answerer) ||
+        !sameTarget(result.answerer, target) ||
+        !result.thread_id
+      )
         throw new Error("Conversation response changed");
       saveContinuedDraft(
         client,
         account,
         row.publication_id,
-        requestId.current,
+        attempt.id,
         row.title,
         result,
       );
@@ -182,11 +218,33 @@ function ActiveSnapshot({
       } catch {
         /* the same request remains replayable */
       }
-      requestId.current = null;
+      requestRef.current = null;
       router.push("/workspace/chats/" + encodeURIComponent(result.thread_id));
     } catch (e) {
       if (!signal.aborted) {
-        setFailure(w.error(e));
+        if (
+          e instanceof SnapshotError &&
+          e.status === 409 &&
+          e.detail &&
+          typeof e.detail === "object" &&
+          "code" in e.detail &&
+          e.detail.code === "answerer_changed"
+        ) {
+          setChanged({
+            at: row,
+            value:
+              "answerer" in e.detail && validAnswerer(e.detail.answerer)
+                ? e.detail.answerer
+                : null,
+          });
+          requestRef.current = null;
+          try {
+            store?.removeItem(key);
+          } catch {
+            /* the next confirmed choice has its own request */
+          }
+          setFailure(w.changedAnswerer);
+        } else setFailure(w.error(e));
         refresh();
       }
     } finally {
@@ -255,14 +313,28 @@ function ActiveSnapshot({
           ))}
         </ul>
       </section>
-      {canContinue && row.answerer?.kind === "assistant" && (
+      {canContinue && answerer && (
         <div>
           <Button disabled={pending} onClick={() => void onContinue()}>
-            {w.continue}
+            {answerer.kind === "agent"
+              ? w.continueWith(answerer.name)
+              : w.continue}
           </Button>
-          {row.with && (
-            <p className="mt-2 text-sm">{w.fallback(row.with.name)}</p>
+          {answerer.kind === "assistant" && row.with && (
+            <p className="mt-2 text-sm">
+              {w.reason(row.with.name, answerer.reason) ??
+                w.fallback(row.with.name)}
+            </p>
           )}
+          {answerer.kind === "agent" &&
+            row.files.some((file) => file.available) && (
+              <p className="mt-2 text-sm">
+                {w.intoHome(
+                  answerer.name,
+                  row.files.filter((file) => file.available).length,
+                )}
+              </p>
+            )}
         </div>
       )}
       {row.can_remove && (

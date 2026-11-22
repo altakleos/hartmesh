@@ -462,8 +462,9 @@ export function InputBox({
   } | null>(null);
   const localImports = useComposerImports(pickerScope);
   const continued = useContinuedDraft(
-    !agentFiles && conversationFilePicker ? user?.id : undefined,
+    conversationFilePicker ? user?.id : undefined,
     threadId,
+    agentFiles?.id,
   );
   const imports = useMemo(
     () => ({

@@ -5,19 +5,38 @@ import {
 } from "@tanstack/react-query";
 
 import { getSessionComposerDraftStorage } from "@/core/threads/composer-draft";
-import {
-  importedAttachment,
-  type ImportReceipt,
-} from "@/core/threads/conversation-file-import";
+import { importedAttachment } from "@/core/threads/conversation-file-import";
 
-import type { ContinueResult } from "./protocol";
+import {
+  continueTarget,
+  sameTarget,
+  type ContinueTarget,
+  type ContinueResult,
+  type ContinuedReceipt,
+} from "./protocol";
 
 export interface ContinuedDraft {
+  answerer?: ContinueTarget;
   publication: string;
   request: string;
   title: string;
-  files: { source: string; receipt: ImportReceipt }[];
+  files: { source: string; receipt: ContinuedReceipt }[];
   missing: { path: string; reason: string }[];
+}
+function checkReceipt(
+  receipt: ContinuedReceipt,
+  target: ContinueTarget | undefined,
+) {
+  if (
+    target?.kind === "agent" &&
+    (receipt.source?.kind !== "shared_publication" ||
+      typeof receipt.source.publication_id !== "string" ||
+      !receipt.source.publication_id ||
+      receipt.source.sha256 !== receipt.sha256)
+  ) {
+    throw new Error("Invalid shared publication receipt");
+  }
+  return importedAttachment(receipt);
 }
 const key = (account: string, thread: string) =>
   ["shared-conversation-draft", account, thread] as const;
@@ -38,7 +57,17 @@ function read(account: string, thread: string): ContinuedDraft | null {
       !Array.isArray(d.missing)
     )
       return null;
-    d.files.forEach((f) => importedAttachment(f.receipt));
+    if (
+      d.answerer !== undefined &&
+      !(
+        d.answerer?.kind === "assistant" ||
+        (d.answerer?.kind === "agent" &&
+          typeof d.answerer.id === "string" &&
+          d.answerer.id)
+      )
+    )
+      return null;
+    d.files.forEach((f) => checkReceipt(f.receipt, d.answerer));
     if (
       d.missing.some(
         (f) => typeof f.path !== "string" || typeof f.reason !== "string",
@@ -84,7 +113,8 @@ export function saveContinuedDraft(
       missing.push({ path: f.path, reason: f.reason });
       continue;
     }
-    importedAttachment(f.attachment);
+    if (f.status !== "copied") throw new Error("Invalid copy outcome");
+    checkReceipt(f.attachment, result.answerer);
     if (
       !files.some(
         (existing) =>
@@ -98,11 +128,22 @@ export function saveContinuedDraft(
     account,
     result.thread_id,
     files.length || missing.length
-      ? { publication, request, title, files, missing }
+      ? {
+          publication,
+          request,
+          title,
+          files,
+          missing,
+          answerer: continueTarget(result.answerer),
+        }
       : null,
   );
 }
-export function useContinuedDraft(account: string | undefined, thread: string) {
+export function useContinuedDraft(
+  account: string | undefined,
+  thread: string,
+  instanceId?: string,
+) {
   const client = useQueryClient();
   const { data } = useQuery({
     queryKey: key(account ?? "", thread),
@@ -111,7 +152,15 @@ export function useContinuedDraft(account: string | undefined, thread: string) {
     staleTime: Infinity,
     retry: false,
   });
-  const draft = account ? data : null;
+  const target: ContinueTarget = instanceId
+    ? { kind: "agent", id: instanceId }
+    : { kind: "assistant" };
+  const draft =
+    account &&
+    data &&
+    sameTarget(data.answerer ?? { kind: "assistant" }, target)
+      ? data
+      : null;
   const chips = (draft?.files ?? []).map((f) => ({
     file: importedAttachment(f.receipt),
     sourceTitle: draft!.title,

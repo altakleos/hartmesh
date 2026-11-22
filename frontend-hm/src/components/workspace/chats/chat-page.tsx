@@ -388,13 +388,19 @@ export default function ChatPage() {
             new Error("Conversation is not ready to send."),
           );
         const capture = attachedFiles.capture();
+        const savedFiles = Array.from(
+          new Map(
+            [...capture.files, ...(options?.savedFiles ?? [])].map((file) => [
+              file.path,
+              file,
+            ]),
+          ).values(),
+        );
         return sendMessage(threadId, { ...message, files: [] }, undefined, {
           ...options,
           keepSentMessageInView: true,
-          additionalKwargs: {
-            ...options?.additionalKwargs,
-            files: capture.files,
-          },
+          savedFiles,
+          additionalKwargs: { ...options?.additionalKwargs, files: savedFiles },
           onSent: () => {
             capture.admitted();
             options?.onSent?.();

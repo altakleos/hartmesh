@@ -19,7 +19,7 @@ on:
         description: Signed frontend digest required for connection qualification
         type: string
       verify_shared_snapshots:
-        description: Interrupt and recover all three publications in a shared conversation
+        description: Qualify ordinary and employee conversation sharing, continuation and recovery
         type: boolean
         default: false
       verify_file_browser:
@@ -169,6 +169,14 @@ jobs:
           revision=$(crane config --platform linux/amd64 "$image" | jq -er '.config.Labels["org.opencontainers.image.revision"]')
           echo "SNAPSHOT_BACKEND_REVISION=$revision" >> "$GITHUB_ENV"
           echo "SNAPSHOT_QUALIFICATION_MODE=signed" >> "$GITHUB_ENV"
+          frontend=$(grep -Ex 'ghcr\.io/altakleos/hartmesh-frontend@sha256:[0-9a-f]{64}' deploy/compose/images.txt)
+          grep -Fq "image: $frontend" deploy/compose/compose.yaml
+          python3 scripts/release_artifacts.py verify-candidate --repository "$GITHUB_REPOSITORY" --version "$(jq -r .version frontend-hm/package.json)" --component frontend --image "$frontend" --revision "$GITHUB_SHA"
+          test "$(crane config --platform linux/amd64 "$frontend" | jq -er '.config.Labels["org.opencontainers.image.revision"]')" = "$revision"
+          echo "SNAPSHOT_BROWSER_IMAGE=$frontend" >> "$GITHUB_ENV"
+          cd backend
+          uv sync --frozen --group dev --extra browser
+          .venv/bin/python -m playwright install --with-deps chromium
 
       - name: Verify connection candidate images
         if: github.event_name == 'workflow_dispatch' && inputs.connections != 'skip'
@@ -406,6 +414,22 @@ jobs:
           assert not tree.findall(".//failure") and not tree.findall(".//error")
           PY
 
+      - name: Install the earlier conversation reader for in-place qualification
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_shared_snapshots
+        run: |
+          tag='v2.2.0+hartmesh.71'
+          commit=86958361cd790e47d239d2f964fc25e9a76d93bc
+          git fetch --no-tags --depth=1 origin "refs/tags/$tag"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$commit"
+          directory=/opt/hartmesh-conversation-reader
+          sudo install -d -m 0755 "$directory"
+          git archive "$commit:deploy/compose" | sudo tar -x -C "$directory"
+          sudo find "$directory" -type d -exec chmod 0755 {} +
+          sudo find "$directory" -type f -exec chmod 0644 {} +
+          image=$(grep -Ex 'ghcr\.io/altakleos/hartmesh-backend@sha256:[0-9a-f]{64}' "$directory/images.txt")
+          docker pull "$image"
+          echo "SNAPSHOT_FLOOR_DIR=$directory" >> "$GITHUB_ENV"
+
       - name: Recover each interrupted snapshot publication
         if: github.event_name == 'workflow_dispatch' && inputs.verify_shared_snapshots
         env:
@@ -419,8 +443,9 @@ jobs:
           HARTMESH_BUNDLE_RUNTIME: hartmesh-ci
         working-directory: backend
         run: |
-          PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 .venv/bin/python -m pytest tests/test_compose_snapshot_publications.py -q --tb=short --maxfail=1 --junitxml="$EVIDENCE/snapshot-publications.xml"
+          PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 .venv/bin/python -m pytest tests/test_compose_snapshot_publications.py tests/test_compose_employee_sharing.py -p no:randomly -q --tb=short --maxfail=1 --junitxml="$EVIDENCE/snapshot-publications.xml"
           jq -e --arg image "$BACKEND_REF" --arg mode "$SNAPSHOT_QUALIFICATION_MODE" --arg rev "$SNAPSHOT_BACKEND_REVISION" '.backend.ref == $image and .mode == $mode and .revision == $rev and .pending_after == 0 and .retried_without_duplicates and .continuation.file_count == 1 and .continuation.seed_count == .visible_messages and .continuation.artifact_sha256 == .operations[0].sha256 and (.operations | length) == 3 and all(.operations[]; .settled == "complete|host-reconciled" and .publication_order == "fact-before-name")' "$EVIDENCE/snapshot-publications.json"
+          jq -e --arg image "$BACKEND_REF" --arg mode "$SNAPSHOT_QUALIFICATION_MODE" '.complete and .backend.ref == $image and .first_turn.via == (if $mode == "signed" then "browser" else "api" end) and .first_turn.file_path == "/mnt/user-data/uploads/acceptance (2).txt" and .floor.ref != $image and .message_count >= 2 and .source != .destination and .floor_resolution == "complete|host-reconciled" and .copied_bytes_survived_removal' "$EVIDENCE/agent-sharing.json"
 
       - name: Qualify interrupted Shared operations
         if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots)

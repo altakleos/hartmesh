@@ -42,7 +42,11 @@ def site(monkeypatch):
     app.state.thread_store = MemoryThreadMetaStore(InMemoryStore())
     app.state.run_event_store = MemoryRunEventStore()
     app.dependency_overrides[get_config] = lambda: SimpleNamespace()
-    snapshot = SimpleNamespace(title="Shared notes", messages=[SimpleNamespace(type=kind, content=text) for kind, text in [("human", "A question"), ("ai", "One answer"), ("ai", "One more observation")]], files=[])
+    from app.gateway.conversation_snapshots import AssistantAnswerer
+
+    snapshot = SimpleNamespace(
+        answerer=AssistantAnswerer(), title="Shared notes", messages=[SimpleNamespace(type=kind, content=text) for kind, text in [("human", "A question"), ("ai", "One answer"), ("ai", "One more observation")]], files=[]
+    )
     reader = AsyncMock(return_value=snapshot)
     monkeypatch.setattr(continued, "read_snapshot", reader)
     with TestClient(app) as client:

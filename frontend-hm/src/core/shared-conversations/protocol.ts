@@ -38,13 +38,51 @@ export interface SnapshotSummary {
   publisher: string | null;
   published_at: string;
 }
+export type Answerer =
+  | {
+      kind: "assistant";
+      reason?: "no_access" | "paused" | "retired" | "unavailable";
+    }
+  | { kind: "agent"; id: string; name: string };
+export type ContinueTarget =
+  | { kind: "assistant" }
+  | { kind: "agent"; id: string };
+export function continueTarget(answerer: Answerer): ContinueTarget {
+  return answerer.kind === "agent"
+    ? { kind: "agent", id: answerer.id }
+    : { kind: "assistant" };
+}
+export function sameTarget(a: ContinueTarget, b: ContinueTarget) {
+  return a.kind === "agent"
+    ? b.kind === "agent" && a.id === b.id
+    : b.kind === "assistant";
+}
+export function validAnswerer(value: unknown): value is Answerer {
+  if (!value || typeof value !== "object" || !("kind" in value)) return false;
+  if (value.kind === "assistant")
+    return (
+      !("reason" in value) ||
+      ["no_access", "paused", "retired", "unavailable"].some(
+        (reason) => reason === value.reason,
+      )
+    );
+  return (
+    value.kind === "agent" &&
+    "id" in value &&
+    typeof value.id === "string" &&
+    !!value.id.trim() &&
+    "name" in value &&
+    typeof value.name === "string" &&
+    !!value.name.trim()
+  );
+}
 export interface Snapshot extends SnapshotSummary {
   with: { kind: "employee" | "assistant"; id: string; name: string } | null;
   messages: { type: "ai" | "human"; content: string }[];
   transcript: SharedMember;
   files: SharedMember[];
   can_remove: boolean;
-  answerer: { kind: "assistant" };
+  answerer: Answerer;
 }
 export interface RetiredSnapshot {
   removed: true;
@@ -100,11 +138,18 @@ export interface PublishResult {
   undo_receipt: string | null;
   already_shared: boolean;
 }
+export interface ContinuedReceipt extends ImportReceipt {
+  source?: {
+    kind: "shared_publication";
+    publication_id: string;
+    sha256: string;
+  };
+}
 export interface ContinueResult {
   thread_id: string;
-  answerer: { kind: "assistant" };
+  answerer: Answerer;
   files: (
-    | { path: string; status: "copied"; attachment: ImportReceipt }
+    | { path: string; status: "copied"; attachment: ContinuedReceipt }
     | { path: string; status: "not_copied"; reason: string }
   )[];
 }
