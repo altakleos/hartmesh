@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.74] - 2026-11-22
+
+### Use a file from a linked conversation
+
+- Paste a HartMesh conversation link into the web composer to reference it for the next turn. You can remove the reference before sending. The distributed Compose configuration enables the conversation reader.
+- In a personal chat with the default assistant, ask it to bring over a file. It can list files handed over in the referenced conversation and copy one into your current uploads. The confirmation shows the saved filename. The source keeps its file, and the receiving chat can use the copy after the source is deleted.
+- Named custom agents keep their existing conversation-reading permissions. The file-import tools are unavailable to them, AI employees, personal AI assistants, helpers and scheduled runs. The existing **From a conversation** picker remains available for manual copies, including confirmed copies into an agent’s Home.
+
+### Rollback
+
+- The previous release is `2.2.0+hartmesh.73`. Files already copied remain ordinary attachments. Older clients have no dedicated import confirmation. A browser tab open during rollback may still try to send references. Reload it when the older Gateway reports that conversation reading is disabled.
+
+- Rollback tests reopened the saved tool exchange and copied attachment on `2.2.0+hartmesh.66` and `2.2.0+hartmesh.60`. On both SQLite and PostgreSQL/Redis, the earlier Gateway read the copied bytes and the assistant continued the conversation.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.73.
+
 ## [2.2.0+hartmesh.73] - 2026-11-22
 
 ### Share a conversation with an AI employee
