@@ -454,6 +454,11 @@ limits. Pull requests measure source builds, and dispatch verifies signed
 candidate digests. Seed the disposable database with the image's ORM; exercise
 the real signed-in search route through ingress. Persist timing samples on failure.
 
+Message search measures one isolated off/on/off replay with the same
+application pair and 20 authenticated accounts. Keep its signed run separate
+from ordinary acceptance. Preserve per-gate observations even on threshold
+misses. The source and signed runs have distinct provenance.
+
 ## Storage preparation
 
 `storage_spaces_volume.py` imports the harness `prepare_volumes` implementation

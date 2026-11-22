@@ -1855,6 +1855,20 @@ class RunManager:
             hidden_attempt_run_ids=failed_attempts,
         )
 
+    async def live_search_replays(self, thread_ids):
+        """Snapshot visibility-affecting records in the order used by the live feed."""
+        async with self._lock:
+            result = {}
+            for thread_id in thread_ids:
+                records = []
+                for run in self._thread_records_locked(thread_id):
+                    source = (run.metadata or {}).get("regenerate_from_run_id")
+                    if not run.evicted and isinstance(source, str) and source:
+                        records.append((run.user_id, run.run_id, source, run.metadata.get("replay_kind"), self._record_status_value(run)))
+                if records:
+                    result[thread_id] = records
+            return result
+
     async def list_edit_replay_visibility(
         self,
         thread_id: str,

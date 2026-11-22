@@ -38,7 +38,7 @@ function wrapper() {
       </QueryClientProvider>
     );
   }
-  return { Wrapper, invalidate, update };
+  return { Wrapper, invalidate, update, client };
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -230,4 +230,30 @@ describe("idempotent retry", () => {
       expect(onRemoteDeleted).not.toHaveBeenCalled();
     },
   );
+});
+
+it("withdraws search hits and context after the server deletes the conversation, even while local cleanup is pending", async () => {
+  const gate = deferred<Response>();
+  localDelete.mockReturnValue(gate.promise);
+  const { Wrapper, client } = wrapper();
+  const keys = ["titles", "messages", "around"].map((kind) => [
+    "workspace-search",
+    kind,
+    "alice",
+    "user",
+    kind === "around" ? "parent" : "April",
+  ]);
+  for (const key of keys) client.setQueryData(key, ["Previously visible"]);
+  const { result } = renderHook(() => useDeleteThread(), { wrapper: Wrapper });
+  let done!: Promise<unknown>;
+  act(() => {
+    done = result.current.mutateAsync({ threadId: "parent" });
+  });
+  await waitFor(() => expect(localDelete).toHaveBeenCalled());
+  const retained = keys.map((key) => client.getQueryData(key));
+  gate.resolve(new Response(null, { status: 204 }));
+  await act(async () => {
+    await done;
+  });
+  expect(retained).toEqual([undefined, undefined, undefined]);
 });

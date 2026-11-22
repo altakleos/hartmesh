@@ -81,7 +81,7 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
   });
 
   for (const availability of [true, false, "missing", "unavailable"] as const) {
-    test(`search describes the title results when message search availability is ${availability}`, async ({
+    test(`search describes the available results when message search availability is ${availability}`, async ({
       page,
     }) => {
       mockLangGraphAPI(page, { threads: THREADS });
@@ -100,13 +100,180 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
       await page.goto("/workspace/chats");
       await discovered;
       await expect(
-        page.getByRole("searchbox", { name: "Search conversation titles" }),
+        page.getByRole("searchbox", {
+          name:
+            availability === true
+              ? "Search conversations"
+              : "Search conversation titles",
+        }),
       ).toBeVisible();
       await expect(
         page.locator("main").getByText(/message search/i),
       ).toHaveCount(0);
     });
   }
+
+  test("message search opens the selected read-only window and navigates to its conversation", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, { threads: THREADS });
+    await page.route("**/api/features", (route) =>
+      route.fulfill({ json: { message_search: true } }),
+    );
+    const thread = THREADS[80]!;
+    const when = thread.updated_at;
+    let contextReads = 0;
+    await page.route("**/api/search", (route) =>
+      route.fulfill({
+        json: {
+          cursor: null,
+          indexing: false,
+          messages_available: true,
+          items:
+            route.request().postDataJSON().types[0] === "message"
+              ? [
+                  {
+                    type: "message",
+                    thread_id: thread.thread_id,
+                    title: thread.title,
+                    agent_name: null,
+                    message_id: "m/2",
+                    seq: 4,
+                    role: "assistant",
+                    updated_at: when,
+                    snippet: [
+                      { text: "Tell the " },
+                      { text: "Henderson", matched: true },
+                      { text: " team first." },
+                    ],
+                  },
+                ]
+              : [],
+        },
+      }),
+    );
+    await page.route("**/messages/around?**", async (route) => {
+      contextReads++;
+      const url = new URL(route.request().url());
+      expect(url.pathname).toBe(
+        `/api/threads/${thread.thread_id}/messages/around`,
+      );
+      expect(url.searchParams.get("message_id")).toBe("m/2");
+      expect(url.searchParams.get("seq")).toBe("4");
+      await route.fulfill({
+        json: {
+          target_seq: 4,
+          has_before: false,
+          has_after: false,
+          messages: [
+            {
+              message_id: "m1",
+              seq: 3,
+              role: "user",
+              text: "Which team should know first?",
+            },
+            {
+              message_id: "m/2",
+              seq: 4,
+              role: "assistant",
+              text: "Tell the Henderson team first.",
+            },
+          ].map((m) => ({
+            ...m,
+            thread_id: thread.thread_id,
+            created_at: when,
+          })),
+        },
+      });
+    });
+    await page.goto("/workspace/chats");
+    await page
+      .getByRole("searchbox", { name: "Search conversations" })
+      .fill("Henderson");
+    const hit = page
+      .getByRole("region", { name: "Messages" })
+      .getByRole("button", { name: /Tell the Henderson team first/ });
+    await expect(hit.locator("mark")).toHaveText("Henderson");
+    expect(contextReads).toBe(0);
+    await hit.click();
+    const dialog = page.getByRole("dialog", { name: "Message context" });
+    await expect(
+      dialog.getByText("Which team should know first?"),
+    ).toBeVisible();
+    await expect(dialog.locator('[aria-current="true"]')).toContainText(
+      "Tell the Henderson team first.",
+    );
+    await expect(dialog.getByRole("textbox")).toHaveCount(0);
+    await expect(page).toHaveURL(/\/workspace\/chats$/);
+    await page.keyboard.press("Escape");
+    await expect(hit).toBeFocused();
+    await hit.click();
+    const open = dialog.getByRole("link", { name: "Open conversation" });
+    await expect(open).toHaveAttribute(
+      "href",
+      `/workspace/chats/${thread.thread_id}`,
+    );
+    await open.click();
+    await expect(page).toHaveURL(`/workspace/chats/${thread.thread_id}`);
+    expect(contextReads).toBe(2);
+  });
+
+  test("paging titles keeps the first virtualized message at the Messages heading", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, { threads: THREADS });
+    await page.route("**/api/features", (route) =>
+      route.fulfill({ json: { message_search: true } }),
+    );
+    await page.route("**/api/search", (route) => {
+      const { types, cursor } = route.request().postDataJSON() as {
+        types: string[];
+        cursor?: string;
+      };
+      const messages = types[0] === "message";
+      const offset = Number(cursor ?? 0);
+      return route.fulfill({
+        json: {
+          items: THREADS.slice(offset, offset + 20).map((thread, i) => ({
+            ...thread,
+            agent_name: null,
+            ...(messages
+              ? {
+                  type: "message",
+                  message_id: `m-${offset + i}`,
+                  seq: 3,
+                  role: "user",
+                  snippet: [{ text: `Matching note ${offset + i}` }],
+                }
+              : { type: "thread" }),
+          })),
+          cursor:
+            offset + 20 < (messages ? 60 : 40) ? String(offset + 20) : null,
+          indexing: false,
+          messages_available: true,
+        },
+      });
+    });
+    await page.goto("/workspace/chats");
+    await page
+      .getByRole("searchbox", { name: "Search conversations" })
+      .fill("note");
+    const messages = page.getByRole("region", { name: "Messages" });
+    await messages.getByRole("button", { name: "More results" }).click();
+    await messages.getByRole("button", { name: "More results" }).click();
+    await expect(
+      messages.getByRole("button", { name: "More results" }),
+    ).toHaveCount(0);
+    const titles = page.getByRole("region", { name: "Conversations" });
+    await titles.getByRole("button", { name: "More results" }).click();
+    await expect(titles.getByRole("link")).toHaveCount(40);
+    await messages
+      .getByRole("heading")
+      .evaluate((node) => node.scrollIntoView({ block: "start" }));
+    await expect(
+      messages.getByRole("button", { name: /Matching note 0$/ }),
+    ).toBeInViewport();
+  });
 
   test("title search finds older conversations and pages through matches without loading the chat list", async ({
     page,

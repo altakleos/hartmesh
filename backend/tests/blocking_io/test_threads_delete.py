@@ -26,6 +26,7 @@ import pytest
 
 from app.gateway.routers import threads
 from deerflow.config.paths import Paths
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.user_context import get_effective_user_id
 
 pytestmark = pytest.mark.asyncio
@@ -50,7 +51,7 @@ async def test_delete_thread_does_not_block_event_loop(tmp_path: Path) -> None:
     # test-side setup and seeding (offloaded; not exercised on the loop)
     paths = await asyncio.to_thread(Paths, tmp_path)
     thread_dir = await asyncio.to_thread(_seed_workspace, paths, "thread-loop-delete", user_id)
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=_RunManager(), checkpointer=None)))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=_RunManager(), run_event_store=MemoryRunEventStore(), checkpointer=None)))
 
     with patch("app.gateway.routers.threads.get_paths", return_value=paths):
         response = await threads.delete_thread_data.__wrapped__("thread-loop-delete", request)

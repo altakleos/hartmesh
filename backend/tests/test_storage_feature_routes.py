@@ -314,6 +314,7 @@ async def test_saved_bytes_survive_actual_thread_deletion_and_optional_feature_r
     from app.gateway.routers import spaces, threads
     from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
     from deerflow.runtime import RunManager
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
     from deerflow.runtime.runs.store.memory import MemoryRunStore
 
     client, app, files, _, paths, alice, _, _ = feature_app
@@ -321,6 +322,7 @@ async def test_saved_bytes_survive_actual_thread_deletion_and_optional_feature_r
     app.state.thread_store = MemoryThreadMetaStore(store)
     app.state.checkpointer = InMemorySaver()
     app.state.run_store = MemoryRunStore()
+    app.state.run_event_store = MemoryRunEventStore()
     app.state.run_manager = RunManager(store=app.state.run_store)
     app.include_router(threads.router)
     app.include_router(spaces.router)

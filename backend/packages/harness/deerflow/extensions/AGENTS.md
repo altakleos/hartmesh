@@ -1,7 +1,7 @@
 ### Python Extension System (Runtime and Distribution)
 
 HartMesh and upstream each spent extension API patch numbers 0.2.5–0.2.7 on
-different contracts; the merged host's `API_VERSION` (0.2.12) provides both sets,
+different contracts; the 0.2.12 host combined both sets,
 so a version below means "added in that line's history", not a shared order.
 
 Artifact presentations use the existing trusted plugin contribution and startup
@@ -557,4 +557,8 @@ Installed packages may ship bounded public `deerflow-extension.json` usage. Read
 only beside the already imported entry point; malformed optional documentation
 is attributed without removing otherwise valid contributions. Never project
 private deployment configuration. The generic registry allows one optional async
-workspace search provider; it must retain the host-bound owner/scope contract.
+workspace search provider. Its candidates require the host's current visible-message check.
+The optional PostgreSQL message index verifies both cascading keys and its
+source-deletion trigger before each write. The trigger invalidates conversation
+coverage inside an event deletion, including when a previous Gateway deletes a
+visible revision. Host SQL admission serializes index writes with seat release. Keep the provider's package and the deployment's activation entry independently selectable.

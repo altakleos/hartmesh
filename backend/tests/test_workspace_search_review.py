@@ -121,3 +121,20 @@ async def test_legacy_checkpoint_is_seeded_before_revision_completion(monkeypatc
     assert await corpus.revision(thread)
     assert [message.text for message in (await corpus.messages(thread, before_seq=None)).items] == ["legacy needle"]
     assert (await corpus.around("legacy", "old"))["target_seq"] > 0
+
+
+@pytest.mark.anyio
+async def test_current_hits_from_one_thread_share_the_same_authoritative_read(monkeypatch):
+    threads = MemoryThreadMetaStore(InMemoryStore())
+    events = MemoryRunEventStore()
+    await threads.create("chat", user_id="alice")
+    for n in range(30):
+        await put(events, "chat", str(n), f"report {n}")
+    await put(events, "chat", "1", "edited reply")
+    corpus = GatewaySearchCorpus(threads, events, manager(), "alice")
+    thread = await corpus.thread("chat")
+    read = AsyncMock(wraps=corpus._page)
+    monkeypatch.setattr(corpus, "_page", read)
+    found = await corpus.latest_messages(thread, {str(n) for n in range(20)})
+    assert len(found) == 20 and found["1"].text == "edited reply"
+    assert read.await_count == 1

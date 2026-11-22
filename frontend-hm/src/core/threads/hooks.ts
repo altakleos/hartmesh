@@ -4336,6 +4336,8 @@ export function useDeleteThread() {
       );
       await deleteRemoteThread(apiClient, threadId, assertActive, signal);
       assertActive();
+      // The remote delete has removed searchable words, even if local cleanup stalls.
+      void queryClient.resetQueries({ queryKey: ["workspace-search"] });
       onRemoteDeleted?.();
       assertActive();
       await deleteLocalThreadData(threadId, signal);

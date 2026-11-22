@@ -687,6 +687,7 @@ class DbRunEventStore(RunEventStore):
         thread_id,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        require_complete: bool = False,
     ):
         """Delete every event of *thread_id* inside the thread mutation fence.
 
@@ -702,6 +703,13 @@ class DbRunEventStore(RunEventStore):
                 async with session.begin():
                     change_seq = await RunRepository._next_change_seq(session)
                     await self._acquire_thread_mutation_fence(session, thread_id)
+                    if require_complete and resolved_user_id is not None:
+                        # A thread reservation fences replacement while the route runs.
+                        # Lock and prove actual custody before removing rows attributed
+                        # to collaborators, background runs or earlier unowned writes.
+                        owner = await session.scalar(select(ThreadMetaRow.user_id).where(ThreadMetaRow.thread_id == thread_id).with_for_update())
+                        if owner == resolved_user_id:
+                            resolved_user_id = None
                     await self._invalidate_evidence(session, thread_id, resolved_user_id, change_seq)
                     count_conditions = [RunEventRow.thread_id == thread_id]
                     if resolved_user_id is not None:
@@ -714,6 +722,8 @@ class DbRunEventStore(RunEventStore):
                     # Reset only an empty thread: surviving events from any
                     # owner still need the allocation floor for deleted runs.
                     remaining_events = select(RunEventRow.id).where(RunEventRow.thread_id == thread_id).exists()
+                    if require_complete and resolved_user_id is not None and await session.scalar(select(remaining_events)):
+                        raise RuntimeError("Cannot verify custody of the complete conversation history")
                     await session.execute(delete(RunEventThreadSeqRow).where(RunEventThreadSeqRow.thread_id == thread_id, ~remaining_events))
             # Retire the live-thread pin, but never remove the weak registry
             # entry directly. asyncio.Lock.release() clears ``locked()`` before

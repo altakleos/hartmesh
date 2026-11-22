@@ -265,3 +265,32 @@ async def test_release_serializes_concurrent_account_writes(account_storage, riv
         with pytest.raises(InvalidPrincipal):
             async with app.state.storage_spaces.registry.admitted(actor=PrincipalRef("human", str(person.id)), requests={company: (Permission.READ, None)}):
                 raise AssertionError("Released accounts must not enter storage admission")
+
+
+@pytest.mark.asyncio
+async def test_release_seat_purges_both_optional_search_tables_in_transaction(account_storage):
+    from sqlalchemy import text
+
+    from deerflow.persistence.thread_meta.model import ThreadMetaRow
+
+    app, repo, sf, _files, _catalog, _company = account_storage
+    person = await repo.create_user(User(email="search-owner@example.com", password_hash="fixture-hash"))
+    await ss.assign_user_space(app, person)
+    from deerflow.persistence.agent_instances.model import AgentConversationRow
+
+    async with sf.kw["bind"].begin() as connection:
+        for model in (ThreadMetaRow, AgentConversationRow):
+            await connection.run_sync(model.__table__.create)
+    async with sf() as session, session.begin():
+        for thread_id, user_id in (("own", str(person.id)), ("other", "other-owner")):
+            session.add(ThreadMetaRow(thread_id=thread_id, user_id=user_id))
+        for name in ("hm_message_search_threads", "hm_message_search_words"):
+            await session.execute(text(f"CREATE TABLE {name} (thread_id varchar(64) NOT NULL)"))
+            await session.execute(text(f"INSERT INTO {name} VALUES ('own'), ('other')"))
+    command = AccountsCommand(repo, tokens=None, schedules=None)
+    await command.run("disable", email=person.email)
+    assert (await command.run("release-seat", email=person.email))["released"] == str(person.id)
+    async with sf() as session:
+        for name in ("hm_message_search_threads", "hm_message_search_words"):
+            assert list(await session.scalars(text(f"SELECT thread_id FROM {name} ORDER BY thread_id"))) == ["other"]
+        assert await session.get(ThreadMetaRow, "own") is not None

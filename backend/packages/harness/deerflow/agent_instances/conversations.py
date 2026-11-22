@@ -195,6 +195,10 @@ class AgentConversations:
         return permissions & int(permission) == int(permission)
 
     async def mutation_allowed(self, session, thread_id, user_id):
+        return await self.locked_permission(session, thread_id, user_id, permission=AgentPermission.MANAGE)
+
+    async def locked_permission(self, session, thread_id, user_id, *, permission):
+        """Authorize under the agent parent lock shared by grant and custody changes."""
         binding = await session.get(AgentConversationRow, thread_id)
         if binding is None:
             return None
@@ -202,7 +206,7 @@ class AgentConversations:
             return False
         # Grant/lifecycle writers also lock this parent. Keep it locked through
         # the conversation mutation so revocation cannot commit in between.
-        row = (await session.execute(select(AgentInstanceRow).where(AgentInstanceRow.id == binding.instance_id).with_for_update())).scalar_one_or_none()
+        row = (await session.execute(select(AgentInstanceRow).where(AgentInstanceRow.id == binding.instance_id).with_for_update(read=permission == AgentPermission.INSPECT))).scalar_one_or_none()
         try:
             identity = InstanceIdentity.from_row(row)
             await self.instances._human(PrincipalRef("human", user_id), session=session)
@@ -210,10 +214,15 @@ class AgentConversations:
                 await self.instances._human(PrincipalRef("human", identity.owner_id), session=session)
         except (AgentDenied, TypeError, ValueError, AttributeError):
             return False
-        if identity.status == "deleted":
+        if identity.status == "deleted" or (permission == AgentPermission.INSPECT and identity.status not in {"active", "suspended", "archived"}):
             return False
         grant = await session.get(AgentInstanceGrantRow, (binding.instance_id, user_id))
-        return grant is not None and 1 <= grant.permissions <= 7 and grant.permissions & int(AgentPermission.MANAGE) == int(AgentPermission.MANAGE)
+        if grant is None or not 1 <= grant.permissions <= 7:
+            return False
+        if permission == AgentPermission.INSPECT and binding.requester_id == user_id and grant.permissions & int(AgentPermission.USE):
+            if await session.get(AgentProtectedContextRow, thread_id) is None:
+                return True
+        return grant.permissions & int(permission) == int(permission)
 
     async def create(self, *, actor, instance_id, thread_id=None, creation_id=None, metadata=None, display_name=None, permission=AgentPermission.USE, source_thread_id=None):
         from deerflow.persistence.thread_meta.sql import ThreadMetaRepository

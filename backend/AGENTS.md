@@ -209,6 +209,8 @@ Per-service commands and the frontend's backend URL variables:
 
 ## Key Features
 
+Recheck hits against the current transcript. [Search provider](extensions/sources/hartmesh-message-search/README.md).
+
 ### Web Search Recency
 
 Optional `web_search` `time_range=day|week|month|year` mappings:
