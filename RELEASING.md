@@ -326,6 +326,41 @@ requires fixing and remeasuring the title path before the release. These
 measurements use hosted runner hardware. Continue normal two-store
 qualification after pinning the measured images.
 
+### Message search measurement
+
+Run the dedicated hosted workflow on the release candidate build commit before
+enabling the message-search package in the distributed configuration.
+
+```sh
+gh workflow run message-search-measurement.yml --repo altakleos/hartmesh --ref <candidate-branch> \
+  -f backend_image=<backend-repository>@sha256:<digest> \
+  -f frontend_image=<frontend-repository>@sha256:<digest>
+```
+
+The rehearsal uses the same signed applications for the off control, enabled
+measurement and off replay. It loads 800,000 visible messages across 20 users.
+The heaviest reader owns 2,000 conversations and 400,000 messages. Headless
+Chromium signs in, opens an older result and follows it to its conversation.
+PostgreSQL and Gateway use the distribution's memory, swap, CPU and process
+limits. The PostgreSQL extension probe rolls back its transaction.
+
+Record the workflow attempt, source, both running image identities, archive
+digest, observations and thresholds in the Compose release guide. The
+eight gates are message and title p95 (60 ingress requests each after warmup),
+whole-user catch-up, median chat time during catch-up, median added deletion
+time for 500 messages, stored bytes including indexes versus visible UTF-8
+bytes, both constraint timeouts and retries, and peak PostgreSQL cgroup memory.
+The receipt records raw observations. Timeouts, incomplete history coverage
+and absent measurements cannot establish a pass. The separate runner's disk
+and CPU differ from a tenant installation.
+
+Only `message-search-observations.json` with `decision: pass` on a fully
+verified candidate permits the default configuration change. A completed
+measurement can record `miss`; leave the package disabled in that release.
+For an unverified result, correct the rehearsal or retain the disabled default.
+Repeat the measurement on fresh candidates after any change to an image input.
+Continue ordinary release acceptance separately.
+
 ### The sandbox base image
 
 `docker/sandbox/Dockerfile` builds on upstream's all-in-one sandbox image,

@@ -45,6 +45,15 @@ TITLE_SEARCH_PATHS = (
     "frontend-hm/playwright.title-search-measurement.config.ts",
     "frontend-hm/tests/e2e-title-search-measurement",
 )
+MESSAGE_SEARCH_PATHS = (
+    ".github/workflows/message-search-measurement.yml",
+    "scripts/release_artifacts.py",
+    "scripts/release_acceptance.py",
+    "docker/acceptance/title-search",
+    "docker/acceptance/message-search",
+    "frontend-hm/playwright.message-search-measurement.config.ts",
+    "frontend-hm/tests/e2e-message-search-measurement",
+)
 FILE_BROWSER_PATHS = (
     ".github/workflows/file-browser-qualification.yml",
     "scripts/release_artifacts.py",
@@ -160,6 +169,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--file-browser-floor",
         help="Published release tag for the previous component of a mixed file-browser check",
     )
+    measurements.add_argument("--measure-messages", action="store_true", help="Measure opt-in message search in the PostgreSQL distribution limits")
     measurements.add_argument(
         "--measure-titles",
         action="store_true",
@@ -207,8 +217,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("File-browser floor must be a published HartMesh version tag")
     if args.measure_files and args.stores == "both":
         parser.error("Qualify individual file-browser storage profiles")
-    if args.measure_titles and args.stores != "postgres-redis":
-        parser.error("Title search measurement requires the postgres-redis profile")
+    if (args.measure_titles or args.measure_messages) and args.stores != "postgres-redis":
+        parser.error("Search measurement requires the postgres-redis profile")
     if args.measure_previews and (not args.backend_image or args.stores != "sqlite"):
         parser.error("Preview measurement requires both image digests and the sqlite profile")
     if args.stores == "both" and args.backend_image:
@@ -375,9 +385,10 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
     ).resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     project = f"hm-acceptance-{uuid.uuid4().hex[:12]}"
+    message_measurement = getattr(args, "measure_messages", False)
     title_measurement = args.measure_titles
     files_profile = args.measure_files
-    measurement = title_measurement or args.measure_previews or bool(files_profile)
+    measurement = message_measurement or title_measurement or args.measure_previews or bool(files_profile)
     supplied = bool(args.backend_image)
     backend, frontend = (
         (source_build["backend"], source_build["frontend"])
@@ -411,6 +422,8 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
         "status": "failed",
         "mode": "file-browser-qualification"
         if files_profile
+        else "message-search-measurement"
+        if message_measurement
         else "title-search-measurement"
         if title_measurement
         else "preview-measurement"
@@ -432,6 +445,8 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
         paths = (
             FILE_BROWSER_PATHS
             if files_profile
+            else MESSAGE_SEARCH_PATHS
+            if message_measurement
             else TITLE_SEARCH_PATHS
             if title_measurement
             else PREVIEW_PATHS
@@ -445,7 +460,7 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
         if measurement and not files_profile:
             fixture = ROOT / "docker/acceptance"
             config = (fixture / "acceptance-config.yaml").read_text(encoding="utf-8")
-            if title_measurement:
+            if title_measurement or message_measurement:
                 overlay = fixture / "title-search"
                 extra = overlay / "event-storage.yaml"
                 generated = artifacts / "title-search-config.yaml"
@@ -456,8 +471,12 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
                 generated = artifacts / "preview-config.yaml"
                 env["ACCEPTANCE_PREVIEW_CONFIG"] = str(generated)
                 config = config.replace("log_level: warning\n", "log_level: info\n", 1)
+            if message_measurement:
+                config = config.replace("log_level: warning\n", "log_level: info\n", 1)
             generated.write_text(config + "\n" + extra.read_text(encoding="utf-8"), encoding="utf-8")
             compose += ["-f", str(overlay / "compose.yaml")]
+            if message_measurement:
+                compose += ["-f", str(fixture / "message-search/compose.yaml")]
         # Verify local prerequisites without downloading or installing anything.
         run(
             ["docker", "info"], env=env, log=artifacts / "prerequisites.log", timeout=30
@@ -592,7 +611,7 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
                 env["HARTMESH_FILES_GATEWAY_ID"] = container
             if args.measure_previews and name == "backend":
                 env["HARTMESH_PREVIEW_GATEWAY_ID"] = container
-            if title_measurement and name == "backend":
+            if (title_measurement or message_measurement) and name == "backend":
                 env["HARTMESH_TITLE_GATEWAY_ID"] = container
         fixture_images = {}
         for service in [
@@ -621,7 +640,7 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
                 text=True,
                 timeout=30,
             ).strip()
-            if title_measurement and service == "postgres":
+            if (title_measurement or message_measurement) and service == "postgres":
                 env["HARTMESH_TITLE_POSTGRES_ID"] = container
             fixture_images[service] = {
                 **inspect_image(image_id, env=env),
@@ -671,22 +690,20 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
             browser_config = "playwright.preview-measurement.config.ts"
         elif title_measurement:
             browser_config = "playwright.title-search-measurement.config.ts"
+        browser_command = [
+            sys.executable, str(ROOT / "scripts/pnpm.py"), "--project", "frontend-hm",
+            "--", "exec", "playwright", "test", "--config", browser_config,
+        ]
+        if message_measurement:
+            browser_command = [
+                sys.executable, str(ROOT / "docker/acceptance/message-search/measure.py"),
+                str(artifacts), env["HARTMESH_TITLE_GATEWAY_ID"], env["HARTMESH_TITLE_POSTGRES_ID"],
+            ]
         browser = run(
-            [
-                sys.executable,
-                str(ROOT / "scripts/pnpm.py"),
-                "--project",
-                "frontend-hm",
-                "--",
-                "exec",
-                "playwright",
-                "test",
-                "--config",
-                browser_config,
-            ],
+            browser_command,
             env=env,
             log=artifacts / "browser.log",
-            timeout=360 if measurement else 300,
+            timeout=5400 if message_measurement else 360 if measurement else 300,
             check=not args.measure_previews,
         )
         if args.measure_previews:
@@ -773,7 +790,7 @@ def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> i
             summary["status"] = "failed"
         signal.signal(signal.SIGTERM, previous_term)
         signal.signal(signal.SIGINT, previous_int)
-        receipt = "title-search-result.json" if title_measurement else "preview-result.json" if args.measure_previews else "result.json"
+        receipt = "message-search-result.json" if message_measurement else "title-search-result.json" if title_measurement else "preview-result.json" if args.measure_previews else "result.json"
         (artifacts / receipt).write_text(
             json.dumps(summary, indent=2) + "\n", encoding="utf-8"
         )

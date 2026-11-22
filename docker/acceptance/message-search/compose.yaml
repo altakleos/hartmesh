@@ -1,0 +1,4 @@
+services:
+  gateway:
+    volumes:
+      - ./message-search/seed.py:/fixture/seed-message-search.py:ro

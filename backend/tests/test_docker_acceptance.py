@@ -336,7 +336,10 @@ def test_hosted_measurement_rejects_other_image_sources_and_commits():
             runner.check_preview_image(name, ref, "example/HartMesh", "a" * 40, revision)
 
 
-@pytest.mark.parametrize(("mode", "receipt_name"), [(["--measure-previews"], "preview-result.json"), (["--measure-titles", "--stores", "postgres-redis"], "title-search-result.json")])
+@pytest.mark.parametrize(
+    ("mode", "receipt_name"),
+    [(["--measure-previews"], "preview-result.json"), (["--measure-titles", "--stores", "postgres-redis"], "title-search-result.json"), (["--measure-messages", "--stores", "postgres-redis"], "message-search-result.json")],
+)
 def test_measurement_checks_each_candidate_before_starting_services(monkeypatch, tmp_path, mode, receipt_name):
     runner = load(ROOT / "scripts/docker_acceptance.py")
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
