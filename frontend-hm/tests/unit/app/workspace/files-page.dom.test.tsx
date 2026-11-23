@@ -813,6 +813,38 @@ describe("FilesPage", () => {
     expect(screen.getByRole("link", { name: "notes.txt" })).toBeTruthy();
   });
 
+  it.each(["personal", "shared"])(
+    "shows siblings when opening a search result's current folder in %s",
+    (area) => {
+      const params = new URLSearchParams({ folder: "Reports" });
+      if (area === "shared") params.set("tab", area);
+      window.history.replaceState(
+        null,
+        "",
+        "/workspace/files?" + params.toString(),
+      );
+      const sibling = { name: "sibling.txt", path: "Reports/sibling.txt" };
+      files.data = {
+        files: [AUGUST, { ...AUGUST, ...sibling }],
+        count: 2,
+        truncated: false,
+      };
+      shared.data = {
+        files: [PUBLISHED, { ...PLACED, ...sibling }],
+        count: 2,
+        truncated: false,
+      };
+      renderPage();
+      search("august");
+      expect(screen.queryByText("sibling.txt")).toBeNull();
+      fireEvent.click(
+        screen.getByRole("button", { name: "Open containing folder: Reports" }),
+      );
+      expect(screen.getByRole<HTMLInputElement>("searchbox").value).toBe("");
+      expect(screen.getByText("sibling.txt")).toBeTruthy();
+    },
+  );
+
   it("sorts duplicate names by newest without losing the original paths", () => {
     files.data = {
       files: [

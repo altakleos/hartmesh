@@ -335,9 +335,11 @@ selects the monthly-review starter, and tenant starter overrides still take prio
 
 Workspace Files and an agent’s Files tab use the same file browser on phones, tablets and
 desktops. **Locations** opens My files, Company shared, and the agent homes
-you can inspect. Open a folder or search the loaded files; **More actions**
-shows the full path, current audience, and available actions. The address and
-Back button preserve your location. Agent searches filter the current folder.
+you can inspect. If the current Home listing is busy or unavailable, use Locations
+to leave it. In search results, **Open containing folder** shows the file alongside
+its siblings. Back restores the search and focuses the result's folder button.
+**More actions** shows the full path, current audience, and available actions.
+The address preserves your folder. Agent searches filter the current folder.
 On supported Gateways, opening My files or Company shared loads the current
 folder, including groups that contain a visible file. Entering a search loads the available files across that location. Folder
 listings and search results each indicate when they reach their own limit.
