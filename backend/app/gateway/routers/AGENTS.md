@@ -109,21 +109,20 @@ never turn an unsupported host into a missing/invalid/changed file.
 exclusive hard links: no placeholders or overwrites of racing names. Verify
 staging ownership/mode before writing; the worker owns cleanup. Unsupported
 atomic publication fails closed.
-Shared publication drains copying, its database record and failure rollback as
-one operation under the deduplication lock before propagating cancellation.
-Ordinary Shared mutations enter `_shared_mutation`; its process mutex and private
-filesystem advisory lock retain ownership through recovery/settlement.
-Delete authorizes the current publication under that lock; optional
-`expected_publication_id` adds stale-client intent fencing (empty means no record).
-Reserve the thread; copy delivered files from finished visible runs. Bound shares require session Manage + Inspect, Home admin/export, and consent to the digest. Recheck on reads/writes. Keep names in drafts and bound thread IDs out of public rows/receipts. Publish separately, manifest last. Match live member ID, path, hash and time.
-Snapshot member GET validates the manifest and member publication IDs under the
-Shared read admission. Serve ranges from the bounded digest-verified capture,
-and require the current company export grant for managed downloads.
-Lists/publications carry nullable `publication_id`; Files/Undo pass it back.
-Removal journals stage bytes on the same filesystem before updating the immutable
-publication ID. Recovery matches record ID and path before using saved outcomes;
-ambiguity refuses access and preserves bytes. Drain removal/recovery workers before
-either lock releases. Multi-Gateway filesystem locks need deployment qualification.
+Drain Shared copy, DB record and rollback under the dedup lock before cancellation.
+Ordinary mutations use `_shared_mutation`’s process and filesystem locks through
+settlement. Delete checks the current publication under lock. Optional
+`expected_publication_id` fences stale selections (empty means no record).
+Reserve the thread and copy only delivered files from finished visible runs.
+Bound shares recheck session Manage + Inspect, Home admin/export and digest consent
+on reads/writes. Keep names in drafts and bound thread IDs out of public rows/receipts.
+Publish each member separately, manifest last. Match live ID, path, hash and time.
+Snapshot links bind both publication IDs. Serve ranges from the bounded SHA-256 capture under
+Shared read admission. Managed downloads require export.
+Lists/publications return nullable `publication_id` for Files/Undo.
+Stage removals on the same filesystem before updating the immutable ID. Recover by
+record ID and path. On ambiguity refuse access and retain bytes. Drain workers
+before releasing either lock. Qualify filesystem locks for multi-Gateway use.
 
 Work activation uses `start_run` with host-only attempt capability and stable run
 idempotency. Require agents read/write, runs create, Use+Inspect and an existing
