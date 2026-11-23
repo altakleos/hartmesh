@@ -102,6 +102,59 @@ def _fact(kpi: dict, currency: str) -> dict:
     return item
 
 
+def _saved_choices(report: dict, receipt: dict) -> list[str]:
+    """Describe saved inputs to this build, excluding per-build replacements."""
+    saved = receipt.get("preferences", {})
+    overridden = (receipt.get("override") or {}).get("preferences", {})
+    applied = set(report["meta"].get("preferences_applied", []))
+    choices = []
+    for field, value in saved.items():
+        if field in overridden:
+            continue
+        if field == "brand":
+            for key, colour in value.items():
+                if f"brand.{key}" in applied:
+                    choices.append(f"{key.capitalize()} colour: {colour}")
+        elif field == "exclusions":
+            for index, rule in enumerate(value):
+                if f"exclusions[{index}]" not in applied:
+                    continue
+                if isinstance(rule, str):
+                    column, _, target = rule.partition("=")
+                else:
+                    column, target = rule.get("role") or rule["column"], rule["equals"]
+                choices.append(f"Exclude rows where {column.strip()} = {target.strip()}")
+        elif field in applied and not receipt.get(f"cli_{field}"):
+            if isinstance(value, list):
+                value = ", ".join(item.replace("_", " ") for item in value) or "none"
+            choices.append(f"{field.replace('_', ' ').capitalize()}: {value}")
+    return choices
+
+
+def _preference_block(choices: list[str]) -> dict:
+    # Each validated exclusion fits on one line. Split large sets at a choice
+    # boundary, retaining every value within the existing v1 fact size limit.
+    parts: list[list[str]] = []
+    size = 0
+    for choice in choices:
+        if not parts or size + len(choice) + 1 > 4096:
+            parts.append([])
+            size = len("Used for this draft")
+        parts[-1].append(choice)
+        size += len(choice) + 1
+    items = []
+    start = 1
+    for lines in parts:
+        end = start + len(lines) - 1
+        count = len(choices)
+        value = f"{count} saved preference" + ("s" if count != 1 else "")
+        if len(parts) > 1:
+            value += f" ({start}–{end})"
+        items.append({"label": "Report settings", "value": value, "detail": "\n".join(["Used for this draft", *lines])})
+        start = end + 1
+    return {"type": "facts", "items": items}
+
+
 def _checks(report: dict, *, concise: bool = False) -> list[dict]:
     result = []
     checks = report["checks"]
@@ -189,7 +242,7 @@ def _table(table: dict, heading: str, currency: str) -> dict:
     return result
 
 
-def _full(view: dict, report: dict) -> dict:
+def _full(view: dict, report: dict, choices: list[str]) -> dict:
     _text(view["title"], 256)
     _text(view["subtitle"], 512)
     currency = report["meta"]["currency"]["code"]
@@ -213,6 +266,8 @@ def _full(view: dict, report: dict) -> dict:
         add(
             {"type": "facts", "items": [_fact(kpi, currency) for kpi in report["kpis"]]}
         )
+    if choices:
+        add(_preference_block(choices))
     for block in _checks(report):
         add(block)
     for section in report["sections"]:
@@ -282,7 +337,7 @@ def _full(view: dict, report: dict) -> dict:
     return view
 
 
-def _concise(view: dict, report: dict) -> dict:
+def _concise(view: dict, report: dict, choices: list[str]) -> dict:
     view["title"] = _short(view["title"], 256)
     view["subtitle"] = _short(view["subtitle"], 512)
     view["blocks"] = [{"type": "notice", "tone": "warning", "text": OMISSION}]
@@ -295,6 +350,8 @@ def _concise(view: dict, report: dict) -> dict:
             continue
     if items:
         view["blocks"].append({"type": "facts", "items": items})
+    if choices:
+        view["blocks"].append(_preference_block(choices))
     view["blocks"].extend(_checks(report, concise=True))
     return view
 
@@ -308,16 +365,17 @@ def _encode(view: dict) -> bytes:
     ).encode("utf-8")
 
 
-def serialize_view(report: dict, source_name: str, names: list[str]) -> bytes:
+def serialize_view(report: dict, source_name: str, names: list[str], preferences: dict | None = None) -> bytes:
     """Return bounded UTF-8 bytes from existing authored/formatter output only."""
     base = _base(report, source_name, names)
+    choices = _saved_choices(report, preferences or {})
     try:
-        content = _encode(_full(dict(base, blocks=[]), report))
+        content = _encode(_full(dict(base, blocks=[]), report, choices))
         if len(content) > MAX_BYTES:
             raise _PreviewLimit("Serialized preview exceeds one MiB.")
         return content
     except _PreviewLimit:
-        content = _encode(_concise(dict(base, blocks=[]), report))
+        content = _encode(_concise(dict(base, blocks=[]), report, choices))
         if len(content) > MAX_BYTES:
             raise _PreviewLimit("Even the concise preview exceeds one MiB.")
         return content

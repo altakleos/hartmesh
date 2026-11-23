@@ -46,7 +46,7 @@ into core. Legacy valid v1 reads are byte-preserving; managed writes add optiona
 `_mutation` metadata and reset retains a new revision. Reporting build validates
 all fields before applying any, supports temporary field replacement, and retains
 `preferences-used.json` as a hashed supporting bundle member. Prose/render copy
-that exact verified snapshot. Report/view schemas are unchanged. The first-command
+that exact verified snapshot. The preview describes only saved choices applied to the draft, omitting fields replaced for this build; it reads the staged preference receipt. Report/view schemas are unchanged. The first-command
 declaration admits report.py so explicit settings-only requests need no build.
 
 `business_report_product.py` owns the strict offline shared identity projection.
