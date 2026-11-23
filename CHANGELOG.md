@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.76] - 2026-11-23
+
+### Large jobs in employee conversations
+
+- People can ask an AI employee or assistant in a signed-in web conversation in Ultra mode to run up to 50 checks and say what to do with the results. The job panel shows progress, saved results and available controls. The final reply can use connections the employee’s manager has granted, even while the requester is away. Individual checks run as helpers in the employee’s workspace.
+- A job has up to 15 minutes for checks and one hour to start. After an interruption, one replacement can finish outstanding checks if the lost run last held its lease within the past hour. After that hour, the job ends with its completed results. When all checks have finished, the Gateway looks for the original final reply. If that reply was lost, the job stops, keeps its results and leaves the next action to the person who asked.
+- The Compose setting `HARTMESH_BATCHES=on` enables personal batches and jobs in employee conversations. The default is off. Operators can list and cancel open work before disabling the setting or rolling back. On rollback, .72 cancels runnable employee jobs at startup and keeps completed results. Returning to .76 leaves those jobs cancelled. Personal batches stay read-only while their worker is off. A direct rollback to .60 with its default worker off can leave an employee job pending. See the Compose guide for the commands.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.75. The job uses the existing batch, item, run and execution-lease records. Its recovery state is stored in the existing continuation document.
+
 ## [2.2.0+hartmesh.75] - 2026-11-22
 
 ### Search conversation history

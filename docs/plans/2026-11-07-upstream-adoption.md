@@ -54,6 +54,11 @@ complete reference frontend. Product UI changes belong in `frontend-hm/`.
 - The ordinary batch worker selects personal jobs. The Gateway checks the
   conversation binding at submission and settles unfinished jobs with a
   recognized agent scope at startup. [PR #598](https://github.com/altakleos/hartmesh/pull/598)
+- Operators can now enable jobs in Ultra-mode web conversations with an AI
+  employee or assistant. Checks run in the employee’s workspace. The final
+  reply can use the employee’s current connection grants. If the Gateway
+  loses that reply after the checks finish, the job keeps the results and
+  stops without repeating the action. [PR #607](https://github.com/altakleos/hartmesh/pull/607)
 - Artifact handoffs refuse unsupported storage before new admission and still
   reconcile recorded idempotent runs. Goal finalization preserves the live
   reservation until authoritative terminal acknowledgement. HarnessGuard keeps
