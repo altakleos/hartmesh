@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from _telegram_repository_test_support import db as db
 from sqlalchemy import select
+from test_telegram_bot_adapter import message
 from test_telegram_voice_notes import Transcribing, arrive, note, script_file, settle, voice_on
 from test_telegram_work_callback_dispatch import press_work
 from test_telegram_work_card_inputs import card
@@ -15,7 +16,7 @@ from test_telegram_work_source_delivery import work_delivery as work_delivery
 from test_telegram_work_typed_input import install_inputs
 from test_work_attention_pages import work_pages as work_pages
 
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramInboundMarkRow, TelegramOutboxRow, TelegramPersonSettingsRow
 
 
 async def voice_answer(e, monkeypatch, *, text="Use the current account.", quoted=801, prompt=False, late_ack=False, combined=False):
@@ -78,7 +79,8 @@ async def test_voice_answer_waits_for_actual_save_and_replays_without_resubmissi
 
 
 @pytest.mark.asyncio
-async def test_voice_discard_records_no_answer_and_erases_saved_button_transcript(work_delivery, monkeypatch):
+@pytest.mark.parametrize(("locale", "confirmation"), [("en-US", "Discarded. Nothing was saved."), ("zh-CN", "已丢弃。没有保存任何内容。")])
+async def test_voice_discard_records_no_answer_and_erases_saved_button_transcript(work_delivery, monkeypatch, locale, confirmation):
     e = work_delivery
     request, _ = await voice_answer(e, monkeypatch)
     await dispatch(e, 901)
@@ -96,7 +98,20 @@ async def test_voice_discard_records_no_answer_and_erases_saved_button_transcrip
         audits = list(await reader.scalars(select(TelegramActRow).where(TelegramActRow.kind == "voice_note")))
         assert len(audits) == 1 and audits[0].body == {"duration": 5, "provider": "openai", "used_as": "discarded"}
         rows = list(await reader.scalars(select(TelegramOutboxRow).where(TelegramOutboxRow.link_id == e.link.id)))
-        assert any(part.get("kind") == "edit" and part.get("source_ref", {}).get("key") == "voice.discarded" for row in rows for part in row.parts)
+        [(edit_id, target)] = [(row.id, part["target_message_id"]) for row in rows for part in row.parts if part.get("source_ref", {}).get("key") == "voice.discarded"]
+        assert target == 901
+    async with e.db.sessions.begin() as writer:
+        (await writer.get(TelegramPersonSettingsRow, e.link.owner_user_id)).locale = locale
+    e.clock.advance(10)
+    message(e.request, endpoint="editMessageText", identity=901)
+    assert await e.sender.tick() == 1
+    await e.sender.drain()
+    async with e.db.sessions() as reader:
+        edit = await reader.get(TelegramOutboxRow, edit_id)
+        assert edit.state == "sent", edit.failed_reason
+    [sent] = [call.parameters for call in e.request.calls if call.endpoint == "editMessageText" and call.parameters["message_id"] == 901]
+    assert sent["text"] == confirmation
+    assert not (sent.get("reply_markup") or {}).get("inline_keyboard")
 
 
 @pytest.mark.asyncio

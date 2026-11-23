@@ -687,6 +687,7 @@ TEXTS.update(
         "review.changes_prompt": "What should change? {name} gets this with the assignment.",
         "review.changes_confirm": 'Your note is kept and has not been sent: "{note}". Request these changes to the result above?',
         "voice.confirm_answer": 'Heard: "{text}" Save this as your answer?',
+        "voice.discarded": "Discarded. Nothing was saved.",
         "label.confirm": "Confirm",
         "label.confirm_resume": "Confirm and resume",
         "label.save_resume": "Save and resume",

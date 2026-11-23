@@ -2173,6 +2173,8 @@ an Edit prompt also accepts a voice note and shows its transcript with the revis
 draft. Saving an edit or confirming withdrawal is a separate gesture. Stopping targets the selected attempt;
 a newer attempt cannot inherit an earlier cancellation request. An acknowledgement
 of the request is separate from confirmed settlement.
+Discarding a spoken assignment answer replaces the transcript and buttons with
+a confirmation in your language. The assignment question stays open.
 Late text and voice replies to closed assignment or Edit prompts stay held until
 you choose Reopen, Send as new message or Discard. Reopen shows the current full
 preview and asks for a fresh answer; it does not submit the held words.
