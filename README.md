@@ -379,6 +379,10 @@ removing its messages and workspace files. A failed deletion keeps the dialog
 open for retry. Copies already kept in My Files or Shared are independent of
 the conversation.
 
+Business reports can split weekly or monthly revenue by technician or provider.
+The chart and editable table use the same filtered rows. Rebuilds in a private
+chat workspace can reuse a parsed spreadsheet after rereading its source bytes.
+
 Business reports retain source precision in their numeric data and Excel formulas,
 rounding monetary values only for display. Malformed amount cells are reported as
 unreadable instead of having digits silently extracted. Conflicting currencies
@@ -391,7 +395,7 @@ Default actions prioritize review of any computed warnings before acting on
 the figures; clean reports still offer business suggestions.
 See the [business-report guide](skills/public/business-report/SKILL.md). Saved report preferences now use validated, revision-checked
 read/save/patch/reset operations. Qualified AI employee Home retains them across
-conversations; one-report overrides preserve saved defaults. Independent procedure
+conversations; one-report overrides preserve saved defaults. Open the saved preference count in a report preview to see which choices applied to that draft. Independent procedure
 and supplier examples plus an optional human-input plugin exercise the same
 platform capabilities. See [consumer qualification and its evidence limits](docs/AI_EMPLOYEE_QUALIFICATION.md).
 

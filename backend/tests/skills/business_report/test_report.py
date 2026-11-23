@@ -205,6 +205,7 @@ def test_script_installs_nothing_never_shells_out_and_runs_on_the_image_python()
     assert [module.name for module in modules] == [
         "business_report_charts.py",
         "business_report_common.py",
+        "business_report_input_cache.py",
         "business_report_presentation.py",
         "business_report_product.py",
         "business_report_publish.py",
@@ -2238,3 +2239,403 @@ def test_a_period_whose_rows_are_all_excluded_is_not_reported_as_one_the_files_m
     code, out, err = _build(report, capsys, tmp_path / "out", str(source), "--period", "2026-07", "--exclude", "category=Repair", "--exclude", "category=Warranty")
     assert code == 1
     assert err.rstrip().endswith("no rows after the exclusions."), err
+
+
+def test_trend_by_person_compares_each_week_after_exclusions(report, tmp_path, capsys):
+    source = _write_csv(
+        tmp_path / "jobs.csv",
+        ["Date", "Total (USD)", "Technician", "Service Type"],
+        [
+            ["2026-08-03", 10, "Jo", "Service"],
+            ["2026-08-05", 30, "Sam", "Service"],
+            ["2026-08-10", -5, "Jo", "Service"],
+            ["2026-08-11", 999, "Sam", "Warranty"],
+        ],
+    )
+    out = tmp_path / "out"
+    code, _, err = _build(report, capsys, out, str(source), "--exclude", "category=Warranty", "--trend-by", "person")
+    assert code == 0, err
+    path = _report_path(out)
+    built = _read_report(out)
+    Draft202012Validator(json.loads(SCHEMA.read_text(encoding="utf-8"))).validate(built)
+    charts = json.loads((path.parent / "chart-data.json").read_text(encoding="utf-8"))["charts"]
+    assert "revenue_by_period" not in charts
+    chart = charts["revenue_by_person_over_time"]
+    assert chart["type"] == "line"
+    assert chart["labels"] == ["3–9 Aug", "10–16 Aug"]
+    assert {series["name"]: series["values"] for series in chart["series"]} == {"Jo": [10, -5], "Sam": [30, 0]}
+    assert (path.parent / "charts/revenue_by_person_over_time.png").read_bytes().startswith(b"\x89PNG")
+    assert _run(report, capsys, "checks", str(path))[0] == 0
+
+
+@pytest.mark.parametrize("fixture", [SMALL_CSV, LARGE_XLSX, SMALL_XLS])
+def test_build_reuses_parsed_input_only_for_the_same_bytes_and_parser(report, tmp_path, monkeypatch, capsys, fixture):
+    import shutil
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(report.input_cache, "WORKSPACE", workspace)
+    source = tmp_path / fixture.name
+    shutil.copy(fixture, source)
+    parsed = []
+    original = report.read_tables
+
+    def counted(*args, **kwargs):
+        parsed.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(report, "read_tables", counted)
+    out = tmp_path / "out"
+    assert _build(report, capsys, out, str(source), "--period", "2026-08")[0] == 0
+    first = _read_report(out)
+    assert _build(report, capsys, out, str(source), "--period", "2026-08", "--short")[0] == 0
+    second = _read_report(out)
+    assert report._saved_figures(first, legacy=False) == report._saved_figures(second, legacy=False)
+    assert parsed == [source]
+    path = _report_path(out)
+    assert _run(report, capsys, "checks", str(path))[0] == 0
+    assert parsed == [source, source]
+    if fixture == SMALL_CSV:
+        info = source.stat()
+        before = source.read_bytes()
+        after = before.replace(b"$113.91", b"$213.91", 1)
+        assert len(before) == len(after) and before != after
+        source.write_bytes(after)
+        report.os.utime(source, ns=(info.st_atime_ns, info.st_mtime_ns))
+        assert _build(report, capsys, out, str(source), "--period", "2026-08")[0] == 0
+        assert parsed == [source, source, source]
+        assert _read_report(out)["meta"]["inputs"][0]["sha256"] != first["meta"]["inputs"][0]["sha256"]
+    source.unlink()
+    assert _build(report, capsys, out, str(source), "--period", "2026-08")[0] != 0
+    assert not any(path.name.startswith("parsed") for path in out.rglob("*"))
+
+
+def test_person_trend_is_a_saved_chart_choice_with_matching_downloads(report, tmp_path, capsys):
+    source = _write_csv(
+        tmp_path / "jobs.csv",
+        ["Date", "Total (USD)", "Technician"],
+        [
+            ["2026-08-01", 13, ""],
+            ["2026-08-01", 8, "Alex"],
+            ["2026-09-03", 9, "Alex"],
+        ],
+    )
+    root = tmp_path / "monthly"
+    prefs = tmp_path / "preferences.json"
+    prefs.write_text(json.dumps({"version": 1, "charts": ["revenue_by_person_over_time"]}), encoding="utf-8")
+    code, _, err = _build(report, capsys, root, str(source), "--period", "2026-Q3", "--prefs", str(prefs), "--render", "docx,pdf,xlsx")
+    assert code == 0, err
+    path = _report_path(root)
+    built = _read_report(root)
+    assert [chart["id"] for chart in built["charts"]] == ["revenue_by_person_over_time"]
+    chart_path = path.parent / built["charts"][0]["png"]
+    table = next(section["table"] for section in built["sections"] if section["id"] == "person_trend")
+    assert table["rows"] == [["Aug 2026", "Alex", 8], ["Aug 2026", "Unassigned", 13], ["Sep 2026", "Alex", 9], ["Sep 2026", "Unassigned", 0]]
+    assert table["totals"] == ["Total", "", 30]
+    xlsx = openpyxl.load_workbook(path.parent / "monthly.xlsx", data_only=True)
+    sheet = next(sheet for sheet in xlsx if sheet["B1"].value == "Technician" and sheet["A1"].value == "Month")
+    assert list(sheet.values)[1:-1] == [tuple(row) for row in table["rows"]]
+    document = Document(path.parent / "monthly.docx")
+    assert len(document.inline_shapes) == 1
+    assert any("Unassigned" in page.extract_text() for page in PdfReader(path.parent / "monthly.pdf").pages)
+    assert _run(report, capsys, "checks", str(path))[0] == 0
+    old_png = chart_path.read_bytes()
+    tenant = tmp_path / "tenant"
+    tenant.mkdir()
+    (tenant / "brand.json").write_text('{"colors":{"primary":"#889944"}}', encoding="utf-8")
+    source.unlink()
+    assert _run(report, capsys, "render", str(path), "--tenant", str(tenant), "--to", "docx")[0] == 0
+    new_path = _report_path(root)
+    assert json.loads(new_path.read_bytes()) == built
+    assert (new_path.parent / built["charts"][0]["png"]).read_bytes() != old_png
+    assert chart_path.read_bytes() == old_png
+
+
+def test_cache_parser_semantics_sheet_profile_and_corrupt_storage(report, tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cache = report.input_cache
+    monkeypatch.setattr(cache, "WORKSPACE", workspace)
+    original = report.read_tables
+    calls = []
+
+    def count(*args, **kwargs):
+        calls.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(report, "read_tables", count)
+    profile = report.load_profile(None, None)
+    report.read_table(str(LARGE_XLSX), profile, cache=True)
+    report.read_table(str(LARGE_XLSX), profile, cache=True)
+    assert len(calls) == 1
+    report.read_table(f"{LARGE_XLSX}::Jobs", profile, cache=True)
+    different_profile = {**profile, "aliases": {**profile["aliases"], "amount": ["billed"]}}
+    report.read_table(str(LARGE_XLSX), different_profile, cache=True)
+    assert len(calls) == 3
+    monkeypatch.setattr(cache, "parser_identity", lambda: "different-parser")
+    report.read_table(str(LARGE_XLSX), profile, cache=True)
+    assert len(calls) == 4
+    for member in workspace.rglob("*.json"):
+        member.write_bytes(b"damaged")
+    report.read_table(str(LARGE_XLSX), profile, cache=True)
+    assert len(calls) == 5
+
+
+def test_cache_limits_conversation_ownership_and_unavailable_storage(report, tmp_path, monkeypatch):
+    cache = report.input_cache
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(cache, "WORKSPACE", workspace)
+    monkeypatch.setattr(cache, "MAX_ENTRIES", 2)
+    for i in range(7):
+        path = _write_csv(tmp_path / "jobs.csv", ["Date", "Amount"], [["2026-08-01", str(i)]])
+        result = report.read_table(str(path), cache=True)
+        assert result.frame.iloc[0, 1] == str(i)
+    assert 1 <= len(list(workspace.rglob("*.json"))) <= 2
+    original = report.read_tables
+    calls = []
+
+    def count(*args, **kwargs):
+        calls.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(report, "read_tables", count)
+    monkeypatch.setattr(cache, "HOME", workspace)
+    report.read_table(str(path), cache=True)
+    assert calls == [path]
+    others = tmp_path / "other-workspace"
+    others.mkdir()
+    (others / ".cache").symlink_to(workspace / ".cache", target_is_directory=True)
+    monkeypatch.setattr(cache, "WORKSPACE", others)
+    report.read_table(str(path), cache=True)
+    assert calls == [path, path]
+    (others / ".cache").unlink()
+    monkeypatch.setattr(cache, "MAX_BYTES", 12)
+    for _ in range(2):
+        report.read_table(str(path), cache=True)
+    assert calls == [path] * 4
+    assert not list(others.rglob("*.json"))
+
+
+def test_source_read_failure_precedes_cache_hit(report, tmp_path, monkeypatch):
+    cache = report.input_cache
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(cache, "WORKSPACE", workspace)
+    report.read_table(str(SMALL_CSV), cache=True)
+    original = report.os.open
+
+    def deny(path, *args, **kwargs):
+        if path == SMALL_CSV:
+            raise PermissionError("no longer readable")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(report.os, "open", deny)
+    with pytest.raises(report.InputError, match="no longer readable"):
+        report.read_table(str(SMALL_CSV), cache=True)
+
+
+def test_cache_record_copied_from_another_conversation_is_reparsed(report, tmp_path, monkeypatch):
+    cache = report.input_cache
+    members = []
+    for name in ("first", "second"):
+        workspace = tmp_path / name
+        workspace.mkdir()
+        monkeypatch.setattr(cache, "WORKSPACE", workspace)
+        report.read_table(str(SMALL_CSV), cache=True)
+        members.append(next(workspace.rglob("*.json")))
+    members[1].write_bytes(members[0].read_bytes())
+    original = report.read_tables
+    calls = []
+
+    def count(*args, **kwargs):
+        calls.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(report, "read_tables", count)
+    for _ in range(2):
+        report.read_table(str(SMALL_CSV), cache=True)
+    assert calls == [SMALL_CSV]
+
+
+def test_person_trend_tail_reconciles_and_unavailable_selection_is_explicit(report, tmp_path, capsys):
+    rows = [["2026-08-03", 20 - i, f"Rep {i}"] for i in range(8)]
+    rows += [["2026-08-13", -1, "Rep 7"], ["2026-08-14", 0.25, "Rep 6"]]
+    source = _write_csv(tmp_path / "people.csv", ["Date", "Total (USD)", "Technician"], rows)
+    out = tmp_path / "out"
+    assert _build(report, capsys, out, str(source), "--trend-by", "person")[0] == 0
+    built = _read_report(out)
+    chart = json.loads((_report_path(out).parent / "chart-data.json").read_bytes())["charts"]["revenue_by_person_over_time"]
+    assert len(chart["series"]) == 7
+    assert chart["series"][-1] == {"name": "Other (2 technicians)", "values": [27, -0.75]}
+    table = next(section["table"] for section in built["sections"] if section["id"] == "person_trend")
+    assert [row for row in table["rows"] if row[1] == "Other (2 technicians)"] == [["3–9 Aug", "Other (2 technicians)", 27], ["10–16 Aug", "Other (2 technicians)", -0.75]]
+    expected = [row[2] for row in next(s["table"]["rows"] for s in built["sections"] if s["id"] == "by_period")]
+    assert [sum(values) for values in zip(*(line["values"] for line in chart["series"]))] == expected
+    source = _write_csv(tmp_path / "no_people.csv", ["Date", "Total (USD)"], [["2026-08-03", 10]])
+    assert _build(report, capsys, out, str(source), "--trend-by", "person")[0] == 0
+    built = _read_report(out)
+    assert all(section["id"] != "person_trend" for section in built["sections"])
+    assert [note for note in built["notes"] if note.startswith("Requested chart")] == ["Requested chart revenue_by_person_over_time is unavailable for these inputs and profile."]
+
+
+def test_input_edit_during_parse_is_refused_and_never_cached(report, tmp_path, monkeypatch):
+    source = _write_csv(tmp_path / "sales.csv", ["Date", "Amount"], [["2026-08-03", 10]])
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(report.input_cache, "WORKSPACE", workspace)
+    read = report.read_tables
+
+    def change_after_hashing(*args, **kwargs):
+        source.write_bytes(source.read_bytes().replace(b",10", b",12"))
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(report, "read_tables", change_after_hashing)
+    with pytest.raises(report.InputError, match="changed while being read"):
+        report.read_table(str(source), cache=True)
+    assert not list(workspace.rglob("*.json"))
+
+
+def test_retained_line_values_must_agree_with_the_report_table(report, tmp_path, capsys):
+    from business_report_charts import validate_data
+
+    root = tmp_path / "out"
+    assert _build(report, capsys, root, str(SMALL_CSV), "--trend-by", "person")[0] == 0
+    path = _report_path(root)
+    data = json.loads((path.parent / "chart-data.json").read_bytes())
+    built = _read_report(root)
+    assert data["schema_version"] == 2
+    data["charts"]["revenue_by_person_over_time"]["series"][0]["values"][0] += 123
+    with pytest.raises(report.InputError, match="unavailable or incompatible"):
+        validate_data(json.dumps(data).encode("utf-8"), built)
+
+
+def test_cache_hit_applies_new_mapping_period_and_exclusions(report, tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(report.input_cache, "WORKSPACE", workspace)
+    source = _write_csv(
+        tmp_path / "combined.csv",
+        ["Date", "Amount", "Tip", "Service Type"],
+        [
+            ["2026-08-01", 10, 1, "Service"],
+            ["2026-09-01", 50, 4, "Service"],
+            ["2026-09-02", 25, 2, "Warranty"],
+        ],
+    )
+    root = tmp_path / "out"
+    assert _build(report, capsys, root, str(source), "--period", "2026-08")[0] == 0
+    assert _read_report(root)["kpis"][0]["value"] == 10
+
+    def already_parsed(*args, **kwargs):
+        pytest.fail("unchanged source must hit the parsed table cache")
+
+    monkeypatch.setattr(report, "read_tables", already_parsed)
+    mapping = tmp_path / "mapping.json"
+    mapping.write_text('{"amount":"Tip"}', encoding="utf-8")
+    september = tmp_path / "september"
+    code, _, err = _build(report, capsys, september, str(source), "--period", "2026-09", "--mapping", str(mapping), "--exclude", "category=Warranty")
+    assert code == 0, err
+    assert _read_report(september)["kpis"][0]["value"] == 4
+
+
+@pytest.mark.parametrize(
+    "saved, surviving",
+    [
+        (["revenue_by_period"], []),
+        (["revenue_by_period", "jobs_by_person"], ["jobs by person"]),
+    ],
+)
+def test_temporary_split_trend_discloses_only_surviving_saved_chart_choices(report, tmp_path, capsys, saved, surviving):
+    root = tmp_path / "out"
+    preferences = tmp_path / "preferences.json"
+    preferences.write_text(json.dumps({"version": 1, "charts": saved}), encoding="utf-8")
+    assert _build(report, capsys, root, str(SMALL_CSV), "--prefs", str(preferences), "--trend-by", "person")[0] == 0
+    built = _read_report(root)
+    assert {chart["id"] for chart in built["charts"]} == {"revenue_by_person_over_time", *(choice.replace(" ", "_") for choice in surviving)}
+    view = json.loads((_report_path(root).parent / "out.view.json").read_bytes())
+    details = [item["detail"] for block in view["blocks"] if block["type"] == "facts" for item in block["items"] if item["label"] == "Report settings"]
+    assert details == (["Used for this draft\nCharts: " + ", ".join(surviving)] if surviving else [])
+
+
+def test_missing_cache_capabilities_preserve_read_only_commands(report, tmp_path, capsys, monkeypatch):
+    root = tmp_path / "out"
+    assert _build(report, capsys, root, str(SMALL_CSV))[0] == 0
+    path = _report_path(root)
+    monkeypatch.delitem(sys.modules, "business_report_input_cache", raising=False)
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    monkeypatch.delattr(report.os, "O_DIRECTORY")
+    reloaded = _load_script()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(reloaded.input_cache, "WORKSPACE", workspace)
+    assert _run(reloaded, capsys, "inspect", str(SMALL_CSV))[0] == 0
+    assert _run(reloaded, capsys, "show", str(path))[0] == 0
+    assert reloaded.read_table(str(SMALL_CSV), cache=True).rows == 300
+    assert list(workspace.iterdir()) == []
+
+
+def test_trend_shows_zero_and_check_when_every_amount_is_unreadable(report, tmp_path, capsys):
+    path = _write_csv(
+        tmp_path / "amounts.csv",
+        ["Date", "Amount", "Technician"],
+        [
+            ["2026-08-03", "", "Jo"],
+            ["2026-08-10", "broken", "Jo"],
+            ["2026-08-10", "unknown", "Alex"],
+        ],
+    )
+    root = tmp_path / "out"
+    code, _, err = _build(report, capsys, root, str(path), "--trend-by", "person")
+    assert code == 0, err
+    built = _read_report(root)
+    table = next(section["table"] for section in built["sections"] if section["id"] == "person_trend")
+    assert table["totals"] == ["Total", "", 0]
+    assert all(row[2] == 0 for row in table["rows"])
+    check = next(item for item in built["checks"] if item["id"] == "unparsed_amounts")
+    assert check["status"] == "warn" and "No row has a usable amount" in check["text"]
+
+
+def test_ten_input_report_rebuild_reuses_every_distinct_source(report, tmp_path, capsys, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(report.input_cache, "WORKSPACE", workspace)
+    inputs = [_write_csv(tmp_path / f"orders-{n}.csv", ["Date", "Total (USD)"], [["2026-08-03", n]]) for n in range(1, 11)]
+    original = report.read_tables
+    parsed = []
+
+    def count(path, *args, **kwargs):
+        parsed.append(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(report, "read_tables", count)
+    root = tmp_path / "out"
+    for _ in range(2):
+        code, _, err = _build(report, capsys, root, *map(str, inputs), "--period", "2026-08")
+        assert code == 0, err
+        assert _read_report(root)["kpis"][0]["value"] == 55
+    assert parsed == inputs
+
+
+def test_split_period_totals_preserve_revenue_between_large_refunds(report, tmp_path, capsys):
+    # Without the person table these rows form one weekly total. Separating
+    # them into three series must preserve the same independently checked fact.
+    profile = report.load_profile(None, None)
+    profile["sections"] = ["by_period"]
+    profile_path = tmp_path / "period-only.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    orders = _write_csv(
+        tmp_path / "orders.csv",
+        ["Date", "Total (USD)", "Technician"],
+        [
+            ["2026-08-03", "10000000000000000", "A"],
+            ["2026-08-03", "1", "B"],
+            ["2026-08-03", "-10000000000000000", "C"],
+        ],
+    )
+    out = tmp_path / "out"
+    code, _, err = _build(report, capsys, out, str(orders), "--profile", str(profile_path), "--trend-by", "person")
+    assert code == 0, err
+    built = _read_report(out)
+    assert next(s["table"]["totals"][2] for s in built["sections"] if s["id"] == "person_trend") == 1
+    assert next(c["status"] for c in built["checks"] if c["id"] == "totals_reconcile") == "pass"

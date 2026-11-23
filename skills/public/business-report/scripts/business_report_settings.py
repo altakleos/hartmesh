@@ -101,7 +101,7 @@ def validate(value):
         elif key == "comparisons":
             valid = isinstance(item, list) and len(item) <= 2 and all(v in ("previous_period", "same_period_last_year") for v in item) and len(set(item)) == len(item)
         elif key == "charts":
-            valid = isinstance(item, list) and len(item) <= 32 and all(isinstance(v, str) and v in {"revenue_by_period", "revenue_by_category", "jobs_by_person"} for v in item)
+            valid = isinstance(item, list) and len(item) <= 32 and all(isinstance(v, str) and v in {"revenue_by_period", "revenue_by_category", "jobs_by_person", "revenue_by_person_over_time"} for v in item)
         elif key == "currency":
             valid = isinstance(item, str) and bool(re.fullmatch(r"[A-Z]{3}", item))
         if not valid:

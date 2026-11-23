@@ -16,6 +16,22 @@ FIELDS = {"type", "x", "y", "title", "format", "labels", "values"}
 UNAVAILABLE = "Saved chart draw data is unavailable or incompatible. Rebuild explicitly from the source inputs before changing its presentation."
 
 
+def _validate_line_table(data, report, chart_id):
+    sections = [section for section in report["sections"] if section.get("id") == "person_trend" and chart_id in section.get("charts", [])]
+    if len(sections) != 1:
+        raise ValueError("missing trend table")
+    names = [line["name"] for line in data["series"]]
+    if len(set(names)) != len(names):
+        raise ValueError("duplicate series")
+    rows = sections[0]["table"]["rows"]
+    if len(rows) != len(data["labels"]) * len(names):
+        raise ValueError("trend table size")
+    for i, label in enumerate(data["labels"]):
+        for j, line in enumerate(data["series"]):
+            if rows[i * len(names) + j] != [label, line["name"], line["values"][i]]:
+                raise ValueError("trend table values")
+
+
 def validate_data(raw, report):
     try:
         if len(raw) > MAX_BYTES:
@@ -26,7 +42,7 @@ def validate_data(raw, report):
         )
         if (
             type(record["schema_version"]) is not int
-            or record["schema_version"] != 1
+            or record["schema_version"] not in {1, 2}
             or not isinstance(record["charts"], dict)
             or len(record["charts"]) > 64
         ):
@@ -38,15 +54,18 @@ def validate_data(raw, report):
             raise ValueError("chart identity")
         for entry in report["charts"]:
             chart_id = entry["id"]
-            data = _object(charts[chart_id], FIELDS)
+            line = entry["spec"]["type"] == "line"
+            if line and record["schema_version"] != 2:
+                raise ValueError("line chart version")
+            data = _object(charts[chart_id], (FIELDS - {"values"} | {"series"}) if line else FIELDS)
             if (
                 not re.fullmatch(r"[a-z0-9_]+", chart_id)
                 or entry["png"] != f"charts/{chart_id}.png"
-                or {k: v for k, v in data.items() if k not in {"labels", "values"}}
+                or {k: v for k, v in data.items() if k not in {"labels", "values", "series"}}
                 != entry["spec"]
             ):
                 raise ValueError("chart spec")
-            if data["type"] not in {"bar", "barh"} or data["format"] not in {
+            if data["type"] not in {"bar", "barh", "line"} or data["format"] not in {
                 "currency",
                 "integer",
                 "number",
@@ -58,27 +77,33 @@ def validate_data(raw, report):
                 for k in ("x", "y", "title")
             ):
                 raise ValueError("chart text")
-            if (
-                not isinstance(data["labels"], list)
-                or not isinstance(data["values"], list)
-                or len(data["labels"]) != len(data["values"])
-                or len(data["values"]) > 4096
-            ):
-                raise ValueError("chart values")
-            if any(
-                not isinstance(v, str) or len(v) > 32767 for v in data["labels"]
-            ) or any(
-                type(v) not in {int, float} or not math.isfinite(v)
-                for v in data["values"]
-            ):
-                raise ValueError("chart scalar")
+            labels = data["labels"]
+            if not isinstance(labels, list) or len(labels) > 4096 or any(not isinstance(v, str) or len(v) > 32767 for v in labels):
+                raise ValueError("chart labels")
+            if line:
+                if not isinstance(data["series"], list) or not 1 <= len(data["series"]) <= 7:
+                    raise ValueError("chart series")
+                values = []
+                for series in data["series"]:
+                    series = _object(series, {"name", "values"})
+                    if not isinstance(series["name"], str) or len(series["name"]) > 32767:
+                        raise ValueError("series name")
+                    values.append(series["values"])
+            else:
+                values = [data["values"]]
+            for points in values:
+                if not isinstance(points, list) or len(labels) != len(points) or any(type(v) not in {int, float} or not math.isfinite(v) for v in points):
+                    raise ValueError("chart values")
+            if line:
+                _validate_line_table(data, report, chart_id)
         return charts
     except (OSError, ValueError, TypeError, KeyError, RecursionError, OverflowError):
         raise InputError(UNAVAILABLE) from None
 
 
 def write_data(stage, charts, report):
-    raw = _canonical({"schema_version": 1, "charts": charts}) + b"\n"
+    version = 2 if any(data["type"] == "line" for data in charts.values()) else 1
+    raw = _canonical({"schema_version": version, "charts": charts}) + b"\n"
     validate_data(raw, report)
     (stage / MEMBER).write_bytes(raw)
 
