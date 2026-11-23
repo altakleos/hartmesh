@@ -102,7 +102,7 @@ from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
 from deerflow.runtime.keyed_lock import KeyedLockTable
-from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
+from deerflow.runtime.presented_files import PRESENTED_BY_KEY, PRESENTED_FILES_KEY, RUNTIME_PRESENTED_FILES_CONTEXT_KEY
 from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
 from deerflow.runtime.runs.capture_io import CaptureIOClosed, capture_io_scope, current_capture_io_owner, run_capture_io
 from deerflow.runtime.runs.naming import resolve_root_run_name
@@ -200,6 +200,8 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             PACKAGE_MESSAGE_KEY,
             SHARED_HISTORY_KEY,
             "imported_files",
+            PRESENTED_FILES_KEY,
+            PRESENTED_BY_KEY,
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,

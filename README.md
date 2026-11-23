@@ -400,7 +400,10 @@ Historical report cards and their filing policy are supplied by the provider-ins
 [compatibility package](backend/extensions/sources/hartmesh-legacy-report/README.md). The
 distribution includes it in the locked extensions group; the example configuration
 explicitly enables it. Existing operator configurations must add its `plugins:` entry
-and restart to retain rich cards. Disable or remove it through the normal extension
+and restart to retain rich cards. The package also checks the latest delivered
+report draft when you next chat. If its live My files or Shared input has changed,
+the reply names the file and offers a rebuild. Conversation attachments and imported
+copies keep their original bytes. Disable or remove the package through the normal extension
 lifecycle; the original report and downloads remain usable.
 
 

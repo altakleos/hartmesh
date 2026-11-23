@@ -1564,7 +1564,7 @@ def command_build(args) -> int:
                 },
             )
 
-    report_path = publish_bundle(out_dir, base, report, targets, tenant_dir, renderer, stage_charts, bundle_id=args.bundle_id, expected_current=expected, verify_current=False, product_identity=product_identity, presentation=presentation)
+    report_path = publish_bundle(out_dir, base, report, targets, tenant_dir, renderer, stage_charts, bundle_id=args.bundle_id, expected_current=expected, verify_current=False, fresh_inputs=True, product_identity=product_identity, presentation=presentation)
     print(f"Built draft {report['meta']['draft']}: {report['meta']['title']} -> {report_path}")
     if previous and any(check["id"] == "prose_numbers" for check in previous.get("checks", [])):
         print("The previous draft carried written text (summary or actions); this rebuild replaced it with the computed text. Run prose again if it still applies.")

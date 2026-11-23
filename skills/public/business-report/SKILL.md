@@ -133,6 +133,11 @@ The files you named under `present` are already with the user: the tool result n
 
 ## Changing a report
 
+In chats with the packaged report adapter, a reply names changed live My files
+or Shared inputs of the latest delivered draft. Use the newer data only when the
+user asks to rebuild. A wording or format change keeps the original report data.
+An upload or an explicitly imported copy remains a conversation snapshot.
+
 - A change to the data (exclude rows, another period, another mapping) is a new `build` into the same `--out` directory with `--render pdf,docx,xlsx`; it becomes the next draft with its own renders. Written text from `prose` is replaced by the computed text; run `prose` again if it still applies.
 - A change to the words (shorter summary, different actions) is one run: `prose … --render pdf,docx,xlsx --bundle-id <new-id>` with `present` naming the new view and renders in that bundle. Nothing is recomputed. A run without `--render` publishes the new JSON without formats; the previous bundle and its formats remain together. Neighboring files the script did not write stay untouched. Use the current report path printed by the previous successful run: stale sources and outside edits are refused, rather than silently overwriting a newer draft.
 - Say what changed and the draft number, for example "Done. Two warranty jobs removed (2 jobs, $0.00). Draft 2."

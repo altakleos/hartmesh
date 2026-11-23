@@ -194,3 +194,8 @@ Keep full reads, provider errors, truncation markers and output evidence exact;
 read-before-write state tracks the canonical requested range independently.
 Host-path masking stops at commas as well as colons, so adjacent path lists do
 not expose unmasked siblings.
+
+Ordinary provider `uses_personal_and_shared_mounts` is independent of
+`uses_thread_data_mounts`. Local mappings and AIO local containers expose both
+live areas. The provisioner omits those binds even with a shared thread-data
+mount. Native consumers must use fresh per-role chat admission.

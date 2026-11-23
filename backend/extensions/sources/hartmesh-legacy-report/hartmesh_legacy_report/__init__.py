@@ -2,9 +2,16 @@
 
 from pathlib import Path
 
-from deerflow_extension_api import ArtifactPresentation, BrowserAssets, PluginContribution, extension
+from deerflow_extension_api import AgentScope, ArtifactPresentation, BrowserAssets, MiddlewarePlacement, Placement, PluginContribution, extension
 
 from .projection import project_report
+
+
+class _FreshnessContributor:
+    def contribute_middlewares(self, app_store, context):
+        from .freshness import ReportFreshnessMiddleware
+
+        return (MiddlewarePlacement(ReportFreshnessMiddleware(), Placement.STANDARD, AgentScope.LEAD),)
 
 
 @extension(api="0.2.5", name="legacy-report")
@@ -35,3 +42,5 @@ def install(registry, config):
     )
     if accepted is not True:
         raise RuntimeError("Historical report presentation requires the artifact plugin host")
+    if enabled:
+        registry.middlewares(_FreshnessContributor())

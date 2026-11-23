@@ -1,6 +1,6 @@
 [project]
 name = "hartmesh-legacy-report"
-version = "0.1.0"
+version = "0.2.0"
 description = "Provider-installed presentation and filing compatibility for historical reports"
 requires-python = ">=3.12"
 dependencies = ["deerflow-extension-api>=0.2.5,<0.3"]

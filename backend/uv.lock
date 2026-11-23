@@ -1718,7 +1718,7 @@ wheels = [
 
 [[package]]
 name = "hartmesh-legacy-report"
-version = "0.1.0"
+version = "0.2.0"
 source = { directory = "extensions/sources/hartmesh-legacy-report" }
 dependencies = [
     { name = "deerflow-extension-api" },
