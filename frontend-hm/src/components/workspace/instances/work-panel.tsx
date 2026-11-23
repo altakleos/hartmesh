@@ -1,7 +1,6 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -17,7 +16,7 @@ import type { WorkPolicy } from "@/core/agents/types";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useFileActionLifetime } from "@/core/file-areas/file-action-lifetime";
 import { useI18n } from "@/core/i18n/hooks";
-import { getSpace, listSpaces } from "@/core/spaces/api";
+import { getSpace, listSpaces, spaceFileURL } from "@/core/spaces/api";
 import { useSpaceActionSignal } from "@/core/spaces/lifetime";
 
 import { WorkActivation, WorkActivationRefusal } from "./work-activation";
@@ -896,9 +895,9 @@ function Sources({ sources }: { sources: api.VisibleWorkSource[] }) {
       {sources.map((source, index) => (
         <li key={index}>
           {source.kind === "space_file" ? (
-            <Link href={`/workspace/spaces?space=${source.space_id}`}>
+            <a href={spaceFileURL(source.space_id, source.path)}>
               {source.path}
-            </Link>
+            </a>
           ) : (
             t.agentWork.unavailableSource
           )}

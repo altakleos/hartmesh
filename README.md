@@ -206,8 +206,9 @@ A requester can retry their own unfinished physical Stop without Manage access;
 the original target and run-cancellation permission still apply.
 Retry also reports a paused or retired agent and lost chat/read access. A known
 receipt is recovered while paused only when current read access still permits it.
-Current Inspect grants control visibility; referenced files retain separate access
-checks. Uncertain execution requires qualified containment and explicit recovery.
+Current Inspect grants control Work visibility. In Work and Attention, select a
+referenced filename to open that file if you still have read access to its Space.
+Uncertain execution requires qualified containment and explicit recovery.
 The Work command API can stop one exact running attempt without cancelling the
 assignment. It requires the run cancellation capability and current Inspect,
 plus Manage or Use as that attempt's requester. Delayed cancellation stays tied

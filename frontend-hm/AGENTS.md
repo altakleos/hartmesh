@@ -39,10 +39,10 @@ identities across unknown replies; receipt recovery never changes the bound thre
 Unresolved attempts prohibit replacement. Polling preserves captured draft/review
 bases. Candidate reports are separate from submitted outcomes; a response starts no
 run. Work Stop captures its attempt/revisions; guarded retries never stop a replacement.
-Recovery is collapsed under Advanced for stopping/uncertain work and needs exact
-completed containment receipts and current Home ADMIN. Attention recipients come
-from eligible grants; directory names never decide authority. Requests and replies
-remain available during execution holds and start no work by themselves.
+Stopping/uncertain recovery stays collapsed under Advanced and requires exact
+completed containment receipts and current Home ADMIN. Work and Attention use
+Space content URLs with exact paths. Current grants determine recipients. Requests and
+replies remain available during execution holds and never start work.
 
 `/workspace/spaces` uses account-scoped queries and host grants. Send captured
 generation/SHA for edits and attachment IDs for retirement; preserve conflict
