@@ -23,7 +23,7 @@ from app.telegram_bots.human_input import HumanInputs
 from app.telegram_bots.human_input_source import HumanInputSource
 from app.telegram_bots.model_source import ModelSource
 from app.telegram_bots.producer import OutboxSender
-from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
+from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow
 from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow
 
 pytestmark = pytest.mark.asyncio
@@ -103,15 +103,27 @@ async def offer(e):
     return await e.services.outbox.get(e.link, identity)
 
 
-async def test_manager_gets_only_the_actual_request_card(network):
+@pytest.mark.parametrize("custody", ["personal", "company"])
+@pytest.mark.parametrize(
+    "locale,scope,labels",
+    [
+        ("en-US", "all its conversations and assignments", ["Allow for 5 minutes", "Keep blocked"]),
+        ("zh-CN", "所有对话和任务", ["允许 5 分钟", "继续阻止"]),
+    ],
+)
+async def test_manager_gets_only_the_actual_request_card(network, custody, locale, scope, labels):
     e = network
+    await e.db.settings.update(e.link.owner_user_id, locale=locale)
+    async with e.db.sessions.begin() as writer:
+        await writer.execute(update(AgentInstanceRow).where(AgentInstanceRow.id == e.link.agent_ref).values(custody=custody, owner_id=e.link.owner_user_id if custody == "personal" else None))
     await permissions(e, 7)
     await offer(e)
     e.request.enqueue("sendMessage", result=sent(e, identity=701))
     await drain(e)
     call = next(call for call in e.request.calls if call.endpoint == "sendMessage")
     assert "example.test" in call.parameters["text"]
-    assert [row[0]["text"] for row in call.parameters["reply_markup"]["inline_keyboard"]] == ["Allow for 5 minutes", "Keep blocked"]
+    assert scope in call.parameters["text"]
+    assert [row[0]["text"] for row in call.parameters["reply_markup"]["inline_keyboard"]] == labels
 
 
 async def test_use_without_manage_cannot_publish_a_network_card(network):

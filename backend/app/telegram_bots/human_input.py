@@ -64,7 +64,7 @@ def _choice_rows(options, *, thread_id, kind, payload, selected=None, cap=CLARIF
     return [buttons[index : index + width] for index in range(0, len(buttons), width)]
 
 
-def present_request(raw, *, thread_id, reply_to_message_id, locale):
+def present_request(raw, *, scope, reply_to_message_id, locale):
     """Render an already source-qualified request; this function grants no read."""
     try:
         request = decode_request(raw)
@@ -72,6 +72,7 @@ def present_request(raw, *, thread_id, reply_to_message_id, locale):
         return _presentation(render("error.generic", locale), (), reply_to_message_id=reply_to_message_id)
     if request["input_mode"] == "form":
         raise ValueError("form-state-required")
+    thread_id = scope.thread_id
     if request["source"] == "sandbox_network":
         details = request["details"]
         host = details["host"] + (f":{details['port']}" if details["port"] not in (80, 443) else "")
@@ -81,7 +82,8 @@ def present_request(raw, *, thread_id, reply_to_message_id, locale):
             [_button("network", thread_id, {**payload, "option_id": "allow_temporary"}, label="label.allow_site", values={"minutes": minutes})],
             [_button("network", thread_id, {**payload, "option_id": "deny"}, label="label.keep_blocked")],
         ]
-        return _presentation(render("net.ask_plain", locale, host=host, minutes=minutes), keyboard, reply_to_message_id=reply_to_message_id)
+        key = "net.ask_instance" if scope.agent_kind == "instance" else "net.ask_plain"
+        return _presentation(render(key, locale, host=host, minutes=minutes), keyboard, reply_to_message_id=reply_to_message_id)
     body = request["question"]
     if request.get("context"):
         body += "\n\n" + request["context"]
@@ -332,7 +334,7 @@ class HumanInputs:
                 form = await self.services.forms.create(link, form_id=form_id, thread_id=record.scope.thread_id, request=request, guard=guard, session=writer, message_thread_id=record.scope.message_thread_id)
                 view = present_form(request, form, thread_id=record.scope.thread_id, reply_to_message_id=anchor, locale=settings.locale, include_question=True)
             else:
-                view = present_request(source.request, thread_id=record.scope.thread_id, reply_to_message_id=anchor, locale=settings.locale)
+                view = present_request(source.request, scope=record.scope, reply_to_message_id=anchor, locale=settings.locale)
             extra = {"file_plan": file_plan} if file_plan is not None else {}
             identity = await self.services.outbox.plan_human_input_reply(record, source, parts=list(view.parts), keyboard=[list(row) for row in view.keyboard], callbacks=self.services.callbacks, guard=guard, session=writer, **extra)
             if form is not None:
@@ -533,7 +535,7 @@ class HumanInputs:
         return await self.services.outbox.plan_human_input_step(source.record, source, step_id=step_id, parts=parts, keyboard=[list(row) for row in view.keyboard], callbacks=self.services.callbacks, guard=guard, session=writer)
 
     async def _receipt(self, link, item, source, key, values, *, step_id, guard, writer, locale):
-        original = present_request(source.request, thread_id=source.record.scope.thread_id, reply_to_message_id=source.record.origins[0].message_id, locale=locale)
+        original = present_request(source.request, scope=source.record.scope, reply_to_message_id=source.record.origins[0].message_id, locale=locale)
         html = "".join(part["html"] for part in original.parts) + "\n\n" + render(key, locale, **values)
         view = _presentation(html, (), reply_to_message_id=source.record.origins[0].message_id)
         return await self._view(link, item, source, view, step_id=step_id, guard=guard, writer=writer)
@@ -876,7 +878,7 @@ class HumanInputs:
                     presentation = _presentation(escape(request["question"]) + "\n\n" + render("clarify.other_prompt", settings.locale), (), reply_to_message_id=source.record.origins[0].message_id, force_reply=True)
                     form = None
                 elif prompt.payload["purpose"] == "request_card":
-                    presentation = present_request(source.request, thread_id=source.record.scope.thread_id, reply_to_message_id=source.record.origins[0].message_id, locale=settings.locale)
+                    presentation = present_request(source.request, scope=source.record.scope, reply_to_message_id=source.record.origins[0].message_id, locale=settings.locale)
                     form = None
                 else:
                     raise CallbackRefused() from None

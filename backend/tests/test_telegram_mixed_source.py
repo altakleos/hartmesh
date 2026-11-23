@@ -64,7 +64,7 @@ async def test_initial_mixed_primary_files_before_question_and_original_input_se
     source, guard, callbacks, basis = await mixed_environment(e)
     record = source.record
     file_plan = await prepare_mixed_files(record, source, http_owner=e.http, guard=guard, capacity=1024, max_bytes=1024)
-    view = present_request(source.request, thread_id=record.scope.thread_id, reply_to_message_id=record.origins[0].message_id, locale="en")
+    view = present_request(source.request, scope=record.scope, reply_to_message_id=record.origins[0].message_id, locale="en")
     identity = await e.outbox.plan_human_input_reply(record, source, parts=list(view.parts), keyboard=list(view.keyboard), callbacks=callbacks, guard=guard, file_plan=file_plan)
     item = await e.outbox.get(e.link, identity)
     proof = validate_mixed_reply_basis(item)
@@ -156,7 +156,7 @@ async def planned_mixed(e):
     source, guard, callbacks, basis = await mixed_environment(e)
     record = source.record
     plan = await prepare_mixed_files(record, source, http_owner=e.http, guard=guard, capacity=1024, max_bytes=1024)
-    view = present_request(source.request, thread_id=record.scope.thread_id, reply_to_message_id=record.origins[0].message_id, locale="en")
+    view = present_request(source.request, scope=record.scope, reply_to_message_id=record.origins[0].message_id, locale="en")
     identity = await e.outbox.plan_human_input_reply(record, source, parts=list(view.parts), keyboard=list(view.keyboard), callbacks=callbacks, guard=guard, file_plan=plan)
     return source, guard, callbacks, identity
 

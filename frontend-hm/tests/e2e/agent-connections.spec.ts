@@ -93,9 +93,10 @@ async function exerciseManagerAccess(
   });
   await expect(dialog).toContainText("3 people can chat");
   await expect(dialog).toContainText("Shared folder");
+  await expect(dialog).toContainText("final reply for an unattended large job");
   expect(writes).toEqual([]);
   const photo = testInfo.outputPath("give-connection.png");
-  await page.screenshot({ path: photo });
+  await page.screenshot({ path: photo, animations: "disabled" });
   await testInfo.attach("Review connection access", {
     path: photo,
     contentType: "image/png",

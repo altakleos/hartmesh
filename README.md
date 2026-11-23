@@ -2002,7 +2002,7 @@ without waiting for the agent’s tools to finish loading.
 
 While signed in, you can leave an assistant’s or AI employee’s Files tab during an upload and return to its original folder to see the result. If the connection drops, HartMesh checks the original operation and shows the filename the Home saved. Changing accounts or losing access clears the transfer from view.
 
-When company connections are enabled, a manager can give an AI employee or personal AI assistant a connection on its **Access** tab. It can then use the connection in conversations, assignments and work started by an approved package, without asking before each action. Anyone who can chat with the agent can ask it to send information it can read, including conversations, attachments, its files and the company’s Shared folder. The agent can also act on information returned by an outside service. Give only the connections the work needs and use a service account with limited rights. The service sees that account regardless of who asked. Helpers have no connection of their own. An administrator’s changes apply from the next action. Telegram shows the agent’s answers. Open the conversation on the web for connection activity.
+When company connections are enabled, a manager can give an AI employee or personal AI assistant a connection on its **Access** tab. It can then use the connection in conversations, assignments, work started by an approved package and the final reply for an unattended large job, without asking before each action. Anyone who can chat with the agent can ask it to send information it can read, including conversations, attachments, its files and the company’s Shared folder. The agent can also act on information returned by an outside service. Give only the connections the work needs and use a service account with limited rights. The service sees that account regardless of who asked. Helpers have no connection of their own. An administrator’s changes apply from the next action. Telegram shows the agent’s answers. Open the conversation on the web for connection activity.
 
 Inline MCP audio results are not supported. Stdio tools report an explicit error, matching HTTP/SSE tools, rather than treating base64 audio as a successful text result.
 When durable MCP background tasks are enabled, agents can use `list_background_tasks(status="failed")` or `status="input_required"` to find failed tasks or tasks awaiting input in the current chat. Other supported statuses are `submitted`, `working`, `completed`, and `cancelled`; omitting the status preserves existing behavior. The database applies the filter before limiting results to the 20 most recent matching tasks. When combined with `active_only=true`, both filters apply: active statuses are `submitted`, `working`, and `input_required`, so terminal statuses return an empty list. `GET /api/threads/{thread_id}/mcp-tasks` supports the same `status` and `active_only` filters before its `limit` (default 50, range 1–100); for example, `?status=failed&limit=20`. Unknown statuses return 422, and omitting the filters preserves the existing response.
@@ -2366,7 +2366,9 @@ gets a plain answer instead.
 
 **Questions.** Bots present clarification choices, typed alternatives and forms with a
 review step before Send. Free-text questions accept an ordinary chat reply. A
-blocked-site request offers temporary permission or refusal. `/new` and `/stop` close
+blocked-site request offers temporary permission or refusal. For an AI assistant or
+employee, the prompt explains that allowing the site covers all of its conversations
+and assignments for the time shown. `/new` and `/stop` close
 the current input, while other commands leave forms and cards open. A reply to an old
 prompt asks first before it becomes new input, and a button press that cannot act says
 why.

@@ -27,7 +27,7 @@ async def primary(e):
     source, guard, callbacks, basis = await mixed_environment(e)
     record = source.record
     plan = await prepare_mixed_files(record, source, http_owner=e.http, guard=guard, capacity=1024, max_bytes=1024)
-    view = present_request(source.request, thread_id=record.scope.thread_id, reply_to_message_id=record.origins[0].message_id, locale="en")
+    view = present_request(source.request, scope=record.scope, reply_to_message_id=record.origins[0].message_id, locale="en")
     identity = await e.outbox.plan_human_input_reply(record, source, parts=list(view.parts), keyboard=list(view.keyboard), callbacks=callbacks, guard=guard, file_plan=plan)
     reader = ModelSource(read_output=e.coordinator.read_output, human_input_source=HumanInputSource(coordinator=e.coordinator, http_owner=e.http, capture_attempt=e.host.capture), outbox=e.outbox, http_owner=e.http)
     return SimpleNamespace(id=identity, reader=reader, basis=basis, request=source.request, callbacks=callbacks, guard=guard)

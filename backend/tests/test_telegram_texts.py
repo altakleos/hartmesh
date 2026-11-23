@@ -43,6 +43,7 @@ LIFECYCLE_KEYS = frozenset("access.agent_off agent.paused agent.retired agent.de
 INSTANCE_PRESENTATION_KEYS = frozenset(
     "hello.assistant hello.employee hello.connections privacy.connections privacy.connections_more privacy.connections_unavailable help.agent privacy.company privacy.protected profile.short.agent profile.description.agent".split()
 )
+INSTANCE_PRESENTATION_KEYS |= {"net.ask_instance"}
 POLICY_KEYS = frozenset({"policy.off", "policy.on", "policy.on_protected", "policy.protected", "policy.unprotected"})
 
 
