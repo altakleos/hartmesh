@@ -61,8 +61,10 @@ def answer(body, fallback):
             raise ValueError("The job was not accepted")
         return {"content": "The requested check has been submitted."}
     if stage in ("item", "second"):
-        if any(n.endswith("_read_notice") for n in offered):
-            raise ValueError("An item received an employee connection")
+        if receipts:
+            raise ValueError("This sample check must finish without calling a tool")
+        if kind != "personal" and any(n.endswith("_read_notice") for n in offered):
+            raise ValueError("An employee check received a company connection")
         if kind in ("employee", "personal"):
             provider.final_observation(nonce + "-" + kind)
         if stage == "second":
@@ -111,6 +113,8 @@ def answer(body, fallback):
             raise ValueError("Missing confirmed company notice")
         if kind == "cut":
             provider.final_observation(nonce + "-final")
+    elif len(receipts) != len(expected):
+        raise ValueError("This final response needs only stored results")
     elif kind == "off" and any(n.endswith("_read_notice") for n in offered):
         raise ValueError("The disabled connection was offered")
     return {"content": "Completed " + kind + " checks " + nonce}

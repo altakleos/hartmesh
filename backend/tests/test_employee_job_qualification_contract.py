@@ -34,10 +34,24 @@ def test_model_uses_offered_tools_and_real_item_and_notice_receipts(monkeypatch)
     names = ["read_batch_result", "notices_read_notice"]
     with pytest.raises(ValueError):
         reply(turn("employee", "item"), names)
+    barrier = []
+    monkeypatch.setattr(module.provider, "final_observation", barrier.append)
+    personal_item = turn("personal", "item")
+    assert reply(personal_item, names) == {"content": "Checked sample " + nonce}
+    assert barrier == [nonce + "-personal"]
+    receive(personal_item, module.call("notices_read_notice", 0, {}, names), [{"type": "text", "text": "Notice from notices-a."}])
+    with pytest.raises(ValueError):
+        reply(personal_item, names)
     final = turn("employee", "final")
     read = reply(final, names)
     assert json.loads(read["tool_calls"][0]["function"]["arguments"]) == {"batch_id": "sample", "position": 0}
     window = json.dumps({"position": 0, "status": "ok", "offset": 0, "next_offset": None, "content": json.dumps({"position": 0, "status": "succeeded", "result": "Checked sample " + nonce})})
+    personal_final = turn("personal", "final")
+    receive(personal_final, reply(personal_final, names), window)
+    assert reply(personal_final, names) == {"content": "Completed personal checks " + nonce}
+    receive(personal_final, module.call("notices_read_notice", 1, {}, names), [{"type": "text", "text": "Notice from notices-a."}])
+    with pytest.raises(ValueError):
+        reply(personal_final, names)
     receive(final, read, window)
     notice = reply(final, names)
     receive(final, notice, [{"type": "text", "text": "Notice from notices-a."}])
