@@ -35,15 +35,13 @@ def utc_isoformat(value):
 
 
 def _hold():
-    from app.gateway.storage_spaces import AGENTS_HOLD_PATH
+    from app.gateway.storage_spaces import AGENTS_HOLD_PATH, hold_reason
 
     try:
         metadata = AGENTS_HOLD_PATH.stat()
     except FileNotFoundError:
         return None
-    with AGENTS_HOLD_PATH.open(encoding="utf-8") as stream:
-        reason = stream.readline(4096).strip() or None
-    return {"since": datetime.fromtimestamp(metadata.st_mtime, UTC).isoformat(), "reason": reason}
+    return {"since": datetime.fromtimestamp(metadata.st_mtime, UTC).isoformat(), "reason": hold_reason()}
 
 
 def inspect_operator_volume(files, binding=None, *, slot=None, managed_home=False):

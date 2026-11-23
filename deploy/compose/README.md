@@ -3572,7 +3572,9 @@ hm logs --no-log-prefix gateway | grep 'agents: hold lifted'
 ```
 
 The Gateway reads this operator-owned file through its read-only mount. Its owner
-is `1000:1000`, mode `0640`; the optional first line appears in the journal only.
+is `1000:1000`, mode `0640`. The hold entry in the Gateway journal and the
+operator’s `ai status` include the optional first line. The journal escapes control
+characters. An empty or unreadable reason still holds execution.
 `/health` reports agents `held`. Removing it lifts the hold at admission, but
 qualification must still succeed. The next message or explicit activation starts
 work; removing the file starts no assignment.
