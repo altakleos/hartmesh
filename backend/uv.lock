@@ -1744,7 +1744,7 @@ requires-dist = [
 
 [[package]]
 name = "hartmesh-office-preview"
-version = "0.1.0"
+version = "0.1.1"
 source = { directory = "extensions/sources/hartmesh-office-preview" }
 dependencies = [
     { name = "deerflow-extension-api" },

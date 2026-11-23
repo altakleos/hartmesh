@@ -274,6 +274,6 @@ Detailed backend documentation lives in `docs/`; [details](docs/backend-guidance
 lists the main guides.
 
 Installed Office presentations live in `extensions/sources/hartmesh-office-preview`.
-Their module-level projectors stream internal OOXML parts into passive views.
+Projectors stream OOXML into passive views. Shared formulas translate A1 references per sheet and retain cached results.
 Historical report compatibility is installed from `extensions/sources/hartmesh-legacy-report`;
 the generic host owns authorization, limits, source SHA and drained I/O.

@@ -4586,7 +4586,8 @@ boundary.
 
 With the installed Office presentation enabled, a workbook, Word document or
 slide deck produced in an ordinary chat opens in the file panel. Download
-retrieves the original file. [Office preview scope](docs/guide/file-previews.md)
+retrieves the original file. Workbook cells show their saved values or, for
+uncached formulas, the expression for that cell. [Office preview scope](docs/guide/file-previews.md)
 
 Artifact previews and downloads preserve literal percent sequences in file names:
 `report%20final.md` and `report final.md` remain distinct files. Markdown links

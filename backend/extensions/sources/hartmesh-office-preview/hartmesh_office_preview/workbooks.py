@@ -3,8 +3,10 @@
 import re
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 
 from .package import MAX_MEMBERS, OfficePackage
+from .shared_formulas import SharedFormula, bounds, column_number, compile_formula, group_index
 from .view import View
 
 _CELL = re.compile(r"([A-Z]{1,3})([1-9][0-9]{0,6})")
@@ -76,6 +78,9 @@ def _sheet(package, part, view):
     rows = []
     row = col = 0
     hidden_columns = set()
+    masters = {}
+    visible = False
+    group = area = None
     hidden_row = False
     cell = None
     field = None
@@ -84,7 +89,9 @@ def _sheet(package, part, view):
     for event, tag, data in package.events(part):
         if event == "text":
             if cell is not None and field is not None:
-                cell[field] = view.text(cell[field] + data)
+                # Translate a complete Excel expression before shortening the displayed cell.
+                limit = 8192 if field == "formula" and area is not None else 4096
+                cell[field] = view.text(cell[field] + data, limit)
             continue
         if event == "start":
             if not root_seen:
@@ -109,17 +116,26 @@ def _sheet(package, part, view):
                     match = _CELL.fullmatch(ref)
                     if match is None or int(match[2]) != row:
                         raise ValueError("Invalid cell reference")
-                    col = 0
-                    for letter in match[1]:
-                        col = col * 26 + ord(letter) - 64
+                    col = column_number(match[1])
+                group = area = None
+                visible = 1 <= row <= _MAX_ROWS and 1 <= col <= _MAX_COLS and not hidden_row and col not in hidden_columns
                 if col > _MAX_COLS:
                     view.notices.add("Only the first 12 columns are shown.")
-                elif 1 <= row <= _MAX_ROWS and not hidden_row and col not in hidden_columns:
+                elif visible:
                     cell = {"type": data.get("t", "n"), "style": int(data.get("s", 0)), "value": "", "formula": "", "inline": ""}
             elif tag == "x:rPh":
                 phonetic = True
             elif tag in {"x:f", "x:v", "x:t"} and not phonetic:
                 field = {"x:f": "formula", "x:v": "value", "x:t": "inline"}[tag]
+                if tag == "x:f" and data.get("t") == "shared":
+                    group = group_index(data.get("si", ""))
+                    if "ref" in data:
+                        area = bounds(data["ref"])
+                        if cell is None and area[0] <= _MAX_ROWS and area[1] <= _MAX_COLS:
+                            # A hidden master may supply a visible follower.
+                            cell = {"formula": "", "value": "", "inline": ""}
+                elif tag == "x:v" and visible and cell is not None and cell["type"] == "str":
+                    cell["cached_string"] = True
             elif tag == "x:mergeCell":
                 view.notices.add("Merged cells show their stored value in the original cell.")
         elif tag == "x:rPh":
@@ -127,6 +143,19 @@ def _sheet(package, part, view):
         elif tag in {"x:f", "x:v", "x:t"}:
             field = None
         elif tag == "x:c" and cell is not None:
+            if group is not None:
+                if area is not None:
+                    if len(masters) >= _MAX_ROWS * _MAX_COLS:
+                        raise ValueError("Too many shared formulas")
+                    masters[group] = SharedFormula(row, col, area, cell["formula"])
+                elif visible and not cell["value"] and not cell.get("cached_string"):
+                    master = masters.get(group)
+                    if master is None:
+                        raise ValueError("Missing shared formula master")
+                    cell["shared_formula"] = (master, row, col)
+            if not visible:
+                cell = None
+                continue
             while len(rows) < row:
                 rows.append([])
             while len(rows[row - 1]) < col:
@@ -158,11 +187,14 @@ def _shared(package, part, wanted, view):
     return values
 
 
-def _display(cell, shared, styles, date1904, view):
+def _display(cell, shared, styles, date1904, view, compiled):
     if cell is None:
         return ""
     kind, value, formula = cell["type"], cell["value"], cell["formula"]
-    if formula and not value:
+    if "shared_formula" in cell:
+        master, row, col = cell["shared_formula"]
+        formula = master.at(row, col, compiled)
+    if formula and not value and not cell.get("cached_string"):
         view.notices.add("Some cells show formulas because the file has no stored results.")
         return "=" + formula
     if kind == "s":
@@ -229,11 +261,13 @@ def project_workbook(source: bytes) -> bytes:
             rows = rows[:count]
         cells_left -= width * (len(rows) + 1)
         for row in rows:
-            wanted.update(int(cell["value"]) for cell in row if cell and cell["type"] == "s")
+            wanted.update(int(cell["value"]) for cell in row if cell and cell["type"] == "s" and cell["value"])
         sheets.append((data.get("name", "Unnamed sheet"), rows))
     shared = _shared(package, strings_part, wanted, view) if strings_part and wanted else {}
+    # Keep parsed expressions only for this workbook, after the cell budget is applied.
+    compiled = lru_cache(maxsize=16)(compile_formula)
     for name, rows in sheets:
-        values = [[_display(cell, shared, styles, date1904, view) for cell in row] for row in rows]
+        values = [[_display(cell, shared, styles, date1904, view, compiled) for cell in row] for row in rows]
         if not view.table(values, "Sheet: " + name):
             break
     view.notices.add("Pictures, charts, embedded objects and workbook layout are outside this preview.")

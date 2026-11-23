@@ -13,7 +13,8 @@ it in the file panel. Download retrieves the complete original file.
 
 - A workbook shows up to 200 rows and 12 columns per visible worksheet, within
   a shared 5,000-cell budget. Formula cells show their saved value when present
-  and their formula text when a saved result is missing.
+  and their formula text when a saved result is missing. If Excel stores a
+  formula once for a range, each cell shows its own adjusted references.
 - A Word document shows its body text, lists and tables in reading order.
 - A slide deck shows the text and speaker notes of up to 60 visible slides.
 

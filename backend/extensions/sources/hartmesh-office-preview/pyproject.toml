@@ -1,6 +1,6 @@
 [project]
 name = "hartmesh-office-preview"
-version = "0.1.0"
+version = "0.1.1"
 description = "Read-only Office document presentations"
 requires-python = ">=3.12"
 dependencies = ["deerflow-extension-api>=0.2.5,<0.3"]

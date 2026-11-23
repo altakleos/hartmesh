@@ -85,13 +85,13 @@ def test_passive_documents_match_the_browser_corpus(projections, kind, suffix, s
 
 
 @pytest.mark.skipif(os.name == "nt", reason="descriptor-relative artifact reads require POSIX")
-@pytest.mark.parametrize("owner", [True, False])
-def test_workbook_via_authorized_artifact_route(monkeypatch, tmp_path, owner):
+@pytest.mark.parametrize(("owner", "shared_formula"), [(True, False), (False, False), (True, True)])
+def test_workbook_via_authorized_artifact_route(monkeypatch, tmp_path, owner, shared_formula):
     paths = paths_module.Paths(tmp_path)
     monkeypatch.setattr(paths_module, "_paths", paths)
     directory = paths.sandbox_outputs_dir("office-chat", user_id=get_effective_user_id())
     directory.mkdir(parents=True)
-    source = workbook()
+    source = workbook(cells='<c r="A1"><f t="shared" si="0" ref="A1:B1">C1+$D$2</f></c><c r="B1"><f t="shared" si="0"/></c>') if shared_formula else workbook()
     (directory / "sample.xlsx").write_bytes(source)
     app = make_authed_test_app(owner_check_passes=owner)
     app.state.extensions, diagnostics = load_extensions([ExtensionSpec(use=ENTRY, required=True)])
@@ -109,7 +109,10 @@ def test_workbook_via_authorized_artifact_route(monkeypatch, tmp_path, owner):
     assert preview.headers["x-artifact-projection"] == "office-workbook-v1"
     assert preview.headers["etag"] == '"' + hashlib.sha256(source).hexdigest() + '"'
     assert int(preview.headers["x-artifact-source-bytes"]) == len(source)
-    assert preview.json() == json.loads((GOLDEN / "workbook.json").read_bytes())
+    if shared_formula:
+        assert preview.json()["blocks"][0]["rows"] == [["=C1+$D$2", "=D1+$D$2"]]
+    else:
+        assert preview.json() == json.loads((GOLDEN / "workbook.json").read_bytes())
     assert download.content == source
 
 
@@ -290,3 +293,55 @@ def test_package_installed_and_template_entry_optional():
     for entry in entries:
         spec = ExtensionSpec.model_validate(entry)
         assert spec.enabled and not spec.required and spec.use == ENTRY and spec.package == name
+
+
+def test_shared_formula_followers_display_their_own_expression(projections):
+    source = workbook(
+        rows=(
+            '<row r="1"><c r="A1"><f t="shared" si="0" ref="A1:C2">SUM(A1:$C$4,$B1,A$1)</f></c>'
+            '<c r="B1"><f t="shared" si="0"/><v/></c><c r="C1"><f t="shared" si="0"/><v>0</v></c></row>'
+            '<row r="2"><c r="B2"><f t="shared" si="0"/></c><c r="C2"><f>1+2</f></c></row>'
+        )
+    )
+    view = json.loads(projections["workbook"](source))
+    assert view["blocks"][0]["rows"] == [
+        ["=SUM(A1:$C$4,$B1,A$1)", "=SUM(B1:$C$4,$B1,B$1)", "0"],
+        ["", "=SUM(B2:$C$4,$B2,B$1)", "=1+2"],
+    ]
+    assert "formula" in notice(view)
+
+
+def test_hidden_shared_formula_anchor_and_reference_syntax(projections):
+    source = workbook(
+        rows=(
+            '<row r="1" hidden="1"><c r="A1"><f t="shared" si="3" ref="A1:B2">'
+            """SUM(A:A,$2:3,'Q1''s A1'!A1,Table1[[Q1]:[A1]],"A1",LOG10(A1),Rate_A1,Rate?A1,CaféA1,A1:B1!C1)"""
+            '</f></c></row><row r="2"><c r="B2"><f t="shared" si="3"/></c></row>'
+        )
+    )
+    view = json.loads(projections["workbook"](source))
+    assert view["blocks"][0]["rows"] == [["", ""], ["", """=SUM(B:B,$2:4,'Q1''s A1'!B2,Table1[[Q1]:[A1]],"A1",LOG10(B2),Rate_A1,Rate?A1,CaféA1,A1:B1!D2)"""]]
+
+
+def test_missing_shared_formula_anchor_is_reported(projections):
+    with pytest.raises(ValueError, match="shared formula"):
+        projections["workbook"](workbook(cells='<c r="A1"><f t="shared" si="3"/></c>'))
+
+
+def test_shared_formula_saved_string_and_defined_name(projections):
+    source = workbook(cells=('<c r="A1" t="str"><f t="shared" si="01" ref="A1:C1">SUM(A1:Tax)</f><v/></c><c r="B1" t="str"><f t="shared" si="1"/><v/></c><c r="C1" t="s"><f t="shared" si="1"/></c>'))
+    assert json.loads(projections["workbook"](source))["blocks"][0]["rows"] == [["", "", "=SUM(C1:Tax)"]]
+
+
+def test_long_shared_formula_is_translated_before_display_truncation(projections):
+    expression = '"A1 ' + "x" * 4100 + '"'
+    source = workbook(cells=f'<c r="A1"><f t="shared" si="0" ref="A1:B1">{expression}</f></c><c r="B1"><f t="shared" si="0"/></c>')
+    view = json.loads(projections["workbook"](source))
+    assert view["blocks"][0]["rows"] == [[("=" + expression)[:4096]] * 2]
+    assert "long text" in notice(view)
+
+
+def test_shared_formula_grid_edges_and_intersections(projections):
+    source = workbook(cells='<c r="A1"><f t="shared" si="0" ref="A1:B1">SUM(XFD9,XFE9,A1 (B2:C3),A1 [@Amount],D : E)</f></c><c r="B1"><f t="shared" si="0"/></c>')
+    view = json.loads(projections["workbook"](source))
+    assert view["blocks"][0]["rows"][0][1] == "=SUM(#REF!,XFE9,B1 (C2:D3),B1 [@Amount],E : F)"
