@@ -138,13 +138,12 @@ committing.
 creates parent, group and controls atomically; exact replay reuses identities.
 The supervisor constructs these services after resolving default repositories.
 
-`human_input.py` composes finite clarification/form/network interactions with the
-existing turn controller and sender; it owns no scheduler. What would answer a card takes
-`_waiting_source`: only Telegram input closes a card, so a newer run in the conversation
-means it went on from the web, and the card refuses. Closing one needs no such check.
-Instance network cards use the bound publication scope to explain that temporary site
-access covers all of the agent’s conversations and assignments. They require current Manage at planning, the SDK limiter
-and the action writer; [network admission](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-network-cards).
+`human_input.py` uses the existing turn controller and sender for clarification,
+forms and network cards without a scheduler. Only Telegram input closes a card.
+Before answering, `_waiting_source` checks for a newer run. Closing skips that check.
+Instance site prompts use the publication scope to explain that temporary access
+covers all conversations and assignments. Planning, the SDK limiter and the action
+writer check current Manage. See [network admission](../../docs/TELEGRAM_TURN_EXECUTION.md#instance-network-cards).
 `network_denials.py` qualifies dropped denials from exact-run artifacts and complete
 inventory. `network_notices.py` saves button-free V8 trailers with their primary;
 delivery requires its acknowledgement and fresh scope/manager wording checks.
