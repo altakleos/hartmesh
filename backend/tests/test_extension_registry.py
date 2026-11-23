@@ -115,6 +115,7 @@ def test_rollback_restores_all_registration_buckets_positionally():
     mark = registry.mark()
     with registry.attributed_to("drop:install"):
         registry.middlewares(_Contributor("drop-middleware"))
+        registry.web_chat_middlewares(_Contributor("drop-web-middleware"))
         registry.task_lifecycle(_Contributor("drop-lifecycle"))
         registry.system_model_observer(_Contributor("drop-observer"))
         registry.service(_Contributor("drop-service"))
@@ -124,6 +125,7 @@ def test_rollback_restores_all_registration_buckets_positionally():
     loaded = registry.build()
 
     assert [contributor.tag for _, contributor in loaded.middleware_contributors] == ["keep"]
+    assert loaded.web_chat_middleware_contributors == ()
     assert loaded.task_lifecycle == ()
     assert loaded.system_model_observers == ()
     assert loaded.services == ()
@@ -151,6 +153,7 @@ def test_discard_removes_every_entry_of_one_source():
         registry.task_lifecycle(keep)
     with registry.attributed_to("bad:install"):
         registry.middlewares(drop)
+        registry.web_chat_middlewares(drop)
         registry.system_model_observer(drop)
         registry.service(drop)
         registry.routers((drop,))
@@ -158,6 +161,7 @@ def test_discard_removes_every_entry_of_one_source():
     loaded = registry.build()
     assert loaded.middleware_contributors == (("good:install", keep),)
     assert loaded.task_lifecycle == (("good:install", keep),)
+    assert loaded.web_chat_middleware_contributors == ()
     assert loaded.system_model_observers == ()
     assert loaded.services == ()
     assert loaded.routers == ()
