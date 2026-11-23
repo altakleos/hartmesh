@@ -164,7 +164,8 @@ scope is unclear, clarify before writing. A temporary request affects this
 report only: use `--summary-length standard` to contradict saved `short`, or
 `--prefs-override <v1-json>` for other fields. Override fields and collections
 replace saved values; omitted fields remain. CLI flags then take precedence;
-`--exclude` appends. Saved bytes and revision remain unchanged.
+`--exclude` appends. Open the saved preference count on a report preview to see
+which saved choices applied to that draft, even after the defaults change. Saved bytes and revision remain unchanged.
 
 Use the validated [preferences operations](references/preferences.md) to read,
 save, patch or reset. Do not write the saved file directly. A successful save

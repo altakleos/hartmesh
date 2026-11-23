@@ -193,3 +193,27 @@ def test_override_only_evidence_survives_prose_and_render(tmp_path, capsys):
     assert (_report_path(out).parent / "preferences-used.json").read_bytes() == original
     assert report.main(["render", str(_report_path(out)), "--to", "html"]) == 0
     assert (_report_path(out).parent / "preferences-used.json").read_bytes() == original
+
+
+def test_preview_discloses_only_saved_choices_used_for_this_draft(settings, tmp_path, capsys):
+    from .test_report import LARGE_CSV, _load_script, _report_path
+
+    report = _load_script()
+    path = tmp_path / "settings.json"
+    saved = {"version": 1, "summary_length": "short", "exclusions": ["category=Warranty"], "brand": {"primary": "#224466"}, "currency": "USD"}
+    settings.mutate(path, "save", saved, expected="missing", operation="save")
+    override = tmp_path / "temporary.json"
+    override.write_text('{"version":1,"summary_length":"standard"}', encoding="utf-8")
+    out = tmp_path / "report"
+    assert report.main(["build", str(LARGE_CSV), "--period", "2026-08", "--out", str(out), "--prefs", str(path), "--prefs-override", str(override), "--currency", "USD"]) == 0
+
+    def preference_fact():
+        view = json.loads(_report_path(out).with_suffix("").with_suffix(".view.json").read_bytes())
+        return next(item for block in view["blocks"] if block["type"] == "facts" for item in block["items"] if item["value"] == "2 saved preferences")
+
+    fact = preference_fact()
+    assert "#224466" in fact["detail"] and "category = Warranty" in fact["detail"]
+    assert "short" not in fact["detail"] and "USD" not in fact["detail"] and str(path) not in fact["detail"]
+    path.unlink()
+    assert report.main(["prose", str(_report_path(out)), "--summary", "Prepared from supplied records."]) == 0
+    assert preference_fact() == fact

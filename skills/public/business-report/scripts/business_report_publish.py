@@ -199,7 +199,9 @@ def publish_bundle(root: Path, base: str, report: dict, targets: list[str], tena
         # Only files successfully staged for this exact draft become exports.
         view_path = stage / f"{base}{VIEW_SUFFIX}"
         try:
-            content = serialize_view(report, path.name, sorted(set(names)))
+            receipt = stage / "preferences-used.json"
+            preferences = json.loads(receipt.read_bytes()) if receipt.is_file() else None
+            content = serialize_view(report, path.name, sorted(set(names)), preferences)
             if not isinstance(content, bytes) or len(content) > MAX_BYTES:
                 raise ValueError("Preview bytes exceed the supported presentation limit.")
             view_path.write_bytes(content)
