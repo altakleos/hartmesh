@@ -1,4 +1,7 @@
-Current head `0056_upstream_adoption` joins HartMesh's published
+Current head `0057_run_cancel_actor_kind` appends a nullable run column for
+first-accepted conversation Stop attribution. Old rows keep an unspecified role.
+
+`0056_upstream_adoption` joins HartMesh's published
 `0053_work_operation_indexes` and upstream `0055_thread_shares` without DDL.
 Upstream0053 approvals,0054 project memory and0055 share tables retain their
 original ancestry; schema availability does not enable deferred runtime/routes.

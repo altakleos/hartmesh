@@ -254,6 +254,28 @@ async def test_bound_batch_task_uses_the_explicit_app_config(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_bound_batch_submission_tells_the_requester_the_conversation_is_busy(monkeypatch):
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY
+
+    runtime = _runtime()
+    runtime.context[AGENT_EXECUTION_CONTEXT_KEY] = object()
+    submitter = AsyncMock()
+    submitter.submit.return_value = {"id": "job", "status": "queued", "total_items": 1}
+    monkeypatch.setattr(tool_module, "get_available_subagent_names", lambda **_: ["general-purpose"])
+    monkeypatch.setattr(tool_module, "get_subagent_config", lambda *args, **kwargs: SubagentConfig(name="general-purpose", description="General purpose"))
+    tool = next(tool for tool in tool_module.bind_batch_tools(submitter) if tool.name == "batch_task")
+    command = await tool.coroutine(
+        runtime=runtime,
+        title="Check one item",
+        items=[BatchTaskItem(key="one", prompt="Check the item")],
+        subagent_type="general-purpose",
+        tool_call_id="submit",
+        continuation="Summarize",
+    )
+    assert "this conversation is busy" in _message(command).content.lower()
+
+
+@pytest.mark.asyncio
 async def test_bound_batch_tools_do_not_fall_back_after_runtime_stops(monkeypatch) -> None:
     fallback = AsyncMock()
     monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: fallback)

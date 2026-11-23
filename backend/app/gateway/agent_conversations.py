@@ -65,6 +65,7 @@ async def require_run_cancellation(request, record):
     actor = await _actor(request)
     permission = AgentPermission.USE if record.user_id == actor.subject_id else AgentPermission.MANAGE
     await require_conversation(request, record.thread_id, permission=permission)
+    return actor.subject_id
 
 
 def guard_response(request, response):

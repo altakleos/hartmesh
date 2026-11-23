@@ -64,6 +64,7 @@ class RunRow(Base):
     # A non-owning worker records cancellation here; the owner consumes it
     # while renewing its lease. The first action wins.
     cancel_action: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    cancel_actor_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))

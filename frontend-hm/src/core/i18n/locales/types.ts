@@ -1299,6 +1299,9 @@ export interface Translations {
     jobState: Record<"waiting" | "working" | "done" | "ended", string>;
     jobReasons: Record<string, string>;
     finishedChecks: (finished: number, total: number) => string;
+    conversationBusy: string;
+    deadlineSummary: (count: number) => string;
+    itemDeadline: string;
     unavailableNotice: (finished: number, total: number) => string;
     openPanel: string;
     askAgain: string;
@@ -1949,6 +1952,7 @@ export interface Translations {
       };
       title: string;
       description: string;
+      agentGrantScope: string;
       adminRequired: string;
       empty: string;
       addServer: string;

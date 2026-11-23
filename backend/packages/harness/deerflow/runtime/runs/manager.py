@@ -2464,15 +2464,19 @@ class RunManager:
         run_id: str,
         *,
         action: str,
+        requested_by: str | None = None,
     ) -> tuple[CancelOutcome, str | None]:
         """Record cancellation and return the first action that won."""
         if self._store is None:
             return CancelOutcome.unknown, None
+        attribution = {}
+        if requested_by is not None and getattr(self._store, "supports_cancel_attribution", False) is True:
+            attribution["requested_by"] = requested_by
         try:
             winning_action = await self._call_store_with_retry(
                 "request_cancel",
                 run_id,
-                lambda: self._store.request_cancel(run_id, action=action),
+                lambda: self._store.request_cancel(run_id, action=action, **attribution),
             )
         except NotImplementedError:
             # Keep third-party stores that predate durable cancellation on the
@@ -2523,11 +2527,13 @@ class RunManager:
         run_id: str,
         *,
         action: str,
+        requested_by: str | None = None,
     ) -> CancelOutcome:
         """Record cancellation for a run whose task belongs to another worker."""
         outcome, _ = await self._request_durable_cancel(
             run_id,
             action=action,
+            requested_by=requested_by,
         )
         return outcome
 
@@ -2552,7 +2558,7 @@ class RunManager:
                 record.task.cancel()
         logger.info("Run %s cancellation signalled locally (action=%s)", run_id, action)
 
-    async def _cancel_capture(self, record: RunRecord, *, action: str) -> CancelOutcome:
+    async def _cancel_capture(self, record: RunRecord, *, action: str, requested_by: str | None) -> CancelOutcome:
         if type(action) is not str or action not in {"interrupt", "rollback"}:
             raise ValueError("Unsupported cancellation action")
         if record.startup_phase is RunStartupPhase.closed:
@@ -2561,10 +2567,10 @@ class RunManager:
         if record.terminal_confirmed and record.status.value in TERMINAL_STATUSES:
             return CancelOutcome.cancelled if record.status is RunStatus.interrupted else CancelOutcome.not_cancellable
         with self._capture_control(record):
-            return await self._cancel_capture_owned(record, action=action)
+            return await self._cancel_capture_owned(record, action=action, requested_by=requested_by)
 
-    async def _cancel_capture_owned(self, record: RunRecord, *, action: str) -> CancelOutcome:
-        outcome, winning = await self._request_durable_cancel(record.run_id, action=action)
+    async def _cancel_capture_owned(self, record: RunRecord, *, action: str, requested_by: str | None) -> CancelOutcome:
+        outcome, winning = await self._request_durable_cancel(record.run_id, action=action, requested_by=requested_by)
         if outcome not in {CancelOutcome.requested, CancelOutcome.unknown}:
             return outcome
         task_to_cancel = None
@@ -2601,15 +2607,15 @@ class RunManager:
             raise ConflictError("Run unavailable")
         await self._store.request_cancel(run_id, action="interrupt", execution_fence=execution_fence, user_id=user_id)
 
-    async def cancel(self, run_id: str, *, action: str = "interrupt") -> CancelOutcome:
+    async def cancel(self, run_id: str, *, action: str = "interrupt", requested_by: str | None = None) -> CancelOutcome:
         """Cancel under the original local owner or a finite host lifetime."""
         record = self._runs.get(run_id)
         if record is not None and self._capture_lifetime(record) is not None:
-            return await self._cancel_with_local_authority(run_id, action=action)
+            return await self._cancel_with_local_authority(run_id, action=action, requested_by=requested_by)
         async with self._maintenance_control():
-            return await self._cancel_with_local_authority(run_id, action=action)
+            return await self._cancel_with_local_authority(run_id, action=action, requested_by=requested_by)
 
-    async def _cancel_with_local_authority(self, run_id: str, *, action: str) -> CancelOutcome:
+    async def _cancel_with_local_authority(self, run_id: str, *, action: str, requested_by: str | None) -> CancelOutcome:
         """Request cancellation of a run.
 
         When the call lands on the owning worker the run is cancelled
@@ -2645,7 +2651,7 @@ class RunManager:
         async with self._run_registry_lock(run_id):
             captured = self._runs.get(run_id)
         if captured is not None and self._captures_output(captured):
-            return await await_drained(self._cancel_capture(captured, action=action))
+            return await await_drained(self._cancel_capture(captured, action=action, requested_by=requested_by))
         durable_owner = self._store is not None and (self.heartbeat_enabled or getattr(self._store, "supports_terminal_recovery", False) is True)
         async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
@@ -2660,6 +2666,7 @@ class RunManager:
             outcome, winning_action = await self._request_durable_cancel(
                 run_id,
                 action=action,
+                requested_by=requested_by,
             )
             if outcome == CancelOutcome.requested:
                 action = winning_action or action
@@ -2768,7 +2775,7 @@ class RunManager:
         lease_expires_at: str | None = row.get("lease_expires_at")
 
         if not is_lease_expired(lease_expires_at, grace_seconds=grace_seconds):
-            return await self._request_remote_cancel(run_id, action=action)
+            return await self._request_remote_cancel(run_id, action=action, requested_by=requested_by)
 
         take_over_msg = f"Run reclaimed by worker {self._worker_id}: the owning worker ({row.get('owner_worker_id') or 'unknown'}) stopped renewing its lease and is presumed dead."
         try:
@@ -2831,7 +2838,7 @@ class RunManager:
             return CancelOutcome.not_cancellable
         # Row is still active — lease was renewed by the owner while the
         # takeover raced. Notify that owner instead of exposing routing as 409.
-        return await self._request_remote_cancel(run_id, action=action)
+        return await self._request_remote_cancel(run_id, action=action, requested_by=requested_by)
 
     def _compute_lease_expires_at(self) -> str | None:
         """Return the lease expiry ISO timestamp for a freshly created run.

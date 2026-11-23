@@ -105,7 +105,10 @@ no customer-facing storage notice exposes byte capacities or pool terminology.
    durable history visible in read-only mode for inspection and JSONL export,
    while deployments with neither a worker nor history keep the trigger hidden.
    The panel renders bounded progress and incrementally paged item previews, controls pause/resume/cancel,
-   retries failed items, and exports JSONL. Worker-dependent mutations stay
+   retries failed items, and exports JSONL. Agent job notices use the owner-visible
+   follow-up state, deadline count and stop reason. Refresh that state when an
+   instance turn ends so a new job's busy notice can appear before idle polling.
+   Worker-dependent mutations stay
    disabled in read-only history mode, and persisted progress is normalized to
    a bounded percentage before reaching the UI primitive. Item pagination uses a
    fixed page size and an explicit load-more control; full results remain available

@@ -62,6 +62,9 @@ export function ThreadSubagentBatches({
   const batches = batchesQuery.isError ? [] : (batchesQuery.data ?? []);
   const newest = batches[0];
   const activeCount = batches.filter(isActiveSubagentBatch).length;
+  const activeJob =
+    newest?.follow_up?.state === "waiting" ||
+    newest?.follow_up?.state === "working";
 
   const hasVisibleSurface =
     repositoryAvailable &&
@@ -74,6 +77,16 @@ export function ThreadSubagentBatches({
 
   return (
     <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
+      {noticeContainer &&
+        accountId &&
+        workerRunning &&
+        activeJob &&
+        createPortal(
+          <p role="status" className="bg-muted mb-2 rounded-md p-3 text-sm">
+            {t.subagentBatches.conversationBusy}
+          </p>,
+          noticeContainer,
+        )}
       {noticeContainer &&
         accountId &&
         newest?.follow_up?.state === "ended" &&
@@ -283,6 +296,9 @@ function BatchCard({
             ? t.subagentBatches.jobReasons[followUp.reason]
             : ""}{" "}
           {t.subagentBatches.finishedChecks(followUp.finished, followUp.total)}
+          {followUp.timed_out
+            ? ` ${t.subagentBatches.deadlineSummary(followUp.timed_out)}`
+            : null}
         </p>
       )}
       {!followUp &&
@@ -388,7 +404,7 @@ function BatchItems({
         <BatchItemRow
           key={item.id}
           item={item}
-          showRetry={!batch.follow_up}
+          conversationJob={!!batch.follow_up}
           workerRunning={workerRunning && !batch.read_only}
           retrying={retry.isPending && retry.variables === item.id}
           onRetry={() => retry.mutate(item.id)}
@@ -415,18 +431,24 @@ function BatchItems({
 
 function BatchItemRow({
   item,
-  showRetry,
+  conversationJob,
   workerRunning,
   retrying,
   onRetry,
 }: {
   item: SubagentBatchItem;
-  showRetry: boolean;
+  conversationJob: boolean;
   workerRunning: boolean;
   retrying: boolean;
   onRetry: () => void;
 }) {
   const { t } = useI18n();
+  const error =
+    conversationJob &&
+    item.status === "cancelled" &&
+    item.stop_reason === "time_limit"
+      ? t.subagentBatches.itemDeadline
+      : item.error;
   return (
     <div className="bg-muted/40 rounded-lg p-2 text-xs">
       <div className="flex items-center justify-between gap-2">
@@ -440,10 +462,8 @@ function BatchItemRow({
           {item.result_preview}
         </p>
       )}
-      {item.error && (
-        <p className="text-destructive mt-1 break-words">{item.error}</p>
-      )}
-      {showRetry && item.status === "failed" && (
+      {error && <p className="text-destructive mt-1 break-words">{error}</p>}
+      {!conversationJob && item.status === "failed" && (
         <Button
           type="button"
           size="sm"

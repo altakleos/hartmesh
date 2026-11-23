@@ -1679,6 +1679,8 @@ export function createEnUS(product: string): Translations {
         interrupted:
           "Work was interrupted. You can ask for a new reply using the saved results.",
         cancelled: "The job was stopped.",
+        stopped_by_requester: "Stopped by you.",
+        stopped_by_manager: "Stopped by a manager.",
         source_ended: "The original request stopped.",
         start_timeout: "The job could not start within the allowed time.",
         time_limit: "The job reached its time limit.",
@@ -1695,6 +1697,10 @@ export function createEnUS(product: string): Translations {
       },
       finishedChecks: (finished, total) =>
         `${finished} of ${total} checks finished.`,
+      conversationBusy: "This conversation is busy until the large job ends.",
+      deadlineSummary: (count) =>
+        `Time limit reached. ${count === 1 ? "1 check did" : `${count} checks did`} not finish in time.`,
+      itemDeadline: "This check did not finish before the time limit.",
       unavailableNotice: (finished, total) =>
         `This large job was cancelled before it finished. Large jobs were unavailable. ${finished} of ${total} checks finished. You can read the results in Batches. Nothing more will run for this job.`,
       openPanel: "Open Batches",
@@ -2439,7 +2445,10 @@ export function createEnUS(product: string): Translations {
             n === 1 ? "Connected. 1 tool." : `Connected. ${n} tools.`,
         },
         title: "Tools",
-        description: "Connect outside systems for your company’s chats.",
+        description:
+          "Personal chats, custom agents and schedules use their configured connections.",
+        agentGrantScope:
+          "Personal AI assistants and AI employees use the company connections granted on their Access tab. A grant covers conversations, assignments, work started by approved packages and the final reply for an unattended large job. The agent can call the service without asking for permission each time.",
         adminRequired: "Admin privileges are required to manage MCP tools.",
         empty: "No MCP tools configured.",
         addServer: "Add server",

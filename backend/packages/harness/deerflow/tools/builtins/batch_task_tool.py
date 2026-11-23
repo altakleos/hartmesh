@@ -305,7 +305,13 @@ async def batch_task(
         return _result(tool_call_id, content=f"Batch submission failed: {exc}", error=True)
     if context.get(AGENT_EXECUTION_CONTEXT_KEY) is not None:
         return _result(
-            tool_call_id, batch=batch, content=f"Job {batch['id']} accepted with {batch['total_items']} checks. Finish this turn. The agent will run the checks in this conversation and use the saved results for the requested reply."
+            tool_call_id,
+            batch=batch,
+            content=(
+                f"Job {batch['id']} accepted with {batch['total_items']} checks. "
+                "Tell the requester that the checks will run here after this reply, this conversation is busy until the job ends, "
+                "and the saved results will be used for the requested reply. Finish this turn."
+            ),
         )
     return _result(
         tool_call_id,

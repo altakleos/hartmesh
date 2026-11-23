@@ -199,8 +199,15 @@ class SubagentBatchRepository(BoundBatchDispatch, BoundBatchItems):
             return await self._with_counts(session, batch)
 
     async def _counts(self, session: AsyncSession, batch_id: str) -> Counter[str]:
-        rows = await session.execute(select(SubagentBatchItemRow.status, func.count()).where(SubagentBatchItemRow.batch_id == batch_id).group_by(SubagentBatchItemRow.status))
-        return Counter({status: int(count) for status, count in rows})
+        item = SubagentBatchItemRow
+        timed_out = func.count().filter(item.status == "cancelled", item.stop_reason == "time_limit")
+        rows = await session.execute(select(item.status, func.count(), timed_out).where(item.batch_id == batch_id).group_by(item.status))
+        counts = Counter()
+        for status, total, missed_deadline in rows:
+            counts[status] = int(total)
+            if missed_deadline:
+                counts["timed_out"] = int(missed_deadline)
+        return counts
 
     async def _with_counts(self, session: AsyncSession, batch: SubagentBatchRow) -> dict[str, Any]:
         counts = await self._counts(session, batch.id)

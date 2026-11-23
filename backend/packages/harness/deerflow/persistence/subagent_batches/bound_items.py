@@ -28,12 +28,16 @@ class BoundBatchItems:
                 return None
             end = deadline(batch, datetime.now(UTC), work_seconds)
             counts = await self._counts(session, batch.id)
+            timed_out_positions = []
+            if counts["timed_out"]:
+                timed_out_positions = list(await session.scalars(select(Item.position).where(Item.batch_id == batch.id, Item.status == "cancelled", Item.stop_reason == "time_limit").order_by(Item.position)))
             return {
                 **self._execution_batch_dict(batch),
                 "subagent_type": batch.subagent_type,
                 "continuation": batch.continuation_json,
                 "counts": dict(counts),
                 "unfinished": sum(counts[status] for status in UNFINISHED),
+                "timed_out_positions": timed_out_positions,
                 "max_running_items": batch.max_running_items,
                 "items_deadline": end,
             }
