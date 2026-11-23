@@ -71,6 +71,7 @@ class LocalSandboxProvider(SandboxProvider):
     """
 
     uses_thread_data_mounts = True
+    uses_personal_and_shared_mounts = True
     needs_upload_permission_adjustment = False
 
     @property

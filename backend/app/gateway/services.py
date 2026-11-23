@@ -33,7 +33,7 @@ from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNA
 from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
 from app.gateway.channel_execution import CHANNEL_TURN_ID_KEY, ChannelExecutionProofError, ChannelExecutionReceipt, ChannelExecutionRequest, receipt_from_run_kwargs
 from app.gateway.channel_execution_reads import channel_lookup_unavailable, live_channel_human
-from app.gateway.company_connection_runs import PACKAGE_MESSAGE_KEY, PACKAGE_TURN_KEY, admitted_connection_origin, package_name_for_turn, stamp_package_turn
+from app.gateway.company_connection_runs import PACKAGE_MESSAGE_KEY, PACKAGE_TURN_KEY, admitted_connection_origin, admitted_web_chat_request, package_name_for_turn, stamp_package_turn
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.internal_auth import (
@@ -48,7 +48,7 @@ from app.gateway.run_origin import resolve_request_origin
 from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.human_input import read_human_input_response
-from deerflow.agents.interaction_policy import resolve_run_interaction_policy
+from deerflow.agents.interaction_policy import RunInteractionMode, resolve_run_interaction_policy
 from deerflow.agents.language import ui_locale
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
@@ -102,7 +102,7 @@ from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
 from deerflow.runtime.keyed_lock import KeyedLockTable
-from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
+from deerflow.runtime.presented_files import PRESENTED_BY_KEY, PRESENTED_FILES_KEY, RUNTIME_PRESENTED_FILES_CONTEXT_KEY
 from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
 from deerflow.runtime.runs.capture_io import CaptureIOClosed, capture_io_scope, current_capture_io_owner, run_capture_io
 from deerflow.runtime.runs.naming import resolve_root_run_name
@@ -200,6 +200,8 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             PACKAGE_MESSAGE_KEY,
             SHARED_HISTORY_KEY,
             "imported_files",
+            PRESENTED_FILES_KEY,
+            PRESENTED_BY_KEY,
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
@@ -3005,6 +3007,17 @@ async def _start_run(
                 raise HTTPException(status_code=403, detail=str(exc)) from None
             run_ctx = replace(run_ctx, agent_mcp_authority=agent_authority)
 
+        if (
+            admitted_web_chat_request(request)
+            and instance_execution is None
+            and origin is None
+            and scheduled_task_runtime is None
+            and publication is None
+            and capture_intent is None
+            and not getattr(request.state, "durable_batch_followup", False)
+            and resolve_run_interaction_policy(config).mode is RunInteractionMode.INTERACTIVE
+        ):
+            run_ctx = replace(run_ctx, web_chat_lead=True)
         if scheduled_task_runtime is not None:
             run_ctx = replace(run_ctx, scheduled_task_runtime=dict(scheduled_task_runtime))
         conversation_references = list(getattr(body, "conversation_references", None) or [])

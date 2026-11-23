@@ -882,6 +882,8 @@ class RunContext:
     scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
     # Host-only preflight under durable run ownership; failures reject execution.
     verify_artifacts: Any | None = field(default=None)
+    # Set only by the Gateway for an admitted ordinary web conversation.
+    web_chat_lead: bool = False
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -1355,6 +1357,8 @@ async def _run_agent(
     )
 
     extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
+    # Runtime and delegated tasks retain the unmodified installation snapshot.
+    lead_extensions = extensions.for_web_chat_lead() if ctx.web_chat_lead else extensions
     task_store: ExtensionData | None = None
     task_info: TaskInfo | None = None
     deferred_finalization_interrupt: BaseException | None = None
@@ -1817,7 +1821,7 @@ async def _run_agent(
                 logger.warning("Run admission hook failed for %s (non-fatal)", run_id, exc_info=True)
 
         task_id = lead_task_id(run_id)
-        if extensions.needs_task_store:
+        if lead_extensions.needs_task_store:
             identity = TaskInfo(
                 task_id=task_id,
                 run_id=run_id,
@@ -2055,7 +2059,7 @@ async def _run_agent(
         from deerflow.extensions import bind_agent_build_extensions
         from deerflow.runtime.assembly_evidence import capture_assembly, project_assembly_evidence
 
-        with bind_agent_build_extensions(extensions), bind_customer_administration_policy(ctx.customer_administration_policy or DENIED_CUSTOMER_ADMINISTRATION), capture_assembly():
+        with bind_agent_build_extensions(lead_extensions), bind_customer_administration_policy(ctx.customer_administration_policy or DENIED_CUSTOMER_ADMINISTRATION), capture_assembly():
             # Assemble off-loop: agent construction re-enters
             # get_available_tools(), which may block on MCP cache
             # initialization — it must not stall the calling event loop

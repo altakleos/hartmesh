@@ -381,6 +381,10 @@ removing its messages and workspace files. A failed deletion keeps the dialog
 open for retry. Copies already kept in My Files or Shared are independent of
 the conversation.
 
+Business reports can split weekly or monthly revenue by technician or provider.
+The chart and editable table use the same filtered rows. Rebuilds in a private
+chat workspace can reuse a parsed spreadsheet after rereading its source bytes.
+
 Business reports retain source precision in their numeric data and Excel formulas,
 rounding monetary values only for display. Malformed amount cells are reported as
 unreadable instead of having digits silently extracted. Conflicting currencies
@@ -393,7 +397,7 @@ Default actions prioritize review of any computed warnings before acting on
 the figures; clean reports still offer business suggestions.
 See the [business-report guide](skills/public/business-report/SKILL.md). Saved report preferences now use validated, revision-checked
 read/save/patch/reset operations. Qualified AI employee Home retains them across
-conversations; one-report overrides preserve saved defaults. Independent procedure
+conversations; one-report overrides preserve saved defaults. Open the saved preference count in a report preview to see which choices applied to that draft. Independent procedure
 and supplier examples plus an optional human-input plugin exercise the same
 platform capabilities. See [consumer qualification and its evidence limits](docs/AI_EMPLOYEE_QUALIFICATION.md).
 
@@ -402,7 +406,10 @@ Historical report cards and their filing policy are supplied by the provider-ins
 [compatibility package](backend/extensions/sources/hartmesh-legacy-report/README.md). The
 distribution includes it in the locked extensions group; the example configuration
 explicitly enables it. Existing operator configurations must add its `plugins:` entry
-and restart to retain rich cards. Disable or remove it through the normal extension
+and restart to retain rich cards. The package also checks the latest delivered
+report draft on the next ordinary web chat turn. If its live My files or Shared input has changed,
+the reply names the file and offers a rebuild. Conversation attachments and imported
+copies keep their original bytes. Disable or remove the package through the normal extension
 lifecycle; the original report and downloads remain usable.
 
 

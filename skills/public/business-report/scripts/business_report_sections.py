@@ -38,6 +38,7 @@ WEEK_BUCKET_LIMIT_DAYS = 62
 TABLE_ROW_LIMIT = 25  # group tables list this many entries, then one "Other" row
 
 
+TREND_PEOPLE_LIMIT = 6  # additional people share one labelled series
 CHART_BAR_LIMIT = 12  # bars per chart, then one "Other" bar
 
 
@@ -245,7 +246,12 @@ def build_report(ctx: BuildContext, previous_draft: int, compute_checks) -> tupl
         section = builder(ctx, state)
         if section is not None:
             sections.append(section)
+            if section_id == "by_period" and "revenue_by_person_over_time" in charts:
+                sections.append(_person_trend_section(ctx, state, charts["revenue_by_person_over_time"]))
     wanted = options.charts
+    if options.trend_by_person:
+        selected = charts if wanted is None else wanted
+        wanted = [chart for chart in selected if chart not in {"revenue_by_period", "revenue_by_person_over_time"}] + ["revenue_by_person_over_time"]
     if wanted is not None:
         for missing in sorted(set(wanted) - charts.keys()):
             notes.append(f"Requested chart {missing} is unavailable for these inputs and profile.")
@@ -387,6 +393,51 @@ def _section_comparison(ctx: BuildContext, state: dict) -> dict | None:
     return {"id": "comparison", "heading": "Compared with earlier periods", "table": {"columns": columns, "formats": formats, "rows": table_rows, "totals": None, "row_formats": row_formats}}
 
 
+def _person_trend(ctx, labelled, order, unit):
+    person = vocab(ctx.profile, "person", "person")
+    people = vocab(ctx.profile, "people", person + "s")
+    totals = labelled.groupby("person")["amount"].agg(_amount_sum).sort_values(ascending=False, kind="stable")
+    series = []
+    for name in totals.index[:TREND_PEOPLE_LIMIT]:
+        rows = labelled.loc[labelled["person"] == name]
+        amounts = rows.groupby("bucket")["amount"].agg(_amount_sum)
+        series.append({"name": name, "values": [number(amounts.get(bucket, 0)) for bucket in order]})
+    if len(totals) > TREND_PEOPLE_LIMIT:
+        tail = totals.index[TREND_PEOPLE_LIMIT:]
+        rows = labelled.loc[labelled["person"].isin(tail)]
+        amounts = rows.groupby("bucket")["amount"].agg(_amount_sum)
+        other = f"Other ({len(tail)} {plural(len(tail), person, people)})"
+        # A literal person name may match the generated group label.
+        while other in totals.index[:TREND_PEOPLE_LIMIT]:
+            other += " (combined)"
+        series.append({"name": other, "values": [number(amounts.get(bucket, 0)) for bucket in order]})
+    return {
+        "type": "line",
+        "x": unit.lower(),
+        "y": "revenue",
+        "title": f"{capitalize(vocab(ctx.profile, 'amount', 'revenue'))} by {unit.lower()} and {person}",
+        "format": "currency",
+        "labels": order,
+        "series": series,
+    }
+
+
+def _person_trend_section(ctx, state, chart):
+    # The same retained values back the editable workbook table and graphics.
+    table_rows = [[bucket, series["name"], series["values"][i]] for i, bucket in enumerate(chart["labels"]) for series in chart["series"]]
+    return {
+        "id": "person_trend",
+        "heading": chart["title"],
+        "table": {
+            "columns": [capitalize(chart["x"]), capitalize(vocab(ctx.profile, "person", "person")), "Revenue"],
+            "formats": ["text", "text", "currency"],
+            "rows": table_rows,
+            "totals": ["Total", "", number(state["revenue"])],
+        },
+        "charts": ["revenue_by_person_over_time"],
+    }
+
+
 def _section_by_period(ctx: BuildContext, state: dict) -> dict | None:
     rows = state["rows"]
     if not len(rows):
@@ -410,6 +461,8 @@ def _section_by_period(ctx: BuildContext, state: dict) -> dict | None:
         "labels": [row[0] for row in table_rows],
         "values": [row[2] or 0 for row in table_rows],
     }
+    if state["has"]["person"] and (ctx.options.trend_by_person or "revenue_by_person_over_time" in (ctx.options.charts or [])):
+        state["charts"]["revenue_by_person_over_time"] = _person_trend(ctx, labelled, order, unit)
     return {
         "id": "by_period",
         "heading": f"By {unit.lower()}",

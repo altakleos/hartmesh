@@ -287,6 +287,42 @@ test("a unique presented sibling view is preferred while canonical source stays 
   await expect(card).toHaveCount(0);
 });
 
+test("a long fact disclosure stays inside a narrow card and opens with the keyboard", async ({
+  page,
+}) => {
+  const value = "A".repeat(600);
+  const card = await openView(page, {
+    body: JSON.stringify({
+      ...fixture,
+      blocks: [
+        {
+          type: "facts",
+          items: [
+            {
+              label: "Choices",
+              value,
+              detail: "Applied to this draft\nCurrency: EUR",
+            },
+          ],
+        },
+      ],
+    }),
+  });
+  const summary = card.locator("summary").filter({ hasText: value });
+  await expect(summary).toBeVisible();
+  await card.evaluate((node) => {
+    node.style.maxWidth = "288px";
+  });
+  expect(
+    await card.evaluate((node) => node.scrollWidth - node.clientWidth),
+  ).toBeLessThanOrEqual(1);
+  await summary.focus();
+  await page.keyboard.press("Enter");
+  await expect(card.getByText(/Currency: EUR/)).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(card.getByText(/Currency: EUR/)).toBeHidden();
+});
+
 test("actual skill output uses one passive presentation and explicit report exports", async ({
   page,
 }) => {
