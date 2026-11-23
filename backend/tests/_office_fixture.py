@@ -36,7 +36,7 @@ def zip_parts(files):
     return output.getvalue()
 
 
-def workbook(*, cells=None, shared=None):
+def workbook(*, cells=None, shared=None, rows=None):
     types = "application/vnd.openxmlformats-officedocument.spreadsheetml."
     main = "xl/workbook.xml"
     rels = [("rId1", "worksheet", "worksheets/sheet1.xml")]
@@ -48,13 +48,15 @@ def workbook(*, cells=None, shared=None):
         overrides["xl/strings.xml"] = types + "sharedStrings+xml"
     if cells is None:
         cells = '<c r="A1" t="inlineStr"><is><t>Apples</t></is></c><c r="B1"><v>12</v></c>'
+    if rows is None:
+        rows = f'<row r="1">{cells}</row>'
     return archive(
         main,
         types + "sheet.main+xml",
         {
             main: f'<workbook xmlns="{X}" xmlns:r="{REL}"><sheets><sheet name="Samples" sheetId="1" r:id="rId1"/></sheets></workbook>',
             "xl/_rels/workbook.xml.rels": relationships(*rels),
-            "xl/worksheets/sheet1.xml": f'<worksheet xmlns="{X}"><sheetData><row r="1">{cells}</row></sheetData></worksheet>',
+            "xl/worksheets/sheet1.xml": f'<worksheet xmlns="{X}"><sheetData>{rows}</sheetData></worksheet>',
             **parts,
         },
         overrides,
