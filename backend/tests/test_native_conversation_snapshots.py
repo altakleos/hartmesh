@@ -165,3 +165,53 @@ async def test_managed_member_links_require_current_grants_and_exact_publication
         refused = await client.get(href, params={"download": download})
         assert refused.status_code == 410 and "no longer available" in refused.text
     assert (await client.get(plain)).content == data
+
+
+@pytest.mark.asyncio
+async def test_shared_writer_at_admission_yields_to_snapshot_publish_and_removal(feature_app, monkeypatch):
+    from deerflow.spaces import workflows
+    from deerflow.spaces.service import SpaceOperationPending
+
+    client, app, _, catalog, _, alice, *_ = feature_app
+    native_request(app)
+    app.include_router(shared_conversations.router)
+    company = next(volume for volume in catalog.verified.values() if volume.spec.kind == "company")
+    app.state.thread_store.get = AsyncMock(return_value={"thread_id": THREAD, "user_id": str(alice.id), "incarnation": "original"})
+    monkeypatch.setattr(snapshot_publication, "read_conversation", AsyncMock(return_value=SimpleNamespace(title="Meeting", messages=[{"type": "human", "content": "Notes"}])))
+
+    @asynccontextmanager
+    async def reserve(*_, **__):
+        yield
+
+    monkeypatch.setattr(snapshot_publication, "get_run_manager", lambda req: SimpleNamespace(reserve_thread_operation=reserve))
+    prefix = "/api/shared-conversations"
+    draft = await client.get(prefix + "/draft", params={"thread_id": THREAD})
+    assert draft.status_code == 200, draft.text
+    body = {"thread_id": THREAD, "snapshot": draft.json()["snapshot"]}
+    real_open = workflows._open
+    held = []
+    conflicts = []
+
+    def release_after_contended_read(volume, **kwargs):
+        try:
+            return real_open(volume, **kwargs)
+        except SpaceOperationPending:
+            if held and kwargs.get("shared"):
+                conflicts.append(True)
+                workflows.close(held)
+                held.clear()
+            raise
+
+    # Let the real read and writer contend, then release the writer as its
+    # first busy result returns. The retry must repeat current admission.
+    monkeypatch.setattr(workflows, "_open", release_after_contended_read)
+    try:
+        held.extend(workflows.acquire({"company": company}))
+        published = await client.post(prefix, json=body)
+        assert published.status_code == 201, published.text
+        held.extend(workflows.acquire({"company": company}))
+        removed = await client.delete(prefix + "/" + published.json()["publication_id"])
+        assert removed.status_code == 200, removed.text
+        assert len(conflicts) == 2
+    finally:
+        workflows.close(held)

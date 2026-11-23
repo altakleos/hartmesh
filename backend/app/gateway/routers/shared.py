@@ -38,7 +38,9 @@ from deerflow.config.paths import USER_FILES_VIRTUAL_PREFIX, VIRTUAL_PATH_PREFIX
 from deerflow.files import SharedFile, SharedFileError, digest_of, list_shared_files, normalize_relative_path, publish_file, remove_shared_file, resolve_shared_file, resolve_user_file, shared_file_holding
 from deerflow.files.shared import shared_mutation_state
 from deerflow.files.shared_attribution import SharedPublicationChanged, observed_file, stage_observed, visible_records
+from deerflow.files.shared_removals import SharedMutationBusy
 from deerflow.files.store import DescriptorSource, SafeFileAccessUnavailable
+from deerflow.spaces.workflows import caller_retries_storage_locks
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -65,12 +67,23 @@ async def _recover_removals(repo, state) -> None:
 
 @asynccontextmanager
 async def _shared_mutation(repo):
-    async with _publish_lock:
+    retry = caller_retries_storage_locks.get()
+    busy = HTTPException(409, {"code": "storage-busy", "message": "Shared is busy"})
+    try:
+        # With an outer budget, acquire immediately or let the caller retry.
+        # Cancelling a queued lock waiter cannot interrupt an admitted write.
+        async with asyncio.timeout(0 if retry else None):
+            await _publish_lock.acquire()
+    except TimeoutError:
+        raise busy from None
+    try:
         state = await asyncio.to_thread(shared_mutation_state)
         try:
             try:
-                await await_drained(asyncio.to_thread(state.acquire))
+                await await_drained(asyncio.to_thread(state.acquire, blocking=not retry))
                 await await_drained(_recover_removals(repo, state))
+            except SharedMutationBusy:
+                raise busy from None
             except SafeFileAccessUnavailable as exc:
                 raise HTTPException(status_code=501, detail=str(exc)) from None
             except Exception:
@@ -79,6 +92,8 @@ async def _shared_mutation(repo):
             yield state
         finally:
             await await_drained(asyncio.to_thread(state.close))
+    finally:
+        _publish_lock.release()
 
 
 class SharedFileInfo(BaseModel):
