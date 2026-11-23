@@ -7,6 +7,9 @@ class SubagentBatchesConfig(BaseModel):
     """Durable batch scheduler limits and recovery settings."""
 
     enabled: bool = Field(default=False)
+    agent_max_items: int = Field(default=50, ge=1, le=50)
+    agent_max_work_seconds: int = Field(default=900, ge=1, le=900)
+    agent_max_start_wait_seconds: int = Field(default=3600, ge=1, le=3600)
     poll_interval_seconds: float = Field(default=1.0, ge=0.1, le=60.0)
     lease_seconds: int = Field(default=120, ge=10, le=3600)
     max_items_per_batch: int = Field(default=5_000, ge=1, le=100_000)

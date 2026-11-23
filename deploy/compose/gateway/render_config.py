@@ -1043,6 +1043,13 @@ def render(
     if name is not None:
         ui["product_name"] = name
     document["ui"] = ui
+    batch_mode = environ.get("HARTMESH_BATCHES", "off")
+    if batch_mode not in {"on", "off"}:
+        raise RenderError("HARTMESH_BATCHES must be `on` or `off`")
+    batches = _mapping(document.get("subagent_batches", {}), "template `subagent_batches`")
+    if "enabled" in batches:
+        raise RenderError("template `subagent_batches.enabled` must be absent; use HARTMESH_BATCHES")
+    document["subagent_batches"] = {**batches, "enabled": batch_mode == "on"}
     connection_mode = environ.get(AGENT_CONNECTIONS_ENV, "on")
     if connection_mode not in {"on", "off"}:
         raise RenderError(f"{AGENT_CONNECTIONS_ENV} must be `on` or `off`")

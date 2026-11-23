@@ -19,6 +19,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 from pydantic import BaseModel, Field, StrictInt
 
+from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
@@ -297,10 +298,15 @@ async def batch_task(
                 continuation=continuation,
                 continuation_authority=context.get(AGENT_RUNS_CONTEXT_KEY),
                 continuation_context=continuation_context if continuation else None,
+                agent_execution=context.get(AGENT_EXECUTION_CONTEXT_KEY),
             )
         )
     except Exception as exc:
         return _result(tool_call_id, content=f"Batch submission failed: {exc}", error=True)
+    if context.get(AGENT_EXECUTION_CONTEXT_KEY) is not None:
+        return _result(
+            tool_call_id, batch=batch, content=f"Job {batch['id']} accepted with {batch['total_items']} checks. Finish this turn. The agent will run the checks in this conversation and use the saved results for the requested reply."
+        )
     return _result(
         tool_call_id,
         batch=batch,
@@ -310,6 +316,25 @@ async def batch_task(
             + "Do not launch ordinary task calls for these items."
         ),
     )
+
+
+async def _outside_agent_thread(submitter, runtime, batch_id, *, record=None):
+    from deerflow.agent_instances.conversations import AgentExecution
+
+    context = runtime.context if runtime is not None and isinstance(runtime.context, dict) else {}
+    execution = context.get(AGENT_EXECUTION_CONTEXT_KEY)
+    if record is None:
+        if not isinstance(execution, AgentExecution) and getattr(submitter, "accepts_continuation_authority", False) is not True:
+            return False
+        record = await submitter.get_batch(batch_id=batch_id, user_id=resolve_runtime_user_id(runtime))
+    if not record:
+        return True
+    if not isinstance(execution, AgentExecution):
+        return record.get("read_only") is True
+    if execution.batch_mode is None or record.get("thread_id") != execution.thread_id:
+        return True
+    await execution.validate()
+    return False
 
 
 @tool("batch_status", parse_docstring=True)
@@ -326,7 +351,7 @@ async def batch_status(runtime: Runtime, batch_id: str) -> str:
     if submitter is None:
         return "Durable subagent batches are unavailable."
     batch = await submitter.get_batch(batch_id=batch_id, user_id=resolve_runtime_user_id(runtime))
-    if batch is None:
+    if batch is None or await _outside_agent_thread(submitter, runtime, batch_id, record=batch):
         return "Batch not found."
     return json.dumps(
         {
@@ -349,13 +374,15 @@ async def cancel_batch(runtime: Runtime, batch_id: str) -> str:
     submitter = _batch_submitter()
     if submitter is None:
         return "Durable subagent batches are unavailable."
+    if await _outside_agent_thread(submitter, runtime, batch_id):
+        return "Batch not found."
     context = runtime.context if runtime is not None and isinstance(runtime.context, dict) else {}
     # Only submitters that run follow-ups take the caller's run authority.
     authority = {"continuation_authority": context.get(AGENT_RUNS_CONTEXT_KEY)} if getattr(submitter, "accepts_continuation_authority", False) else {}
     batch = await submitter.cancel_batch(batch_id=batch_id, user_id=resolve_runtime_user_id(runtime), **authority)
     if batch is None:
         return "Batch not found."
-    if batch.get("read_only") is True:
+    if batch.get("read_only") is True and batch.get("continuation_status") != "cancelled":
         return "This batch is read-only."
     return f"Batch {batch_id} cancellation requested."
 

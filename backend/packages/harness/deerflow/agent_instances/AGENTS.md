@@ -392,3 +392,9 @@ proposal from sibling effects and conditionally ends the real agent loop before
 another model call. A bare Command END does not override create_agent's outgoing
 tool edge. Fallback and Just answer keep normal model continuation. Artifact and
 exact current-turn issuer/call/draft proof gate termination; old cards do not.
+
+An admitted conversation job carries its item runner only in the lead run's
+execution environment. Before the first model call, the lead claims and stores
+items against its exact run and uses the normal isolated helper and Home
+acceptance checker. A persisted final-turn decision follows terminal items.
+The helper's environment receives its own restricted authority and workspace.

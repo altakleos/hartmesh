@@ -55,9 +55,11 @@ work. Standalone harness hosts with mutable accounts can supply the same
 
 Follow-up needs a session-authorized Gateway AgentRuns capability or local auth-disabled
 mode. Internal/PAT callers and unsupported embedded runtimes retain ordinary batches.
-HartMesh permits followups only from ordinary chats. Work attempts, instance
-conversations, output capture, channels and schedules require their own admission
-and cannot register a followup. Saved role/OAuth identity must still match at
+An interactive AI assistant or employee conversation can register one large job when
+batches and its helper tools are enabled. Its items run inside the newly admitted
+follow-up, with the requester's current permission to use the agent and that agent's
+workspace. Work attempts, output capture, packages, channels and schedules cannot
+register a large job. A helper cannot recursively submit one. Saved role/OAuth identity must still match at
 restoration and each host call; changed identity, account refusal or revocation
 suppresses the followup. The original owner check also applies before dispatch.
 Customer-management policy stays denied through extension-started descendants.
@@ -71,6 +73,25 @@ with a follow-up also require `runs:cancel`. Trusted internal cleanup retains it
 path. Claim ownership/expiry lives only in the existing execution-lease table.
 Completed item results remain available. The Web panel discovers follow-up Runs
 through existing observers; refresh never launches work. Chat Stop remains available.
+
+## Large jobs in agent conversations
+
+The batch owner keeps the item list, results and export. The panel reads the
+server's `follow_up` state and `controls`. Recognized scoped records retain
+`read_only` for earlier clients. Only the advertised Cancel is available to
+the owner with current thread access, Use and the cancellation permission.
+An agent manager can stop the running turn through normal Run cancellation.
+A startup cancellation can draw a dismissible notice above the owner's composer.
+The notice belongs to the viewer's browser and is outside the conversation history.
+
+Jobs have up to 50 checks, 15 minutes of work and one hour to start. After loss,
+one replacement can finish outstanding checks inside the recovery window.
+Once all checks have ended, reconcile a durably completed final turn or stop
+as interrupted. A new request from the person can use the retained results.
+The final turn can use the agent's connections without the person present.
+An interrupted external call has an unknown effect and is never replayed by
+restarting that final turn. See the Compose guide for the startup switch and
+the pre-disable listing and cancellation command.
 
 ## Upgrade and verification
 

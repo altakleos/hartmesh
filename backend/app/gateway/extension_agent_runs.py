@@ -332,14 +332,21 @@ class _BoundAgentRuns:
     async def start(self, *, thread_id, input, context=None, idempotency_key=None, execution_fence=None, artifact_imports=None) -> AgentRun:
         return await self._start(thread_id=thread_id, input=input, context=context, idempotency_key=idempotency_key, execution_fence=execution_fence, artifact_imports=artifact_imports)
 
-    async def start_batch_followup(self, *, thread_id, batch_id, input, context, config, execution_fence, goal_wakeup=None):
+    async def start_batch_followup(self, *, thread_id, batch_id, input, context, config, execution_fence, goal_wakeup=None, idempotency_key=None):
         """Native single follow-up; the existing SQL admission fences cancellation."""
         from app.gateway.run_models import RunCreateRequest
         from app.gateway.services import resolve_thread_assistant_id, start_run
         from deerflow.subagents.batch_runtime import BATCH_CONTINUATION_NAMESPACE, batch_continuation_key
 
-        if self._origin != make_origin("subagent_batch") or execution_fence.namespace != BATCH_CONTINUATION_NAMESPACE or execution_fence.resource_id != batch_id:
+        if not self._durable_followup or self._plugin_namespace is not None or self._origin != make_origin("subagent_batch") or execution_fence.namespace != BATCH_CONTINUATION_NAMESPACE or execution_fence.resource_id != batch_id:
             raise AgentRunError(403, "Invalid native batch continuation")
+        key = batch_continuation_key(batch_id)
+        if idempotency_key is not None:
+            from deerflow.persistence.subagent_batches.bound import BoundBatchExecutionFence
+
+            if not isinstance(execution_fence, BoundBatchExecutionFence) or idempotency_key not in (key, key + ":replacement"):
+                raise AgentRunError(403, "Invalid agent job generation")
+            key = idempotency_key
         async with self._request("runs:create", thread_id) as request:
             request.state.extension_execution_fence = execution_fence
             assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=True)
@@ -351,7 +358,7 @@ class _BoundAgentRuns:
                 metadata={"batch_goal_wakeup": _json_object(goal_wakeup)} if goal_wakeup is not None else None,
                 on_disconnect="continue",
             )
-            record = await start_run(body, thread_id, request, idempotency_key=batch_continuation_key(batch_id), require_existing_thread=True)
+            record = await start_run(body, thread_id, request, idempotency_key=key, require_existing_thread=True)
             return _view(record)
 
     async def resume(self, *, thread_id, resume, idempotency_key=None) -> AgentRun:

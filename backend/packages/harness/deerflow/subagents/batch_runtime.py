@@ -36,6 +36,7 @@ class BatchSubmitRequest:
     continuation: str | None = None
     continuation_authority: Any = None
     continuation_context: dict[str, Any] | None = None
+    agent_execution: Any = None
 
 
 class SubagentBatchSubmitter(Protocol):

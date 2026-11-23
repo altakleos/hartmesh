@@ -11,13 +11,15 @@ from fastapi import FastAPI
 from starlette.responses import StreamingResponse
 from test_agent_conversations import conversations
 from test_agent_instances import create
-from test_agent_instances import instances as instances
+from test_agent_instances import instances as instances_fixture
 
 from deerflow.agent_instances.contract import AgentPermission
 from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentProtectedContextRow
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+instances = instances_fixture
 
 
 def app_for(agents, authority, threads, monkeypatch, *, actor=BOB, permissions=None):
@@ -326,3 +328,35 @@ async def test_title_search_uses_current_inspect_grants_for_another_requesters_c
         response = await client.post("/api/search", json=query)
         assert response.status_code == 200
         assert response.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_use_only_requester_can_cancel_a_bound_job_without_gaining_other_controls(instances, monkeypatch):
+    from app.gateway.routers import subagent_batches
+
+    agents, authority, threads, sf = await conversations(instances)
+    agent = await create(agents, custody="company", supervisor=BOB)
+    chat = await authority.create(actor=BOB, instance_id=agent.id, creation_id=operation())
+    thread_id = chat["thread_id"]
+    async with sf.begin() as session:
+        (await session.get(AgentInstanceGrantRow, (agent.id, "bob"))).permissions = int(AgentPermission.USE)
+    row = {"id": "mine", "thread_id": thread_id, "read_only": True, "controls": ["cancel"], "continuation_status": "dispatched"}
+
+    async def owned(batch_id, *, user_id):
+        return row if (batch_id, user_id) == ("mine", "bob") else None
+
+    for ceiling in (True, False):
+        permissions = ["threads:read", "threads:write", "agents:read"] + (["runs:cancel"] if ceiling else [])
+        app = app_for(agents, authority, threads, monkeypatch, permissions=permissions)
+        app.include_router(subagent_batches.router)
+        app.state.subagent_batches_available = True
+        app.state.subagent_batch_repo = SimpleNamespace(get_batch=owned)
+        app.state.subagent_batch_service = SimpleNamespace(cancel_batch=AsyncMock(return_value=row))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", cookies={"access_token": "fixture"}) as client:
+            prefix = f"/api/threads/{thread_id}/subagent-batches"
+            detail = await client.get(f"{prefix}/mine")
+            assert detail.status_code == 200 and detail.json()["controls"] == (["cancel"] if ceiling else [])
+            assert (await client.post(f"{prefix}/other/cancel")).status_code == 404
+            assert (await client.post(f"{prefix}/mine/pause")).status_code == 404
+            assert (await client.post(f"{prefix}/mine/cancel")).status_code == (200 if ceiling else 403)
+            assert app.state.subagent_batch_service.cancel_batch.await_count == int(ceiling)

@@ -6,6 +6,7 @@ import socket
 import uuid
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -147,6 +148,7 @@ class SubagentBatchService:
     accepts_continuation_authority = True
 
     # Also used by focused shutdown tests constructing an instance via __new__.
+    _claim_agent_jobs = None
     _stopping: bool = False
     _stop_drains: int = 0
     _stop_cleanup_task: asyncio.Task[None] | None = None
@@ -161,7 +163,8 @@ class SubagentBatchService:
         execution_capacity: SubagentExecutionCapacity | None = None,
         extensions: LoadedExtensions | None = None,
         owner_access: Callable[[dict[str, Any]], Awaitable[bool]] | None = None,
-        classify_submission: Callable[[BatchSubmitRequest], Awaitable[None]] | None = None,
+        classify_submission: Callable[[BatchSubmitRequest], Awaitable[dict | None]] | None = None,
+        claim_agent_jobs=None,
         prepare_continuation=None,
         dispatch_continuation=None,
         cancel_continuation=None,
@@ -187,6 +190,7 @@ class SubagentBatchService:
         self._execution_ids: dict[str, str] = {}
         self._item_batches: dict[str, str] = {}
         self._classify_submission = classify_submission
+        self._claim_agent_jobs = claim_agent_jobs
         self._prepare_continuation = prepare_continuation
         self._dispatch_continuation = dispatch_continuation
         self._cancel_continuation = cancel_continuation
@@ -275,7 +279,11 @@ class SubagentBatchService:
     async def run_once(self, *, now: datetime) -> None:
         if self._dispatch_continuation is not None:
             owner = f"{self._lease_owner[:80]}:{uuid.uuid4().hex}"
-            for batch in await self._repository.claim_continuations(now=now, lease_owner=owner, lease_seconds=self._config.lease_seconds, exclude_batch_ids=tuple(self._continuations)):
+            claim_args = dict(now=now, lease_owner=owner, lease_seconds=self._config.lease_seconds, exclude_batch_ids=tuple(self._continuations))
+            batches = await self._repository.claim_continuations(**claim_args)
+            if self._claim_agent_jobs is not None:
+                batches.extend(await self._claim_agent_jobs(**claim_args, start_wait_seconds=self._config.agent_max_start_wait_seconds))
+            for batch in batches:
                 task = asyncio.create_task(self._continue_batch(batch, owner), name=f"subagent-batch-followup-{batch['id']}")
                 self._continuations[batch["id"]] = task
                 task.add_done_callback(lambda _, key=batch["id"]: self._continuations.pop(key, None))
@@ -322,10 +330,16 @@ class SubagentBatchService:
             raise ValueError(f"max_running_items must be between 1 and {self._config.max_running_items_per_batch}")
         if max_running > max_live:
             raise ValueError("max_running_items must not exceed max_live_items")
-        if self._classify_submission is not None:
-            await self._classify_submission(request)
         if not is_ordinary_batch_spec(request.execution_spec):
             raise ValueError("The host determines the batch execution scope")
+        if self._classify_submission is not None:
+            scope = await self._classify_submission(request)
+            if scope is not None:
+                # Persist the verified session once, where historical workers
+                # fail closed. Helper tools and MCP authority are resolved live.
+                private = {"user_role", "oauth_provider", "oauth_id", "is_internal", "channel_user_id", "authz_attributes", "mcp_agent_auth", "mcp_plugins"}
+                spec = {key: value for key, value in request.execution_spec.items() if key not in private}
+                request = replace(request, execution_spec={**spec, "scope": scope})
         continuation = None
         if request.continuation:
             if self._prepare_continuation is None or self._dispatch_continuation is None:
@@ -349,9 +363,13 @@ class SubagentBatchService:
         )
 
     async def _continue_batch(self, batch, owner):
-        if not is_ordinary_batch_spec(batch.get("execution_spec")):
-            return
         try:
+            if not is_ordinary_batch_spec(batch.get("execution_spec")):
+                from deerflow.subagents.batch_scope import known_agent_batch_scope
+
+                if self._claim_agent_jobs is not None and known_agent_batch_scope(batch.get("execution_spec")) is not None:
+                    await self._dispatch_continuation(batch)
+                return
             outcome = await self._dispatch_continuation(batch) if await self._owner_allowed(batch) else {"status": "suppressed"}
             if outcome and outcome.get("status") == "waiting":
                 # A question can stay open for hours: keep the claim until its
@@ -452,20 +470,22 @@ class SubagentBatchService:
         user_id: str,
         continuation_authority: Any = _TRUSTED,
     ) -> dict[str, Any] | None:
-        if continuation_authority is not _TRUSTED:
+        current = None
+        if self._claim_agent_jobs is not None or continuation_authority is not _TRUSTED:
             current = await self._repository.get_batch(batch_id, user_id=user_id)
-            if current is None or current.get("read_only") is True:
+            if current is None:
+                return None
+            if current.get("read_only") is True and (self._claim_agent_jobs is None or "cancel" not in current.get("controls", ())):
                 return current
-            if current.get("continuation_status") is not None:
-                if self._cancel_continuation is None:
-                    raise ValueError("Automatic follow-up requires an authorized Gateway runtime")
-                await self._cancel_continuation(
-                    batch_id,
-                    user_id,
-                    thread_id=current["thread_id"],
-                    authority=continuation_authority,
-                    authorize_only=True,
-                )
+        if continuation_authority is not _TRUSTED and current.get("continuation_status") is not None:
+            if self._cancel_continuation is None:
+                raise ValueError("Automatic follow-up requires an authorized Gateway runtime")
+            await self._cancel_continuation(batch_id, user_id, thread_id=current["thread_id"], authority=continuation_authority, authorize_only=True)
+        if current is not None and current.get("read_only") is True:
+            batch = await self._repository.cancel_bound_batch(batch_id, user_id=user_id)
+            if batch is not None and batch.get("continuation_run_id") and self._cancel_continuation is not None:
+                await self._cancel_continuation(batch_id, user_id, thread_id=batch["thread_id"], bound_run_id=batch["continuation_run_id"])
+            return batch
         batch = await self._repository.cancel_batch(batch_id, user_id=user_id)
         if batch is None:
             return None

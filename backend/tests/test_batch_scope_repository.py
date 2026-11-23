@@ -19,7 +19,9 @@ KNOWN = {"version": 1, "kind": "agent_conversation", "instance_id": "agent-1", "
 
 
 async def seed(repo, key, spec):
-    return await create(repo, [{"key": "a", "prompt": "A"}, {"key": "b", "prompt": "B"}], batch_id=key, submission_key=key, execution_spec=spec, continuation={"prompt": "Summarize", "future": [1, 2]})
+    row = await create(repo, [{"key": "a", "prompt": "A"}, {"key": "b", "prompt": "B"}], batch_id=key, submission_key=key, execution_spec={}, continuation={"prompt": "Summarize", "future": [1, 2]})
+    await change(repo, key, execution_spec=spec)
+    return row
 
 
 async def change(repo, key, **values):
@@ -142,3 +144,17 @@ async def test_locked_startup_reconciliation_yields_and_connection_policy_is_res
         for _ in range(3):
             session = await stack.enter_async_context(repo._sf())
             assert await session.scalar(policy_sql) == original_policy
+
+
+async def test_enabled_recovery_cancels_only_jobs_without_a_carry_record(repo):
+    from app.subagent_batches.recovery import recover_unavailable_batches
+
+    for key, carry in (("legacy", None), ("supported", {"version": 1, "replacements": 0}), ("future", {"version": 4})):
+        await seed(repo, key, {})
+        doc = {"carry": carry} if carry else {}
+        await change(repo, key, execution_spec={"scope": KNOWN}, continuation_json=doc)
+    await recover_unavailable_batches(repo, agent_enabled=True)
+    assert (await repo.get_batch("legacy", user_id="owner"))["status"] == "cancelled"
+    for key in ("supported", "future"):
+        assert not await repo.cancel_unavailable_bound_batch(key, legacy_only=True)
+        assert (await repo.get_batch(key, user_id="owner"))["status"] == "queued"

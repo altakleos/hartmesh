@@ -1,7 +1,7 @@
 """Durable conversation authority and host-owned execution admission."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Literal
@@ -40,12 +40,17 @@ class AgentExecution:
     memory_audience_allowed: bool = True
     work: object | None = field(default=None, compare=False, repr=False)
     connection_origin: ConnectionOrigin | None = None
+    batch_mode: Literal["submit", "results"] | None = None
     _workspace_identity: object = field(default_factory=object, repr=False, compare=False)
 
+    item_step_allowed: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
+
     def for_helper(self):
-        return self if self.connection_origin is None else replace(self, connection_origin=None)
+        return self if self.connection_origin is None and self.batch_mode is None else replace(self, connection_origin=None, batch_mode=None)
 
     async def _validate(self, environment=None):
+        if self.item_step_allowed is not None and not self.item_step_allowed():
+            raise AgentDenied("The job item is no longer running")
         await self.authority.validate(self)
         if environment is not None:
             from deerflow.agent_instances.runtime import require_live_workspace

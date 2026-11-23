@@ -936,13 +936,77 @@ async def task_tool(
             keep the subagent's configured/inherited model. Does not change the
             parent conversation or the saved subagent configuration.
     """
+    return await _execute_delegation(runtime, prompt, subagent_type, tool_call_id, acceptance_criteria=acceptance_criteria, description=description, context_mode=context_mode, model_name=model_name)
+
+
+async def execute_bound_item(state, runtime, item):
+    """Use the same employee helper, workspace and acceptance checker as an interactive delegation."""
+    from langgraph.config import get_config
+
+    from deerflow.agent_instances.contract import AgentDenied
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+    from deerflow.agent_instances.runtime import current_environment
+    from deerflow.community.ragflow.sources import durable_source_artifact
+
+    execution = (runtime.context or {}).get(AGENT_EXECUTION_CONTEXT_KEY)
+    environment = current_environment()
+    if not isinstance(execution, AgentExecution) or environment is None or environment.execution is not execution or environment.provider is None or environment.bound_batch_items is None:
+        raise AgentDenied("The conversation job workspace is unavailable")
+    await execution.validate(environment)
+    call_id = "item-" + item["id"]
+    tool_runtime = Runtime(state=state, context=runtime.context, config=get_config(), stream_writer=runtime.stream_writer, tool_call_id=call_id, store=runtime.store)
+    limits = _get_runtime_app_config(tool_runtime).subagent_batches
+
+    def result_fields(*, status, result=None, error=None, stop_reason=None, model_name=None, usage=None, source_messages=None, acceptance_verdict=None, **_kwargs):
+        text = result or ""
+        stored = text[: limits.max_result_chars]
+        return {
+            "succeeded": status == "completed",
+            "result": stored or None,
+            "result_preview": text[: limits.result_preview_max_chars] or None,
+            "result_truncated": len(stored) < len(text),
+            "result_artifact": durable_source_artifact(source_messages or [], stored, max_chars=limits.max_result_chars),
+            "error": error,
+            "stop_reason": stop_reason,
+            "model_name": model_name,
+            "token_usage": usage,
+            "acceptance_verdict": acceptance_verdict,
+        }
+
+    from dataclasses import replace
+    from threading import Event
+
+    done = Event()
+    record = environment.run_record
+
+    def item_step_allowed():
+        return not done.is_set() and environment.bound_batch_items.items_open() and not record.ownership_lost and not record.abort_event.is_set()
+
+    # Only the helper receives the item lifetime. Its constructor still narrows
+    # the parent's authority and drops its connection origin in for_helper().
+    try:
+        return await _execute_delegation(
+            tool_runtime,
+            item["prompt"],
+            item["batch"]["subagent_type"],
+            call_id,
+            acceptance_criteria=item.get("acceptance_criteria"),
+            description=item["item_key"],
+            result_builder=result_fields,
+            item_execution=replace(execution, item_step_allowed=item_step_allowed),
+        )
+    finally:
+        done.set()
+
+
+async def _execute_delegation(runtime, prompt, subagent_type, tool_call_id, *, acceptance_criteria=None, description="", context_mode="isolated", model_name=None, result_builder=None, item_execution=None):
     from deerflow.runtime.runs.input_control import run_input_control
 
     parent_context = getattr(runtime, "context", None)
     parent_context = parent_context if isinstance(parent_context, dict) else {}
-    input_control = run_input_control(parent_context)
+    input_control = run_input_control(parent_context) if result_builder is None else None
     input_gate = input_control.child(tool_call_id) if input_control is not None else None
-    result_command = partial(_task_result_command, message_id=input_gate.result_id) if input_gate is not None else _task_result_command
+    result_command = partial(_task_result_command, message_id=input_gate.result_id) if input_gate is not None else result_builder or _task_result_command
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
     allowed_subagents = metadata.get("allowed_subagents")
@@ -1159,7 +1223,7 @@ async def task_tool(
         "acceptance_criteria": acceptance_criteria,
     }
     if agent_execution is not None:
-        executor_kwargs["agent_execution"] = agent_execution
+        executor_kwargs["agent_execution"] = item_execution if item_execution is not None else agent_execution
     # Carry the host-captured lifecycle, including legacy None, without
     # inventing a legacy scope for missing context or re-reading thread state.
     if THREAD_INCARNATION_CONTEXT_KEY in parent_context:
@@ -1167,7 +1231,7 @@ async def task_tool(
     if context_snapshot is not None:
         executor_kwargs["context_snapshot"] = context_snapshot
     middleware_recorder = None
-    parent_journal = parent_context.get("__run_journal")
+    parent_journal = parent_context.get("__run_journal") if result_builder is None else None
     if parent_journal is not None:
         # The task tool runs on the parent run's loop. Pass only a proxy across
         # the isolated-subagent boundary so middleware persistence is delivered
@@ -1206,19 +1270,25 @@ async def task_tool(
     logger.info(f"[trace={trace_id}] Started background task {tool_call_id} (execution_id={execution_id}, subagent={subagent_type}, timeout={config.timeout_seconds}s, polling_limit={max_poll_count} polls)")
 
     writer = get_stream_writer()
+
+    async def emit_progress(payload):
+        # Job item prompts and results belong to the owner-only batch view.
+        # Token usage still reaches the run journal through its accounting API.
+        if result_builder is None:
+            await aemit_custom_event(payload, writer=writer)
+
     try:
         # Send Task Started message. This is a real await point (registered
         # handlers run here), so it belongs inside the guarded region: an emit
         # failure must take the same cooperative-cancel + deferred-cleanup
         # path as any other unexpected exit, not leak the background entry.
-        await aemit_custom_event(
+        await emit_progress(
             {
                 "type": "task_started",
                 "task_id": tool_call_id,
                 "description": description or prompt,
                 "model_name": effective_model,
             },
-            writer=writer,
         )
 
         while True:
@@ -1226,9 +1296,8 @@ async def task_tool(
 
             if result is None:
                 logger.error(f"[trace={trace_id}] Task {tool_call_id} execution {execution_id} not found in background tasks")
-                await aemit_custom_event(
+                await emit_progress(
                     {"type": "task_failed", "task_id": tool_call_id, "error": "Task disappeared from background tasks"},
-                    writer=writer,
                 )
                 cleanup_background_task(execution_id)
                 error = f"Task {tool_call_id} disappeared from background tasks"
@@ -1255,7 +1324,7 @@ async def task_tool(
                 # Send task_running event for each new message
                 for i in range(last_message_count, current_message_count):
                     message = ai_messages[i]
-                    await aemit_custom_event(
+                    await emit_progress(
                         {
                             "type": "task_running",
                             "task_id": tool_call_id,
@@ -1265,7 +1334,6 @@ async def task_tool(
                             "usage": usage,
                             "model_name": effective_model,
                         },
-                        writer=writer,
                     )
                     logger.info(f"[trace={trace_id}] Task {tool_call_id} sent message #{i + 1}/{current_message_count}")
                 last_message_count = current_message_count
@@ -1273,7 +1341,7 @@ async def task_tool(
             # Check if task completed, failed, or timed out
             if result.status == SubagentStatus.COMPLETED:
                 _report_subagent_usage(runtime, result)
-                await aemit_custom_event(
+                await emit_progress(
                     {
                         "type": "task_completed",
                         "task_id": tool_call_id,
@@ -1281,7 +1349,6 @@ async def task_tool(
                         "usage": usage,
                         "model_name": effective_model,
                     },
-                    writer=writer,
                 )
                 logger.info(f"[trace={trace_id}] Task {tool_call_id} completed after {poll_count} polls")
                 cleanup_background_task(execution_id)
@@ -1329,7 +1396,7 @@ async def task_tool(
                 )
             elif result.status == SubagentStatus.FAILED:
                 _report_subagent_usage(runtime, result)
-                await aemit_custom_event(
+                await emit_progress(
                     {
                         "type": "task_failed",
                         "task_id": tool_call_id,
@@ -1337,7 +1404,6 @@ async def task_tool(
                         "usage": usage,
                         "model_name": effective_model,
                     },
-                    writer=writer,
                 )
                 logger.error(f"[trace={trace_id}] Task {tool_call_id} failed: {result.error}")
                 cleanup_background_task(execution_id)
@@ -1356,7 +1422,7 @@ async def task_tool(
                 )
             elif result.status == SubagentStatus.CANCELLED:
                 _report_subagent_usage(runtime, result)
-                await aemit_custom_event(
+                await emit_progress(
                     {
                         "type": "task_cancelled",
                         "task_id": tool_call_id,
@@ -1364,7 +1430,6 @@ async def task_tool(
                         "usage": usage,
                         "model_name": effective_model,
                     },
-                    writer=writer,
                 )
                 logger.info(f"[trace={trace_id}] Task {tool_call_id} cancelled: {result.error}")
                 cleanup_background_task(execution_id)
@@ -1379,7 +1444,7 @@ async def task_tool(
                 )
             elif result.status == SubagentStatus.TIMED_OUT:
                 _report_subagent_usage(runtime, result)
-                await aemit_custom_event(
+                await emit_progress(
                     {
                         "type": "task_timed_out",
                         "task_id": tool_call_id,
@@ -1387,7 +1452,6 @@ async def task_tool(
                         "usage": usage,
                         "model_name": effective_model,
                     },
-                    writer=writer,
                 )
                 logger.warning(f"[trace={trace_id}] Task {tool_call_id} timed out: {result.error}")
                 _supervise_terminal_usage_tail(
@@ -1420,14 +1484,13 @@ async def task_tool(
                 logger.error(f"[trace={trace_id}] Task {tool_call_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
-                await aemit_custom_event(
+                await emit_progress(
                     {
                         "type": "task_timed_out",
                         "task_id": tool_call_id,
                         "usage": usage,
                         "model_name": effective_model,
                     },
-                    writer=writer,
                 )
                 # The task may still be running in the background. Signal cooperative
                 # cancellation and schedule deferred cleanup to remove the entry from
@@ -1457,7 +1520,10 @@ async def task_tool(
                 f"[trace={trace_id}] Failed to request cancellation for background task {execution_id} during unwind",
                 exc_info=True,
             )
-        await _finalize_interrupted_subagent(runtime, execution_id, trace_id, max_poll_count)
+        if result_builder is None:
+            await _finalize_interrupted_subagent(runtime, execution_id, trace_id, max_poll_count)
+        else:
+            await _finalize_interrupted_subagent(runtime, execution_id, trace_id, max_poll_count, grace_seconds=_UNEXPECTED_EXIT_GRACE_SECONDS)
         raise
     except Exception:
         # Unexpected poller failure (emit error, status-lookup bug, writer

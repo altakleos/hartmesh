@@ -1296,6 +1296,14 @@ export interface Translations {
   };
 
   subagentBatches: {
+    jobState: Record<"waiting" | "working" | "done" | "ended", string>;
+    jobReasons: Record<string, string>;
+    finishedChecks: (finished: number, total: number) => string;
+    unavailableNotice: (finished: number, total: number) => string;
+    openPanel: string;
+    askAgain: string;
+    switchedOff: string;
+    dismiss: string;
     followUpPending: string;
     followUpStopped: string;
     label: string;

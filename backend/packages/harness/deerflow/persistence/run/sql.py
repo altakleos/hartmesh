@@ -101,8 +101,9 @@ class RunRepository(RunStore):
                 query = query.where(RunRow.user_id == user_id)
             return (await session.execute(query.order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(1))).scalar_one_or_none()
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, on_thread_admission=None) -> None:
         self._sf = session_factory
+        self._on_thread_admission = on_thread_admission
 
     @asynccontextmanager
     async def _terminal_session(self):
@@ -1538,6 +1539,7 @@ class RunRepository(RunStore):
         Returns:
             Tuple of ``(new_run_dict, claimed_run_dicts)``.
         """
+        from deerflow.persistence.subagent_batches.bound import BoundBatchExecutionFence, bind_run_admission
         from deerflow.runtime.runs.manager import ConflictError
 
         now = datetime.now(UTC)
@@ -1578,6 +1580,10 @@ class RunRepository(RunStore):
             if execution_fence is not None:
                 from deerflow.persistence.extension_leases.fence import lock_execution_fence
 
+                if isinstance(execution_fence, BoundBatchExecutionFence) and self._on_thread_admission is None:
+                    raise ConflictError("This run store cannot admit conversation jobs")
+                if self._on_thread_admission is not None:
+                    await bind_run_admission(session, execution_fence, run_id=run_id, thread_id=thread_id, user_id=user_id, key=idempotency_key, origin=values["origin_kind"], metadata=metadata)
                 # ``user_id`` arrives already resolved by the public wrapper.
                 await lock_execution_fence(session, execution_fence, user_id)
             claimed: list[dict[str, Any]] = []
@@ -1588,6 +1594,8 @@ class RunRepository(RunStore):
                 existing = (await session.execute(select(RunRow).where(RunRow.idempotency_key == idempotency_key).with_for_update())).scalar_one_or_none()
                 if existing is not None:
                     raise RunIdempotencyConflict(self._row_to_dict(existing))
+            if self._on_thread_admission is not None:
+                await self._on_thread_admission(session, thread_id=thread_id, admitted_batch=execution_fence.resource_id if isinstance(execution_fence, BoundBatchExecutionFence) else None)
             if multitask_strategy in ("interrupt", "rollback"):
                 stmt = (
                     select(RunRow)

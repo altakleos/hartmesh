@@ -987,8 +987,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             from deerflow.persistence.feedback import FeedbackRepository
             from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
             from deerflow.persistence.run import RunRepository
+            from deerflow.persistence.subagent_batches.bound import advance_thread_generation
 
-            app.state.run_store = RunRepository(sf)
+            app.state.run_store = RunRepository(sf, on_thread_admission=advance_thread_generation)
             app.state.feedback_repo = FeedbackRepository(sf)
             from deerflow.persistence.shared_publications import SharedPublicationRepository
 

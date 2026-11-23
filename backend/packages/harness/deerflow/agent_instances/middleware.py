@@ -32,8 +32,9 @@ def _local_date(messages) -> HumanMessage | None:
 
 
 class InstanceAuthorityMiddleware(AgentMiddleware):
-    def __init__(self, *, require_memory_audience=False, allowed_tool_names=frozenset()):
+    def __init__(self, *, require_memory_audience=False, allowed_tool_names=frozenset(), lead=False):
         super().__init__()
+        self.lead = lead
         self.require_memory_audience = require_memory_audience
         self.allowed_tool_names = allowed_tool_names
 
@@ -70,9 +71,26 @@ class InstanceAuthorityMiddleware(AgentMiddleware):
 
     def before_model(self, state, runtime):
         self._validate_sync(runtime)
+        if self._bound_environment() is not None:
+            raise RuntimeError("Conversation jobs require asynchronous execution.")
+
+    def _bound_environment(self):
+        from deerflow.agent_instances.runtime import current_environment
+
+        environment = current_environment() if self.lead else None
+        return environment if environment is not None and environment.bound_batch_items is not None else None
 
     async def abefore_model(self, state, runtime):
         await self._validate_async(runtime)
+        environment = self._bound_environment()
+        if environment is not None:
+            from functools import partial
+
+            from deerflow.tools.builtins.task_tool import execute_bound_item
+
+            record = environment.run_record
+            await environment.bound_batch_items.run_items(partial(execute_bound_item, state, runtime), stopped=lambda: record.ownership_lost or record.abort_event.is_set())
+            await self._validate_async(runtime)
 
     def _check_tool(self, request):
         name = request.tool_call.get("name")

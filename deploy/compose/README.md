@@ -104,6 +104,7 @@ get explicit `environment:` entries and never see a provider key.
 | `HARTMESH_PROVIDER_KEYS_SECRET` | The wrapping key for provider keys an administrator sets in the product and for the tokens of Telegram bots people connect, at least 32 characters (`openssl rand -base64 32`). Absent -- which is what every existing tenant `.env` is -- nothing changes and the product refuses to store a key, saying why, and no Telegram bot can be added or polled (§ "Telegram bots"). Best supplied from the environment of the `docker compose` command rather than this file, which shares a disk with the database it protects (§ "Provider keys in the product"). |
 | `HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS` | Only while rotating that key: the old value, so keys wrapped under it are read and rewrapped under the new one at the next start (§ "Provider keys in the product"). |
 | `HARTMESH_PRIVATE_ENDPOINTS` | Private endpoints that an MCP connection or a custom model made in the product may use although they are not public: exact `host:port` pairs separated by commas, for example `mcp.internal.example:8443,10.0.4.7:9000`. No wildcard, and the port is always written. Absent -- which is what every existing tenant `.env` is -- none. An entry that is not a `host:port` pair is ignored and logged; it allows nothing and never stops a start. Read at Gateway start (§ "MCP connections"). |
+| `HARTMESH_BATCHES` | `off` (default) or `on`. Enables personal background batches and large jobs in agent conversations. [Limits and pre-disable procedure](#large-jobs-in-conversations). |
 | `HARTMESH_AGENT_CONNECTIONS` | Bundles with this switch accept `on` (default) or `off`. It controls company connection calls by AI assistants and employees. [Operation and rollback](#agent-connection-grants). |
 | `SANDBOX_READY_TIMEOUT` | The cold-start readiness budget, `sandbox.ready_timeout` in the rendered `config.yaml`: whole seconds from 60 to 600. Absent -- which is what every existing tenant `.env` is -- the template's 120 applies. Anything else (zero, a negative or fractional number, text, a value outside the range) refuses to render and the Gateway does not start, so no value can turn the deadline off (§ "Sandbox readiness budget"). |
 | `SANDBOX_CAPACITY_WAIT_TIMEOUT` | How long an acquisition waits for one of the two sandbox slots when both are in active use and nothing is parked to evict, `sandbox.capacity_wait_timeout` in the rendered `config.yaml`: whole seconds from 0 to 60, where 0 refuses at once. Absent, the template's 5 applies. Anything else refuses to render, so no value makes the wait unbounded (§ "Memory budget"). |
@@ -4446,6 +4447,26 @@ before upgrading to see which ones a tenant has.
 
 Rolling back to a release without the rule restores the earlier behaviour for
 every stored connection; the two lines are ignored by an older Gateway.
+
+### Large jobs in conversations
+
+Set `HARTMESH_BATCHES=on` in the tenant environment and recreate the Gateway to enable personal batches and large jobs in conversations with AI assistants and AI employees. An absent setting means `off`. Other values fail configuration rendering. The renderer owns `subagent_batches.enabled`. The shared template sets limits for agent jobs separately from the existing personal worker.
+
+In Ultra mode a large job starts after the requesting reply ends. One job occupies the conversation and a workspace execution slot. It has up to 50 checks, 15 minutes of work, and one hour to start. Personal background batches retain their existing limits and tools. Both kinds can consume additional model tokens. Telegram, assignments and schedules do not start agent jobs.
+
+The checks use the agent's Home and permitted web tools. People with Can chat can ask about files in that Home. The final reply can use the connections the manager granted the agent, including sending information to an external service while the requester is away. Check results, including text from the web, reach that reply. Setting `HARTMESH_AGENT_CONNECTIONS=off` removes those connection tools.
+
+Before switching off or downgrading, pause new submissions and list outstanding jobs. Run these commands in the bundle directory with the current Gateway still running:
+
+```sh
+docker compose exec -T gateway python -m app.subagent_batches.operator list
+docker compose exec -T gateway python -m app.subagent_batches.operator list --after CURSOR
+docker compose exec -T gateway python -m app.subagent_batches.operator cancel BATCH_ID
+```
+
+Follow each non-null `next_after`, including on an empty page. Cancel each selected job and repeat the list to catch concurrent admissions. Cancel revokes future work and preserves finished results. Exit status 2 reports a live follow-up or started checks whose stop could not be confirmed. A sent external action can already have taken effect. Recheck before changing the deployment.
+
+Restore the previous bundle and images together. On the next startup with large jobs unavailable the Gateway cancels recognized outstanding agent work; a database error or startup time limit can defer cancellation to a later start. Ordinary personal batches retain their state. The earlier Gateway offers the batch panel for reading and export. When unfinished checks lose their run, one replacement is possible within an hour of the lost lease. An interrupted final reply leaves the finished checks available. The person can request a new summary.
 
 ### Agent connection grants
 

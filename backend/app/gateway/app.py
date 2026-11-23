@@ -1174,8 +1174,8 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 from app.subagent_batches.identity import resolve_batch_principal
                 from app.subagent_batches.recovery import recover_unavailable_batches
 
-                await recover_unavailable_batches(batch_repo)
-                continuations = BatchContinuations(app)
+                await recover_unavailable_batches(batch_repo, agent_enabled=subagent_batches_config.enabled)
+                continuations = BatchContinuations(app, agent_enabled=subagent_batches_config.enabled, agent_max_items=subagent_batches_config.agent_max_items, agent_work_seconds=subagent_batches_config.agent_max_work_seconds)
                 app.state.batch_continuations = continuations
                 batch_service = SubagentBatchService(
                     repository=batch_repo,
@@ -1184,6 +1184,7 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     extensions=getattr(app.state, "extensions", None),
                     owner_access=batch_owner_allowed,
                     classify_submission=continuations.admit_submission,
+                    claim_agent_jobs=continuations.claim_agent_jobs if subagent_batches_config.enabled else None,
                     prepare_continuation=continuations.prepare,
                     dispatch_continuation=continuations.dispatch,
                     cancel_continuation=continuations.cancel,

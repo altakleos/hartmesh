@@ -1628,7 +1628,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
     if instance_execution:
         from deerflow.agent_instances.runtime import instance_tools
 
-        raw_tools = instance_tools(raw_tools)
+        raw_tools = instance_tools(raw_tools, batch_mode=instance_execution.batch_mode if not cfg.get("is_subagent") else None)
         if instance_execution.work is not None:
             from deerflow.agent_instances.work_tools import read_work_context, report_work
 
@@ -1703,7 +1703,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
             from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
             from deerflow.agents.middlewares.tool_declarations import instance_tool_names, isolate_instance_declarations
 
-            middlewares.insert(0, InstanceAuthorityMiddleware(require_memory_audience=memory_enabled))
+            middlewares.insert(0, InstanceAuthorityMiddleware(require_memory_audience=memory_enabled, lead=True))
             middlewares, external_positions = isolate_instance_declarations(middlewares, external_middlewares, read_only=not instance_execution.execution_allowed)
         middlewares, declared_authorized = narrow_declared_tools(
             middlewares,

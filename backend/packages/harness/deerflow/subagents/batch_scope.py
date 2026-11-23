@@ -12,11 +12,6 @@ class AgentBatchScope:
     token_version: int
 
 
-def can_run_agent_batches() -> bool:
-    """The Gateway currently has no run-bound executor for instance batches."""
-    return False
-
-
 def is_ordinary_batch_spec(spec: object) -> bool:
     return isinstance(spec, dict) and "scope" not in spec
 

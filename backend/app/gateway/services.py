@@ -2705,8 +2705,11 @@ async def _start_run(
         require_existing_thread = True
     origin = resolve_request_origin(request, body.metadata)
     instance_execution = await execution_for_run(request, thread_id, require_ready=work_attempt is None)
-    if instance_execution is not None and getattr(request.state, "durable_batch_followup", False) is True:
-        raise HTTPException(422, "Automatic batch follow-ups are unavailable for instance conversations")
+    agent_job = None
+    if getattr(request.state, "durable_batch_followup", False) is True:
+        from app.subagent_batches.agent_jobs import require_job_execution
+
+        agent_job = require_job_execution(request, instance_execution, origin=origin, thread_id=thread_id, idempotency_key=idempotency_key)
     if work_attempt is not None:
         from deerflow.agent_instances.work_execution import WorkAttempt
 
@@ -2729,7 +2732,13 @@ async def _start_run(
             extensions=getattr(request.app.state, "extensions", None),
             telegram=publication is not None and (body.context or {}).get("channel_name") == "telegram",
         )
-        instance_execution = replace(instance_execution, connection_origin=connection_origin)
+        batch_mode = None
+        if getattr(request.app.state, "subagent_batches_available", False) and getattr(request.state, "auth_source", None) == "session":
+            if agent_job is not None:
+                batch_mode = "results"
+            elif work_attempt is None and scheduled_task_runtime is None and publication is None and origin is None and connection_origin is not None and connection_origin.kind == "message":
+                batch_mode = "submit"
+        instance_execution = replace(instance_execution, connection_origin=connection_origin, batch_mode=batch_mode)
         run_ctx = replace(run_ctx, agent_execution=instance_execution, mcp_task_repo=None, on_run_completed=None)
         if body.multitask_strategy != "reject":
             from app.gateway.agent_conversations import require_conversation
@@ -2947,6 +2956,21 @@ async def _start_run(
                 assistant_id=body.assistant_id,
             )
         admission_run_id = str(uuid.uuid4())
+        if agent_job is not None:
+            from app.subagent_batches.execution import BoundBatchItems
+
+            run_ctx = replace(
+                run_ctx,
+                bound_batch_items=BoundBatchItems(
+                    repository=request.app.state.subagent_batch_repo,
+                    batch_id=agent_job.resource_id,
+                    run_id=admission_run_id,
+                    thread_id=thread_id,
+                    user_id=owner_user_id,
+                    instance_id=instance_execution.instance.id,
+                    work_seconds=request.app.state.batch_continuations.agent_work_seconds,
+                ),
+            )
         package = package_name_for_turn(request, origin) if instance_execution is not None else None
         if package:
             stamp_package_turn(graph_input, run_metadata, package=package, user_id=instance_execution.requester.subject_id, run_id=admission_run_id)
@@ -3351,6 +3375,7 @@ async def _start_run(
                             # config built above keeps the secrets for the actual run.
                             kwargs={
                                 "input": run_record_input,
+                                **({"agent_job_id": agent_job.resource_id} if agent_job is not None else {}),
                                 **({"package_input_hash": knowledge_default_request_hash} if package and idempotency_key else {}),
                                 **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
                                 "config": redact_config_secrets(request_config),
@@ -3385,6 +3410,12 @@ async def _start_run(
 
                 if record.idempotency_reused:
                     stored = record.kwargs or {}
+                    if stored.get("agent_job_id") != (agent_job.resource_id if agent_job is not None else None):
+                        raise HTTPException(409, "Run is already bound to another request")
+                    if agent_job is not None and (
+                        record.user_id != owner_user_id or record.thread_id != thread_id or (record.metadata or {}).get("agent_instance_id") != instance_execution.instance.id or (record.metadata or {}).get(DEERFLOW_ORIGIN_KEY) != origin
+                    ):
+                        raise HTTPException(409, "Run is already bound to another request")
                     _require_same_output_capture(stored, capture_intent)
                     if capture_intent is not None:
                         saved_disconnect = stored.get(OUTPUT_CAPTURE_DISCONNECT_KEY)

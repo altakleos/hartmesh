@@ -43,6 +43,8 @@ async def admit_request(request):
     suffix = parts[3:]
     if request.method == "POST" and suffix in (["runs"], ["runs", "stream"], ["runs", "wait"]):
         permission = AgentPermission.USE
+    if request.method == "POST" and len(suffix) == 3 and suffix[0] == "subagent-batches" and suffix[2] == "cancel":
+        permission = AgentPermission.USE
     if (request.method == "POST" and len(suffix) == 3 and suffix[0] == "runs" and suffix[2] == "cancel") or (len(suffix) == 3 and suffix[0] == "runs" and suffix[2] == "stream"):
         permission = AgentPermission.INSPECT
     if not await require_conversation(request, thread_id, permission=permission):
