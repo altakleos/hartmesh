@@ -7,7 +7,7 @@ import time
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
@@ -33,6 +33,7 @@ class ExecutionEnvironment:
     recycle_required: bool = False
     bound_batch_items: object | None = None
     run_record: object | None = None
+    proposal_calls: dict[tuple[str, str], tuple[str, str]] = field(default_factory=dict)
 
 
 _environment = ContextVar("agent_execution_environment", default=None)

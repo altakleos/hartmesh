@@ -31,9 +31,13 @@ log_level: info
 
 models: []
 
-# Historical report presentation uses the normally installed compatibility package.
-# This provider template explicitly selects it; core does not activate adapters.
+# The distribution selects its installed optional packages here.
 plugins:
+  - name: work-proposals
+    package: hartmesh-work-proposals
+    use: hartmesh_work_proposals:install
+    enabled: true
+    required: false
   - name: legacy-report
     package: hartmesh-legacy-report
     use: hartmesh_legacy_report:install

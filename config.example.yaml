@@ -3844,6 +3844,11 @@ authorization:
 # The product distribution installs this compatibility package through the normal
 # extensions dependency group. Operators can disable/remove it and restart.
 plugins:
+  - name: work-proposals
+    package: hartmesh-work-proposals
+    use: hartmesh_work_proposals:install
+    enabled: true
+    required: false
   - name: legacy-report
     package: hartmesh-legacy-report
     use: hartmesh_legacy_report:install

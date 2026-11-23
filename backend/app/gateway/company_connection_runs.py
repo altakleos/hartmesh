@@ -22,6 +22,43 @@ _INTERACTIVE_ROUTES = {
 }
 
 
+def interactive_proposal_turn(request, body):
+    """Attribute only a fresh, directly submitted human web message."""
+    route = request.scope.get("route") if isinstance(request, Request) else None
+    if not isinstance(route, APIRoute) or (route.endpoint.__module__, route.name) not in _INTERACTIVE_ROUTES or getattr(request.state, "auth_source", None) != AUTH_SOURCE_SESSION:
+        return False
+    if any(getattr(body, field, None) is not None for field in ("command", "checkpoint", "checkpoint_id")):
+        return False
+    messages = (body.input or {}).get("messages")
+    if not isinstance(messages, list) or not messages:
+        return False
+    if not all(isinstance(m, dict) and m.get("role", m.get("type")) in ("human", "user") for m in messages):
+        return False
+    attributes = messages[-1].get("additional_kwargs", {})
+    return isinstance(attributes, dict) and not attributes.get("hide_from_ui") and getattr(request.state, "admitted_queued_human", False) is not True
+
+
+def proposal_account_admission(user):
+    """Recheck the admitted web principal using the borrowed employee transaction."""
+    from app.gateway.deps import get_user_repo
+    from deerflow.agent_instances.contract import AgentDenied
+    from deerflow.config.agents_api_config import get_agents_api_config
+    from deerflow.utils.file_io import run_file_io
+
+    def identity(current):
+        return tuple(getattr(current, key, None) for key in ("id", "token_version", "system_role", "role_limit", "oauth_provider", "oauth_id", "oauth_issuer", "needs_setup", "disabled_at", "released_at"))
+
+    original = identity(user)
+    repository = get_user_repo()
+
+    async def admit(session):
+        current = await repository.get_user_by_id(str(original[0]), session=session) if repository is not None else None
+        if current is None or identity(current) != original or not (await run_file_io(get_agents_api_config)).enabled:
+            raise AgentDenied("The proposal requester's authority changed")
+
+    return admit
+
+
 def package_name_for_turn(request, origin):
     host = admit_origin(getattr(request.state, "run_origin", None))
     return host.get("namespace") if host and host == origin and host["kind"] == "extension" else None

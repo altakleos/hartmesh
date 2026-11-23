@@ -1625,6 +1625,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         app_config=resolved_app_config,
         chat_model=chat_model,
     )
+    resident_proposals = []
     if instance_execution:
         from deerflow.agent_instances.runtime import instance_tools
 
@@ -1637,6 +1638,11 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
             from deerflow.agent_instances.chat_tools import chat_tools
 
             raw_tools.extend(chat_tools(instance_execution))
+            if instance_execution.proposal_submission:
+                from deerflow.agent_instances.proposal_tools import proposal_tools
+
+                resident_proposals = proposal_tools(agent_config.tool_groups if agent_config else None)
+                raw_tools.extend(resident_proposals)
     selected_child_model = cfg.get("subagent_model_name")
     if selected_child_model is not None:
         from deerflow.models.selection import authorize_selected_model, bind_selected_task_model
@@ -1703,7 +1709,9 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
             from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
             from deerflow.agents.middlewares.tool_declarations import instance_tool_names, isolate_instance_declarations
 
-            middlewares.insert(0, InstanceAuthorityMiddleware(require_memory_audience=memory_enabled, lead=True))
+            authority_middleware = InstanceAuthorityMiddleware(require_memory_audience=memory_enabled, lead=True)
+            authority_middleware.proposal_tools = frozenset(tool.name for tool in resident_proposals if tool in authorized_tools)
+            middlewares.insert(0, authority_middleware)
             middlewares, external_positions = isolate_instance_declarations(middlewares, external_middlewares, read_only=not instance_execution.execution_allowed)
         middlewares, declared_authorized = narrow_declared_tools(
             middlewares,

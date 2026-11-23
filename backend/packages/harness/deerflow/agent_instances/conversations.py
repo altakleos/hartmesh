@@ -45,8 +45,11 @@ class AgentExecution:
 
     item_step_allowed: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
 
+    proposal_submission: bool = False
+    proposal_account: Callable | None = field(default=None, repr=False, compare=False)
+
     def for_helper(self):
-        return self if self.connection_origin is None and self.batch_mode is None else replace(self, connection_origin=None, batch_mode=None)
+        return self if self.connection_origin is None and self.batch_mode is None and not self.proposal_submission else replace(self, connection_origin=None, batch_mode=None, proposal_submission=False, proposal_account=None)
 
     async def _validate(self, environment=None):
         if self.item_step_allowed is not None and not self.item_step_allowed():

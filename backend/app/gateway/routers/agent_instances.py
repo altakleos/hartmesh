@@ -465,7 +465,7 @@ async def change_lifecycle(instance_id: str, body: LifecycleChange, request: Req
                 if definition.config["name"].lower() != body.definition_name:
                     raise AgentConflict("Lifecycle definition retry changed")
         definition = definition or await _load_definition(request, actor, body.definition_name)
-    result = await InstanceLifecycle(service).change(
+    result = await InstanceLifecycle(service, proposal_admission=_proposal_admission(request, actor, write=True)).change(
         actor=actor,
         instance_id=instance_id,
         expected_generation=body.generation,
@@ -503,7 +503,7 @@ async def abandon_lifecycle(instance_id: str, body: AbandonLifecycle, request: R
     actor = await _actor(request)
     await service.get(actor=actor, instance_id=instance_id, permission=AgentPermission.MANAGE, include_deleted=True)
     await _lifecycle_ready(service, instance_id, allow_unverified=True)
-    result = await InstanceLifecycle(service).abandon(actor=actor, instance_id=instance_id, expected_generation=body.generation, operation_id=body.operation_id)
+    result = await InstanceLifecycle(service, proposal_admission=_proposal_admission(request, actor, write=True)).abandon(actor=actor, instance_id=instance_id, expected_generation=body.generation, operation_id=body.operation_id)
     return {**result, "instance": jsonable_encoder(asdict(result["instance"]))}
 
 
@@ -600,3 +600,79 @@ async def update_instance_memory_fact(instance_id: str, fact_id: str, body: Upda
 @require_permission("memory", "read")
 async def delete_instance_memory_fact(instance_id: str, fact_id: str, request: Request):
     return await _memory_call(request, instance_id, "delete_fact", write=True, fact_id=fact_id)
+
+
+class ProposalBasis(StrictRequest):
+    base_generation: int = Field(ge=1, le=2**31 - 1)
+    base_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+def _proposal_admission(request, actor, *, write):
+    from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
+    from app.gateway.authz import resolve_route_permissions_for_request
+    from app.gateway.deps import resolve_session_cookie
+
+    async def admit(session):
+        if getattr(request.state, "auth_source", None) != AUTH_SOURCE_SESSION:
+            raise HTTPException(403, "Configuration review requires a human web session")
+        user = await resolve_session_cookie(request, session=session)
+        if str(user.id) != actor.subject_id:
+            raise HTTPException(401, "The review session changed")
+        permissions = await resolve_route_permissions_for_request(request, user)
+        if "agents:read" not in permissions or (write and "agents:write" not in permissions):
+            raise HTTPException(403, "Permission to review this proposal changed")
+        if not (await run_file_io(get_agents_api_config)).enabled:
+            raise HTTPException(403, "Agent management API is disabled")
+
+    return admit
+
+
+async def _proposal_service(request, *, write=False):
+    from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
+    from deerflow.agent_instances.proposal_tools import installed_forms
+    from deerflow.agent_instances.proposals import ConfigurationProposals
+
+    service = await _service(request)
+    if not installed_forms(getattr(request.app.state, "extensions", None)):
+        raise HTTPException(404, "Employee configuration proposals are unavailable")
+    actor = await _actor(request)
+    if getattr(request.state, "auth_source", None) != AUTH_SOURCE_SESSION:
+        raise HTTPException(403, "Configuration review requires a human web session")
+
+    async def load_source(actor, name):
+        return await _load_definition(request, actor, name)
+
+    return ConfigurationProposals(service, admission=_proposal_admission(request, actor, write=write)), actor, load_source
+
+
+@router.get("/{instance_id}/proposals")
+@require_permission("agents", "read")
+async def list_proposals(instance_id: str, request: Request, limit: int = Query(20, ge=1, le=100), cursor: str | None = Query(None, max_length=4096)):
+    service, actor, source = await _proposal_service(request)
+    return await service.list(actor, instance_id, source, limit=limit, cursor=cursor)
+
+
+@router.get("/{instance_id}/proposals/{proposal_id}")
+@require_permission("agents", "read")
+async def proposal_detail(instance_id: str, proposal_id: str, request: Request):
+    service, actor, source = await _proposal_service(request)
+    return await service.detail(actor, instance_id, proposal_id, source)
+
+
+@router.post("/{instance_id}/proposals/{proposal_id}/decline")
+@require_permission("agents", "write")
+@require_permission("agents", "read")
+async def decline_proposal(instance_id: str, proposal_id: str, body: StrictRequest, request: Request):
+    service, actor, source = await _proposal_service(request, write=True)
+    return await service.decline(actor, instance_id, proposal_id, source)
+
+
+@router.post("/{instance_id}/proposals/{proposal_id}/adopt")
+@require_permission("agents", "write")
+@require_permission("agents", "read")
+async def adopt_proposal(instance_id: str, proposal_id: str, body: ProposalBasis, request: Request, response: Response):
+    service, actor, source = await _proposal_service(request, write=True)
+    projection = await service.adopt(actor, instance_id, proposal_id, body.model_dump(), source)
+    response.status_code = 202 if projection["status"] == "applying" else 200
+    return projection

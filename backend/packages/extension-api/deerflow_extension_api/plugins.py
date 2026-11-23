@@ -27,6 +27,7 @@ class ActionContext:
     resource: StorageResource | None = field(default=None, kw_only=True)
     human_input: HumanInputActions | None = field(default=None, kw_only=True)
     agent_runs: AgentRuns | None = field(default=None, kw_only=True)
+    review_proposal: Callable[[str, str], Awaitable[Mapping[str, Any]]] | None = field(default=None, kw_only=True)
     # Host-stamped browser session; model tools and other callers default closed.
     interaction: Literal["session", "other"] = field(default="other", kw_only=True)
 
@@ -47,6 +48,7 @@ class ToolContext(ActionContext):
     """
 
     thread_id: str | None
+    submit_proposal: Callable[[str, bool], Awaitable[Mapping[str, Any]]] | None = field(default=None, kw_only=True)
     # Host-stamped execution identity, never supplied by tool arguments.
     run_id: str | None = field(default=None, kw_only=True)
 
@@ -146,6 +148,8 @@ class PluginContribution:
     actor_kinds: tuple[str, ...] = ("human",)
     storage_controller: StorageController | None = None
     human_input_api_version: int | None = None
+    proposal_api_version: int | None = None
+    proposal_tool: ModelTool | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", tuple(self.fields))
