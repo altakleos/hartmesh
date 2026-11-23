@@ -4,21 +4,43 @@ Called only in WorkEventReader's locked pair transaction. Rendering, exact edit
 anchors, current delivery authority and supervisor installation remain separate.
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import select
 
 from app.telegram_bots.notifications import aware
+from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_event_facts import event_attempt, event_request, event_response
 from deerflow.agent_instances.work import DELEGATE, INSPECT, MANAGE, UNRESOLVED
 from deerflow.persistence.agent_instances.human_input import HumanInputEventRow
 from deerflow.persistence.agent_instances.model import AgentInstanceRow
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow
-from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramOutboxRow, TelegramPersonSettingsRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramCallbackRow, TelegramOutboxRow, TelegramPersonSettingsRow
 
 _QUIET_KEYS = frozenset({"result.waiting_review", "attempt.stopped", "attempt.stopped_changed", "attempt.stopped_withdrawn", "request.answered", "result.accepted", "work.changed", "work.reopened"})
 _IGNORED = frozenset({"delegate", "outcome", "suggest", "stop", "derive", "input", "reconcile_mandate", "reconcile_attempt"})
+
+
+def _acknowledged_control(control, parent):
+    """Only the actual displayed group or ForceReply can own this message."""
+    if type(parent.payload) is not dict or type(parent.parts) is not list or type(control.message_id) is not int or control.message_id < 1:
+        return False
+    version = parent.payload.get("presentation_version")
+    if type(version) is not int or type(control.payload.get("presentation_version")) is not int or control.payload["presentation_version"] != version:
+        return False
+    part = parent.parts[-1] if parent.parts else None
+    if type(part) is not dict or type(part.get("presentation_version")) is not int or part["presentation_version"] != version or part.get("state") != "sent" or not same_body(part.get("message_ids"), [control.message_id]):
+        return False
+    try:
+        if datetime.fromisoformat(part["sent_at"]).utcoffset() is None:
+            return False
+    except (KeyError, TypeError, ValueError):
+        return False
+    if control.kind == "prompt":
+        basis = parent.payload.get("work_request_basis")
+        return type(basis) is dict and basis.get("prompt_id") == control.id and part.get("force_reply") is True
+    return part.get("callback_group_id") == control.group_id
 
 
 class WorkEventIntents:
@@ -64,7 +86,7 @@ class _Projection:
             return 1
         return None
 
-    async def save(self, key, class_, *, recipient=None, actor=False, edit=False, response=None, hold=False, edit_request_revision=None):
+    async def save(self, key, class_, *, recipient=None, actor=False, edit=False, response=None, hold=False, edit_request_revision=None, decision_anchor=None):
         if recipient != self.person or not actor and self.event.actor_kind == "human" and self.event.actor_id == self.person:
             return
         if not edit and (class_ in {"question", "reminder"} and self.settings.notify not in {"all", "questions"} or class_ in {"result", "interrupt", "info"} and self.settings.notify != "all"):
@@ -89,6 +111,7 @@ class _Projection:
             "attempt_id": self.attempt.id if self.attempt else None,
             "request_revision": self.request_revision(),
             "edit_request_revision": edit_request_revision,
+            **({"decision_anchor": decision_anchor, "decision_operation": event.operation_id} if decision_anchor is not None else {}),
             "response_id": response.id if response else None,
             "hold_until": (created + timedelta(seconds=self.owner.links.config.outbox.decision_hold_seconds)).isoformat() if hold else None,
         }
@@ -114,6 +137,45 @@ class _Projection:
             )
         )
         await self.writer.flush()
+
+    async def decision_edit(self):
+        """Follow the confirmed card back through choices, typed inputs and notes."""
+        if self.request is None or self.event.actor_id != self.person:
+            return
+        control = await self.writer.get(TelegramCallbackRow, self.event.operation_id)
+        if control is None or control.kind not in {"decide_confirm", "decide_confirm_resume"} or type(control.payload) is not dict or control.payload.get("work_action_id") != control.id:
+            return
+        visited = set()
+        while control is not None and control.id not in visited:
+            visited.add(control.id)
+            if (control.link_id, control.chat_id, control.binding_generation) != (self.link.id, self.link.chat_id, self.link.binding_generation):
+                return
+            anchor_id = control.payload.get("anchor_outbox_id")
+            parent = await self.writer.get(TelegramOutboxRow, anchor_id) if type(anchor_id) is str else None
+            if (
+                parent is None
+                or (parent.link_id, parent.owner_user_id, parent.binding_generation, parent.chat_id, parent.message_thread_id, parent.request_id, parent.work_id)
+                != (self.link.id, self.person, self.link.binding_generation, self.link.chat_id, control.message_thread_id, self.request.id, self.event.work_id)
+                or parent.state != "sent"
+                or not _acknowledged_control(control, parent)
+            ):
+                return
+            if control.kind in {"decide_choice", "decide_own"}:
+                await self.save("decide.done_line", "question", recipient=self.person, actor=True, edit=True, edit_request_revision=self.request_revision(), decision_anchor=parent.id)
+                return
+            basis = parent.payload.get("work_request_basis")
+            origin = basis.get("origin") if type(basis) is dict else None
+            if type(origin) is not dict or any(type(origin.get(key)) is not str for key in ("callback_id", "anchor_outbox_id")) or any(type(origin.get(key)) is not int for key in ("message_id", "presentation_version")):
+                return
+            control = await self.writer.get(TelegramCallbackRow, origin["callback_id"])
+            if (
+                control is None
+                or type(control.payload) is not dict
+                or control.payload.get("anchor_outbox_id") != origin["anchor_outbox_id"]
+                or control.payload.get("presentation_version") != origin["presentation_version"]
+                or control.message_id != origin["message_id"]
+            ):
+                return
 
     async def question_edit(self, key):
         if self.request is None:
@@ -188,6 +250,8 @@ class _Projection:
         elif action == "attempt_settled":
             await self.settled()
         elif action in {"decide", "changes_requested", "derived"}:
+            if action == "decide":
+                await self.decision_edit()
             await self.save({"decide": "decision.recorded", "changes_requested": "result.changes", "derived": "work.proposed"}[action], "info", recipient=self.requester)
         elif action in {"accept", "cancel"}:
             key = "result.accepted" if action == "accept" else "work.cancelled"

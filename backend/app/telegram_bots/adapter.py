@@ -2035,6 +2035,7 @@ class TelegramBotChannel(TelegramChannel):
             "concealed.review",
             "concealed.result",
             "concealed.info",
+            "concealed.place_free",
             "concealed.proposed",
             "concealed.no_result",
             "concealed.interrupted",

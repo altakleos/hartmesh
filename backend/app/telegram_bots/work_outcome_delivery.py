@@ -50,6 +50,7 @@ def context(read):
         "name": source.request["instance_name"],
         "supervisor": read.supervisor,
         "person": read.recipient,
+        **({"decided_at": read.decided_at} if read.decided_at is not None else {}),
         "accepted_at": (read.receipt or {}).get("review", {}).get("accepted_at") if act.kind == "accept" and act.state == "done" else None,
     }
     if act.state == "done" and isinstance(act.continuation, Mapping) and "request_activation" in act.continuation:
@@ -81,6 +82,8 @@ def materialize(link, data, *, locale, timezone, product, routing=None, comment=
     act = SimpleNamespace(**data["act"])
     accepted = data["accepted_at"]
     values = {"name": data["name"], "supervisor": data["supervisor"], "person": data["person"], "product": product}
+    if data.get("decided_at") is not None:
+        values["decision_time"] = datetime.fromisoformat(data["decided_at"]).astimezone(ZoneInfo(timezone)).strftime("%Y-%m-%d %H:%M")
     if accepted is not None:
         values["time"] = datetime.fromisoformat(accepted).astimezone(ZoneInfo(timezone)).strftime("%Y-%m-%d %H:%M")
     shown = present_outcome(
@@ -184,7 +187,7 @@ def validate_edit(callback, parent, basis, row):
     edit = basis.get("edit")
     if edit is None:
         return
-    if basis["context"]["act"]["kind"] != "route" or basis["context"]["act"]["state"] != "done" or basis["origin"] is None or parent is None or callback is None:
+    if basis["context"]["act"]["kind"] not in {"decide", "route"} or basis["context"]["act"]["state"] != "done" or basis["origin"] is None or parent is None or callback is None:
         raise ProductSourceRetired()
     if type(edit) is not dict or set(edit) != {"presentation_version", "part_id", "message_id", "protect_content"}:
         raise ProductSourceRetired()
@@ -192,7 +195,7 @@ def validate_edit(callback, parent, basis, row):
         raise ProductSourceRetired()
     part = next((part for part in parent.parts if part["part_id"] == edit["part_id"]), None)
     if (
-        len(row.parts) != 1
+        (len(row.parts) != 1 and basis["context"]["act"]["kind"] != "decide")
         or parent.id != basis["origin"]["anchor_outbox_id"]
         or parent.state != "sent"
         or parent.payload["presentation_version"] != edit["presentation_version"]
@@ -396,7 +399,7 @@ class WorkOutcomePlans:
                 original, origin, topic = await self._origin(writer, link, read.act)
                 destination = {"chat_id": link.chat_id, "message_thread_id": topic}
                 edit = None
-                if read.act.kind == "route" and read.act.state == "done" and original is not None:
+                if read.act.kind in {"route", "decide"} and read.act.state == "done" and original is not None:
                     parent = await writer.get(TelegramOutboxRow, original.payload["anchor_outbox_id"], populate_existing=True)
                     part = next((part for part in parent.parts if part.get("callback_group_id") == original.group_id and part["presentation_version"] == parent.payload["presentation_version"]), None)
                     if part is not None and parent.state == "sent" and part["state"] == "sent" and part["message_ids"] == [original.message_id] and (not read.protected or part.get("protect_content")):
@@ -622,7 +625,7 @@ class _ContextProjection(_OutcomeProjection):
 
     def check(self, rows):
         super().check(rows)
-        if (rows[0][2], self.supervisor, self.recipient, self.continued) != (self.read.permissions, self.read.supervisor, self.read.recipient, self.read.continued):
+        if (rows[0][2], self.supervisor, self.recipient, self.continued, self.decided_at) != (self.read.permissions, self.read.supervisor, self.read.recipient, self.read.continued, self.read.decided_at):
             raise ProductSourceRetired()
         if self.routing is not None:
             self.routing.check(rows)
@@ -693,7 +696,11 @@ class WorkOutcomeSources:
             if callback is None and (origin is None or origin["operation_id"] != act_id):
                 raise ValueError()
             read = await self.plans.reader.read(captured.link, act_id, native="detail" in basis["context"])
-            if not same_body(context(read), basis["context"]):
+            fresh = context(read)
+            if "decided_at" not in basis["context"]:
+                # Earlier saved plans still own their original acknowledgement.
+                fresh.pop("decided_at", None)
+            if not same_body(fresh, basis["context"]):
                 raise ProductSourceRetired()
             settings = await self.plans.settings.get(captured.link.owner_user_id)
             if settings is None or (settings.locale, settings.timezone) != (basis["locale"], basis["timezone"]):

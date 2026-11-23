@@ -104,6 +104,26 @@ async def test_help_privacy_and_pages_use_current_instance_grants(presentation):
     assert not any("tab=files" in button["url"] or "tab=memory" in button["url"] or "tab=access" in button["url"] for row in pages for button in row)
 
 
+@pytest.mark.parametrize(("locale", "terms"), [("en-US", ("memory", "files", "assignments")), ("zh-CN", ("记忆", "文件", "任务"))])
+async def test_new_conversation_explains_retained_agent_data(presentation, monkeypatch, locale, terms):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.telegram_bots.commands import CallbackCommands
+    from app.telegram_bots.render import render_plain
+
+    e = presentation
+    commands = CallbackCommands(e.services)
+    complete = AsyncMock()
+    monkeypatch.setattr(e.services, "threads", SimpleNamespace(new_conversation=complete), raising=False)
+    offer = await commands._presentation("new", e.link)
+    settled = await commands._started_new(e.link, "original command")
+    for source in (offer, settled):
+        text = render_plain(source["key"], locale, **source["values"])
+        assert all(term in text for term in terms)
+    complete.assert_awaited_once_with(e.link, origin="original command")
+
+
 @pytest.mark.parametrize("custody", ["personal", "company"])
 @pytest.mark.parametrize("locale", ["en-US", "zh-CN"])
 async def test_instance_profile_names_kind_and_registers_current_menu(presentation, custody, locale):

@@ -38,7 +38,7 @@ def offer_intent(item):
         type(value) is not dict
         or set(value) != {"version", "act_id", "ordinal", "origin"}
         or type(value["version"]) is not int
-        or value["version"] != 1
+        or value["version"] not in {1, 2}
         or type(value["ordinal"]) is not int
         or value["ordinal"] < 1
         or type(value["act_id"]) is not str
@@ -85,7 +85,7 @@ def qualify_waiting(link, journal, attempt, callback, parent, controls, origin, 
 def present_capacity_offer(source, basis, identity, link):
     if basis["concealed"]:
         # The service teaser contains no assignment or occupant detail.
-        return present_news("work.changed", values={}, locale=basis["locale"], protected=source.protected, concealed=True, outbox_id=identity)
+        return present_news("capacity.offer" if source.values.get("capacity_notice") else "work.changed", values={}, locale=basis["locale"], protected=source.protected, concealed=True, outbox_id=identity)
     view = present_view(replace(source, key="view.detail"), basis, link)
     html = render("busy.place_free", basis["locale"], objective=source.work["detail"]["record"]["objective"]) + "\n\n" + "".join(part["html"] for part in view.parts)
     parts = tuple(dict(kind="text", html=chunk, visible_text=visible_text(chunk), protect_content=source.protected) for chunk in split_html(html))
@@ -240,6 +240,8 @@ class WorkCapacityOfferProjection:
 
         data = thaw({"detail": asdict(self.projection.source), "waiting_act": act_facts(act), "origin": self.intent["origin"]})
         values = {"date": date(record["created_at"]), "due": date(record["due_at"])}
+        if self.intent["version"] == 2:
+            values["capacity_notice"] = True
         source = WorkNewsRead(act.work_id, "capacity.offer", values, self.projection.source.protected, data, digest([act.id, self.intent, thaw(act.body)]), digest([data, values]))
         if self.source is not None and not same_body(asdict(source), asdict(self.source)):
             raise ProductSourceRetired()

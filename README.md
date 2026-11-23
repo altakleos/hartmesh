@@ -2138,6 +2138,12 @@ protected delivery, retires late replies after access changes, and offers the
 first currently connectable next target. Deletion notices remain visible until
 Settings closes. Agent avatars share Telegram bot initials and colors.
 
+In an assistant or employee chat, starting a new conversation keeps the agent’s
+memory, files and assignments. After **Confirm** or **Confirm and resume**, the
+decision receipt shows what you chose and when you decided, in your Telegram
+settings timezone. A protected availability notice reveals the assignment after
+you tap **Show**. Starting it requires a separate press.
+
 On an employee's Access tab, managers can allow Telegram, prevent forwarding and
 saving, or turn it off after confirming the connected-bot count. This policy
 remains editable during an execution hold. Personal assistants follow their
