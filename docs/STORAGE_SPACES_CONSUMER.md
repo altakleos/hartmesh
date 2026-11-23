@@ -215,9 +215,10 @@ binding.
 | Test-fixture creation acknowledgement loss preserves its backing until exact absence | Native real-create-then-error case and `test_storage_spaces_native_fixture_ownership.py` |
 | Missing controller, private state and current grants | Existing facade, workflow, feature-control/publication and attachment tests |
 
-The mandatory Linux Docker merge job executes all 26 native cases, including
-instance AIO persistence, managed chat scope and private-control reclamation,
-and rejects every skip. Ordinary directory/SQL fixtures prove functional contracts, not native
+The mandatory Linux Docker merge job executes the full native suite (37 cases
+at .78), including instance AIO persistence, managed chat scope and
+private-control reclamation. CI requires at least 30 cases, checks specific
+scenarios by name, and rejects every skip. Ordinary directory/SQL fixtures prove functional contracts, not native
 mounts or quotas. Unsupported contributor hosts skip only the separately
 qualified tier and must not self-attest native readiness. The complete default
 offline suite runs in four CI shards; strict blocking-I/O, frontend/isolation and
