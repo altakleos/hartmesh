@@ -1227,6 +1227,13 @@ open. Unfinished setup attempts appear separately from the normal agent list.
 A manager can remove them, and maintenance removes attempts older than 24 hours,
 reclaiming any assigned Space after containment and cleanup are confirmed.
 
+In a web conversation, a company employee can propose turning tracked assignments
+on or off. In the employee’s **Settings**, a manager with inspection access can
+review the proposed change, its definition revision and the resulting assignment
+policy. Adoption also requires the current definition owner and administrator
+access to the employee’s Home. The manager can decline an outdated proposal
+and ask for a new one.
+
 An operator hold or unavailable execution blocks new conversations, replies,
 Work activations and lifecycle changes before durable admission. Current grants
 are checked first; exact Work retries retain their recorded admission. Deleting
