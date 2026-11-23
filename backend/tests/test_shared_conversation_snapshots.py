@@ -375,3 +375,120 @@ async def test_draft_identifies_each_exceeded_limit(share, monkeypatch, cap):
         monkeypatch.setattr(snapshot_manifest, "MANIFEST_LIMIT", 200 if cap == "manifest-limit" else 10)
     detail = client.get("/api/shared-conversations/draft", params={"thread_id": THREAD})
     assert detail.status_code == 413 and detail.json()["detail"]["code"] == "snapshot-" + cap
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("action", ["publish", "duplicate", "remove"])
+async def test_retries_busy_shared_read_from_first_admission(share, monkeypatch, action):
+    from fastapi import HTTPException
+
+    client, _, _ = share
+    prefix = "/api/shared-conversations"
+    with client:
+        draft = client.get(prefix + "/draft", params={"thread_id": THREAD}).json()
+        body = {"snapshot": draft["snapshot"], "thread_id": THREAD}
+        if action != "publish":
+            first = client.post(prefix, json=body)
+            assert first.status_code == 201
+            publication = first.json()["publication_id"]
+        read_name = {"publish": "inspect_destination", "duplicate": "exact_manifest", "remove": "read_snapshot"}[action]
+        read = getattr(snapshot_publication, read_name)
+        attempts = 0
+
+        async def contended(**kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise HTTPException(409, {"code": "storage-busy"})
+            return await read(**kwargs)
+
+        monkeypatch.setattr(snapshot_publication, read_name, contended)
+        response = client.delete(prefix + "/" + publication) if action == "remove" else client.post(prefix, json=body)
+        assert response.status_code == (201 if action == "publish" else 200), response.text
+        assert attempts >= 2
+        if action == "duplicate":
+            assert response.json()["already_shared"]
+        if action == "remove":
+            assert publication in response.json()["removed_publication_ids"]
+
+
+@pytest.mark.asyncio
+async def test_busy_snapshot_uses_one_wait_budget_and_refuses_changed_permissions(monkeypatch):
+    from fastapi import HTTPException
+
+    now = 0.0
+
+    delays = []
+
+    async def sleep(delay):
+        nonlocal now
+        delays.append(delay)
+        # The event loop can visit us later than requested.
+        now += 0.8 if len(delays) == 1 else delay
+
+    async def contended_admission():
+        nonlocal now
+        if not delays:
+            now += 58.4
+            raise HTTPException(409, {"code": "storage-busy"})
+        return "admitted"
+
+    async def contended_member():
+        raise HTTPException(409, {"code": "storage-busy"})
+
+    async def revoked():
+        raise HTTPException(403, "Permission changed")
+
+    monkeypatch.setattr(snapshot_publication, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(snapshot_publication, "asyncio", SimpleNamespace(sleep=sleep))
+    wait = snapshot_publication.SharedWait(SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())))
+    with pytest.raises(HTTPException) as denied:
+        await wait.call(revoked)
+    assert denied.value.status_code == 403 and now == 0
+    assert await wait.call(contended_admission) == "admitted"
+    with pytest.raises(HTTPException) as error:
+        await wait.call(contended_member)
+    assert error.value.detail["code"] == "shared-busy"
+    assert now == pytest.approx(60.0)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("holder", ["gateway", "filesystem"])
+async def test_snapshot_caller_owns_ordinary_shared_lock_retries(paths, repo, holder, monkeypatch):
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from app.gateway.routers import shared
+    from deerflow.spaces.workflows import try_storage_locks_once
+
+    if holder == "gateway":
+        locked = asyncio.Lock()
+        monkeypatch.setattr(shared, "_publish_lock", locked)
+        await locked.acquire()
+        release = locked.release
+    else:
+        state = shared.shared_mutation_state()
+        await asyncio.to_thread(state.acquire)
+        release = state.close
+    # The ordinary, blocking behavior would eventually acquire the lock and
+    # fail the assertion. Keep the test bounded in that case too.
+    released = False
+
+    def release_once():
+        nonlocal released
+        if not released:
+            release()
+            released = True
+
+    timer = asyncio.get_running_loop().call_later(0.5, release_once)
+    try:
+        with try_storage_locks_once(), pytest.raises(HTTPException) as busy:
+            async with shared._shared_mutation(repo):
+                pass
+        assert busy.value.status_code == 409 and busy.value.detail["code"] == "storage-busy"
+    finally:
+        timer.cancel()
+        release_once()
+    async with shared._shared_mutation(repo):
+        pass

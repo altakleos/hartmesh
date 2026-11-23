@@ -25,6 +25,7 @@ from app.gateway.transcript import read_conversation
 from deerflow.files.store import MAX_PATH_DEPTH, DescriptorSource
 from deerflow.runtime import ThreadOperationKind
 from deerflow.runtime.runs.manager import ConflictError
+from deerflow.spaces.workflows import try_storage_locks_once
 from deerflow.utils.file_io import await_drained, run_file_io
 from deerflow.utils.thread_id import ThreadId
 
@@ -153,16 +154,15 @@ class SharedWait:
         while not _stopping(self.request):
             started = time.monotonic()
             try:
-                return await operation(**values)
+                with try_storage_locks_once():
+                    return await operation(**values)
             except HTTPException as exc:
                 if not isinstance(exc.detail, dict) or exc.status_code != 409 or exc.detail.get("code") != "storage-busy":
                     raise
+            remaining = self.remaining - (time.monotonic() - started)
+            if remaining > 0:
+                await asyncio.sleep(min(remaining, 0.25))
             self.remaining -= time.monotonic() - started
-            if self.remaining <= 0:
-                raise _refuse("shared-busy")
-            delay = min(self.remaining, 0.25)
-            await asyncio.sleep(delay)
-            self.remaining -= delay
             if self.remaining <= 0:
                 raise _refuse("shared-busy")
         raise _refuse("gateway-stopping", 503)
@@ -206,16 +206,17 @@ async def publish_snapshot(request, body):
     scope, agent_source = await share_scope(request, body.thread_id)
     if agent_source is not None and (body.acknowledge is None or body.acknowledge.snapshot != body.snapshot):
         raise _refuse("snapshot-acknowledgement-required")
-    await inspect_destination(request=request, plans=[])
+    wait = SharedWait(request)
+    await wait.call(inspect_destination, request=request, plans=[])
     try:
         async with get_run_manager(request).reserve_thread_operation(body.thread_id, kind=ThreadOperationKind.branch, user_id=acting_user_id(request)):
             await require_share_scope(request, body.thread_id, scope, agent_source)
-            return await _share(request, body, scope, agent_source)
+            return await _share(request, body, scope, agent_source, wait)
     except ConflictError:
         raise _refuse("finish-current-turn") from None
 
 
-async def _share(request, body, scope, agent_source):
+async def _share(request, body, scope, agent_source, wait):
     frozen = await prepare(request, body.thread_id, scope, agent_source)
     if frozen.digest != body.snapshot:
         raise _refuse("snapshot-changed")
@@ -223,9 +224,8 @@ async def _share(request, body, scope, agent_source):
     files = [(f, "/mnt/user-data/outputs/" + f.path.removeprefix("files/"), None) for f in docs.files]
     files += [(docs.transcript, TRANSCRIPT_SOURCE, frozen.transcript), (SnapshotMember(path="conversation.json", size=len(frozen.document), sha256=frozen.digest), MANIFEST_SOURCE, frozen.document)]
     absolute = [frozen.folder + "/" + file.path for file, _, _ in files]
-    wait = SharedWait(request)
     manifest = (await wait.call(inspect_destination, request=request, plans=absolute[-1:])).get(absolute[-1])
-    if manifest and manifest["sha256"] == frozen.digest and await exact_manifest(request=request, row=manifest):
+    if manifest and manifest["sha256"] == frozen.digest and await wait.call(exact_manifest, request=request, row=manifest):
         await require_share_scope(request, body.thread_id, scope, agent_source)
         return {"publication_id": manifest["publication_id"], "created_publication_ids": [], "undo_receipt": None, "already_shared": True}
     await wait.call(inspect_destination, request=request, plans=absolute, preflight=True)
@@ -283,7 +283,8 @@ async def _share(request, body, scope, agent_source):
 
 
 async def remove_snapshot(request, publication_id, *, undo=None):
-    snapshot = await read_snapshot(request=request, publication_id=publication_id)
+    wait = SharedWait(request)
+    snapshot = await wait.call(read_snapshot, request=request, publication_id=publication_id)
     if not snapshot.can_remove:
         raise _refuse("snapshot-remove-forbidden", 403)
     repo = get_shared_publications_repo(request)
@@ -297,7 +298,6 @@ async def remove_snapshot(request, publication_id, *, undo=None):
         if not hmac.compare_digest(expected, undo.undo_receipt):
             raise _refuse("invalid-undo", 409)
         allowed = set(undo.publication_ids)
-    wait = SharedWait(request)
     removed = []
     retained = []
     for entry in [snapshot.transcript, *snapshot.files, None]:
