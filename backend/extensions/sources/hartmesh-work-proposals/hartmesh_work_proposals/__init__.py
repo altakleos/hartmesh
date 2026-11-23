@@ -18,7 +18,7 @@ async def review(payload, context):
     return await context.review_proposal(payload["instance_id"], payload["proposal_id"])
 
 
-@extension(api="0.2.14", name="work-proposals")
+@extension(api="0.2.15", name="work-proposals")
 def install(registry, config):
     registry.plugin(
         PluginContribution(

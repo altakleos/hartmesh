@@ -1002,7 +1002,7 @@ extensions = [
 
 [[package]]
 name = "deerflow-extension-api"
-version = "0.2.14"
+version = "0.2.15"
 source = { editable = "packages/extension-api" }
 
 [[package]]
@@ -1764,7 +1764,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "deerflow-extension-api", specifier = ">=0.2.14,<0.3" }]
+requires-dist = [{ name = "deerflow-extension-api", specifier = ">=0.2.15,<0.3" }]
 
 [[package]]
 name = "hpack"
