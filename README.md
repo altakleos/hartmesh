@@ -379,6 +379,9 @@ removing its messages and workspace files. A failed deletion keeps the dialog
 open for retry. Copies already kept in My Files or Shared are independent of
 the conversation.
 
+Business report rebuilds in a private chat workspace can reuse a parsed
+spreadsheet after rereading its source bytes.
+
 Business reports retain source precision in their numeric data and Excel formulas,
 rounding monetary values only for display. Malformed amount cells are reported as
 unreadable instead of having digits silently extracted. Conflicting currencies

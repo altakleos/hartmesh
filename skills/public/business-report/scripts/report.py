@@ -29,6 +29,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import warnings
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
+    import business_report_input_cache as input_cache
     import business_report_settings as settings
     import openpyxl  # noqa: F401  (pandas' xlsx engine; asserted so a missing engine fails here, not mid-build)
     import pandas as pd
@@ -233,12 +235,14 @@ def _named_columns(columns: list[str]) -> list[str]:
     return [*columns[:MAX_NAMED_COLUMNS], f"… {len(columns) - MAX_NAMED_COLUMNS} more"]
 
 
-def _read_csv(path: Path, *, headerless: bool = False) -> pd.DataFrame:
+def _read_csv(path: Path, *, content=None, headerless: bool = False) -> pd.DataFrame:
     """The file as a table. ``headerless`` reads every line as data, so a title
     row above the real header cannot decide the shape of the frame: a header of
     one field over rows of three leaves pandas a one-column table, and nothing
     downstream can recover the columns from that."""
-    raw = path.read_bytes()
+    if content is not None:
+        content.seek(0)
+    raw = content.read() if content is not None else path.read_bytes()
     for encoding in ("utf-8-sig", "cp1252"):
         try:
             text = raw.decode(encoding)
@@ -269,9 +273,9 @@ def _read_csv(path: Path, *, headerless: bool = False) -> pd.DataFrame:
     return frame
 
 
-def _read_workbook(path: Path) -> dict[str, pd.DataFrame]:
+def _read_workbook(path: Path, content=None) -> dict[str, pd.DataFrame]:
     try:
-        sheets = pd.read_excel(path, sheet_name=None)
+        sheets = pd.read_excel(content if content is not None else path, sheet_name=None)
     except Exception as error:  # xlrd/openpyxl raise their own families
         raise InputError(f"{path.name} could not be read as a workbook: {error}") from error
     result: dict[str, pd.DataFrame] = {}
@@ -318,15 +322,15 @@ def reheadered(frame: pd.DataFrame, profile: dict) -> pd.DataFrame | None:
     return None
 
 
-def read_tables(path: Path, profile: dict) -> tuple[list[tuple[str | None, pd.DataFrame]], list[dict], bool]:
+def read_tables(path: Path, profile: dict, *, content=None) -> tuple[list[tuple[str | None, pd.DataFrame]], list[dict], bool]:
     """Every data table in a file, the sheets skipped and why, and whether it is a workbook."""
 
-    if not path.is_file():
+    if content is None and not path.is_file():
         raise InputError(f"No such file: {path}")
     if path.suffix.lower() in (".csv", ".txt", ".tsv"):
-        frame = _read_csv(path)
+        frame = _read_csv(path, content=content)
         if suggest_mapping(frame, profile).missing:
-            repaired = reheadered(_read_csv(path, headerless=True), profile)
+            repaired = reheadered(_read_csv(path, content=content, headerless=True), profile)
             if repaired is not None:
                 frame = repaired
         return [(None, frame)], [], False
@@ -334,7 +338,7 @@ def read_tables(path: Path, profile: dict) -> tuple[list[tuple[str | None, pd.Da
         raise InputError(f"{path.name}: only .csv, .xlsx, .xlsm and .xls files are supported.")
     tables: list[tuple[str | None, pd.DataFrame]] = []
     skipped: list[dict] = []
-    for sheet, frame in _read_workbook(path).items():
+    for sheet, frame in _read_workbook(path, content).items():
         if frame.shape[0] == 0 or frame.shape[1] == 0:
             skipped.append({"sheet": sheet, "reason": "empty"})
             continue
@@ -349,12 +353,7 @@ def read_tables(path: Path, profile: dict) -> tuple[list[tuple[str | None, pd.Da
     return tables, skipped, True
 
 
-def read_table(source: str, profile: dict | None = None) -> LoadedTable:
-    """One data table from ``path`` or ``path::Sheet``."""
-
-    profile = profile or load_profile(None, None)
-    path, sheet = parse_source(source)
-    tables, skipped, is_workbook = read_tables(path, profile)
+def _select_sheet(path, sheet, tables, skipped):
     if sheet is not None:
         chosen = [table for table in tables if table[0] == sheet]
         if not chosen:
@@ -375,14 +374,49 @@ def read_table(source: str, profile: dict | None = None) -> LoadedTable:
             f"{path.name} has several sheets with data: {', '.join(names)}. Which one is the export? Pass it as {path.name}::<sheet>.",
             {"file": path.name, "sheets": names},
         )
+    return sheet, frame
+
+
+def read_table(source: str, profile: dict | None = None, *, cache: bool = False) -> LoadedTable:
+    """Hash and parse one open source, rejecting concurrent in-place edits."""
+    path, sheet = parse_source(source)
+    profile = profile or load_profile(None, None)
+    try:
+        # One descriptor pins the source across hashing and parsing. An arriving
+        # FIFO or device is never a data table, even if a path is replaced.
+        with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)), "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise InputError(f"{path.name} is not a regular file.")
+            uploaded = dt.date.fromtimestamp(before.st_mtime).isoformat()
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                digest.update(chunk)
+            key = input_cache.entry(digest.hexdigest(), path.suffix.lower(), sheet, profile) if cache else None
+            result = input_cache.load(key)
+            if result is None:
+                stream.seek(0)
+                tables, skipped, is_workbook = read_tables(path, profile, content=stream)
+                sheet, frame = _select_sheet(path, sheet, tables, skipped)
+            else:
+                sheet, frame, skipped, is_workbook = result
+            after = os.fstat(stream.fileno())
+            if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                raise InputError(f"{path.name} changed while being read. Run the build again with the completed export.")
+    except FileNotFoundError:
+        raise InputError(f"No such file: {path}") from None
+    except OSError as error:
+        raise InputError(f"{path.name} could not be read: {error}") from error
+    if result is None:
+        input_cache.store(key, sheet, frame, skipped, is_workbook)
     return LoadedTable(
         name=path.name,
         path=str(path),
         sheet=sheet,
         frame=frame,
-        sha256=sha256_of(path),
+        sha256=digest.hexdigest(),
         rows=int(frame.shape[0]),
-        uploaded=dt.date.fromtimestamp(path.stat().st_mtime).isoformat(),
+        uploaded=uploaded,
         is_workbook=is_workbook,
         skipped_sheets=skipped,
     )
@@ -880,7 +914,7 @@ def _rows_per_month(dates, counted: str = "") -> str:
     return f", {heading}: " + ", ".join(f"{month}: {int(count)}" for month, count in listed.items())
 
 
-def prepare(sources: list[str], period_text: str | None, options: BuildOptions, mapping_override: dict | None, profile: dict, *, resolved_mappings: list[dict] | None = None) -> BuildContext:
+def prepare(sources: list[str], period_text: str | None, options: BuildOptions, mapping_override: dict | None, profile: dict, *, resolved_mappings: list[dict] | None = None, cache: bool = False) -> BuildContext:
     """Read, map, clean and filter the inputs; raises DecisionNeeded when a question is due.
 
     ``period_text`` of ``None`` means the caller named no period -- the common
@@ -893,7 +927,7 @@ def prepare(sources: list[str], period_text: str | None, options: BuildOptions, 
     if not sources:
         raise InputError("Give at least one CSV, XLSX or XLS file.")
     profile = copy.deepcopy(profile)
-    tables = [read_table(source, profile) for source in sources]
+    tables = [read_table(source, profile, cache=cache) for source in sources]
     if resolved_mappings is not None and len(resolved_mappings) != len(tables):
         raise InputError("The saved mappings do not match the number of inputs; rebuild the report.")
     mappings: list[Mapping] = []
@@ -1528,7 +1562,7 @@ def command_build(args) -> int:
         options.summary_length = args.summary_length
     mapping_override = _load_json_file(args.mapping, "mapping file") if args.mapping else None
     targets = parse_targets(args.render, "--render")
-    ctx = prepare(args.files, args.period, options, mapping_override, profile)
+    ctx = prepare(args.files, args.period, options, mapping_override, profile, cache=True)
     out_dir = Path(args.out)
     base = _report_base_name(out_dir, options.name)
     with publication_lock(out_dir, base):

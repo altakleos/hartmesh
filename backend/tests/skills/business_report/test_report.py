@@ -205,6 +205,7 @@ def test_script_installs_nothing_never_shells_out_and_runs_on_the_image_python()
     assert [module.name for module in modules] == [
         "business_report_charts.py",
         "business_report_common.py",
+        "business_report_input_cache.py",
         "business_report_presentation.py",
         "business_report_product.py",
         "business_report_publish.py",
@@ -2238,3 +2239,236 @@ def test_a_period_whose_rows_are_all_excluded_is_not_reported_as_one_the_files_m
     code, out, err = _build(report, capsys, tmp_path / "out", str(source), "--period", "2026-07", "--exclude", "category=Repair", "--exclude", "category=Warranty")
     assert code == 1
     assert err.rstrip().endswith("no rows after the exclusions."), err
+
+
+@pytest.mark.parametrize("fixture", [SMALL_CSV, LARGE_XLSX, SMALL_XLS])
+def test_build_reuses_parsed_input_only_for_the_same_bytes_and_parser(report, tmp_path, monkeypatch, capsys, fixture):
+    import shutil
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(report.input_cache, "WORKSPACE", workspace)
+    source = tmp_path / fixture.name
+    shutil.copy(fixture, source)
+    parsed = []
+    original = report.read_tables
+
+    def counted(*args, **kwargs):
+        parsed.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(report, "read_tables", counted)
+    out = tmp_path / "out"
+    assert _build(report, capsys, out, str(source), "--period", "2026-08")[0] == 0
+    first = _read_report(out)
+    assert _build(report, capsys, out, str(source), "--period", "2026-08", "--short")[0] == 0
+    second = _read_report(out)
+    assert report._saved_figures(first, legacy=False) == report._saved_figures(second, legacy=False)
+    assert parsed == [source]
+    path = _report_path(out)
+    assert _run(report, capsys, "checks", str(path))[0] == 0
+    assert parsed == [source, source]
+    if fixture == SMALL_CSV:
+        info = source.stat()
+        before = source.read_bytes()
+        after = before.replace(b"$113.91", b"$213.91", 1)
+        assert len(before) == len(after) and before != after
+        source.write_bytes(after)
+        report.os.utime(source, ns=(info.st_atime_ns, info.st_mtime_ns))
+        assert _build(report, capsys, out, str(source), "--period", "2026-08")[0] == 0
+        assert parsed == [source, source, source]
+        assert _read_report(out)["meta"]["inputs"][0]["sha256"] != first["meta"]["inputs"][0]["sha256"]
+    source.unlink()
+    assert _build(report, capsys, out, str(source), "--period", "2026-08")[0] != 0
+    assert not any(path.name.startswith("parsed") for path in out.rglob("*"))
+
+
+def test_cache_parser_semantics_sheet_profile_and_corrupt_storage(report, tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cache = report.input_cache
+    monkeypatch.setattr(cache, "WORKSPACE", workspace)
+    original = report.read_tables
+    calls = []
+
+    def count(*args, **kwargs):
+        calls.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(report, "read_tables", count)
+    profile = report.load_profile(None, None)
+    report.read_table(str(LARGE_XLSX), profile, cache=True)
+    report.read_table(str(LARGE_XLSX), profile, cache=True)
+    assert len(calls) == 1
+    report.read_table(f"{LARGE_XLSX}::Jobs", profile, cache=True)
+    different_profile = {**profile, "aliases": {**profile["aliases"], "amount": ["billed"]}}
+    report.read_table(str(LARGE_XLSX), different_profile, cache=True)
+    assert len(calls) == 3
+    monkeypatch.setattr(cache, "parser_identity", lambda: "different-parser")
+    report.read_table(str(LARGE_XLSX), profile, cache=True)
+    assert len(calls) == 4
+    for member in workspace.rglob("*.json"):
+        member.write_bytes(b"damaged")
+    report.read_table(str(LARGE_XLSX), profile, cache=True)
+    assert len(calls) == 5
+
+
+def test_cache_limits_conversation_ownership_and_unavailable_storage(report, tmp_path, monkeypatch):
+    cache = report.input_cache
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(cache, "WORKSPACE", workspace)
+    monkeypatch.setattr(cache, "MAX_ENTRIES", 2)
+    for i in range(7):
+        path = _write_csv(tmp_path / "jobs.csv", ["Date", "Amount"], [["2026-08-01", str(i)]])
+        result = report.read_table(str(path), cache=True)
+        assert result.frame.iloc[0, 1] == str(i)
+    assert 1 <= len(list(workspace.rglob("*.json"))) <= 2
+    original = report.read_tables
+    calls = []
+
+    def count(*args, **kwargs):
+        calls.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(report, "read_tables", count)
+    monkeypatch.setattr(cache, "HOME", workspace)
+    report.read_table(str(path), cache=True)
+    assert calls == [path]
+    others = tmp_path / "other-workspace"
+    others.mkdir()
+    (others / ".cache").symlink_to(workspace / ".cache", target_is_directory=True)
+    monkeypatch.setattr(cache, "WORKSPACE", others)
+    report.read_table(str(path), cache=True)
+    assert calls == [path, path]
+    (others / ".cache").unlink()
+    monkeypatch.setattr(cache, "MAX_BYTES", 12)
+    for _ in range(2):
+        report.read_table(str(path), cache=True)
+    assert calls == [path] * 4
+    assert not list(others.rglob("*.json"))
+
+
+def test_source_read_failure_precedes_cache_hit(report, tmp_path, monkeypatch):
+    cache = report.input_cache
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(cache, "WORKSPACE", workspace)
+    report.read_table(str(SMALL_CSV), cache=True)
+    original = report.os.open
+
+    def deny(path, *args, **kwargs):
+        if path == SMALL_CSV:
+            raise PermissionError("no longer readable")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(report.os, "open", deny)
+    with pytest.raises(report.InputError, match="no longer readable"):
+        report.read_table(str(SMALL_CSV), cache=True)
+
+
+def test_cache_record_copied_from_another_conversation_is_reparsed(report, tmp_path, monkeypatch):
+    cache = report.input_cache
+    members = []
+    for name in ("first", "second"):
+        workspace = tmp_path / name
+        workspace.mkdir()
+        monkeypatch.setattr(cache, "WORKSPACE", workspace)
+        report.read_table(str(SMALL_CSV), cache=True)
+        members.append(next(workspace.rglob("*.json")))
+    members[1].write_bytes(members[0].read_bytes())
+    original = report.read_tables
+    calls = []
+
+    def count(*args, **kwargs):
+        calls.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(report, "read_tables", count)
+    for _ in range(2):
+        report.read_table(str(SMALL_CSV), cache=True)
+    assert calls == [SMALL_CSV]
+
+
+def test_input_edit_during_parse_is_refused_and_never_cached(report, tmp_path, monkeypatch):
+    source = _write_csv(tmp_path / "sales.csv", ["Date", "Amount"], [["2026-08-03", 10]])
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(report.input_cache, "WORKSPACE", workspace)
+    read = report.read_tables
+
+    def change_after_hashing(*args, **kwargs):
+        source.write_bytes(source.read_bytes().replace(b",10", b",12"))
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(report, "read_tables", change_after_hashing)
+    with pytest.raises(report.InputError, match="changed while being read"):
+        report.read_table(str(source), cache=True)
+    assert not list(workspace.rglob("*.json"))
+
+
+def test_cache_hit_applies_new_mapping_period_and_exclusions(report, tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(report.input_cache, "WORKSPACE", workspace)
+    source = _write_csv(
+        tmp_path / "combined.csv",
+        ["Date", "Amount", "Tip", "Service Type"],
+        [
+            ["2026-08-01", 10, 1, "Service"],
+            ["2026-09-01", 50, 4, "Service"],
+            ["2026-09-02", 25, 2, "Warranty"],
+        ],
+    )
+    root = tmp_path / "out"
+    assert _build(report, capsys, root, str(source), "--period", "2026-08")[0] == 0
+    assert _read_report(root)["kpis"][0]["value"] == 10
+
+    def already_parsed(*args, **kwargs):
+        pytest.fail("unchanged source must hit the parsed table cache")
+
+    monkeypatch.setattr(report, "read_tables", already_parsed)
+    mapping = tmp_path / "mapping.json"
+    mapping.write_text('{"amount":"Tip"}', encoding="utf-8")
+    september = tmp_path / "september"
+    code, _, err = _build(report, capsys, september, str(source), "--period", "2026-09", "--mapping", str(mapping), "--exclude", "category=Warranty")
+    assert code == 0, err
+    assert _read_report(september)["kpis"][0]["value"] == 4
+
+
+def test_missing_cache_capabilities_preserve_read_only_commands(report, tmp_path, capsys, monkeypatch):
+    root = tmp_path / "out"
+    assert _build(report, capsys, root, str(SMALL_CSV))[0] == 0
+    path = _report_path(root)
+    monkeypatch.delitem(sys.modules, "business_report_input_cache", raising=False)
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    monkeypatch.delattr(report.os, "O_DIRECTORY")
+    reloaded = _load_script()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(reloaded.input_cache, "WORKSPACE", workspace)
+    assert _run(reloaded, capsys, "inspect", str(SMALL_CSV))[0] == 0
+    assert _run(reloaded, capsys, "show", str(path))[0] == 0
+    assert reloaded.read_table(str(SMALL_CSV), cache=True).rows == 300
+    assert list(workspace.iterdir()) == []
+
+
+def test_ten_input_report_rebuild_reuses_every_distinct_source(report, tmp_path, capsys, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(report.input_cache, "WORKSPACE", workspace)
+    inputs = [_write_csv(tmp_path / f"orders-{n}.csv", ["Date", "Total (USD)"], [["2026-08-03", n]]) for n in range(1, 11)]
+    original = report.read_tables
+    parsed = []
+
+    def count(path, *args, **kwargs):
+        parsed.append(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(report, "read_tables", count)
+    root = tmp_path / "out"
+    for _ in range(2):
+        code, _, err = _build(report, capsys, root, *map(str, inputs), "--period", "2026-08")
+        assert code == 0, err
+        assert _read_report(root)["kpis"][0]["value"] == 55
+    assert parsed == inputs
