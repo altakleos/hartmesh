@@ -144,6 +144,10 @@ async def test_managed_member_links_require_current_grants_and_exact_publication
     current[0] = bob
     for download in (False, True):
         assert (await client.get(href, params={"download": download})).status_code == 404
+    (disk / "conversation.json").write_bytes(b"damaged")
+    denied = await client.get(snapshot_url)
+    assert denied.status_code in {403, 404} and frozen.folder not in denied.text
+    (disk / "conversation.json").write_bytes(frozen.document)
     current[0] = alice
     actor = PrincipalRef("human", str(alice.id))
     space = next(s for s in await files.registry.list(actor=actor) if s.custody.kind == "company")
@@ -151,6 +155,11 @@ async def test_managed_member_links_require_current_grants_and_exact_publication
     current[0] = bob
     assert (await client.get(href)).content == data
     assert (await client.get(href, params={"download": True})).status_code in {403, 404}
+    (disk / "conversation.json").write_bytes(b"damaged")
+    available = await client.get(snapshot_url)
+    assert available.status_code == 404
+    assert available.json()["detail"] == {"code": "snapshot-folder-available", "publication_id": manifest["publication_id"], "folder": frozen.folder, "entries": ["conversation.json", "files/", "transcript.md"], "truncated": False}
+    (disk / "conversation.json").write_bytes(frozen.document)
     current[0] = alice
     plain = "/api/shared/" + member_path
     (disk / member.path).write_bytes(b"Changed content")

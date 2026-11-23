@@ -19,10 +19,10 @@ from app.gateway.conversation_snapshots import _manifest_document, _open_shared,
 from app.gateway.deps import get_run_manager, get_run_store, get_shared_publications_repo, get_thread_store
 from app.gateway.routers._file_http import acting_user_id
 from app.gateway.routers.shared import PublishRequest, _publisher_names, publish_snapshot_file, remove_shared
-from app.gateway.snapshot_manifest import FILE_LIMIT, MANIFEST_SOURCE, TOTAL_LIMIT, TRANSCRIPT_SOURCE, Digest, SnapshotMember, SnapshotModel, digest_of_bytes, freeze_manifest, generated_name
+from app.gateway.snapshot_manifest import FILE_LIMIT, MANIFEST_SOURCE, TOTAL_LIMIT, TRANSCRIPT_SOURCE, Digest, SnapshotLimit, SnapshotMember, SnapshotModel, digest_of_bytes, freeze_manifest, generated_name
 from app.gateway.storage_features import storage_feature
 from app.gateway.transcript import read_conversation
-from deerflow.files.store import DescriptorSource
+from deerflow.files.store import MAX_PATH_DEPTH, DescriptorSource
 from deerflow.runtime import ThreadOperationKind
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.utils.file_io import await_drained, run_file_io
@@ -91,6 +91,8 @@ async def _read_output(request, thread_id, path, limit, *, changed=False, agent_
     except HTTPException as exc:
         if exc.status_code in {404, 409} or (changed and exc.status_code == 413):
             raise _refuse("snapshot-file-changed") from None
+        if exc.status_code == 413:
+            raise _refuse("snapshot-total-limit" if limit < FILE_LIMIT else "snapshot-file-limit", 413) from None
         raise
     return data
 
@@ -118,16 +120,22 @@ async def prepare(request, thread_id, scope, agent_source, *, authors=None):
     files = []
     total = 0
     for path in sorted(paths):
+        if len(path) > 4096:
+            raise _refuse("snapshot-source-path-limit", 413)
         content = await _read_output(request, thread_id, path, min(FILE_LIMIT, TOTAL_LIMIT - total), agent_source=agent_source)
         total += len(content)
         files.append(SnapshotMember(path="files/" + path.removeprefix("/mnt/user-data/outputs/"), size=len(content), sha256=await run_file_io(digest_of_bytes, content)))
     await require_share_scope(request, thread_id, scope, agent_source)
     try:
         snapshot = await run_file_io(freeze_manifest, conversation.title, conversation.messages, files, with_agent=agent_source.agent if agent_source else None)
+    except SnapshotLimit as exc:
+        raise _refuse(str(exc), 413) from None
     except ValueError:
         raise _refuse("snapshot-limit", 413) from None
     if any(len((snapshot.folder + "/" + entry.path).rsplit("/", 1)[0]) > 1024 for entry in snapshot.manifest.files):
         raise _refuse("snapshot-path-limit", 413)
+    if any((snapshot.folder + "/" + entry.path).count("/") >= MAX_PATH_DEPTH for entry in snapshot.manifest.files):
+        raise _refuse("snapshot-path-depth", 413)
     return snapshot
 
 

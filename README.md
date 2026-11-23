@@ -4768,6 +4768,8 @@ Open the conversation and select **Share with everyone**. For a conversation wit
 
 Anyone with access to Company shared can read the published messages and download those files. Open and Download use the exact publication shown in the shared conversation. If someone removes or replaces the transcript or a file, its link reports that it is no longer available. Later messages and edits stay in the original conversation. You can remove the published copy from Company shared.
 
+If the published conversation cannot be read, its page lists the current contents of its Shared folder. Open **View current folder files** to browse the folder. For a recipient outside the company, use **Export** in the conversation header to download the transcript.
+
 ### Continue a shared conversation
 
 Open a published conversation in Company shared. The **Continue** button names the assistant who will answer. If you can chat with the original AI assistant or employee and it is available, you can continue with it. Otherwise, your ordinary assistant can answer. The new conversation includes the published words and copies of the files that are still shared.

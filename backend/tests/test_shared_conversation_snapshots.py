@@ -30,6 +30,7 @@ def share(repo, paths, monkeypatch):
 
     monkeypatch.setattr(snapshot_publication, "read_conversation", conversation)
     monkeypatch.setattr("app.gateway.conversation_file_import.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.files.folders.get_paths", lambda: paths)
     output = _thread_output(paths, user, "note.txt", b"blue")
     monkeypatch.setattr(snapshot_publication, "receipt_paths", AsyncMock(return_value=[output]))
 
@@ -171,12 +172,15 @@ async def test_recognized_document_reads_version_one_agent_metadata_and_only_hos
         assert detail.json()["with"] == doc["with"]
         assert detail.json()["answerer"] == {"kind": "assistant", "reason": "unavailable"}
     else:
+        assert detail.json()["detail"] == {"code": "snapshot-folder-available", "publication_id": row["publication_id"], "folder": rel.rsplit("/", 1)[0], "entries": ["conversation.json"], "truncated": False}
         assert not client.get("/api/shared-conversations").json()["conversations"]
         assert client.get("/api/shared/" + rel).content == data
 
     await repo.record_removal(row["publication_id"], removed_by=str(user.id))
     outsider = await repo.record_publication(path=rel, sha256=digest, size=len(data), published_by=str(user.id), from_thread_id=THREAD, from_path="/mnt/user-data/outputs/conversation.json")
-    assert client.get("/api/shared-conversations/" + outsider["publication_id"]).status_code == 404
+    unrecognized = client.get("/api/shared-conversations/" + outsider["publication_id"])
+    assert unrecognized.status_code == 404 and unrecognized.json()["detail"] == {"code": "snapshot-unavailable"}
+    assert "folder" not in client.get("/api/shared-conversations/" + row["publication_id"]).json()["detail"]
     assert not client.get("/api/shared").json()["files"][0].get("snapshot_publication_id")
 
 
@@ -297,3 +301,77 @@ async def test_snapshot_member_links_read_only_the_displayed_publication(share, 
     for download in (False, True):
         assert client.get(href, params={"download": download}).status_code == 410
     assert client.get(plain).content == b"blue"
+
+
+@pytest.mark.anyio
+async def test_damaged_snapshot_offers_only_its_current_folder_under_shared_read(share, paths, repo, monkeypatch):
+    import _router_auth_helpers
+
+    client, _, _ = share
+    prefix = "/api/shared-conversations"
+    draft = client.get(prefix + "/draft", params={"thread_id": THREAD}).json()
+    publication = client.post(prefix, json={"snapshot": draft["snapshot"], "thread_id": THREAD}).json()["publication_id"]
+    url = f"{prefix}/{publication}"
+    member = client.get(url).json()["files"][0]
+    folder = member["shared_path"].rsplit("/files/", 1)[0]
+    manifest = paths.shared_dir() / folder / "conversation.json"
+    original = manifest.read_bytes()
+    manifest.write_bytes(b"broken")
+    disk = paths.shared_dir() / folder
+    (disk / "other-publisher.txt").write_bytes(b"ordinary file")
+    (disk / ".private").write_bytes(b"hidden")
+    (disk / "unreadable-link").symlink_to(disk / ".private")
+    response = client.get(url)
+    assert response.status_code == 404 and response.json()["detail"] == {
+        "code": "snapshot-folder-available",
+        "publication_id": publication,
+        "folder": folder,
+        "entries": ["conversation.json", "files/", "other-publisher.txt", "transcript.md"],
+        "truncated": False,
+    }
+    assert "no-store" in response.headers["cache-control"]
+    assert client.get(url + "/members/" + member["publication_id"]).status_code == 410
+    assert client.delete(url).status_code == 404
+    for number in range(55):
+        (disk / f"additional-{number}.txt").touch()
+    limited = client.get(url).json()["detail"]
+    assert limited["truncated"] and len(limited["entries"]) == 50
+    with monkeypatch.context() as denied:
+        denied.setattr(_router_auth_helpers, "_STUB_PERMISSIONS", [p for p in _router_auth_helpers._STUB_PERMISSIONS if p != "threads:read"])
+        denied_response = client.get(url)
+        assert denied_response.status_code == 403 and folder not in denied_response.text
+    assert client.get(prefix + "/missing").json()["detail"] == {"code": "snapshot-unavailable"}
+    with monkeypatch.context() as replaced:
+        live = await repo.live_publication(folder + "/conversation.json")
+        replaced.setattr(repo, "live_publication", AsyncMock(side_effect=[live, {**live, "publication_id": "replacement"}]))
+        assert client.get(url).json()["detail"] == {"code": "snapshot-unavailable"}
+    # An ordinary removal of the exact manifest must retire even a bookmarked recovery page.
+    manifest.write_bytes(original)
+    result = client.delete("/api/shared/" + folder + "/conversation.json", params={"expected_publication_id": publication})
+    assert result.status_code == 200
+    retired = client.get(url)
+    assert retired.status_code == 410 and set(retired.json()["detail"]) == {"code", "publisher", "published_at"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cap", ["file-count", "path-limit", "source-path-limit", "path-depth", "manifest-limit", "transcript-limit", "message-count", "file-limit", "total-limit"])
+async def test_draft_identifies_each_exceeded_limit(share, monkeypatch, cap):
+    from app.gateway import snapshot_manifest
+
+    client, _, _ = share
+    if cap == "file-limit":
+        monkeypatch.setattr(snapshot_publication, "FILE_LIMIT", 3)
+    elif cap == "total-limit":
+        monkeypatch.setattr(snapshot_publication, "TOTAL_LIMIT", 3)
+    elif cap == "file-count":
+        monkeypatch.setattr(snapshot_publication, "receipt_paths", AsyncMock(return_value=[f"/mnt/user-data/outputs/{i}" for i in range(65)]))
+    elif cap in {"path-limit", "path-depth", "source-path-limit"}:
+        relative = {"path-limit": ("n" * 100 + "/") * 10 + "one", "path-depth": "nested/" * 13 + "one", "source-path-limit": ("n" * 255 + "/") * 15 + "n" * 255}[cap]
+        monkeypatch.setattr(snapshot_publication, "receipt_paths", AsyncMock(return_value=["/mnt/user-data/outputs/" + relative]))
+        monkeypatch.setattr(snapshot_publication, "_read_output", AsyncMock(return_value=b"one"))
+    elif cap == "message-count":
+        monkeypatch.setattr(snapshot_publication, "read_conversation", AsyncMock(return_value=SimpleNamespace(title="One", messages=[{"type": "ai", "content": "Hi"}] * 10001)))
+    else:
+        monkeypatch.setattr(snapshot_manifest, "MANIFEST_LIMIT", 200 if cap == "manifest-limit" else 10)
+    detail = client.get("/api/shared-conversations/draft", params={"thread_id": THREAD})
+    assert detail.status_code == 413 and detail.json()["detail"]["code"] == "snapshot-" + cap

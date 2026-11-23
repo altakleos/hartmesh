@@ -458,7 +458,8 @@ operations, recheck restored paths and keep history in account memory. A refused
 versioned operation has no path-only fallback.
 
 Fold marked members after authorized discovery and collection reads. Link by snapshot
-and member publication IDs. Agent sharing requires agent_publish, Manage + Inspect and
+and member publication IDs. An unreadable snapshot can show current folder names and link to the Shared folder browser
+only for a matching publication ID from the authorized reader. Agent sharing requires agent_publish, Manage + Inspect and
 consent to the previewed company audience. Undo sends the exact receipt and created IDs.
 Attribute copied turns by verified thread seed IDs. Bind continued upload paths to the
 account, thread and confirmed answerer. Retry transport with the same request. Changing answerer needs a new click.
