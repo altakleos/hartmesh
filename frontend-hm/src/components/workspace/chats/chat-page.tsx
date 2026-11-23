@@ -109,6 +109,8 @@ export default function ChatPage() {
   const { user } = useAuth();
   const runInputsEnabled = useRunInputsEnabled(!!user);
   const locallyCreated = useRef<string | null>(null);
+  const [batchNoticeContainer, setBatchNoticeContainer] =
+    useState<HTMLDivElement | null>(null);
   const feature = useAgentInstances();
   const router = useRouter();
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
@@ -586,7 +588,14 @@ export default function ChatPage() {
                   {!isNewThread &&
                     !isMock &&
                     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
-                      <ThreadSubagentBatches threadId={threadId} />
+                      <ThreadSubagentBatches
+                        threadId={threadId}
+                        accountId={user?.id}
+                        noticeContainer={batchNoticeContainer}
+                        hideWhenEmpty={
+                          !!binding && binding.requester_id !== user?.id
+                        }
+                      />
                     )}
                   {!isNewThread && !isMock && legacyCapabilities && (
                     <ThreadScheduledTasksLink threadId={threadId} />
@@ -798,6 +807,7 @@ export default function ChatPage() {
                               </Button>
                             </div>
                           )}
+                        {binding && <div ref={setBatchNoticeContainer} />}
                         {sendNotice && <div role="alert">{sendNotice}</div>}
                         {stop.message && <div role="alert">{stop.message}</div>}
                         {binding && agentRunRefusal && (

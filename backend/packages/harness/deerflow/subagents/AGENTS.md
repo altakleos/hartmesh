@@ -8,7 +8,11 @@ tool use continues.
 Batch `owner_access` is host-owned: check before assembly/launch, lease renewals
 and acceptance. On deny, cancel and drain. Personal workers and file checks accept
 only specs without a `scope` key. The Gateway checks the conversation binding
-for every submission before persisting it.
+for every submission before persisting it. A session-bound job belongs to its
+employee conversation. Recheck the live principal and conversation at admission.
+Run its checks as helpers in the admitted employee workspace. Only that run
+can claim the final turn. See the [storage contract](../persistence/subagent_batches/AGENTS.md)
+for recovery and the one-hour replacement limit.
 
 Drain cleanup; preserve terminal outcomes on cancel.
 Queued capacity abandonment drains waiter removal and transferred-slot release

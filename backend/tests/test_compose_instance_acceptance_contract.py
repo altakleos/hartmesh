@@ -294,7 +294,7 @@ def test_candidate_browser_rehearsal_uses_the_built_product_ui_and_real_file_act
     build = next(step for step in steps if "frontend-hm/Dockerfile" in step.get("run", ""))
     gate = next(step for step in steps if "attachment-browser.json" in step.get("run", ""))
     assert gate["if"] == "github.event_name == 'workflow_dispatch' && inputs.verify_home_rollback"
-    assert build["if"] == "github.event_name == 'workflow_dispatch' && (inputs.verify_home_rollback || (inputs.verify_file_browser && inputs.backend_image == ''))"
+    assert build["if"] == "github.event_name == 'workflow_dispatch' && (inputs.verify_home_rollback || ((inputs.verify_file_browser || inputs.verify_agent_jobs) && inputs.backend_image == ''))"
     assert 'echo "HARTMESH_BROWSER_FRONTEND=$frontend_ref" >> "$GITHUB_ENV"' in build["run"]
     assert "uv sync --frozen --group dev --extra browser" in build["run"]
     assert "attachment-browser-interrupted.png" in gate["run"] and "attachment-browser-recovered.png" in gate["run"]
@@ -384,7 +384,7 @@ def test_scripted_model_host_port_stays_outside_the_container_port_allocator_ran
     document = yaml.safe_load((ROOT / ".github/workflows/compose-instances.yml").read_text(encoding="utf-8"))
     steps = {step.get("name"): step.get("run", "") for step in document["jobs"]["bundle-instances"]["steps"]}
     start = steps["5 Start the scripted model"]
-    tokens = shlex.split(next(line for line in start.splitlines() if line.startswith("nohup ")))
+    tokens = shlex.split(next(line for line in start.splitlines() if line.strip().startswith("nohup python3 -c ")))
     assert tokens[:3] == ["nohup", "python3", "-c"], "Use the existing Handler at a separate runner-host port"
     tree = ast.parse(tokens[3])
     server = next(node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "ThreadingHTTPServer")

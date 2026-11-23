@@ -33,8 +33,12 @@ async def _require_ordinary_source(app, record):
 
 
 class BatchContinuations:
-    def __init__(self, app):
+    def __init__(self, app, *, agent_enabled=False, agent_max_items=50, agent_work_seconds=900):
         self.app = app
+        self.agent_enabled = agent_enabled
+        self.agent_max_items = agent_max_items
+        self.agent_work_seconds = agent_work_seconds
+        self._last_agent_job = None
 
     async def admit_submission(self, request):
         # The Gateway installs a SQL-backed binding reader even when managed
@@ -42,8 +46,14 @@ class BatchContinuations:
         authority = getattr(self.app.state, "agent_conversations", None)
         if authority is None:
             raise AgentRunError(503, "The conversation binding cannot be verified")
-        if await authority.binding(request.thread_id) is not None:
+        instance_id = await authority.binding(request.thread_id)
+        if instance_id is None:
+            return None
+        if not self.agent_enabled:
             raise AgentRunError(422, "Background batches are unavailable for instance conversations")
+        from app.subagent_batches.agent_jobs import classify_agent_submission
+
+        return await classify_agent_submission(self.app, request, instance_id, max_items=self.agent_max_items)
 
     async def prepare(self, request):
         from app.gateway.services import _CONTEXT_CONFIGURABLE_KEYS, _MODEL_SELECTION_CONTEXT_KEYS
@@ -57,7 +67,13 @@ class BatchContinuations:
         record = await self.app.state.run_manager.get(request.run_id, user_id=request.user_id)
         if record is None or record.user_id != request.user_id or record.thread_id != request.thread_id:
             raise AgentRunError(403, "Batch follow-up must belong to its originating Run")
-        await _require_ordinary_source(self.app, record)
+        from deerflow.subagents.batch_scope import known_agent_batch_scope
+
+        bound = known_agent_batch_scope(request.execution_spec)
+        if bound is None:
+            await _require_ordinary_source(self.app, record)
+        elif not self.agent_enabled or grant.get("source") != "session" or record.metadata.get("agent_instance_id") != bound.instance_id or await self.app.state.agent_conversations.binding(request.thread_id) != bound.instance_id:
+            raise AgentRunError(403, "Agent conversation admission changed")
         captured = request.continuation_context or {}
         if (grant.get("durable_followup") is True or (record.metadata or {}).get("deerflow_origin", {}).get("kind") == "subagent_batch") and (captured.get("goal") or {}).get("status") != "active":
             raise AgentRunError(409, "A batch follow-up cannot register another automatic follow-up")
@@ -75,7 +91,38 @@ class BatchContinuations:
             "knowledge_scope": copy.deepcopy(scope),
         }
 
+    async def claim_agent_jobs(self, *, now, lease_owner, lease_seconds, start_wait_seconds, exclude_batch_ids):
+        repo = self.app.state.subagent_batch_repo
+        try:
+            candidates = await repo.list_bound_jobs(after=self._last_agent_job, limit=16)
+        except Exception as error:
+            # Leased personal follow-ups and the ordinary item poll must still run.
+            logger.warning("Could not list agent jobs (%s)", type(error).__name__)
+            return []
+        self._last_agent_job = candidates[-1] if len(candidates) == 16 else None
+        claims = []
+        for batch_id in candidates:
+            if batch_id in exclude_batch_ids:
+                continue
+            try:
+                claim = await repo.claim_bound_dispatch(batch_id, now=now, lease_owner=lease_owner, lease_seconds=lease_seconds, start_wait_seconds=start_wait_seconds)
+            except Exception as error:
+                logger.warning("Could not reconcile agent job %s (%s)", batch_id, type(error).__name__)
+                continue
+            if claim is not None:
+                claims.append(claim)
+        return claims
+
     async def dispatch(self, batch):
+        from deerflow.subagents.batch_scope import known_agent_batch_scope
+
+        if self.agent_enabled and known_agent_batch_scope(batch.get("execution_spec")) is not None:
+            from app.subagent_batches.agent_jobs import dispatch_agent_job
+
+            status, reason = await dispatch_agent_job(self.app, batch)
+            if status != "dispatched":
+                await self.app.state.subagent_batch_repo.finish_bound_dispatch(batch["id"], execution_fence=batch["execution_fence"], status=status, reason=reason)
+            return None
         if not is_ordinary_batch_spec(batch.get("execution_spec")):
             return {"status": "suppressed"}
         continuation = batch["continuation"]
@@ -148,19 +195,29 @@ class BatchContinuations:
                 return {"status": "suppressed"}
             raise
 
-    async def cancel(self, batch_id, user_id, *, thread_id=None, authority=_TRUSTED, authorize_only=False):
+    async def cancel(self, batch_id, user_id, *, thread_id=None, authority=_TRUSTED, authorize_only=False, bound_run_id=None):
         if authority is not _TRUSTED:
             self.app.state.agent_runs_host.capture_batch_authority(authority, user_id=user_id)
-            async with authority._request("runs:cancel", thread_id):
+            async with authority._request("runs:cancel", thread_id) as request:
+                from app.gateway.agent_conversations import require_conversation
+                from deerflow.agent_instances.contract import AgentPermission
+
+                if await require_conversation(request, thread_id, permission=AgentPermission.USE):
+                    await require_conversation(request, thread_id, permission=AgentPermission.INSPECT)
                 if authorize_only:
                     return
         elif authorize_only:
             return
-        run_id = await self.app.state.subagent_batch_repo.continuation_run_id(batch_id, user_id=user_id)
+        run_id = bound_run_id or await self.app.state.subagent_batch_repo.continuation_run_id(batch_id, user_id=user_id)
         if run_id is None:
             return
         record = await self.app.state.run_manager.get(run_id, user_id=user_id)
         if record is not None:
+            if bound_run_id is not None:
+                from deerflow.runtime.run_origin import origin_kind_of
+
+                if record.thread_id != thread_id or record.user_id != user_id or origin_kind_of(record.metadata) != "subagent_batch" or (record.kwargs or {}).get("agent_job_id") != batch_id:
+                    return
             await self.app.state.run_manager.cancel(run_id)
 
     async def source_finished(self, record):

@@ -3942,6 +3942,18 @@ The token budget counts separate accepted model calls even when their response m
 
 ### Sub-Agents
 
+In a signed-in web conversation with an AI employee, you can ask it to run up to
+50 checks on its own files and tell it what to do with the results. Open the
+job panel to see progress, read individual results or cancel the job. Checks
+run in the employee’s workspace. Its final reply can use the company
+connections its manager granted. If HartMesh restarts after the checks finish
+and before the final reply is saved, the job stops and keeps the results.
+You can ask the employee to use them in a new message.
+
+Operators can enable jobs in the Compose bundle with `HARTMESH_BATCHES=on`.
+The default is off. See the [batch guide](backend/docs/BATCH_CONTINUATION.md)
+for limits, recovery and operator commands.
+
 Web chats accept direct model choices such as “ask MODEL to handle this”, “use MODEL for this turn”, and “from now on use MODEL”; Chinese equivalents are supported too. A child choice leaves the main model unchanged, a one-turn choice leaves defaults unchanged, and a conversation choice uses the existing browser-local thread override without changing account preferences. Choices resolve against available configurations and optional `models[].aliases`; ambiguous names or scopes show a selection card before execution, while delegation still requires enabled subagents (Ultra mode).
 
 When a sub-agent ends with `return_direct=True` tools, including tools contributed by extension middleware, their outputs are returned in tool-call order. A failed tool marks the task as failed while preserving the batch outputs.

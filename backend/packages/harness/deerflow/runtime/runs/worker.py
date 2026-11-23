@@ -868,6 +868,7 @@ class RunContext:
     conversation_reader: Any | None = field(default=None)
     storage_provider: Any | None = field(default=None)
     agent_execution: Any | None = field(default=None)
+    bound_batch_items: Any | None = field(default=None)
     # Trusted host scope only; never part of runtime payloads or checkpoints.
     chat_storage_scope: Callable[..., AbstractAsyncContextManager[Any]] | None = None
     # The owning app retains the task privately; never put this in run payloads.
@@ -1765,12 +1766,17 @@ async def _run_agent(
             return
         started = True
 
+        from deerflow.agent_instances.runtime import validate_bound_job
+
+        validate_bound_job(record, ctx.agent_execution, ctx.bound_batch_items)
         if ctx.agent_execution is not None:
             from deerflow.agent_instances.runtime import current_environment, prepare_environment
 
             environment = current_environment()
             if environment is None or environment.execution is not ctx.agent_execution:
                 raise ValueError("Instance execution is missing its trusted host scope")
+            environment.bound_batch_items = ctx.bound_batch_items
+            environment.run_record = record
             environment.provider = await prepare_environment(ctx.agent_execution, app_config=ctx.app_config, run_id=record.run_id)
             if ctx.agent_execution.work is not None and getattr(ctx.agent_execution.authority.instances, "residents", None) is not None:
                 await ctx.agent_execution.work.workspace_ready(ctx.agent_execution, environment.provider.sandbox.id)

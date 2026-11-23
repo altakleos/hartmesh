@@ -26,6 +26,16 @@ rs.mock("@/core/i18n/hooks", () => ({
     t: {
       common: { loading: "Loading", loadMore: "Load more" },
       subagentBatches: {
+        jobState: { working: "Working", ended: "Ended" },
+        jobReasons: { unavailable: "Unavailable" },
+        unavailableNotice: (finished: number, total: number) =>
+          `${finished} of ${total} checks finished`,
+        finishedChecks: (finished: number, total: number) =>
+          `${finished} of ${total} finished`,
+        askAgain: "Ask again",
+        switchedOff: "Off",
+        openPanel: "Open Batches",
+        dismiss: "Dismiss",
         label: "Batches",
         title: "Subagent batches",
         description: "Durable batch work",
@@ -197,5 +207,100 @@ describe("ThreadSubagentBatches capability gating", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Load more" }));
 
     expect(batchState.fetchNextPage).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("agent conversation jobs", () => {
+  it("keeps a colleague's empty drawer private when the worker is active", () => {
+    featureState.workerRunning = true;
+    render(<ThreadSubagentBatches threadId="other-chat" hideWhenEmpty />);
+    expect(screen.queryByRole("button", { name: "Batches" })).toBeNull();
+  });
+
+  it("shows only the advertised Cancel and keeps item failures readable", async () => {
+    featureState.workerRunning = true;
+    batchState.batches = [
+      {
+        ...HISTORICAL_BATCH,
+        read_only: true,
+        follow_up: { state: "working", finished: 1, total: 2 },
+        controls: ["cancel"],
+      },
+    ];
+    batchState.itemPages = [
+      [{ id: "one", item_key: "part", status: "failed" }],
+    ];
+    render(<ThreadSubagentBatches threadId="thread-1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Batches" }));
+    fireEvent.click(await screen.findByRole("button", { name: "View items" }));
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(batchState.control).toHaveBeenCalledWith({
+      batchId: "batch-1",
+      action: "cancel",
+    });
+  });
+
+  it("shows only the newest unavailable job above the composer and remembers dismissal per account", async () => {
+    const mount = document.createElement("div");
+    document.body.appendChild(mount);
+    const job = {
+      ...HISTORICAL_BATCH,
+      read_only: true,
+      status: "cancelled",
+      controls: [],
+      follow_up: {
+        state: "ended",
+        reason: "unavailable",
+        finished: 1,
+        total: 2,
+      },
+    };
+    batchState.batches = [job];
+    const view = render(
+      <ThreadSubagentBatches
+        accountId="starter"
+        threadId="thread-1"
+        noticeContainer={mount}
+      />,
+    );
+    expect(mount.textContent).toContain("1 of 2 checks finished");
+    fireEvent.click(screen.getByRole("button", { name: "Open Batches" }));
+    expect(await screen.findByRole("dialog")).toBeDefined();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    fireEvent.click(await screen.findByRole("button", { name: "Dismiss" }));
+    view.unmount();
+    const again = render(
+      <ThreadSubagentBatches
+        accountId="starter"
+        threadId="thread-1"
+        noticeContainer={mount}
+      />,
+    );
+    expect(mount.textContent).toBe("");
+    again.rerender(
+      <ThreadSubagentBatches
+        accountId="other"
+        threadId="thread-1"
+        noticeContainer={mount}
+      />,
+    );
+    expect(mount.textContent).toContain("1 of 2 checks finished");
+    for (const reason of ["cancelled", "interrupted", "future"]) {
+      batchState.batches = [
+        { ...job, follow_up: { ...job.follow_up, reason } },
+        job,
+      ];
+      again.rerender(
+        <ThreadSubagentBatches
+          accountId="other"
+          threadId="thread-1"
+          noticeContainer={mount}
+        />,
+      );
+      expect(mount.textContent).toBe("");
+    }
+    mount.remove();
   });
 });

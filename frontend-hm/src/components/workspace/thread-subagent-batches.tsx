@@ -11,6 +11,7 @@ import {
   RotateCcwIcon,
 } from "lucide-react";
 import { useState } from "react";
+import { createPortal } from "react-dom";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,7 @@ import {
 } from "@/components/ui/sheet";
 import { useSubagentBatchesCapability } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
+import { safeLocalStorage } from "@/core/settings/local";
 import {
   completedSubagentBatchItems,
   isActiveSubagentBatch,
@@ -38,7 +40,18 @@ import {
   useSubagentBatches,
 } from "@/core/subagent-batches";
 
-export function ThreadSubagentBatches({ threadId }: { threadId: string }) {
+export function ThreadSubagentBatches({
+  threadId,
+  accountId,
+  noticeContainer,
+  hideWhenEmpty = false,
+}: {
+  threadId: string;
+  accountId?: string;
+  noticeContainer?: HTMLElement | null;
+  hideWhenEmpty?: boolean;
+}) {
+  const [sheetOpen, setSheetOpen] = useState(false);
   const { t } = useI18n();
   const { repositoryAvailable, workerRunning } = useSubagentBatchesCapability();
   const batchesQuery = useSubagentBatches(threadId, {
@@ -46,7 +59,8 @@ export function ThreadSubagentBatches({ threadId }: { threadId: string }) {
     polling: workerRunning,
   });
   const control = useControlSubagentBatch(threadId);
-  const batches = batchesQuery.data ?? [];
+  const batches = batchesQuery.isError ? [] : (batchesQuery.data ?? []);
+  const newest = batches[0];
   const activeCount = batches.filter(isActiveSubagentBatch).length;
 
   const hasVisibleSurface =
@@ -56,10 +70,30 @@ export function ThreadSubagentBatches({ threadId }: { threadId: string }) {
       batchesQuery.isError ||
       batches.length > 0);
 
-  if (!hasVisibleSurface) return null;
+  if (!hasVisibleSurface || (hideWhenEmpty && !batches.length)) return null;
 
   return (
-    <Sheet>
+    <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
+      {noticeContainer &&
+        accountId &&
+        newest?.follow_up?.state === "ended" &&
+        newest.follow_up.reason === "unavailable" &&
+        createPortal(
+          <UnavailableJobNotice
+            key={JSON.stringify([accountId, threadId, newest.id])}
+            storageKey={JSON.stringify([
+              "dismissed-large-job",
+              accountId,
+              threadId,
+              newest.id,
+            ])}
+            finished={newest.follow_up.finished}
+            total={newest.follow_up.total}
+            workerRunning={workerRunning}
+            onOpen={() => setSheetOpen(true)}
+          />,
+          noticeContainer,
+        )}
       <SheetTrigger asChild>
         <Button
           type="button"
@@ -124,7 +158,7 @@ export function ThreadSubagentBatches({ threadId }: { threadId: string }) {
                   key={batch.id}
                   threadId={threadId}
                   batch={batch}
-                  workerRunning={workerRunning && !batch.read_only}
+                  workerRunning={workerRunning}
                   controlling={
                     control.isPending && control.variables?.batchId === batch.id
                   }
@@ -138,6 +172,49 @@ export function ThreadSubagentBatches({ threadId }: { threadId: string }) {
         </div>
       </SheetContent>
     </Sheet>
+  );
+}
+
+function UnavailableJobNotice({
+  storageKey,
+  finished,
+  total,
+  workerRunning,
+  onOpen,
+}: {
+  storageKey: string;
+  finished: number;
+  total: number;
+  workerRunning: boolean;
+  onOpen: () => void;
+}) {
+  const { t } = useI18n();
+  const [dismissed, setDismissed] = useState(
+    () => safeLocalStorage.getItem(storageKey) === "1",
+  );
+  if (dismissed) return null;
+  const words = t.subagentBatches;
+  return (
+    <div role="status" className="bg-muted mb-2 rounded-md p-3 text-sm">
+      <p>
+        {words.unavailableNotice(finished, total)}{" "}
+        {workerRunning ? words.askAgain : words.switchedOff}
+      </p>
+      <Button type="button" size="sm" variant="link" onClick={onOpen}>
+        {words.openPanel}
+      </Button>
+      <Button
+        type="button"
+        size="sm"
+        variant="ghost"
+        onClick={() => {
+          safeLocalStorage.setItem(storageKey, "1");
+          setDismissed(true);
+        }}
+      >
+        {words.dismiss}
+      </Button>
+    </div>
   );
 }
 
@@ -158,6 +235,11 @@ function BatchCard({
   const [open, setOpen] = useState(false);
   const completed = completedSubagentBatchItems(batch);
   const active = isActiveSubagentBatch(batch);
+  const followUp = batch.follow_up;
+  const canControl = workerRunning && !batch.read_only;
+  const canCancel = followUp
+    ? workerRunning && batch.controls?.includes("cancel")
+    : canControl;
   const labels = t.subagentBatches.status;
 
   return (
@@ -192,7 +274,19 @@ function BatchCard({
           </span>
         )}
       </div>
-      {batch.continuation_status &&
+      {followUp && (
+        <p className="text-muted-foreground mt-2 text-xs">
+          {t.subagentBatches.jobState[followUp.state] ??
+            t.subagentBatches.followUpStopped}{" "}
+          {followUp.reason &&
+          Object.hasOwn(t.subagentBatches.jobReasons, followUp.reason)
+            ? t.subagentBatches.jobReasons[followUp.reason]
+            : ""}{" "}
+          {t.subagentBatches.finishedChecks(followUp.finished, followUp.total)}
+        </p>
+      )}
+      {!followUp &&
+        batch.continuation_status &&
         batch.continuation_status !== "dispatched" && (
           <p className="text-muted-foreground mt-2 text-xs">
             {batch.continuation_status === "pending" ||
@@ -210,33 +304,34 @@ function BatchCard({
         >
           {open ? t.subagentBatches.hideItems : t.subagentBatches.viewItems}
         </Button>
-        {batch.status === "running" || batch.status === "queued" ? (
+        {!followUp &&
+        (batch.status === "running" || batch.status === "queued") ? (
           <Button
             type="button"
             size="sm"
             variant="outline"
-            disabled={!workerRunning || controlling}
+            disabled={!canControl || controlling}
             onClick={() => onControl("pause")}
           >
             <CirclePauseIcon /> {t.subagentBatches.pause}
           </Button>
-        ) : batch.status === "paused" ? (
+        ) : !followUp && batch.status === "paused" ? (
           <Button
             type="button"
             size="sm"
             variant="outline"
-            disabled={!workerRunning || controlling}
+            disabled={!canControl || controlling}
             onClick={() => onControl("resume")}
           >
             <CirclePlayIcon /> {t.subagentBatches.resume}
           </Button>
         ) : null}
-        {active && (
+        {(followUp ? batch.controls?.includes("cancel") : active) && (
           <Button
             type="button"
             size="sm"
             variant="outline"
-            disabled={!workerRunning || controlling}
+            disabled={!canCancel || controlling}
             onClick={() => onControl("cancel")}
           >
             <CircleStopIcon /> {t.subagentBatches.cancel}
@@ -293,7 +388,8 @@ function BatchItems({
         <BatchItemRow
           key={item.id}
           item={item}
-          workerRunning={workerRunning}
+          showRetry={!batch.follow_up}
+          workerRunning={workerRunning && !batch.read_only}
           retrying={retry.isPending && retry.variables === item.id}
           onRetry={() => retry.mutate(item.id)}
         />
@@ -319,11 +415,13 @@ function BatchItems({
 
 function BatchItemRow({
   item,
+  showRetry,
   workerRunning,
   retrying,
   onRetry,
 }: {
   item: SubagentBatchItem;
+  showRetry: boolean;
   workerRunning: boolean;
   retrying: boolean;
   onRetry: () => void;
@@ -345,7 +443,7 @@ function BatchItemRow({
       {item.error && (
         <p className="text-destructive mt-1 break-words">{item.error}</p>
       )}
-      {item.status === "failed" && (
+      {showRetry && item.status === "failed" && (
         <Button
           type="button"
           size="sm"

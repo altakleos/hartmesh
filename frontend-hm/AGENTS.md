@@ -25,9 +25,7 @@ is provider-only. EN/ZH notices use configured provider links.
 account/role caches and retired-action fences. Retry exact intents; 202 is pending.
 Viewer-scoped `/api/search` is cancellable; demos filter locally. Agent files use Spaces and audited writes.
 Conversation attachments stay local to chat. The account workspace owns Home uploads and rechecks grants, incarnation and receipts across routes. Pickers send destination references. Browse inspectable agents on demand. Confirm Home copies, omit source titles, reconcile by ID; verify receipt, Home and execution.
-Binding discovery hides ordinary artifacts, preserving selections; confirmed bindings retire the panel. Use verified custody in breadcrumbs.
-Only Inspect opens produced files. Browser/sidecar/scheduling remain ordinary-chat
-controls. Memory uses instance APIs/all summaries only.
+Binding discovery hides ordinary artifacts and preserves selection. Confirmed bindings retire the panel. Verify breadcrumb custody. Inspect opens produced files. Browser, sidecar and scheduling are personal. Use instance memory APIs. Agent batch controls come from the Gateway. Startup notices stay outside history.
 Company targets start empty; transfer data explicitly through admitted APIs.
 Work controls separate delegation, explicit activation and review. Use+Inspect delegates with adopted
 policy defaults; Manage+Inspect changes assignments and reviews exact statements.

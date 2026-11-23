@@ -31,6 +31,8 @@ class ExecutionEnvironment:
     provider: SandboxProvider | None = None
     attachment_id: str | None = None
     recycle_required: bool = False
+    bound_batch_items: object | None = None
+    run_record: object | None = None
 
 
 _environment = ContextVar("agent_execution_environment", default=None)
@@ -329,7 +331,7 @@ class InstanceSandboxProvider(SandboxProvider):
             discard_sandbox_lease_manager(self)
 
 
-def instance_tools(tools):
+def instance_tools(tools, *, batch_mode=None):
     """Keep supported native/public tools; withhold private integration surfaces."""
     builtin_modules = {
         "deerflow.sandbox.tools",
@@ -340,6 +342,8 @@ def instance_tools(tools):
         "deerflow.tools.builtins.view_image_tool",
     }
     public_providers = {"tavily", "sofya", "jina_ai", "unbrowse", "firecrawl", "image_search", "brave", "ddg_search", "exa", "searxng", "serper", "serply", "tencent_wsa", "direct_fetch"}
+    from deerflow.tools.builtins.batch_task_tool import native_batch_tool_names
+
     retained = []
     for tool in tools:
         function = getattr(tool, "coroutine", None) or getattr(tool, "func", None)
@@ -347,6 +351,9 @@ def instance_tools(tools):
         parts = module.split(".")
         if module in builtin_modules or (parts[:2] == ["deerflow", "community"] and len(parts) > 2 and parts[2] in public_providers):
             retained.append(tool)
+        elif batch_mode in ("submit", "results") and native_batch_tool_names((tool,)):
+            if batch_mode == "submit" or tool.name in ("batch_status", "read_batch_result"):
+                retained.append(tool)
     return retained
 
 
@@ -536,3 +543,25 @@ async def _prepare_client(execution, baseline_provider, attached, capture, app_c
     except BaseException:
         await await_drained(run_file_io(sandbox.close))
         raise
+
+
+def validate_bound_job(record, execution, bound):
+    from deerflow.runtime.run_origin import origin_kind_of
+
+    is_job = execution is not None and origin_kind_of(record.metadata) == "subagent_batch"
+    job_id = (record.kwargs or {}).get("agent_job_id")
+    if not is_job and bound is None and job_id is None:
+        return
+    if (
+        not is_job
+        or bound is None
+        or job_id != bound.batch_id
+        or getattr(execution.connection_origin, "kind", None) != "batch_followup"
+        or record.run_id != bound.run_id
+        or record.thread_id != bound.thread_id
+        or record.user_id != bound.user_id
+        or execution.requester.subject_id != bound.user_id
+        or execution.thread_id != bound.thread_id
+        or execution.instance.id != bound.instance_id
+    ):
+        raise AgentDenied("The conversation job does not match its admitted run")

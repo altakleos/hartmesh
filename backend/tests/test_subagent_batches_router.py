@@ -262,3 +262,25 @@ async def test_read_only_scope_refuses_writes_after_checking_ownership(monkeypat
         with pytest.raises(HTTPException) as error:
             await route.__wrapped__(thread_id=thread_id, batch_id="batch-1", request=request, **extra)
         assert error.value.status_code == expected
+
+
+@pytest.mark.asyncio
+async def test_bound_row_only_accepts_its_advertised_cancel(monkeypatch):
+    repo = Repository()
+    repo.batch.update(read_only=True, follow_up={"state": "working"}, controls=["cancel"], continuation_status="dispatched")
+    service = SimpleNamespace(cancel_batch=AsyncMock(return_value=_batch(status="cancelled")))
+    request = _request(repo, service=service)
+    monkeypatch.setattr(subagent_batches, "get_current_user", AsyncMock(return_value="user-1"))
+    seen = []
+    monkeypatch.setattr(subagent_batches, "require_cancel_permission_if", lambda req, required: seen.append(required))
+    result = await subagent_batches.cancel_batch.__wrapped__(thread_id="thread-1", batch_id="batch-1", request=request)
+    assert result["status"] == "cancelled" and seen == [True]
+    for route, extra in [(subagent_batches.pause_batch, {}), (subagent_batches.resume_batch, {}), (subagent_batches.retry_batch_item, {"item_id": "item-1"})]:
+        with pytest.raises(HTTPException) as denied:
+            await route.__wrapped__(thread_id="thread-1", batch_id="batch-1", request=request, **extra)
+        assert denied.value.status_code == 409
+    repo.batch["controls"] = []
+    with pytest.raises(HTTPException) as stopped:
+        await subagent_batches.cancel_batch.__wrapped__(thread_id="thread-1", batch_id="batch-1", request=request)
+    assert stopped.value.status_code == 409
+    service.cancel_batch.assert_awaited_once()

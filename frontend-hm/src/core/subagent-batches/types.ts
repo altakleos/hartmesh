@@ -31,6 +31,13 @@ export type SubagentBatch = {
   updated_at: string;
   completed_at: string | null;
   read_only?: boolean;
+  controls?: "cancel"[];
+  follow_up?: {
+    state: "waiting" | "working" | "done" | "ended";
+    reason?: string;
+    finished: number;
+    total: number;
+  };
   continuation_status?:
     | "pending"
     | "dispatching"
@@ -60,6 +67,9 @@ export type SubagentBatchItem = {
 };
 
 export function isActiveSubagentBatch(batch: SubagentBatch): boolean {
+  if (batch.follow_up) {
+    return ["waiting", "working"].includes(batch.follow_up.state);
+  }
   return (
     ["queued", "running", "paused"].includes(batch.status) ||
     batch.continuation_status === "pending" ||

@@ -6,7 +6,6 @@ from collections.abc import Coroutine
 from typing import Any
 
 from deerflow.persistence.subagent_batches.sql import SubagentBatchRepository
-from deerflow.subagents.batch_scope import can_run_agent_batches
 
 logger = logging.getLogger(__name__)
 _unwinding: set[asyncio.Task] = set()
@@ -37,15 +36,14 @@ async def _call_with_deadline[T](operation: Coroutine[Any, Any, T], timeout: flo
             task.cancel()
 
 
-async def recover_unavailable_batches(repository: SubagentBatchRepository, *, time_budget: float = 5.0, call_timeout: float = 1.0) -> None:
-    if can_run_agent_batches():
-        return
+async def recover_unavailable_batches(repository: SubagentBatchRepository, *, agent_enabled: bool = False, time_budget: float = 5.0, call_timeout: float = 1.0) -> None:
+    selection = {"legacy_only": True} if agent_enabled else {}
     loop = asyncio.get_running_loop()
     deadline = loop.time() + time_budget
     after = None
     while (remaining := deadline - loop.time()) > 0:
         try:
-            batch_ids = await _call_with_deadline(repository.list_unavailable_bound_batches(after=after, limit=64), min(call_timeout, remaining))
+            batch_ids = await _call_with_deadline(repository.list_unavailable_bound_batches(after=after, limit=64, **selection), min(call_timeout, remaining))
         except Exception as error:
             logger.warning("Listing unavailable batches during startup failed (%s)", type(error).__name__)
             return
@@ -56,7 +54,7 @@ async def recover_unavailable_batches(repository: SubagentBatchRepository, *, ti
             if remaining <= 0:
                 break
             try:
-                await _call_with_deadline(repository.cancel_unavailable_bound_batch(batch_id), min(call_timeout, remaining))
+                await _call_with_deadline(repository.cancel_unavailable_bound_batch(batch_id, **selection), min(call_timeout, remaining))
             except Exception as error:
                 logger.warning("Could not cancel unavailable batch %s during startup (%s)", batch_id, type(error).__name__)
             after = batch_id

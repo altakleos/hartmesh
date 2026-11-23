@@ -634,7 +634,14 @@ async def test_lifespan_recovers_bound_batches_before_starting_the_worker(monkey
 
     scoped = {"version": 1, "kind": "agent_conversation", "instance_id": "employee", "principal": {"source": "session", "system_role": "user", "oauth_provider": None, "oauth_id": None, "token_version": 1}}
     items = [{"key": "part", "prompt": "Check the document"}]
-    await create_batch(batch_repository, items, batch_id="bound", submission_key="bound", execution_spec={"scope": scoped})
+    from sqlalchemy import update
+
+    from deerflow.persistence.subagent_batches.model import SubagentBatchRow
+
+    # An installed earlier writer may have left this scope on disk.
+    await create_batch(batch_repository, items, batch_id="bound", submission_key="bound", execution_spec={})
+    async with batch_repository._sf.begin() as session:
+        await session.execute(update(SubagentBatchRow).where(SubagentBatchRow.id == "bound").values(execution_spec={"scope": scoped}))
     await create_batch(batch_repository, items, batch_id="personal", submission_key="personal", execution_spec={})
 
     async def check_settled():
@@ -649,6 +656,9 @@ async def test_lifespan_recovers_bound_batches_before_starting_the_worker(monkey
         yield
 
     with (
+        # Account bootstrap caches the repository and provider for this temporary database.
+        patch("app.gateway.deps._cached_repo", None),
+        patch("app.gateway.deps._cached_local_provider", None),
         patch("app.gateway.app.get_app_config", return_value=startup_config),
         patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
         patch("app.gateway.app.langgraph_runtime", runtime),

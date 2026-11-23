@@ -1663,6 +1663,44 @@ export function createEnUS(product: string): Translations {
     },
 
     subagentBatches: {
+      jobState: {
+        waiting: "Waiting to start.",
+        working: "Working in this conversation.",
+        done: "Final reply completed.",
+        ended: "The follow-up ended.",
+      },
+      jobReasons: {
+        "execution-unavailable": "The workspace is unavailable.",
+        "start-failed": "The workspace could not start yet.",
+        "starting-elsewhere": "The workspace is starting.",
+        "run-limit": "The agent is working in other conversations.",
+        "goal-active": "A goal is active in this conversation.",
+        unavailable: "Large jobs were unavailable.",
+        interrupted:
+          "Work was interrupted. You can ask for a new reply using the saved results.",
+        cancelled: "The job was stopped.",
+        source_ended: "The original request stopped.",
+        start_timeout: "The job could not start within the allowed time.",
+        time_limit: "The job reached its time limit.",
+        "account-changed": "Your account changed.",
+        "access-lost": "Access to this conversation changed.",
+        "agent-paused": "The agent is paused.",
+        "agent-archived": "The agent is archived.",
+        "cannot-run": "The agent is unavailable.",
+        "files-full": "The agent's files are full.",
+        busy: "The conversation or workspace is busy.",
+        restarting: "The workspace is restarting.",
+        "waiting-for-answer": "A response is needed in this conversation.",
+        "storage-busy": "The workspace storage is busy.",
+      },
+      finishedChecks: (finished, total) =>
+        `${finished} of ${total} checks finished.`,
+      unavailableNotice: (finished, total) =>
+        `This large job was cancelled before it finished. Large jobs were unavailable. ${finished} of ${total} checks finished. You can read the results in Batches. Nothing more will run for this job.`,
+      openPanel: "Open Batches",
+      askAgain: "Ask again to start a new job.",
+      switchedOff: "Large jobs are switched off here for now.",
+      dismiss: "Dismiss",
       followUpPending:
         "The requested follow-up will continue after this batch.",
       followUpStopped: "Automatic follow-up has stopped.",

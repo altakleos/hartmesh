@@ -341,6 +341,12 @@ dedupe_storage:
 run_events:
   backend: db
 
+# Agent conversation job ceilings. HARTMESH_BATCHES controls the worker.
+subagent_batches:
+  agent_max_items: 50
+  agent_max_work_seconds: 900
+  agent_max_start_wait_seconds: 3600
+
 # One Gateway worker owns every run, and it renews a lease on each while it
 # runs. The renewal is also where the worker reads a cancellation another
 # process asked for: `python -m app.gateway.auth.accounts disable` ends a
