@@ -72,6 +72,7 @@ class AssistantAllowance(SeatCount):
 
 
 class AgentInstancesFeature(BaseModel):
+    configuration_proposals: bool = False
     connections: bool = False
     enabled: bool = False
     execution: Literal["ready", "unavailable"] = "unavailable"
@@ -390,6 +391,7 @@ def _unassigned(files, seats, unverified):
 
 async def _storage_features(request, config):
     from app.gateway import storage_spaces as ss
+    from deerflow.agent_instances.proposal_tools import installed_forms
 
     app = request.app
     try:
@@ -417,6 +419,7 @@ async def _storage_features(request, config):
         accounts = AccountsFeature(seats=SeatCount(allowed=counts["user"].allowed, in_use=counts["user"].in_use))
         instances = AgentInstancesFeature(
             enabled=config.agents_api.enabled,
+            configuration_proposals=config.agents_api.enabled and bool(installed_forms(getattr(app.state, "extensions", None))),
             connections=config.agents_api.enabled and getattr(getattr(config, "agent_connections", None), "enabled", False) is True,
             execution=execution.execution,
             reason=execution.reason,

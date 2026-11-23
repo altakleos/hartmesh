@@ -1070,7 +1070,12 @@ The profile runs the business profile (`ui.profile: business` in
 `config.yaml`) and explicitly enables the installed `hartmesh-legacy-report`
 compatibility plugin through `plugins:`. Historical cards, projection and filing
 use that package; disabling its entry and restarting leaves ordinary file access.
-The provider template owns this selection.
+The provider template also enables the installed `hartmesh-work-proposals`
+package. With AI employee storage enabled, a signed-in person can ask an
+employee to propose turning tracked assignments on or off. Its manager reviews
+the proposal in the employee’s Settings. Set the `work-proposals` entry’s
+`enabled` field to `false` and restart the Gateway to disable the form and review
+surface. Existing proposals and past decisions stay in the database.
 It also explicitly selects the existing monthly review, document summary and
 spreadsheet starters in `ui.starters`. Generic business defaults contain only the
 two document/spreadsheet tasks. Tenant `starters.json` takes precedence, including

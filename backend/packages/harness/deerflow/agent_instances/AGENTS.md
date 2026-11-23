@@ -7,6 +7,17 @@ preserve a grant, and a recreated installation needs a new grant. The embedded
 client omits the private binding. A manager sees the registry and grants; a
 viewer with Use or Inspect sees only active connection names and hosts.
 
+A company employee can submit an installed configuration proposal during a
+direct web lead turn. The host binds the requester, run and issuing model call
+and rechecks Home, thread and instance authority in the insert transaction.
+The manager reviews the immutable base and candidate digest in Settings.
+Fresh adoption requires the source definition owner and Home ADMIN, and writes
+the proposal association in the same transaction as lifecycle withdrawal.
+Idle-only withdrawal shares the resident Home admission lock from the idle
+check through the committed generation change. Release it before physical
+containment or consumer notifications. Pending adoption and abandonment use
+that exact intent under current grants.
+
 Company connection authority belongs to the host-admitted employee execution.
 Use a current human web session, a qualified Telegram turn, an authenticated
 queued human input, an admitted Work attempt, or an installed, listed package.

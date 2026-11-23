@@ -121,7 +121,15 @@ def test_features_reports_agents_api_enabled(monkeypatch) -> None:
         "file_browser": {"versions": [1], "storage_mode": "ordinary", "operations": {"personal": ["select", "folder"], "shared": ["select", "folder"], "agent": []}},
         "storage_spaces": {"enabled": False, "backend": None, "native_attachments": False, "editor_concurrency": None, "user_spaces": False, "state": "off", "reason": None, "own": "ready"},
         "accounts": {"seats": {"allowed": 0, "in_use": 0}},
-        "agent_instances": {"connections": False, "enabled": False, "execution": "unavailable", "reason": None, "ai_assistants": {"per_user": 0, "allowed": 0, "in_use": 0, "mine": 0}, "ai_employees": {"allowed": 0, "in_use": 0}},
+        "agent_instances": {
+            "configuration_proposals": False,
+            "connections": False,
+            "enabled": False,
+            "execution": "unavailable",
+            "reason": None,
+            "ai_assistants": {"per_user": 0, "allowed": 0, "in_use": 0, "mine": 0},
+            "ai_employees": {"allowed": 0, "in_use": 0},
+        },
         "people_search": "prefix",
         "message_search": False,
         "customer_administration": {"plugin_management": False, "local_skill_management": False, "local_mcp_management": False, "provider_operations": False},
@@ -190,6 +198,7 @@ async def test_features_report_storage_allowances_and_only_the_callers_assistant
     assert response["shared_conversations"]["operations"] == ["read", "publish", "continue", "agent_publish"]
     assert response["accounts"]["seats"] == {"allowed": 1, "in_use": 2}
     assert response["agent_instances"] == {
+        "configuration_proposals": False,
         "connections": False,
         "enabled": True,
         "execution": "ready",
@@ -324,7 +333,15 @@ def test_features_reports_agents_api_disabled(monkeypatch) -> None:
         "file_browser": {"versions": [1], "storage_mode": "ordinary", "operations": {"personal": ["select", "folder"], "shared": ["select", "folder"], "agent": []}},
         "storage_spaces": {"enabled": False, "backend": None, "native_attachments": False, "editor_concurrency": None, "user_spaces": False, "state": "off", "reason": None, "own": "ready"},
         "accounts": {"seats": {"allowed": 0, "in_use": 0}},
-        "agent_instances": {"connections": False, "enabled": False, "execution": "unavailable", "reason": None, "ai_assistants": {"per_user": 0, "allowed": 0, "in_use": 0, "mine": 0}, "ai_employees": {"allowed": 0, "in_use": 0}},
+        "agent_instances": {
+            "configuration_proposals": False,
+            "connections": False,
+            "enabled": False,
+            "execution": "unavailable",
+            "reason": None,
+            "ai_assistants": {"per_user": 0, "allowed": 0, "in_use": 0, "mine": 0},
+            "ai_employees": {"allowed": 0, "in_use": 0},
+        },
         "people_search": "prefix",
         "message_search": False,
         "customer_administration": {"plugin_management": False, "local_skill_management": False, "local_mcp_management": False, "provider_operations": False},

@@ -259,6 +259,16 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
                             raise _http_error(exc) from None
                         except NotImplementedError as exc:
                             raise HTTPException(501, "Host resource storage is unavailable.") from exc
+                    proposal_review_active = True
+
+                    async def review(instance_id, proposal_id):
+                        from app.gateway.routers.agent_instances import proposal_detail
+
+                        if not proposal_review_active or interaction != "session" or not any(key == source and current is plugin for key, current in request.app.state.extensions.plugins):
+                            raise HTTPException(403, "Proposal review is unavailable")
+                        await authorize_plugin_action_for_request(request, namespace=namespace, action_name=action_name)
+                        return await proposal_detail(instance_id, proposal_id, request)
+
                     human_input = None
                     if plugin.human_input_api_version == 1:
                         from app.gateway.human_input_facade import HostHumanInputActions
@@ -274,11 +284,13 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
                                 storage=storage,
                                 resource=resource,
                                 human_input=human_input,
+                                review_proposal=review if plugin.proposal_api_version == 1 and interaction == "session" else None,
                                 agent_runs=agent_runs,
                                 interaction=interaction,
                             ),
                         )
                     finally:
+                        proposal_review_active = False
                         if human_input is not None:
                             human_input.retire()
             return await action.handler(MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings), agent_runs=agent_runs, interaction=interaction))

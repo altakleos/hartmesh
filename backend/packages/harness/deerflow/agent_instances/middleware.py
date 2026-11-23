@@ -35,6 +35,7 @@ class InstanceAuthorityMiddleware(AgentMiddleware):
     def __init__(self, *, require_memory_audience=False, allowed_tool_names=frozenset(), lead=False):
         super().__init__()
         self.lead = lead
+        self.proposal_tools = frozenset()
         self.require_memory_audience = require_memory_audience
         self.allowed_tool_names = allowed_tool_names
 
@@ -130,6 +131,16 @@ class InstanceAuthorityMiddleware(AgentMiddleware):
             )
         return request.override(messages=insert_after_leading_system_messages(list(request.messages), projections))
 
+    def _observe_response(self, response, runtime):
+        if self.proposal_tools:
+            from deerflow.agent_instances.proposal_tools import observe_proposal_calls
+            from deerflow.agent_instances.runtime import current_environment
+
+            environment = current_environment()
+            if environment is not None:
+                observe_proposal_calls(environment, response, self.proposal_tools, getattr(runtime.execution_info, "task_id", None))
+        return response
+
     def wrap_model_call(self, request, handler):
         execution = self._execution(request.runtime)
         context = None
@@ -137,7 +148,7 @@ class InstanceAuthorityMiddleware(AgentMiddleware):
             from deerflow.agent_instances.memory import _bridge
 
             context = _bridge(execution.owner_loop, execution.work.context(execution))
-        return handler(self._with_identity(request, context))
+        return self._observe_response(handler(self._with_identity(request, context)), request.runtime)
 
     async def awrap_model_call(self, request, handler):
         execution = self._execution(request.runtime)
@@ -148,4 +159,4 @@ class InstanceAuthorityMiddleware(AgentMiddleware):
             context = await on_owner_loop(execution, execution.work.context(execution))
         # A cold ZoneInfo lookup reads the system timezone database.
         projected = await asyncio.to_thread(self._with_identity, request, context)
-        return await handler(projected)
+        return self._observe_response(await handler(projected), request.runtime)

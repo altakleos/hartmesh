@@ -180,6 +180,15 @@ adopt that definition for the instance. **Work on this** and **Resume** explicit
 start an AI employee attempt; saving an assignment or response never starts a run.
 If Work is switched off during a save, its private card explains the refusal and
 keeps the original retry; only current managers receive a settings link.
+The bundled `hartmesh-work-proposals` extension lets a company AI employee ask
+a manager to turn tracked assignments on or off during a web conversation.
+Open the employee’s **Settings** to review the proposed value, adopted revision
+and effective assignment rules. A manager who owns the source definition and
+has Home administration can adopt the change when the employee is idle.
+Adoption changes this employee's settings and creates zero assignments.
+Existing deployments can enable the extension using its entry in
+`config.example.yaml` and restarting the Gateway.
+
 The Work page separates progress, blockers, execution attempts and human review.
 A reviewer’s request-for-changes note stays in later attempts’ context until the
 result is accepted or the assignment is cancelled or reopened.
