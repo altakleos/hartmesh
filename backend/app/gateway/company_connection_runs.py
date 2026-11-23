@@ -22,6 +22,17 @@ _INTERACTIVE_ROUTES = {
 }
 
 
+def admitted_web_chat_request(request):
+    """Recognize a person at the web entry point or dispatch of their stored queued input."""
+    state = request.state
+    if getattr(state, "auth_source", None) not in {AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED} or getattr(state, "run_origin", None) is not None:
+        return False
+    if getattr(state, "admitted_queued_human", False) is True:
+        return True
+    route = request.scope.get("route") if isinstance(request, Request) else None
+    return isinstance(route, APIRoute) and (route.endpoint.__module__, route.name) in _INTERACTIVE_ROUTES
+
+
 def package_name_for_turn(request, origin):
     host = admit_origin(getattr(request.state, "run_origin", None))
     return host.get("namespace") if host and host == origin and host["kind"] == "extension" else None
@@ -39,12 +50,7 @@ def admitted_connection_origin(request, metadata, origin, *, assignment, config,
             declared = metadata.get(DEERFLOW_ORIGIN_KEY, declared)
         if declared is not None:
             return None
-        auth_source = getattr(request.state, "auth_source", None)
-        if telegram or (getattr(request.state, "admitted_queued_human", False) is True and auth_source in {AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED}):
-            return ConnectionOrigin("message")
-        route = request.scope.get("route") if isinstance(request, Request) else None
-        source = getattr(request.state, "auth_source", None)
-        if isinstance(route, APIRoute) and (route.endpoint.__module__, route.name) in _INTERACTIVE_ROUTES and source in {AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED}:
+        if telegram or admitted_web_chat_request(request):
             return ConnectionOrigin("message")
         return None
     if origin["kind"] == "subagent_batch" and getattr(request.state, "durable_batch_followup", False) is True:

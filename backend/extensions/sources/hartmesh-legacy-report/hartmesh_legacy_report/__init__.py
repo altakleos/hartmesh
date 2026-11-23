@@ -14,7 +14,7 @@ class _FreshnessContributor:
         return (MiddlewarePlacement(ReportFreshnessMiddleware(), Placement.STANDARD, AgentScope.LEAD),)
 
 
-@extension(api="0.2.5", name="legacy-report")
+@extension(api="0.2.14", name="legacy-report")
 def install(registry, config):
     enabled = config.get("enabled", True)
     if type(enabled) is not bool or set(config) - {"enabled"}:
@@ -42,5 +42,5 @@ def install(registry, config):
     )
     if accepted is not True:
         raise RuntimeError("Historical report presentation requires the artifact plugin host")
-    if enabled:
-        registry.middlewares(_FreshnessContributor())
+    if enabled and registry.web_chat_middlewares(_FreshnessContributor()) is not True:
+        raise RuntimeError("Report source notices require web chat middleware support")

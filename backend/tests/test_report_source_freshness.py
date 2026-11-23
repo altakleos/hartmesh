@@ -193,7 +193,8 @@ async def exercise_web_stream(paths, source, owner):
             return self
 
     loaded, diagnostics = load_extensions([ExtensionSpec(use="hartmesh_legacy_report:install", required=True, config={"enabled": True})])
-    [(name, contributor)] = loaded.middleware_contributors
+    assert loaded.middleware_contributors == ()
+    [(name, contributor)] = loaded.for_web_chat_lead().middleware_contributors
     [placement] = contributor.contribute_middlewares(loaded.app_store, AgentBuildContext(scope=AgentScope.LEAD))
     assert placement.scope == AgentScope.LEAD
     handoff = AIMessage("", tool_calls=[{"name": "bash", "args": {"present": [VIEW]}, "id": "call1", "type": "tool_call"}])

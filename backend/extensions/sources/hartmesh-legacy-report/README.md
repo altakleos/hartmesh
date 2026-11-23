@@ -55,7 +55,9 @@ manifest. Rebuilding them does not rebuild the HartMesh frontend.
 ### Live inputs on the next turn
 
 The installed lead-agent middleware checks the latest delivered business report
-in the last 128 messages of an interactive chat. A handoff under
+in the last 128 messages of an ordinary web chat. The Gateway selects the hook
+for the lead graph before assembly. Telegram and output-captured graphs keep
+their original presentation inventory. A handoff under
 `outputs/reports/…/drafts/<id>/` must name the passive view or canonical report.
 The capture verifies the selected member hashes and reads the compact hashed
 `input-sources.json` bound to the canonical digest. It retains

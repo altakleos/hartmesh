@@ -18,9 +18,10 @@ from fastapi import HTTPException
 from sqlalchemy import text, update
 from test_gateway_services import _make_start_run_request
 
-from app.gateway import agent_conversations, chat_storage, services
+from app.gateway import chat_storage, run_inputs, services
 from app.gateway.auth.models import User
-from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
+from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, AUTH_SOURCE_PAT, AUTH_SOURCE_SESSION
+from app.gateway.routers import thread_runs
 from app.gateway.run_models import RunCreateRequest
 from deerflow.config import app_config as app_config_module
 from deerflow.config.app_config import AppConfig, set_app_config
@@ -62,6 +63,8 @@ async def admission(output_store, monkeypatch):
     request.app.state.stream_bridge = bridge = MemoryStreamBridge()
     request.app.state.run_event_store = DbRunEventStore(e.sf)
     workers, inputs, preparations, managers = set(), [], [], [manager]
+    from app.gateway import agent_conversations
+
     prepare = agent_conversations.execution_for_run
 
     async def observed_preparation(*args, **kwargs):
@@ -113,6 +116,59 @@ def install_manager(e, store, *, worker_id=None):
     e.managers.append(manager)
     e.request.app.state.run_manager = manager
     return manager
+
+
+def web_app(e):
+    app = make_authed_test_app(user_factory=lambda: e.owner, bind_current_user=True, signed_in=True)
+    for name, value in vars(e.request.app.state).items():
+        setattr(app.state, name, value)
+    app.include_router(thread_runs.router)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_only_admitted_web_runs_enable_web_lead_middleware(admission):
+    e = admission
+    spoof = {"web_chat_lead": True, "admitted_queued_human": True}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=web_app(e)), base_url="http://fixture") as client:
+        url = f"/api/threads/{e.thread_id}/runs"
+        response = await client.post(url, json=ordinary().model_dump(mode="json"))
+        assert response.is_success, response.text
+        record = await e.manager.get(response.json()["run_id"])
+        await record.task
+        assert e.inputs[-1]["ctx"].web_chat_lead is True
+        response = await client.post(url, json=captured(context=spoof, metadata=spoof).model_dump(mode="json"))
+        assert response.status_code == 403
+    await launched(e, captured(context=spoof, metadata=spoof))
+    assert e.inputs[-1]["ctx"].web_chat_lead is False
+    e.request.state.auth_source = AUTH_SOURCE_SESSION
+    await launched(e, ordinary(context=spoof, metadata=spoof), key="spoof")
+    assert e.inputs[-1]["ctx"].web_chat_lead is False
+    e.request.state.admitted_queued_human = True
+    for auth, origin in [(AUTH_SOURCE_SESSION, {"kind": "extension", "namespace": "example"}), (AUTH_SOURCE_PAT, None), (AUTH_SOURCE_INTERNAL, None)]:
+        e.request.state.auth_source = auth
+        e.request.state.run_origin = origin
+        await launched(e, ordinary(), key=auth)
+        assert e.inputs[-1]["ctx"].web_chat_lead is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_of_persisted_web_input_enables_web_lead_middleware(admission, monkeypatch):
+    e = admission
+    monkeypatch.setattr(run_inputs, "get_agent_runs", lambda request: object())
+    parent = await e.manager.create_or_reject(e.thread_id, "lead_agent", user_id=OWNER_ID)
+    await e.repository.mutate_run_inputs(parent.run_id, lambda state, row: None, user_id=OWNER_ID)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=web_app(e)), base_url="http://fixture") as client:
+        url = f"/api/threads/{e.thread_id}/runs/{parent.run_id}/inputs"
+        response = await client.post(url, json={"request_id": "queued", "text": "Check my report", "mode": "queue"})
+        assert response.is_success, response.text
+        assert response.json()["source"] == "user"
+        await e.manager.set_status(parent.run_id, RunStatus.success)
+        response = await client.post(f"{url}/queued/retry")
+        assert response.is_success, response.text
+        record = await e.manager.get(response.json()["run_id"], user_id=OWNER_ID)
+        await record.task
+    assert e.inputs[-1]["ctx"].web_chat_lead is True
 
 
 @pytest.mark.asyncio
@@ -434,6 +490,8 @@ async def test_capture_snapshot_precedes_the_first_preparation_await(admission, 
     e = admission
     entered, release = asyncio.Event(), asyncio.Event()
     source = e.request.app.state.run_event_store
+    from app.gateway import agent_conversations
+
     prepare = agent_conversations.execution_for_run
 
     async def held_preparation(*args, **kwargs):

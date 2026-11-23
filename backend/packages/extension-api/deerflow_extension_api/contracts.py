@@ -216,6 +216,10 @@ class ExtensionRegistry(Protocol):
         """Register one WorkspaceSearchProvider; False on hosts without search."""
         return False
 
+    def web_chat_middlewares(self, contributor: MiddlewareContributor) -> bool:
+        """Register middleware for the lead graph of an ordinary Gateway web chat."""
+        return False
+
     def middlewares(self, contributor: MiddlewareContributor) -> None:
         return None
 
