@@ -123,7 +123,7 @@ class BoundBatchItems:
             await session.execute(
                 update(Item)
                 .where(Item.batch_id == batch.id, Item.status.in_(UNFINISHED))
-                .values(status="failed", stop_reason="time_limit", error="Not run: time limit.", lease_owner=None, lease_expires_at=None, completed_at=now, updated_at=now)
+                .values(status="cancelled", stop_reason="time_limit", error="Not run: time limit.", lease_owner=None, lease_expires_at=None, completed_at=now, updated_at=now)
             )
             await self._refresh_batch_status(session, batch, now=now)
             return True

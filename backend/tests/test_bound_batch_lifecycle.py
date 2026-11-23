@@ -256,11 +256,32 @@ async def test_work_deadline_and_requester_stop_are_terminal(repo):
     assert not await repo.timeout_bound_items("batch", **CTX, run_id="first-run", now=state["items_deadline"] - timedelta(seconds=1))
     assert await repo.timeout_bound_items("batch", **CTX, run_id="first-run", now=state["items_deadline"])
     assert not await finish(repo, check["id"], "first-run")
-    assert (await repo.get_bound_run("batch", **CTX, run_id="first-run"))["counts"]["failed"] == 2
+    assert (await repo.get_bound_run("batch", **CTX, run_id="first-run"))["counts"]["cancelled"] == 2
     async with repo._sf.begin() as session:
         await session.execute(update(RunRow).where(RunRow.run_id == "first-run").values(status="interrupted", cancel_requested_at=datetime.now(UTC)))
     assert not await claim(repo)
     assert (await repo.get_batch("batch", user_id="owner"))["continuation_status"] == "cancelled"
+
+
+async def test_work_timeout_preserves_partial_results_for_the_one_final_reply(repo):
+    await start(repo)
+    run = dict(**CTX, run_id="first-run")
+    (first,) = await items(repo, "first-run")
+    assert await finish(repo, first["id"], "first-run")
+    (second,) = await items(repo, "first-run")
+    state = await repo.get_bound_run("batch", **run)
+    assert await repo.timeout_bound_items("batch", **run, now=state["items_deadline"])
+    assert not await finish(repo, second["id"], "first-run")
+    saved, expired = await repo.list_items("batch", user_id="owner", include_result=True)
+    assert (saved["status"], saved["result"]) == ("succeeded", "checked")
+    assert (expired["status"], expired["result"], expired["stop_reason"], expired["error"]) == ("cancelled", None, "time_limit", "Not run: time limit.")
+    assert (await repo.get_batch("batch", user_id="owner"))["follow_up"] == {"state": "working", "finished": 1, "total": 2}
+    assert await repo.begin_bound_final("batch", **run, now=state["items_deadline"])
+    assert not await repo.begin_bound_final("batch", **run, now=state["items_deadline"])
+    await record_reply(repo, content="One check completed; the other reached its time limit.")
+    await mark(repo, "first-run", "success")
+    assert not await claim(repo)
+    assert (await repo.get_batch("batch", user_id="owner"))["follow_up"] == {"state": "done", "finished": 1, "total": 2}
 
 
 @pytest.mark.parametrize("final_state", ["lost", "done", "live"])
