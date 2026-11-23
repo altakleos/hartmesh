@@ -454,7 +454,9 @@ History, replay and busy-run inputs never initiate that anchor.
 
 Workspace and agent Files share `components/workspace/file-browser`. Use one
 renderer on every device. Read older Gateways through the authorized file lists. Negotiate each source’s
-operations, recheck restored paths and keep history in account memory. A refused
+operations, recheck restored paths and keep history in account memory. A search and its
+containing folder have distinct history entries even when they share a URL. Keep Locations
+reachable when Home discovery or listing fails. A refused
 versioned operation has no path-only fallback.
 
 Fold marked members after authorized discovery and collection reads. Link by snapshot

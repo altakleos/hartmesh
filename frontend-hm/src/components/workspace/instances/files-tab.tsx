@@ -104,13 +104,17 @@ export function FilesTab(props: Props) {
         {(props.instance.permissions & USE) !== 0 && (
           <p>{t.agentInstances.files.readOnlyHint(props.instance.name)}</p>
         )}
+        <BrowserLocations area="agent" instance={props.instance.id} />
       </section>
     );
   if (!props.instance.home_id)
     return (
-      <p role="alert">
-        {t.agentInstances.files.listFailed(props.instance.name)}
-      </p>
+      <>
+        <p role="alert">
+          {t.agentInstances.files.listFailed(props.instance.name)}
+        </p>
+        <BrowserLocations area="agent" instance={props.instance.id} />
+      </>
     );
   return (
     <FileBrowser
@@ -415,42 +419,33 @@ function FileBrowser({
       if (!owner.aborted) setDownloading(undefined);
     }
   }
+  const locations = <BrowserLocations area="agent" instance={instance.id} />;
   if (waiting)
     return (
-      <p role="status">
-        {protocol.failed || closing
-          ? copy.listFailed(instance.name)
-          : t.common.loading}
-      </p>
-    );
-  if (checked === null)
-    return (
       <>
-        <p role="alert">{words.missing}</p>
-        <Link href={browserHref("agent", "", { instance: instance.id })}>
-          {instance.name}
-        </Link>
+        <p role="status">
+          {protocol.failed || closing
+            ? copy.listFailed(instance.name)
+            : t.common.loading}
+        </p>
+        {locations}
       </>
     );
-  if (
-    qualified &&
-    files.error instanceof StorageRequestError &&
-    files.error.status === 404
-  )
+  if (checked === null || missingRoute)
     return (
       <>
         <p role="alert">{words.missing}</p>
         <Link href={browserHref("agent", "", { instance: instance.id })}>
           {instance.name}
         </Link>
-        <BrowserLocations area="agent" instance={instance.id} />
+        {locations}
       </>
     );
   if (lostAccess(space.error) || lostAccess(files.error))
     return (
       <>
         <p role="alert">{copy.accessNotSaved(instance.name)}</p>
-        <BrowserLocations area="agent" instance={instance.id} />
+        {locations}
       </>
     );
   const notices = (
@@ -514,6 +509,7 @@ function FileBrowser({
           />
         ))}
       {content}
+      {locations}
     </section>
   );
   if (
