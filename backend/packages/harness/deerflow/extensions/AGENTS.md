@@ -570,3 +570,10 @@ The optional PostgreSQL message index verifies both cascading keys and its
 source-deletion trigger before each write. The trigger invalidates conversation
 coverage inside an event deletion, including when a previous Gateway deletes a
 visible revision. Host SQL admission serializes index writes with seat release. Keep the provider's package and the deployment's activation entry independently selectable.
+
+
+Plugin API 0.2.15 supports a v5 contribution with `proposal_api_version=1`.
+An installed `proposal_tool` receives a submit-only handle during its issuing
+employee web lead call. A human session backend action can read the authorized
+review using `review_proposal(instance_id, proposal_id)`. Both handles retire
+when the invocation ends. Proposal tools stay outside ordinary plugin inventory.

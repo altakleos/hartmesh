@@ -937,6 +937,7 @@ extensions = [
     { name = "hartmesh-legacy-report" },
     { name = "hartmesh-message-search" },
     { name = "hartmesh-office-preview" },
+    { name = "hartmesh-work-proposals" },
 ]
 
 [package.metadata]
@@ -996,11 +997,12 @@ extensions = [
     { name = "hartmesh-legacy-report", directory = "extensions/sources/hartmesh-legacy-report" },
     { name = "hartmesh-message-search", directory = "extensions/sources/hartmesh-message-search" },
     { name = "hartmesh-office-preview", directory = "extensions/sources/hartmesh-office-preview" },
+    { name = "hartmesh-work-proposals", directory = "extensions/sources/hartmesh-work-proposals" },
 ]
 
 [[package]]
 name = "deerflow-extension-api"
-version = "0.2.14"
+version = "0.2.15"
 source = { editable = "packages/extension-api" }
 
 [[package]]
@@ -1752,6 +1754,17 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "deerflow-extension-api", specifier = ">=0.2.5,<0.3" }]
+
+[[package]]
+name = "hartmesh-work-proposals"
+version = "0.1.0"
+source = { directory = "extensions/sources/hartmesh-work-proposals" }
+dependencies = [
+    { name = "deerflow-extension-api" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "deerflow-extension-api", specifier = ">=0.2.15,<0.3" }]
 
 [[package]]
 name = "hpack"

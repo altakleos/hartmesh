@@ -23,8 +23,25 @@ class _Complete(Exception):
 
 
 class InstanceLifecycle:
-    def __init__(self, agents):
+    def __init__(self, agents, *, proposal_admission=None):
         self.agents = agents
+        self.proposal_admission = proposal_admission
+
+    async def _proposal_access(self, session, intent, view, actor, *, expected=None, refresh=False):
+        linked = intent.request.get("proposal_id")
+        if expected is not None and linked != expected.id:
+            raise AgentConflict("Lifecycle operation belongs to a different decision")
+        if linked is not None:
+            from deerflow.agent_instances.proposals import verify_association
+
+            if refresh:
+                _, _, view = await self._parent(session, actor, view.id)
+            await verify_association(session, intent, view)
+            if self.proposal_admission is not None:
+                await self.proposal_admission(session)
+            if not await self._stored_file_grant(session, view.home_id, actor) & Permission.ADMIN:
+                raise AgentDenied("Resolving an adoption requires Home administration")
+        return view
 
     async def _parent(self, session, actor, instance_id):
         row = (await session.execute(select(AgentInstanceRow).where(AgentInstanceRow.id == instance_id).with_for_update())).scalar_one_or_none()
@@ -39,7 +56,7 @@ class InstanceLifecycle:
 
     @staticmethod
     def _match(intent, actor, generation, request, *, company=False):
-        if (intent.actor_id != actor.subject_id and not company) or intent.generation != generation or intent.request != request:
+        if (intent.actor_id != actor.subject_id and not company) or intent.generation != generation or {k: v for k, v in intent.request.items() if k != "proposal_id"} != request:
             raise AgentConflict("Lifecycle identity belongs to another request")
         if intent.phase not in {"pending", "complete", "abandoned"} or type(intent.attachment_ids) is not list or len(intent.attachment_ids) > 32:
             raise AgentConflict("Invalid lifecycle containment scope")
@@ -137,6 +154,8 @@ class InstanceLifecycle:
         view = await self.agents.get(actor=actor, instance_id=instance_id, permission=AgentPermission.MANAGE, include_deleted=True)
         async with self.agents._sf() as session:
             terminal = await session.get(AgentLifecycleRow, (instance_id, operation_id))
+            if terminal is not None:
+                view = await self._proposal_access(session, terminal, view, actor, refresh=True)
             abandoned = terminal is not None and terminal.phase == "abandoned" and terminal.home_id == view.home_id and (terminal.actor_id == actor.subject_id or view.custody == "company")
         if abandoned:
             await self.agents.files.registry.get(actor=actor, space_id=view.home_id, permission=Permission.ADMIN)
@@ -153,6 +172,7 @@ class InstanceLifecycle:
                 intent = await session.get(AgentLifecycleRow, (instance_id, operation_id))
                 if intent is None or (intent.actor_id != actor.subject_id and current.custody != "company") or intent.home_id != current.home_id or current.home_id != view.home_id:
                     raise AgentConflict("Pending lifecycle intent is unavailable")
+                await self._proposal_access(session, intent, current, actor)
                 if intent.phase == "abandoned":
                     return {"instance": current, "complete": True, "abandoned": True, "operation_id": operation_id}
                 if intent.phase != "pending" or row.generation != expected_generation or row.generation != intent.generation + 1 or row.status != "suspended":
@@ -218,7 +238,9 @@ class InstanceLifecycle:
         current = await session.scalar(select(SpaceAttachmentRow.id).join(SpaceMountRow, SpaceMountRow.attachment_id == SpaceAttachmentRow.id).where(SpaceMountRow.space_id == intent.home_id, SpaceAttachmentRow.phase != "fenced").limit(1))
         return current is None
 
-    async def change(self, *, actor, instance_id, expected_generation, operation_id, action, definition=None, supervisor=None, member=None, permissions=None, only_if_idle=False, runs_in_flight=None, host_admission=None):
+    async def change(
+        self, *, actor, instance_id, expected_generation, operation_id, action, definition=None, supervisor=None, member=None, permissions=None, only_if_idle=False, runs_in_flight=None, host_admission=None, proposal=None, load_source=None
+    ):
         validate_generation(expected_generation)
         self.agents.files._operation_id(operation_id)
         if host_admission is not None and not callable(host_admission):
@@ -229,6 +251,8 @@ class InstanceLifecycle:
             raise ValueError("Lifecycle action fields do not match")
         if action != "grant" and (member is not None or permissions is not None):
             raise ValueError("Grant fields require a grant action")
+        if proposal is not None and (action != "adopt" or not callable(load_source) or not only_if_idle):
+            raise ValueError("Proposal adoption requires an idle-only reviewed definition")
         request = {"action": action}
         if definition is not None:
             if not isinstance(definition, DefinitionSnapshot):
@@ -251,6 +275,7 @@ class InstanceLifecycle:
             async with self.agents._sf() as session:
                 existing = await session.get(AgentLifecycleRow, (instance_id, operation_id))
                 if existing is not None:
+                    view = await self._proposal_access(session, existing, view, actor, expected=proposal, refresh=True)
                     self._match(existing, actor, expected_generation, request, company=view.custody == "company")
                     if existing.phase != "pending":
                         return {"instance": view, "complete": True, "abandoned": existing.phase == "abandoned", "operation_id": operation_id}
@@ -282,6 +307,7 @@ class InstanceLifecycle:
                 intent = await session.get(AgentLifecycleRow, (instance_id, operation_id))
                 candidates = [key for key, _container in identities]
                 if intent is not None:
+                    await self._proposal_access(session, intent, current, actor, expected=proposal)
                     self._match(intent, actor, expected_generation, request, company=current.custody == "company")
                     if intent.phase != "pending":
                         raise _Complete(intent.phase == "abandoned")
@@ -303,6 +329,10 @@ class InstanceLifecycle:
                     await self.agents._human(member, session=session)
                 if action == "grant":
                     await self._grant_ready(session, actor, instance_id, member, permissions)
+                if proposal is not None:
+                    if self.proposal_admission is not None:
+                        await self.proposal_admission(session)
+                    await proposal.bind(session, self.agents, actor, current, operation_id, definition, load_source)
                 if definition is not None:
                     if definition.owner_id != actor.subject_id:
                         raise AgentDenied("Fresh definition adoption requires its current human owner")
@@ -320,7 +350,7 @@ class InstanceLifecycle:
                     generation=expected_generation,
                     home_generation=home_generation,
                     home_id=current.home_id,
-                    request=request,
+                    request=request if proposal is None else {**request, "proposal_id": proposal.id},
                     attachment_ids=candidates,
                     phase="pending",
                     prior_status=current.status,
@@ -333,7 +363,11 @@ class InstanceLifecycle:
             try:
                 # An empty committed scope must never become an all-current retry.
                 if ids is None or ids:
-                    await attachments.retire(reason="lifecycle", actor=actor, space_id=view.home_id, expected_generation=home_generation, attachment_ids=ids, admission=withdraw)
+                    # The Gateway holds this same Home lock from final run admission
+                    # through task registration. Serialize its idle sample and our
+                    # committed withdrawal; physical containment runs after release.
+                    guard = self.agents.residents.entry(view).lock if only_if_idle and ids is None and self.agents.residents is not None else None
+                    await attachments.retire(reason="lifecycle", actor=actor, space_id=view.home_id, expected_generation=home_generation, attachment_ids=ids, admission=withdraw, admission_guard=guard)
             except _Complete as terminal:
                 return {"instance": await self.agents.get(actor=actor, instance_id=instance_id, permission=AgentPermission.MANAGE, include_deleted=True), "complete": True, "abandoned": terminal.args[0], "operation_id": operation_id}
             except AttachmentPending:
@@ -354,6 +388,7 @@ class InstanceLifecycle:
                     intent = await session.get(AgentLifecycleRow, (instance_id, operation_id))
                     if intent is None:
                         raise AgentConflict("Lifecycle intent is unavailable")
+                    await self._proposal_access(session, intent, current, actor, expected=proposal)
                     self._match(intent, actor, expected_generation, request, company=current.custody == "company")
                     if intent.phase != "pending":
                         return {"instance": current, "complete": True, "abandoned": intent.phase == "abandoned", "operation_id": operation_id}

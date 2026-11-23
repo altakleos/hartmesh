@@ -180,6 +180,15 @@ adopt that definition for the instance. **Work on this** and **Resume** explicit
 start an AI employee attempt; saving an assignment or response never starts a run.
 If Work is switched off during a save, its private card explains the refusal and
 keeps the original retry; only current managers receive a settings link.
+The bundled `hartmesh-work-proposals` extension lets a company AI employee ask
+a manager to turn tracked assignments on or off during a web conversation.
+Open the employee’s **Settings** to review the proposed value, adopted revision
+and effective assignment rules. A manager who owns the source definition and
+has Home administration can adopt the change when the employee is idle.
+Adoption changes this employee's settings and creates zero assignments.
+Existing deployments can enable the extension using its entry in
+`config.example.yaml` and restarting the Gateway.
+
 The Work page separates progress, blockers, execution attempts and human review.
 A reviewer’s request-for-changes note stays in later attempts’ context until the
 result is accepted or the assignment is cancelled or reopened.
@@ -1235,6 +1244,13 @@ prefixes when registration is closed and exact addresses when registration is
 open. Unfinished setup attempts appear separately from the normal agent list.
 A manager can remove them, and maintenance removes attempts older than 24 hours,
 reclaiming any assigned Space after containment and cleanup are confirmed.
+
+In a web conversation, a company employee can propose turning tracked assignments
+on or off. In the employee’s **Settings**, a manager with inspection access can
+review the proposed change, its definition revision and the resulting assignment
+policy. Adoption also requires the current definition owner and administrator
+access to the employee’s Home. The manager can decline an outdated proposal
+and ask for a new one.
 
 An operator hold or unavailable execution blocks new conversations, replies,
 Work activations and lifecycle changes before durable admission. Current grants

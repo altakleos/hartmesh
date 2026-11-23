@@ -22,6 +22,10 @@ on:
         description: Qualify ordinary and employee conversation sharing, continuation and recovery
         type: boolean
         default: false
+      verify_configuration_proposals:
+        description: Exercise the employee submission, manager decision and fresh Work in Chromium
+        type: boolean
+        default: false
       verify_agent_jobs:
         description: Exercise overlapping employee and ordinary jobs, company calls and interrupted final replies
         type: boolean
@@ -36,7 +40,7 @@ on:
         default: false
 
 concurrency:
-  group: compose-instances-${{ github.event.pull_request.number || github.ref }}${{ inputs.verify_file_browser && '-file-browser' || '' }}${{ inputs.verify_shared_snapshots && '-shared-snapshots' || '' }}${{ inputs.verify_agent_jobs && '-agent-jobs' || '' }}
+  group: compose-instances-${{ github.event.pull_request.number || github.ref }}${{ inputs.verify_file_browser && '-file-browser' || '' }}${{ inputs.verify_shared_snapshots && '-shared-snapshots' || '' }}${{ inputs.verify_agent_jobs && '-agent-jobs' || '' }}${{ inputs.verify_configuration_proposals && '-proposals' || '' }}
   cancel-in-progress: true
 
 permissions:
@@ -49,12 +53,22 @@ jobs:
     name: Storage and agents in the Compose bundle (Linux Docker)
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-26.04
-    timeout-minutes: ${{ (inputs.verify_agent_jobs || inputs.verify_file_browser || inputs.verify_shared_snapshots || inputs.verify_home_rollback || (github.event_name == 'workflow_dispatch' && inputs.connections != 'skip')) && 110 || 60 }}
+    timeout-minutes: ${{ (inputs.verify_configuration_proposals || inputs.verify_agent_jobs || inputs.verify_file_browser || inputs.verify_shared_snapshots || inputs.verify_home_rollback || (github.event_name == 'workflow_dispatch' && inputs.connections != 'skip')) && 110 || 60 }}
     env:
       C: docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env
       EVIDENCE: ${{ github.workspace }}/bundle-evidence
     steps:
       - uses: actions/checkout@v6
+
+      - name: Check employee proposal mode
+        if: inputs.verify_configuration_proposals
+        env:
+          OTHER_MODE: ${{ inputs.connections != 'skip' || inputs.verify_home_rollback || inputs.verify_file_browser || inputs.verify_shared_snapshots || inputs.verify_agent_jobs }}
+          BACKEND: ${{ inputs.backend_image }}
+          FRONTEND: ${{ inputs.frontend_image }}
+        run: |
+          test "$OTHER_MODE" = false
+          test -n "$BACKEND" || test -z "$FRONTEND"
 
       - name: Check employee job mode
         if: inputs.verify_agent_jobs
@@ -172,7 +186,7 @@ jobs:
           cat "$EVIDENCE/backend-tools.txt"
 
       - name: Install crane for signed candidates
-        if: github.event_name == 'workflow_dispatch' && (inputs.connections != 'skip' || ((inputs.verify_file_browser || inputs.verify_shared_snapshots || inputs.verify_agent_jobs) && inputs.backend_image != ''))
+        if: github.event_name == 'workflow_dispatch' && (inputs.connections != 'skip' || ((inputs.verify_file_browser || inputs.verify_shared_snapshots || inputs.verify_agent_jobs || inputs.verify_configuration_proposals) && inputs.backend_image != ''))
         uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
 
       - name: Verify the signed snapshot backend
@@ -217,7 +231,7 @@ jobs:
           echo "HARTMESH_BROWSER_FRONTEND=$FRONTEND" >> "$GITHUB_ENV"
 
       - name: Verify the signed workspace browser pair
-        if: github.event_name == 'workflow_dispatch' && (inputs.verify_file_browser || inputs.verify_agent_jobs) && inputs.backend_image != ''
+        if: github.event_name == 'workflow_dispatch' && (inputs.verify_file_browser || inputs.verify_agent_jobs || inputs.verify_configuration_proposals) && inputs.backend_image != ''
         env:
           GH_TOKEN: ${{ github.token }}
           BACKEND: ${{ inputs.backend_image }}
@@ -262,7 +276,7 @@ jobs:
           test "$(grep -c -F "$BACKEND_REF" /opt/hartmesh/compose.yaml)" = 3
 
       - name: Build the candidate product UI and install its browser rehearsal
-        if: github.event_name == 'workflow_dispatch' && (inputs.verify_home_rollback || ((inputs.verify_file_browser || inputs.verify_agent_jobs) && inputs.backend_image == ''))
+        if: github.event_name == 'workflow_dispatch' && (inputs.verify_home_rollback || ((inputs.verify_file_browser || inputs.verify_agent_jobs || inputs.verify_configuration_proposals) && inputs.backend_image == ''))
         run: |
           docker build --target prod --tag localhost:80/hartmesh-frontend:ci --file frontend-hm/Dockerfile --label "org.opencontainers.image.revision=$GITHUB_SHA" --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" .
           docker push localhost:80/hartmesh-frontend:ci
@@ -382,7 +396,7 @@ jobs:
           tail -n 1 "$EVIDENCE/prepare-again.json" | jq -e '.command == "prepare" and .returncode == 0 and .verdict == "nothing-to-do" and (.prepared_now | add) == 0 and .prepared == {"user": 3, "assistant": 3, "employee": 2, "company": 1} and .fstab.changed == false and (.problems | length) == 0'
 
       - name: 13 Run the acceptance tests
-        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots && !inputs.verify_agent_jobs)
+        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots && !inputs.verify_agent_jobs && !inputs.verify_configuration_proposals)
         working-directory: backend
         run: |
           env PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 \
@@ -470,7 +484,7 @@ jobs:
           jq -e --arg image "$BACKEND_REF" --arg mode "$SNAPSHOT_QUALIFICATION_MODE" '.complete and .backend.ref == $image and .first_turn.via == (if $mode == "signed" then "browser" else "api" end) and .first_turn.file_path == "/mnt/user-data/uploads/acceptance (2).txt" and .floor.ref != $image and .message_count >= 2 and .source != .destination and .floor_resolution == "complete|host-reconciled" and .copied_bytes_survived_removal' "$EVIDENCE/agent-sharing.json"
 
       - name: Qualify interrupted Shared operations
-        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots && !inputs.verify_agent_jobs)
+        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots && !inputs.verify_agent_jobs && !inputs.verify_configuration_proposals)
         env:
           HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
           HARTMESH_BUNDLE_URL: http://localhost:2026
@@ -494,7 +508,7 @@ jobs:
           sudo python3 ../docker/acceptance/mounted_devices.py after-gateway --previous "$EVIDENCE/mounted-devices-before.json" > "$EVIDENCE/mounted-devices-after-gateway.json"
 
       - name: Measure Home settlement and the first fresh answer
-        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots && !inputs.verify_agent_jobs)
+        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots && !inputs.verify_agent_jobs && !inputs.verify_configuration_proposals)
         env:
           HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
           HARTMESH_BUNDLE_URL: http://localhost:2026
@@ -557,7 +571,7 @@ jobs:
           PY
 
       - name: Observe manager acceptance during the last model call
-        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots && !inputs.verify_agent_jobs)
+        if: github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots && !inputs.verify_agent_jobs && !inputs.verify_configuration_proposals)
         working-directory: backend
         env:
           HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
@@ -601,6 +615,22 @@ jobs:
             bash docker/acceptance/connections/tls.sh "$backend" "$directory"
             echo "$tag $commit $backend" >> "$EVIDENCE/connection-rollback-builds.txt"
           done
+
+      - name: Qualify employee configuration proposals in the installed browser
+        if: inputs.verify_configuration_proposals
+        env:
+          HARTMESH_VERIFY_CONFIGURATION_PROPOSALS: '1'
+          HARTMESH_REQUIRE_BUNDLE_INSTANCES: '1'
+          HARTMESH_BUNDLE_URL: http://localhost:2026
+          HARTMESH_BUNDLE_PROJECT_DIR: /opt/hartmesh
+          HARTMESH_BUNDLE_ENV_FILE: /srv/hartmesh/.env
+          HARTMESH_BUNDLE_ADMIN_EMAIL: admin@example.com
+          HARTMESH_BUNDLE_ADMIN_PASSWORD: 'Acceptance-Admin-2026!'
+          HARTMESH_BUNDLE_RUNTIME: hartmesh-ci
+        working-directory: backend
+        run: |
+          PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 .venv/bin/python -m pytest tests/test_compose_employee_proposals.py -q --tb=short --maxfail=1 --junitxml="$EVIDENCE/employee-proposals.xml"
+          jq -e '.complete and .fresh_work.definition_revision == .enable.candidate_digest and .disable.current_value == false and .stale.status == "declined" and .package_off and .preferences_preserved' "$EVIDENCE/employee-proposals.json"
 
       - name: Qualify employee jobs and final-turn recovery
         if: inputs.verify_agent_jobs
@@ -655,7 +685,7 @@ jobs:
 
       - name: 14 Check that the stack stops cleanly
         env:
-          SHARED_MEASURED: ${{ github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots && !inputs.verify_agent_jobs) }}
+          SHARED_MEASURED: ${{ github.event_name != 'workflow_dispatch' || (inputs.connections == 'skip' && !inputs.verify_file_browser && !inputs.verify_shared_snapshots && !inputs.verify_agent_jobs && !inputs.verify_configuration_proposals) }}
         run: |
           $C logs --no-color > "$EVIDENCE/compose-before-down.log" 2>&1
           $C ps -a > "$EVIDENCE/services-before-down.txt"

@@ -17,6 +17,7 @@ there is no matching entity directory.
 from deerflow.features.resources import StorageFeatureLinkRow
 from deerflow.persistence.agent_instances.human_input import HumanInputEventRow, HumanInputReadRow, HumanInputRequestRow, HumanInputResponseRow
 from deerflow.persistence.agent_instances.model import AgentConversationRow, AgentDefinitionRevisionRow, AgentInstanceGrantRow, AgentInstanceRow, AgentLifecycleRow, AgentMemoryRow, AgentProtectedContextRow
+from deerflow.persistence.agent_instances.proposals import AgentProposalRow
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow, AgentWorkRow
 from deerflow.persistence.agents.model import AgentRow
 from deerflow.persistence.channel_connections.model import (
@@ -91,6 +92,7 @@ __all__ = [
     "AgentInstanceGrantRow",
     "AgentInstanceRow",
     "AgentLifecycleRow",
+    "AgentProposalRow",
     "AgentMemoryRow",
     "AgentProtectedContextRow",
     "ExtensionExecutionLeaseRow",

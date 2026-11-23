@@ -97,15 +97,12 @@ def _build_tool(source, plugin, declaration, loaded=None):
             if len(json.dumps(payload, allow_nan=False).encode()) > 256 * 1024 or not validator.is_valid(payload):
                 raise ToolException("Invalid plugin tool input.")
             context = runtime.context if isinstance(runtime.context, Mapping) else {}
-            runs = context.get(AGENT_RUNS_CONTEXT_KEY)
-            tool_context = ToolContext(
-                ExtensionPrincipal(resolve_runtime_user_id(runtime)),
-                MappingProxyType(settings),
-                context.get("thread_id"),
-                run_id=context.get("run_id"),
-                agent_runs=runs.for_plugin(plugin.namespace) if runs is not None else None,
-            )
-            if plugin.api_version in (4, 5):
+            if plugin.proposal_tool is declaration:
+                from deerflow.agent_instances.proposal_tools import bound_submission
+
+                async with bound_submission(runtime, source, plugin, declaration, settings, payload) as tool_context, asyncio.timeout(30):
+                    result = await declaration.handler(MappingProxyType(payload), tool_context)
+            elif plugin.api_version in (4, 5):
                 from deerflow_extension_api.storage import StorageActor
 
                 from deerflow.spaces.facade import STORAGE_PROVIDER_CONTEXT_KEY, HostStorageProvider, _current_actor
@@ -122,8 +119,18 @@ def _build_tool(source, plugin, declaration, loaded=None):
 
                     storage = await provider.for_plugin(source, plugin, lambda: loaded if loaded is not None else get_loaded_extensions()).current()
                 tool_context = ToolContext(ExtensionPrincipal(actor.subject_id) if actor.kind == "human" else None, MappingProxyType(settings), context.get("thread_id"), actor=StorageActor(actor.kind, actor.subject_id), storage=storage)
-            async with asyncio.timeout(30):
-                result = await declaration.handler(MappingProxyType(payload), tool_context)
+            else:
+                runs = context.get(AGENT_RUNS_CONTEXT_KEY)
+                tool_context = ToolContext(
+                    ExtensionPrincipal(resolve_runtime_user_id(runtime)),
+                    MappingProxyType(settings),
+                    context.get("thread_id"),
+                    run_id=context.get("run_id"),
+                    agent_runs=runs.for_plugin(plugin.namespace) if runs is not None else None,
+                )
+            if plugin.proposal_tool is not declaration:
+                async with asyncio.timeout(30):
+                    result = await declaration.handler(MappingProxyType(payload), tool_context)
             if declaration.response_format == "content_and_artifact":
                 if not isinstance(result, PluginToolResult) or not isinstance(result.content, str) or (result.artifact is not None and not isinstance(result.artifact, Mapping)):
                     raise TypeError("Expected PluginToolResult with text and a JSON object artifact")

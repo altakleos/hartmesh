@@ -118,7 +118,7 @@ from deerflow_extension_api.storage import (
 
 #: Contract version. Before 1.0, minors may break and patches are additive.
 #: From 1.0 on, bump the major for breaking changes.
-API_VERSION = "0.2.14"
+API_VERSION = "0.2.15"
 
 __all__ = [
     "StorageAccessDenied",

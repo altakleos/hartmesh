@@ -27,6 +27,9 @@ Viewer-scoped `/api/search` is cancellable; demos filter locally. Agent files us
 Conversation attachments stay local to chat. The account workspace owns Home uploads and rechecks grants, incarnation and receipts across routes. Pickers send destination references. Browse inspectable agents on demand. Confirm Home copies, omit source titles, reconcile by ID; verify receipt, Home and execution.
 Binding discovery hides ordinary artifacts and preserves selection. Confirmed bindings retire the panel. Verify breadcrumb custody. Inspect opens produced files. Browser, sidecar and scheduling are personal. Use instance memory APIs. Agent batch controls come from the Gateway. Startup notices stay outside history.
 Company targets start empty; transfer data explicitly through admitted APIs.
+Employee configuration proposals use the installed feature flag and current Inspect + Manage.
+Show the captured diff beside the current revision. Adopt sends the reviewed digest and
+generation, and uncertain decisions refresh their receipt.
 Work controls separate delegation, explicit activation and review. Use+Inspect delegates with adopted
 policy defaults; Manage+Inspect changes assignments and reviews exact statements.
 Retain uncertain mutation bodies/IDs, retire actions on account/permission changes,
