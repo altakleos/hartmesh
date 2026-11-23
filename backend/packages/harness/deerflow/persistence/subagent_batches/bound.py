@@ -286,9 +286,7 @@ async def close_job(session, batch, reason, now):
         batch.status = "cancelled"
         batch.completed_at = now
     batch.continuation_status = "cancelled"
-    batch.continuation_json = {**batch.continuation_json, "outcome": {"version": 1, "reason": reason, "finished": batch.total_items - remaining.rowcount, "total": batch.total_items}}
-    batch.updated_at = now
-    await expire_fence(session, batch.id)
+    await record_outcome(session, batch, reason, now)
 
 
 async def confirmed_reply(session, batch, run):
@@ -323,8 +321,9 @@ async def confirmed_reply(session, batch, run):
         return False
 
 
-async def complete_job(session, batch, now):
-    batch.continuation_json = {**batch.continuation_json, "outcome": {"version": 1, "reason": "completed", "finished": batch.total_items, "total": batch.total_items}}
+async def record_outcome(session, batch, reason, now):
+    finished = await session.scalar(select(func.count(Item.id)).where(Item.batch_id == batch.id, Item.status.in_(("succeeded", "failed"))))
+    batch.continuation_json = {**batch.continuation_json, "outcome": {"version": 1, "reason": reason, "finished": finished, "total": batch.total_items}}
     batch.updated_at = now
     await expire_fence(session, batch.id)
 
@@ -339,7 +338,7 @@ async def reconcile_unavailable_final(session, batch, now):
         if run.status in ACTIVE_RUN and (run.lease_expires_at is None or utc(run.lease_expires_at) > now):
             return False
         if await confirmed_reply(session, batch, run):
-            await complete_job(session, batch, now)
+            await record_outcome(session, batch, "completed", now)
             return True
     await close_job(session, batch, "interrupted", now)
     return True
@@ -415,7 +414,7 @@ class BoundBatchDispatch:
         counts = await self._counts(session, batch.id)
         unfinished = sum(counts[status] for status in UNFINISHED)
         if not unfinished and await confirmed_reply(session, batch, run):
-            await complete_job(session, batch, now)
+            await record_outcome(session, batch, "completed", now)
             return False
         lost = not run.cancel_requested_at and not run.cancel_action and (run.stop_reason in LOST or run.status == "error")
         loss = utc(run.lease_expires_at or run.updated_at)
@@ -465,7 +464,7 @@ class BoundBatchDispatch:
             if batch.continuation_status == "dispatched" and state is not None and state.get("final_started") is True:
                 run = await session.get(RunRow, batch.continuation_run_id, with_for_update=True)
                 if admitted_run(batch, run) and run.status not in ACTIVE_RUN and await confirmed_reply(session, batch, run):
-                    await complete_job(session, batch, datetime.now(UTC))
+                    await record_outcome(session, batch, "completed", datetime.now(UTC))
                     return None if only_open else await self._with_counts(session, batch)
             await close_job(session, batch, reason, datetime.now(UTC))
             return await self._with_counts(session, batch)

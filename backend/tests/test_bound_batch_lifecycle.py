@@ -263,7 +263,8 @@ async def test_work_deadline_and_requester_stop_are_terminal(repo):
     assert (await repo.get_batch("batch", user_id="owner"))["continuation_status"] == "cancelled"
 
 
-async def test_work_timeout_preserves_partial_results_for_the_one_final_reply(repo):
+@pytest.mark.parametrize("final_recorded", [False, True])
+async def test_work_timeout_preserves_partial_results_for_the_one_final_reply(repo, final_recorded):
     await start(repo)
     run = dict(**CTX, run_id="first-run")
     (first,) = await items(repo, "first-run")
@@ -278,10 +279,16 @@ async def test_work_timeout_preserves_partial_results_for_the_one_final_reply(re
     assert (await repo.get_batch("batch", user_id="owner"))["follow_up"] == {"state": "working", "finished": 1, "total": 2}
     assert await repo.begin_bound_final("batch", **run, now=state["items_deadline"])
     assert not await repo.begin_bound_final("batch", **run, now=state["items_deadline"])
-    await record_reply(repo, content="One check completed; the other reached its time limit.")
+    if final_recorded:
+        await record_reply(repo, content="One check completed; the other reached its time limit.")
     await mark(repo, "first-run", "success")
     assert not await claim(repo)
-    assert (await repo.get_batch("batch", user_id="owner"))["follow_up"] == {"state": "done", "finished": 1, "total": 2}
+    reason = "completed" if final_recorded else "interrupted"
+    async with repo._sf() as session:
+        outcome = (await session.get(SubagentBatchRow, "batch")).continuation_json["outcome"]
+    assert outcome == {"version": 1, "reason": reason, "finished": 1, "total": 2}
+    expected = {"state": "done"} if final_recorded else {"state": "ended", "reason": reason}
+    assert (await repo.get_batch("batch", user_id="owner"))["follow_up"] == {**expected, "finished": 1, "total": 2}
 
 
 @pytest.mark.parametrize("final_state", ["lost", "done", "live"])
