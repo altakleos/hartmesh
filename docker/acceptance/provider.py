@@ -613,6 +613,8 @@ def fallback_reply(body, turn):
 
 
 class Handler(BaseHTTPRequestHandler):
+    streaming_usage = False
+
     def log_message(self, _format: str, *args: object) -> None:
         pass  # Never print request bodies or authentication headers.
 
@@ -692,6 +694,8 @@ class Handler(BaseHTTPRequestHandler):
                 "object": "chat.completion.chunk",
                 "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
             }
+            if self.streaming_usage:
+                end["usage"] = {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20}
             self.wfile.write(f"data: {json.dumps(end)}\n\ndata: [DONE]\n\n".encode())
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):

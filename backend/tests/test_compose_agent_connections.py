@@ -18,7 +18,6 @@ if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("HARTMESH_VERIFY
 from _compose_browser_session import signed_in_browser, verify_image
 from _compose_connection_evidence import confirmed_browser_notice, observe_initial_thread_reads
 from _compose_gateway_restart import start_gateway, stop_gateway
-from playwright.sync_api import expect
 from test_compose_instance_acceptance import Bundle, activate, await_attempt, await_execution_ready, delegate, eventually, new_conversation, required
 from test_compose_instance_acceptance import compose as compose
 from test_compose_instance_acceptance import session as session
@@ -100,6 +99,8 @@ def create_employees(session):
 
 
 def access_page(page, compose, agent, enabled):
+    from playwright.sync_api import expect
+
     reply = page.goto(f"{compose.url}/workspace/instances?instance={agent['instance']['id']}&tab=access", wait_until="domcontentloaded")
     assert reply.ok
     expect(page.get_by_text(agent["instance"]["name"], exact=True).first).to_be_visible(timeout=30000)
@@ -111,6 +112,8 @@ def access_page(page, compose, agent, enabled):
 
 
 def connect_from_browser(page, compose):
+    from playwright.sync_api import expect
+
     page.goto(compose.url + "/workspace/chats/new?settings=tools", wait_until="domcontentloaded")
     page.get_by_role("button", name="Add connection", exact=True).click(timeout=30000)
     dialog = page.get_by_role("dialog", name="Add connection", exact=True)
@@ -125,6 +128,8 @@ def connect_from_browser(page, compose):
 
 
 def read_from_browser(page, compose, session, agent, evidence):
+    from playwright.sync_api import expect
+
     thread_id = agent["thread_id"]
     evidence["thread_id"] = thread_id
     expected = "Notice from notices-a."
@@ -314,6 +319,8 @@ def rollback(compose, session, version, primary, unaffected, counts, assignment)
 
 
 def test_company_connection_calls_switch_and_rollback(compose, session):
+    from playwright.sync_api import expect
+
     output = Path(required("EVIDENCE")) / "connections.json"
     record = {"complete": False, "activation": required("HARTMESH_VERIFY_CONNECTIONS"), "head": required("GITHUB_SHA"), "workflow_run": required("GITHUB_RUN_ID"), "attempt": required("GITHUB_RUN_ATTEMPT"), "rollback": {}}
     try:

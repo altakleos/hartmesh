@@ -304,6 +304,21 @@ Check both `snapshot-publications.json` and `agent-sharing.json` in the run’s
 artifact. The latter records the browser’s first employee run, the copied file,
 and the outcome observed by the earlier reader.
 
+### Employee conversation jobs
+
+For changes to employee jobs, dispatch `compose-instances.yml` with
+`verify_agent_jobs=true` and `connections=skip`. Leave the backend image
+unset for a source rehearsal. For release qualification, supply the signed
+backend digest on the release pin commit. The workflow verifies both pinned
+application images and enables batches on its disposable installation.
+
+Check `employee-jobs.xml` and `employee-jobs.json` for overlapping employee
+and personal checks, a third person's completed chat, Gateway memory, stored
+token counts, and final-turn connection calls. Check the interrupted final
+reply, the replacement run's newly granted connection, and the switched-off
+control. The scripted provider reports fixed token usage. Tenant performance
+and provider pricing require separate measurements.
+
 ### Conversation title search measurements
 
 Pull requests changing the title search measurement or its search handler build

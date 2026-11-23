@@ -36,18 +36,30 @@ def test_model_uses_offered_tools_and_real_item_and_notice_receipts(monkeypatch)
     final = turn("employee", "final")
     read = reply(final, names)
     assert json.loads(read["tool_calls"][0]["function"]["arguments"]) == {"batch_id": "sample", "position": 0}
-    receive(final, read, "Checked sample " + nonce)
+    window = json.dumps({"position": 0, "status": "ok", "offset": 0, "next_offset": None, "content": json.dumps({"position": 0, "status": "succeeded", "result": "Checked sample " + nonce})})
+    receive(final, read, window)
     notice = reply(final, names)
     receive(final, notice, [{"type": "text", "text": "Notice from notices-a."}])
-    assert reply(final, names) == {"content": "Completed checks " + nonce}
+    assert reply(final, names) == {"content": "Completed employee checks " + nonce}
     final[-1]["tool_call_id"] = "stale"
     with pytest.raises(ValueError):
         reply(final, names)
     off = turn("off", "final")
-    receive(off, reply(off, names), "Checked sample " + nonce)
+    receive(off, reply(off, names), window)
     with pytest.raises(ValueError):
         reply(off, names)
     assert "Completed" in reply(off, names[:1])["content"]
+    replacement = turn("replacement", "final")
+    tools = ["read_batch_result", "updated_read_notice"]
+    receive(replacement, reply(replacement, tools), window)
+    second = reply(replacement, tools)
+    assert json.loads(second["tool_calls"][0]["function"]["arguments"])["position"] == 1
+    remaining = json.dumps({"position": 1, "status": "ok", "offset": 0, "next_offset": None, "content": json.dumps({"position": 1, "status": "succeeded", "result": "Checked remaining " + nonce})})
+    receive(replacement, second, remaining)
+    with pytest.raises(ValueError):
+        reply(replacement, [*tools, "notices_read_notice"])
+    receive(replacement, reply(replacement, tools), [{"type": "text", "text": "Notice from notices-b."}])
+    assert reply(replacement, tools) == {"content": "Completed replacement checks " + nonce}
 
 
 def test_dedicated_mounted_job_shares_candidate_verification_and_preserves_bundle_default():
