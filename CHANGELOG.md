@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.78] - 2026-11-23
+
+### Workbook previews
+
+- When Office previews are enabled, an Excel formula shared across a range shows the expression for each cell that has no saved result. Relative references adjust to the cell’s position and absolute references stay fixed. If the workbook contains a saved result, the preview shows it, including zero.
+- Office previews are opt-in for ordinary chat output. Download retrieves the original workbook.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.77.
+
 ## [2.2.0+hartmesh.77] - 2026-11-23
 
 ### Shared files and assignment reviews
