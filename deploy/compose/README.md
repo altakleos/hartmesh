@@ -1901,6 +1901,40 @@ DROP TABLE IF EXISTS hm_message_search_threads;
 DROP FUNCTION IF EXISTS hm_message_search_forget_coverage();
 ```
 
+### Preview measurements for v2.2.0+hartmesh.78
+
+Office previews are opt-in. The signed-image measurement exceeded the 10% latency
+allowance for both chat turns and file listing. Each row shows the median of five
+signed-in requests on hosted Linux.
+
+| Operation | Baseline | During preview work | Increase |
+| --- | ---: | ---: | ---: |
+| Chat turn | 195.494 ms | 215.389 ms | 10.18% |
+| File listing | 5.745 ms | 6.686 ms | 16.37% |
+
+The workbook, document and slide deck projected in 262, 279 and 307 ms. All three
+original downloads matched their source hashes. Of 12 overlapping previews,
+three completed and nine returned the busy response. Browser Retry succeeded.
+Gateway memory peaked at 296.41 MiB before previews and 331.20 MiB after the
+burst, a 34.79 MiB increase against a 288 MiB allowance. The Gateway ran with
+two CPUs, 1088 MiB of memory, zero swap and a 2048-process limit. The ten-second
+worker deadline returned HTTP 503 after 10.04 seconds while readiness returned
+HTTP 200. Container-wide memory exhaustion and adversarial documents or
+projectors remain outside the measured cases.
+
+The signed backend image also passed a separate shared-formula workbook check.
+The installed Office preview package reported version 0.1.1 and rendered the
+adjusted formulas, saved zero and saved empty text. The workbook fixture SHA-256
+was `f585c585be97e95c145f1935f12a7b293e979bd37b833f10154776620299d7cc`.
+
+Both running images came from source `b72c678e4f1d68cc1b3ab60a91ad153ea032ec82`.
+The backend digest was `sha256:b9c5ec09c8818f33e92147b783e1500358d5c3d360bc1b3d3e91e30cde9f9b4e`.
+The frontend digest was `sha256:5764720e4dbba0bfcaec19ae36de24884d84debf16d0b70ec527c2792d3aea54`.
+The measurement archive SHA-256 was
+`c91ebd1e7a7394ef2f5d2662c546fb0c404484779c7dd5c233e2f4a5e642d880`.
+[Candidate build](https://github.com/altakleos/hartmesh/actions/runs/45159862748) ·
+[Preview measurement, attempt 1](https://github.com/altakleos/hartmesh/actions/runs/45161922982/attempts/1)
+
 ### Preview measurements for v2.2.0+hartmesh.64
 
 Office previews stay off in this profile. On the release images, file listing
