@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.77] - 2026-11-23
+
+### Shared files and assignment reviews
+
+- Open and Download in a shared conversation verify the original file publication. If the file has been removed or replaced, the link tells you it is unavailable. Open the shared conversation again after upgrading to get these links.
+- Work and Attention open the exact evidence file you select, including files in nested folders. Each open checks your current read access.
+
+### Telegram and company connections
+
+- A Telegram site-approval prompt for an AI assistant or employee explains that the temporary permission covers all its conversations and assignments. The company connection dialog also explains that an employee can use the connection to prepare a large job’s final reply while the requester is away.
+- Discarding a spoken assignment answer clears the transcript and buttons and confirms the discard in English or Chinese.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.76.
+
 ## [2.2.0+hartmesh.76] - 2026-11-23
 
 ### Large jobs in employee conversations
