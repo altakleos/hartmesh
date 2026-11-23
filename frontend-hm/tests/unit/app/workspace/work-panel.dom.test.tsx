@@ -29,15 +29,12 @@ rs.mock("@/core/agent-instances/api", () => ({
   createInstanceConversation: rs.fn(),
   activateWork: rs.fn(),
 }));
-rs.mock("@/core/spaces/api", () => ({
-  listSpaces: rs.fn().mockResolvedValue({ spaces: [] }),
-  getSpace: rs.fn().mockResolvedValue({ permissions: 0 }),
-}));
+rs.mock("@/core/spaces/api", { spy: true });
 import { WorkPanel } from "@/components/workspace/instances/work-panel";
 import * as api from "@/core/agent-instances/api";
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 import { I18nProvider } from "@/core/i18n/context";
-import { getSpace } from "@/core/spaces/api";
+import { getSpace, listSpaces } from "@/core/spaces/api";
 
 const instance: api.AgentInstance = {
   id: "a".repeat(32),
@@ -115,6 +112,7 @@ function show(
   return { ...render(ui()), ui, client };
 }
 beforeEach(() => {
+  rs.mocked(listSpaces).mockResolvedValue({ spaces: [] });
   rs.mocked(getSpace)
     .mockReset()
     .mockResolvedValue({
@@ -752,6 +750,11 @@ it("requires consent to replace unavailable sources and strips projection fields
       name: "Review the guide · Open · Normal",
     }),
   );
+  expect(
+    (await screen.findByRole("link", { name: "second.txt" })).getAttribute(
+      "href",
+    ),
+  ).toBe(`/api/spaces/${"b".repeat(32)}/content?path=second.txt`);
   fireEvent.click(
     await screen.findByRole("button", { name: "Edit assignment" }),
   );

@@ -97,6 +97,25 @@ async def test_ungranted_actor_never_gets_files_even_with_optional_authorization
 
 
 @pytest.mark.asyncio
+async def test_content_link_rechecks_read_grant_on_each_open(space_file_storage):
+    from deerflow.spaces.contract import Permission
+
+    service, _, _ = space_file_storage
+    space = await home(service)
+    await service.write(actor=ALICE, space_id=space.id, expected_generation=space.generation, operation_id=operation(), path="review.txt", content=b"Reviewed details", create=True)
+    space = await service.registry.set_grant(actor=ALICE, space_id=space.id, subject=BOB, permissions=Permission.READ, expected_generation=space.generation, acknowledge_existing_data=True)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=request_app(service, BOB)), base_url="http://test") as client:
+        link = f"/api/spaces/{space.id}/content?path=review.txt"
+        opened = await client.get(link)
+        assert opened.status_code == 200 and opened.content == b"Reviewed details"
+        assert opened.headers["cache-control"] == "private, no-store"
+        await service.registry.set_grant(actor=ALICE, space_id=space.id, subject=BOB, permissions=Permission(0), expected_generation=space.generation)
+        denied = await client.get(link)
+        assert denied.status_code == 404
+        assert b"Reviewed details" not in denied.content
+
+
+@pytest.mark.asyncio
 async def test_active_content_is_downloaded_and_unknown_actor_never_defaults(space_file_storage):
     service, _, _ = space_file_storage
     space = await home(service)

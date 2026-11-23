@@ -21,15 +21,14 @@ rs.mock("@/core/auth/AuthProvider", () => ({
 rs.mock("@/core/attention/api", { spy: true });
 rs.mock("@/core/agent-instances/api", { spy: true });
 rs.mock("@/core/people/api", { spy: true });
-rs.mock("@/core/spaces/api", () => ({
-  listSpaces: rs.fn().mockResolvedValue({ spaces: [] }),
-}));
+rs.mock("@/core/spaces/api", { spy: true });
 import { RequestDetail } from "@/components/workspace/attention/inbox";
 import * as workAPI from "@/core/agent-instances/api";
 import * as api from "@/core/attention/api";
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 import { I18nProvider } from "@/core/i18n/context";
 import { getPeople } from "@/core/people/api";
+import { listSpaces } from "@/core/spaces/api";
 
 const id = "a".repeat(32);
 let current: api.InputRequest;
@@ -50,6 +49,7 @@ function show(executionUnavailable = false) {
   return { client, ...mounted };
 }
 beforeEach(() => {
+  rs.mocked(listSpaces).mockResolvedValue({ spaces: [] });
   rs.mocked(workAPI.getInstanceGrants)
     .mockReset()
     .mockResolvedValue({
@@ -409,4 +409,25 @@ it("recovers the exact acceptance receipt after a lost acknowledgement and close
   expect(rs.mocked(workAPI.commandWork).mock.calls[0]?.[2]).toEqual(
     rs.mocked(workAPI.commandWork).mock.calls[1]?.[2],
   );
+});
+
+it("links only readable sources and keeps the unchecked label", async () => {
+  current.sources = [
+    {
+      kind: "space_file",
+      space_id: "d".repeat(32),
+      path: "reports/first #1.txt",
+    },
+    { kind: "unavailable" },
+  ];
+  show();
+  const link = await screen.findByRole("link", {
+    name: "reports/first #1.txt · Current file contents are unchecked.",
+  });
+  expect(link.getAttribute("href")).toBe(
+    `/api/spaces/${"d".repeat(32)}/content?path=reports%2Ffirst+%231.txt`,
+  );
+  expect(
+    screen.getByText("This file is no longer available to you.").closest("a"),
+  ).toBeNull();
 });

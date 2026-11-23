@@ -12,7 +12,7 @@ import * as api from "@/core/attention/api";
 import { useAttention } from "@/core/attention/hooks";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
-import { listSpaces } from "@/core/spaces/api";
+import { listSpaces, spaceFileURL } from "@/core/spaces/api";
 import { useSpaceActionSignal } from "@/core/spaces/lifetime";
 
 import { InputRecipientSelect, NO_RECIPIENT } from "./recipient-select";
@@ -670,12 +670,9 @@ function SourceList({ sources }: { sources: api.InputRequest["sources"] }) {
       {sources.map((s, i) => (
         <li key={i}>
           {s.kind === "space_file" ? (
-            <Link
-              className="underline"
-              href={`/workspace/spaces?space=${s.space_id}`}
-            >
+            <a className="underline" href={spaceFileURL(s.space_id, s.path)}>
               {s.path} · {t.attention.unchecked}
-            </Link>
+            </a>
           ) : (
             t.attention.sourceUnavailable
           )}
