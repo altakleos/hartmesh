@@ -84,3 +84,6 @@ source independently. Employee Home aliases bypass caching. Ten 8 MiB slots
 hold a full ten-input report. One locked 8 MiB temporary brings peak payload
 storage to 88 MiB, plus a 32-byte workspace key. Signed typed records trust the local
 sandbox account. Cache failures fall back to parsing.
+
+The optional person trend uses the existing period buckets after exclusions.
+Keep the canonical table, retained line series and all exports in agreement.

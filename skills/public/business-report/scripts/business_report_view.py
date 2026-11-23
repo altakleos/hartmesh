@@ -125,6 +125,13 @@ def _saved_choices(report: dict, receipt: dict) -> list[str]:
                     column, target = rule.get("role") or rule["column"], rule["equals"]
                 choices.append(f"Exclude rows where {column.strip()} = {target.strip()}")
         elif field in applied and not receipt.get(f"cli_{field}"):
+            if field == "charts" and receipt.get("cli_trend_by") == "person":
+                # This build chose the split trend explicitly. Preserve only
+                # separately saved chart selections present in the resulting draft.
+                shown = {chart["id"] for chart in report["charts"]} - {"revenue_by_person_over_time"}
+                value = [chart for chart in value if chart in shown]
+                if not value:
+                    continue
             if isinstance(value, list):
                 value = ", ".join(item.replace("_", " ") for item in value) or "none"
             choices.append(f"{field.replace('_', ' ').capitalize()}: {value}")

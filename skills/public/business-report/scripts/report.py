@@ -1102,7 +1102,7 @@ def compute_checks(ctx: BuildContext, rows: pd.DataFrame, revenue: float, count:
         if not table or not table.get("totals") or "Revenue" not in table["columns"] or section["id"] == "customers":
             continue
         index = table["columns"].index("Revenue")
-        section_total = sum(row[index] or 0 for row in table["rows"])
+        section_total = independent_amount_total([row[index] for row in table["rows"]])
         if not math.isclose(section_total, revenue, rel_tol=1e-12, abs_tol=1e-9):
             mismatches.append(f"the {section['heading'].lower()} table sums to {format_value(section_total, 'currency', currency)}")
     if mismatches:
@@ -1556,6 +1556,7 @@ def command_build(args) -> int:
     options.currency = args.currency or options.currency
     options.draft = args.draft
     options.name = args.name
+    options.trend_by_person = args.trend_by == "person"
     if args.short:
         options.summary_length = "short"
     if args.summary_length:
@@ -1594,6 +1595,7 @@ def command_build(args) -> int:
                     "effective": effective if args.prefs_override else snapshot["preferences"],
                     "cli_summary_length": args.summary_length or ("short" if args.short else None),
                     "cli_currency": args.currency,
+                    **({"cli_trend_by": args.trend_by} if args.trend_by else {}),
                     "cli_exclusions": args.exclude or [],
                 },
             )
@@ -1778,6 +1780,7 @@ def command_checks(args) -> int:
         profile = recipe["profile"] if recipe else load_profile(report["meta"].get("profile"), tenant_dir)
         options = BuildOptions(exclusions=list(build.get("exclusions", [])), currency=report["meta"]["currency"]["code"] if report["meta"]["currency"]["source"] == "preferences" else None)
         if recipe:
+            options.charts = [chart["id"] for chart in report["charts"]]
             options.comparisons = recipe["comparisons"]
             options.top_n = recipe["top_n"]
             options.summary_length = recipe["summary_length"]
@@ -1854,6 +1857,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_parser_.add_argument("--summary-length", choices=("short", "standard"), help="Override saved summary length for this build only")
     build_parser_.add_argument("--tenant", help="Tenant bundle directory (default: /mnt/tenant when present)")
     build_parser_.add_argument("--exclude", action="append", help="role=value or column=value; repeatable")
+    build_parser_.add_argument("--trend-by", choices=("person",), help="Split the revenue time trend by the mapped technician or provider")
     build_parser_.add_argument("--title", help="Report title (default from the profile)")
     build_parser_.add_argument("--company", help="Company name shown on the report")
     build_parser_.add_argument("--currency", help="Three-letter code when the file does not say")
