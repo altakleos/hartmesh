@@ -23,8 +23,8 @@ def buttons(view):
     return [button for row in view.keyboard for button in row]
 
 
-def present(raw):
-    return present_request(raw, thread_id="render-thread", reply_to_message_id=91, locale="en-US")
+def present(raw, *, locale="en-US", agent_kind="lead_agent"):
+    return present_request(raw, scope=SimpleNamespace(thread_id="render-thread", agent_kind=agent_kind), reply_to_message_id=91, locale=locale)
 
 
 def test_full_choices_remain_visible_while_at_most_48_numbered_buttons_are_offered():
@@ -66,9 +66,18 @@ def test_malformed_network_details_show_generic_error_without_any_controls(detai
     assert text(view) == "Something went wrong and the message was not answered. It is kept."
 
 
-def test_network_card_uses_saved_details_and_never_offers_allow_sandbox():
-    view = present(request(source="sandbox_network", details={"host": "api.example&value", "port": 8443, "ttl_seconds": 420}))
-    assert "api.example&value:8443" in text(view) and "7 minutes" in text(view)
+@pytest.mark.parametrize(
+    "locale,expected",
+    [
+        ("en-US", "A step tried to reach {host}, which is blocked. Allow {host} for 7 minutes, or keep {host} blocked."),
+        ("zh-CN", "一个步骤尝试访问被阻止的 {host}。允许访问 {host} 7 分钟，还是继续阻止？"),
+    ],
+)
+@pytest.mark.parametrize("agent_kind", ["lead_agent", "custom_agent"])
+def test_ordinary_network_card_keeps_its_wording_and_controls(locale, expected, agent_kind):
+    raw = request(source="sandbox_network", details={"host": "api.example&value", "port": 8443, "ttl_seconds": 420})
+    view = present(raw, locale=locale, agent_kind=agent_kind)
+    assert text(view) == expected.format(host="api.example&value:8443")
     assert "&amp;value" in view.parts[0]["html"]
     assert [button["payload"]["option_id"] for button in buttons(view)] == ["allow_temporary", "deny"]
     assert all(button["payload"]["host"] == "api.example&value" and button["payload"]["port"] == 8443 for button in buttons(view))

@@ -84,7 +84,9 @@ import {
 } from "@/components/workspace/instances/lifecycle-actions";
 import * as api from "@/core/agent-instances/api";
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
+import type { Locale } from "@/core/i18n";
 import { I18nProvider } from "@/core/i18n/context";
+import { setLocaleInCookie } from "@/core/i18n/cookies";
 
 const agent: api.AgentInstanceDetail = {
   id: "a".repeat(32),
@@ -109,12 +111,13 @@ const agent: api.AgentInstanceDetail = {
   execution: { execution: "ready", reason: null },
 };
 const clients: QueryClient[] = [];
-function show(permissions = 7) {
+function show(permissions = 7, locale: Locale = "en-US") {
+  setLocaleInCookie(locale);
   const client = new QueryClient();
   clients.push(client);
   return render(
     <QueryClientProvider client={client}>
-      <I18nProvider initialLocale="en-US">
+      <I18nProvider initialLocale={locale}>
         <FileActionLifetimeProvider>
           <LifecycleActionsProvider
             instance={{ ...agent, permissions }}
@@ -280,66 +283,100 @@ test("supervisor choices are confined to existing managers and never grant acces
   expect(api.changeInstanceLifecycle).not.toHaveBeenCalled();
 });
 
-test("a manager without Inspect can give and immediately remove a connection without seeing member identities", async () => {
-  state.connections = true;
-  const item = {
-    id: "notes/active",
-    name: "Notes",
-    description: "Read notes",
-    host: "notes.example.test",
-    reason: null,
-    given: false,
-    given_by: null,
-    given_at: null,
-    can_give: true,
-  };
-  const other = {
-    ...item,
-    id: "local",
-    host: "",
-    name: "Local",
-    reason: "not-remote",
-    can_give: false,
-  };
-  let given = false;
-  let attempts = 0;
-  rs.mocked(api.request).mockImplementation(async (url, options) => {
-    if (!options?.method)
-      return { chat_member_count: 4, connections: [{ ...item, given }, other] };
-    expect(url.endsWith("/notes%2Factive")).toBe(true);
-    expect(options.body).toBeUndefined();
-    given = options.method === "PUT";
-    attempts++;
-  });
-  show(4);
-  expect(
-    await screen.findByRole("heading", { name: "Connections" }),
-  ).toBeDefined();
-  const control = await screen.findByRole("switch", { name: "Notes" });
-  expect(rs.mocked(api.getInstanceGrants)).not.toHaveBeenCalled();
-  expect(
-    screen.getByRole("switch", { name: "Local" }).hasAttribute("disabled"),
-  ).toBe(true);
-  expect(screen.getByText("notes.example.test")).toBeDefined();
-  fireEvent.click(control);
-  const dialog = screen.getByRole("dialog");
-  expect(dialog.textContent).toContain("4 people can chat");
-  expect(dialog.textContent).toContain("Shared");
-  expect(dialog.textContent).toContain("approved package");
-  expect(attempts).toBe(0);
-  fireEvent.click(
-    within(dialog).getByRole("button", { name: "Give connection" }),
-  );
-  await waitFor(() =>
-    expect(control.getAttribute("aria-checked")).toBe("true"),
-  );
-  fireEvent.click(control);
-  await waitFor(() =>
-    expect(control.getAttribute("aria-checked")).toBe("false"),
-  );
-  expect(screen.queryByRole("dialog")).toBeNull();
-  expect(attempts).toBe(2);
-});
+test.each([
+  {
+    locale: "en-US" as const,
+    heading: "Connections",
+    members: "4 people can chat",
+    shared: "Shared",
+    uses: [
+      "conversations",
+      "assignments",
+      "approved package",
+      "final reply",
+      "unattended large job",
+    ],
+    give: "Give connection",
+  },
+  {
+    locale: "zh-CN" as const,
+    heading: "连接",
+    members: "目前有 4 人",
+    shared: "共享",
+    uses: [
+      "对话",
+      "任务",
+      "获准软件包发起的工作",
+      "最终回复",
+      "无人值守的大型任务",
+    ],
+    give: "分配连接",
+  },
+])(
+  "a manager without Inspect reviews the scope before granting a connection ($locale)",
+  async ({ locale, heading, members, shared, uses, give }) => {
+    state.connections = true;
+    const item = {
+      id: "notes/active",
+      name: "Notes",
+      description: "Read notes",
+      host: "notes.example.test",
+      reason: null,
+      given: false,
+      given_by: null,
+      given_at: null,
+      can_give: true,
+    };
+    const other = {
+      ...item,
+      id: "local",
+      host: "",
+      name: "Local",
+      reason: "not-remote",
+      can_give: false,
+    };
+    let given = false;
+    let attempts = 0;
+    rs.mocked(api.request).mockImplementation(async (url, options) => {
+      if (!options?.method)
+        return {
+          chat_member_count: 4,
+          connections: [{ ...item, given }, other],
+        };
+      expect(url.endsWith("/notes%2Factive")).toBe(true);
+      expect(options.body).toBeUndefined();
+      given = options.method === "PUT";
+      attempts++;
+    });
+    show(4, locale);
+    expect(await screen.findByRole("heading", { name: heading })).toBeDefined();
+    const control = await screen.findByRole("switch", { name: "Notes" });
+    expect(rs.mocked(api.getInstanceGrants)).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("switch", { name: "Local" }).hasAttribute("disabled"),
+    ).toBe(true);
+    expect(screen.getByText("notes.example.test")).toBeDefined();
+    fireEvent.click(control);
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain(members);
+    expect(dialog.textContent).toContain(shared);
+    const description = document.getElementById(
+      dialog.getAttribute("aria-describedby") ?? "",
+    )?.textContent;
+    for (const use of uses) expect(description).toContain(use);
+    expect(attempts).toBe(0);
+    fireEvent.click(within(dialog).getByRole("button", { name: give }));
+    await waitFor(() =>
+      expect(control.getAttribute("aria-checked")).toBe("true"),
+    );
+    fireEvent.click(control);
+    await waitFor(() =>
+      expect(control.getAttribute("aria-checked")).toBe("false"),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(attempts).toBe(2);
+  },
+);
 test("a live change to the roster or audience retires the give confirmation", async () => {
   state.connections = true;
   const row = {
