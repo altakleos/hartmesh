@@ -320,6 +320,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && (inputs.connections != 'skip' || inputs.verify_agent_jobs)
         env:
           ACTIVATION: ${{ inputs.connections }}
+          SOURCE_JOB_REVISION: ${{ inputs.verify_agent_jobs && inputs.backend_image == '' && github.sha || '' }}
         run: |
           sudo sed -i -E "s#ghcr.io/altakleos/hartmesh-frontend@sha256:[0-9a-f]{64}#${HARTMESH_BROWSER_FRONTEND}#g" /opt/hartmesh/compose.yaml /opt/hartmesh/images.txt
           test "$(grep -c -F "$HARTMESH_BROWSER_FRONTEND" /opt/hartmesh/compose.yaml)" = 1

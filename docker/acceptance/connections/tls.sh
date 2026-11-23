@@ -6,7 +6,17 @@ set -euo pipefail
 [[ "$GITHUB_ACTIONS" == true && $# -eq 2 ]]
 image=$1
 bundle=$2
-[[ "$image" =~ ^ghcr\.io/altakleos/hartmesh-backend@sha256:[a-f0-9]{64}$ ]]
+if [[ -n "${SOURCE_JOB_REVISION:-}" ]]; then
+  # Only the source job installs a checkout-built image in the primary fixture.
+  [[ "$bundle" == /opt/hartmesh && "$image" == "${BACKEND_REF:?}" ]]
+  [[ "$image" =~ ^localhost:80/hartmesh-backend@sha256:[a-f0-9]{64}$ ]]
+  [[ "$SOURCE_JOB_REVISION" =~ ^[a-f0-9]{40}$ && "$SOURCE_JOB_REVISION" == "${GITHUB_SHA:?}" ]]
+  grep -Fxq -- "$image" "$bundle/images.txt"
+  labels=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}} {{index .Config.Labels "org.opencontainers.image.source"}}' "$image")
+  [[ "$labels" == "$SOURCE_JOB_REVISION https://github.com/${GITHUB_REPOSITORY:?}" ]]
+else
+  [[ "$image" =~ ^ghcr\.io/altakleos/hartmesh-backend@sha256:[a-f0-9]{64}$ ]]
+fi
 [[ "$bundle" == /opt/hartmesh || "$bundle" =~ ^/opt/hartmesh-rollback-(60|61|66)$ ]]
 tls_dir="$RUNNER_TEMP/connection-fixture-tls"
 if [[ ! -f "$tls_dir/ca.pem" ]]; then

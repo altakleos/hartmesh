@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -68,6 +69,69 @@ def test_dedicated_mounted_job_shares_candidate_verification_and_preserves_bundl
     steps = {s.get("name"): s for s in workflow["jobs"]["bundle-instances"]["steps"]}
     signed = steps["Verify the signed workspace browser pair"]
     assert "inputs.verify_agent_jobs" in signed["if"] and "verify-candidate" in signed["run"] and "deploy/compose/images.txt" in signed["run"]
-    assert "HARTMESH_BATCHES=on" in steps["Install the connection qualification fixture"]["run"]
+    install = steps["Install the connection qualification fixture"]
+    assert "HARTMESH_BATCHES=on" in install["run"]
+    assert install["env"]["SOURCE_JOB_REVISION"] == "${{ inputs.verify_agent_jobs && inputs.backend_image == '' && github.sha || '' }}"
     fixture = steps["Qualify employee jobs and final-turn recovery"]
     assert fixture["if"] == "inputs.verify_agent_jobs" and "employee-jobs.xml" in fixture["run"] and "employee-jobs.json" in fixture["run"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "reference", "bundle", "valid"),
+    [
+        ("source", "current", "/opt/hartmesh", True),
+        ("source", "other-pin", "/opt/hartmesh", False),
+        ("source", "other-revision", "/opt/hartmesh", False),
+        ("source", "other-origin", "/opt/hartmesh", False),
+        ("source", "local-tag", "/opt/hartmesh", False),
+        ("source", "current", "/opt/hartmesh-rollback-66", False),
+        ("signed", "current", "/opt/hartmesh", False),
+        ("signed", "release", "/opt/hartmesh", True),
+        ("signed", "release", "/opt/hartmesh-rollback-66", True),
+    ],
+)
+def test_tls_fixture_executes_only_the_admitted_backend(tmp_path, monkeypatch, mode, reference, bundle, valid):
+    """Exercise the installed wrapper with a disposable pin and a Docker command recorder."""
+    root = Path(__file__).resolve().parents[2]
+    revision = "a" * 40
+    image = "localhost:80/hartmesh-backend@sha256:" + "b" * 64
+    if reference == "release":
+        image = image.replace("localhost:80", "ghcr.io/altakleos")
+    elif reference == "local-tag":
+        image = "localhost:80/hartmesh-backend:ci"
+    (tmp_path / "images.txt").write_text((image if reference != "other-pin" else "another-image") + "\n")
+    (tmp_path / "connection-fixture-tls").mkdir()
+    (tmp_path / "connection-fixture-tls/ca.pem").touch()
+    recorder = tmp_path / "commands.bash"
+    recorder.write_text(
+        """grep() {
+  if [[ "${!#}" == /opt/hartmesh/images.txt ]]; then command grep "${@:1:$#-1}" "$RUNNER_TEMP/images.txt"; else return 1; fi
+}
+docker() {
+  if [[ "$1 $2" == 'image inspect' && "${!#}" == "$BACKEND_REF" ]]; then
+    echo "$IMAGE_REVISION $IMAGE_SOURCE"
+  elif [[ "$1" == run ]]; then
+    printf '%s\n' "$@" > "$RUNNER_TEMP/run-command"
+    return 79
+  else return 1; fi
+}
+"""
+    )
+    for key, value in {
+        "BASH_ENV": str(recorder),
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_SHA": revision,
+        "GITHUB_REPOSITORY": "altakleos/hartmesh",
+        "SOURCE_JOB_REVISION": revision if mode == "source" else "",
+        "IMAGE_REVISION": "d" * 40 if reference == "other-revision" else revision,
+        "IMAGE_SOURCE": "https://github.com/example/other" if reference == "other-origin" else "https://github.com/altakleos/hartmesh",
+        "BACKEND_REF": image,
+    }.items():
+        monkeypatch.setenv(key, value)
+    result = subprocess.run(["bash", root / "docker/acceptance/connections/tls.sh", image, bundle], check=False)
+    recorded = tmp_path / "run-command"
+    if valid:
+        assert result.returncode == 79 and image in recorded.read_text().splitlines()
+    else:
+        assert result.returncode != 0 and not recorded.exists()
