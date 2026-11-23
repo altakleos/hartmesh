@@ -294,7 +294,7 @@ def test_candidate_browser_rehearsal_uses_the_built_product_ui_and_real_file_act
     build = next(step for step in steps if "frontend-hm/Dockerfile" in step.get("run", ""))
     gate = next(step for step in steps if "attachment-browser.json" in step.get("run", ""))
     assert gate["if"] == "github.event_name == 'workflow_dispatch' && inputs.verify_home_rollback"
-    assert build["if"] == "github.event_name == 'workflow_dispatch' && (inputs.verify_home_rollback || ((inputs.verify_file_browser || inputs.verify_agent_jobs) && inputs.backend_image == ''))"
+    assert build["if"] == "github.event_name == 'workflow_dispatch' && (inputs.verify_home_rollback || ((inputs.verify_file_browser || inputs.verify_agent_jobs || inputs.verify_configuration_proposals) && inputs.backend_image == ''))"
     assert 'echo "HARTMESH_BROWSER_FRONTEND=$frontend_ref" >> "$GITHUB_ENV"' in build["run"]
     assert "uv sync --frozen --group dev --extra browser" in build["run"]
     assert "attachment-browser-interrupted.png" in gate["run"] and "attachment-browser-recovered.png" in gate["run"]

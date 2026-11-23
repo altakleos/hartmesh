@@ -178,6 +178,59 @@ def linked_report(messages, latest, offered):
     return {"tool_calls": [{"id": f"call_linked_{len(results)}", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}]}
 
 
+def employee_proposal_turn(messages, mode, token, offered):
+    forms = [
+        name
+        for name in offered
+        if isinstance(name, str)
+        and re.fullmatch(
+            r"ext_hm_work_proposals_propose_tracked_work_[a-f0-9]{12}", name
+        )
+    ]
+    if mode == "package-off":
+        if forms:
+            raise ValueError("The disabled proposal form is still offered")
+        return {"content": "The configuration form is unavailable."}
+    if len(forms) != 1:
+        raise ValueError("The installed employee form is unavailable or ambiguous")
+    if mode.startswith("fresh-"):
+        enabled = mode == "fresh-on"
+        if ("propose_assignment" in offered) != enabled:
+            raise ValueError(
+                "The fresh employee run did not use its adopted Work policy"
+            )
+        return {
+            "content": "Tracked assignment proposals are available."
+            if enabled
+            else "Tracked assignment proposals are unavailable."
+        }
+    form = forms[0]
+    call_id = "call_" + token
+    if len(messages) == 1:
+        return {
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": form,
+                        "arguments": json.dumps({"enabled": mode == "enable"}),
+                    },
+                }
+            ]
+        }
+    if len(messages) != 3 or scripted_tool(messages[-2], messages[-1], call_id) != form:
+        raise ValueError(
+            "The employee submission result did not match the issuing call"
+        )
+    if (
+        f"The proposal to {mode} tracked assignments was submitted for review"
+        not in tool_result_content(messages[-1]["content"])
+    ):
+        raise ValueError("The installed form did not confirm a committed submission")
+    return {"content": f"Submitted the {mode} proposal for review."}
+
+
 def reply(body: dict[str, Any]) -> dict[str, Any]:
     messages = body.get("messages", [])
     if not body.get("tools"):
@@ -212,6 +265,14 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
             latest = previous
             wrap_up = True
     user_text = message_text(messages[latest])
+    proposal = re.search(
+        r"\bacceptance:proposal:(enable|disable|fresh-on|fresh-off|package-off):([a-f0-9]{32})\b",
+        user_text,
+    )
+    if proposal:
+        return employee_proposal_turn(
+            messages[latest:], proposal[1], proposal[2], offered
+        )
     if "Read-only conversation references for this run:" in user_text:
         imported = linked_report(messages, latest, offered)
         if imported is not None:
