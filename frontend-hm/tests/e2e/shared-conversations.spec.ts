@@ -46,6 +46,7 @@ const snapshot = {
   ],
   transcript: {
     ...member,
+    publication_id: "8".repeat(32),
     path: "transcript.md",
     shared_path: "Conversations/Release/transcript.md",
   },
@@ -217,18 +218,61 @@ for (const view of ["browser", "classic"]) {
       page.getByText("No longer shared", { exact: true }),
     ).toBeVisible();
     await expect(page.getByText(/will answer, not Maya/)).toBeVisible();
-    await expect(
-      page
-        .getByRole("listitem")
-        .filter({ has: page.getByText("report.pdf", { exact: true }) })
-        .first()
-        .getByRole("link", { name: "Open" }),
-    ).toHaveAttribute(
-      "href",
-      /api\/shared\/Conversations\/Release\/files\/report.pdf/,
-    );
+    for (const [name, id] of [
+      ["Transcript", snapshot.transcript.publication_id],
+      ["report.pdf", member.publication_id],
+    ] as const) {
+      const row = page.getByRole("listitem").filter({
+        has: page.getByText(name, { exact: true }),
+      });
+      const href = `/api/shared-conversations/${publication}/members/${id}`;
+      await expect(row.getByRole("link", { name: "Open" })).toHaveAttribute(
+        "href",
+        href,
+      );
+      await expect(row.getByRole("link", { name: "Download" })).toHaveAttribute(
+        "href",
+        href + "?download=true",
+      );
+    }
   });
 }
+test("an open reader follows its selected member links after replacement", async ({
+  page,
+  context,
+}) => {
+  await setup(page);
+  await page.goto("/workspace/files/conversations/" + publication);
+  const row = page.getByRole("listitem").filter({
+    has: page.getByText("report.pdf", { exact: true }),
+  });
+  await expect(row.getByRole("link", { name: "Open" })).toBeVisible();
+  const href = `/api/shared-conversations/${publication}/members/${member.publication_id}`;
+  await context.route(
+    (url) => url.pathname === href,
+    (route) =>
+      route.fulfill({
+        status: 410,
+        json: {
+          detail:
+            "This file is no longer available in this shared conversation.",
+        },
+      }),
+  );
+  for (const name of ["Open", "Download"]) {
+    const pending = context.waitForEvent("page");
+    await row.getByRole("link", { name }).click();
+    const opened = await pending;
+    await expect(opened.locator("body")).toContainText("no longer available");
+    const url = new URL(opened.url());
+    expect(url.pathname).toBe(href);
+    expect(url.searchParams.get("download")).toBe(
+      name === "Open" ? null : "true",
+    );
+    await opened.close();
+  }
+});
+
 test("earlier Gateway leaves raw files available", async ({ page }) => {
   await setup(page, false);
   let snapshotReads = 0;

@@ -457,8 +457,8 @@ renderer on every device. Read older Gateways through the authorized file lists.
 operations, recheck restored paths and keep history in account memory. A refused
 versioned operation has no path-only fallback.
 
-Fold marked snapshot members after authorized discovery and collection reads.
-Agent publication requires agent_publish, Manage + Inspect and consent to the previewed company audience.
-Undo sends its exact receipt and created IDs. Copied-turn attribution needs the
-thread’s verified seed IDs. Continued attachment chips use the returned uploads
-path for that account, thread and confirmed answerer. Retry transport with the same request; a changed answerer requires a new click.
+Fold marked members after authorized discovery and collection reads. Link by snapshot
+and member publication IDs. Agent sharing requires agent_publish, Manage + Inspect and
+consent to the previewed company audience. Undo sends the exact receipt and created IDs.
+Attribute copied turns by verified thread seed IDs. Bind continued upload paths to the
+account, thread and confirmed answerer. Retry transport with the same request. Changing answerer needs a new click.

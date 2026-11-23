@@ -4763,7 +4763,7 @@ and the [request contract](backend/docs/API.md#referencing-a-previous-conversati
 
 Open the conversation and select **Share with everyone**. For a conversation with an AI assistant or AI employee, you need both **Can manage** and **Can see all work**. The confirmation lists the participants HartMesh can identify and which files the agent handed back in that conversation. Review their current names and sizes before confirming. A file in the agent’s Home can change after the message that first presented it.
 
-Anyone with access to Company shared can read the published messages and download those files. Later messages and edits stay in the original conversation. You can remove the published copy from Company shared.
+Anyone with access to Company shared can read the published messages and download those files. Open and Download use the exact publication shown in the shared conversation. If someone removes or replaces the transcript or a file, its link reports that it is no longer available. Later messages and edits stay in the original conversation. You can remove the published copy from Company shared.
 
 ### Continue a shared conversation
 

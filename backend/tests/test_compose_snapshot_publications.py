@@ -110,6 +110,31 @@ def continue_and_repeat(session, detail, file):
     }
 
 
+def verify_member_links(session, thread, detail):
+    member = detail["files"][0]
+    link = f"{PREFIX}/{detail['publication_id']}/members/{member['publication_id']}"
+    plain = "/api/shared/" + member["shared_path"]
+    for download, disposition in ((False, "inline"), (True, "attachment")):
+        opened = session.request("GET", link, params={"download": download})
+        assert opened.content == ARTIFACT and opened.headers["content-disposition"].startswith(disposition)
+    session.request("DELETE", plain, params={"expected_publication_id": member["publication_id"]})
+    for download in (False, True):
+        session.request("GET", link, params={"download": download}, expected=410)
+    replacement = session.request(
+        "POST",
+        "/api/shared/publish",
+        json={"thread_id": thread, "path": "/mnt/user-data/outputs/acceptance.txt", "folder": member["shared_path"].rsplit("/", 1)[0]},
+        expected=201,
+    ).json()
+    assert replacement["path"] == member["shared_path"] and replacement["publication_id"] != member["publication_id"]
+    for download in (False, True):
+        refused = session.request("GET", link, params={"download": download}, expected=410)
+        assert "no longer available" in refused.text
+    assert session.request("GET", plain).content == ARTIFACT
+    session.request("DELETE", plain, params={"expected_publication_id": replacement["publication_id"]})
+    return {"selected": member["publication_id"], "replacement": replacement["publication_id"], "sha256": member["sha256"], "stale_open_status": 410, "stale_download_status": 410}
+
+
 def test_the_same_share_survives_interruption_of_an_output_transcript_and_manifest(compose, session):
     ref = required("BACKEND_REF")
     evidence = {"backend": verify_image(compose, "gateway", ref), "run_id": required("GITHUB_RUN_ID"), "attempt": required("GITHUB_RUN_ATTEMPT"), "head": required("GITHUB_SHA"), "operations": []}
@@ -165,6 +190,7 @@ def test_the_same_share_survives_interruption_of_an_output_transcript_and_manife
         assert evidence["pending_after"] == 0
         evidence["continuation"] = continue_and_repeat(session, detail, file)
         assert evidence["continuation"]["thread_id"] != thread
+        evidence["member_links"] = verify_member_links(session, thread, detail)
         save()
         for created in (evidence["continuation"]["thread_id"], thread):
             assert session.request("DELETE", "/api/threads/" + created).json()["success"] is True

@@ -244,3 +244,56 @@ async def test_draft_reports_a_disappeared_presented_output(share, paths):
     (paths.sandbox_outputs_dir(THREAD, user_id=str(user.id)) / "note.txt").unlink()
     response = client.get("/api/shared-conversations/draft", params={"thread_id": THREAD})
     assert response.status_code == 409 and response.json()["detail"]["code"] == "snapshot-file-changed"
+
+
+@pytest.mark.anyio
+async def test_snapshot_member_links_read_only_the_displayed_publication(share, paths, monkeypatch):
+    import _router_auth_helpers
+
+    client, user, _ = share
+    prefix = "/api/shared-conversations"
+    digest = client.get(prefix + "/draft", params={"thread_id": THREAD}).json()["snapshot"]
+    publication = client.post(prefix, json={"thread_id": THREAD, "snapshot": digest}).json()["publication_id"]
+    detail = client.get(f"{prefix}/{publication}").json()
+    member = detail["files"][0]
+    href = f"{prefix}/{publication}/members/{member['publication_id']}"
+    transcript = client.get(f"{prefix}/{publication}/members/{detail['transcript']['publication_id']}")
+    assert transcript.status_code == 200 and "Second" in transcript.text
+    for download, disposition in ((False, "inline"), (True, "attachment")):
+        opened = client.get(href, params={"download": download})
+        assert opened.status_code == 200 and opened.content == b"blue"
+        assert opened.headers["content-disposition"].startswith(disposition)
+        assert "no-store" in opened.headers["cache-control"]
+        ranged = client.get(href, params={"download": download}, headers={"Range": "bytes=1-2"})
+        assert ranged.status_code == 206 and ranged.content == b"lu"
+
+    with monkeypatch.context() as revoked:
+        revoked.setattr(_router_auth_helpers, "_STUB_PERMISSIONS", [p for p in _router_auth_helpers._STUB_PERMISSIONS if p != "threads:read"])
+        for download in (False, True):
+            assert client.get(href, params={"download": download}).status_code == 403
+
+    plain = "/api/shared/" + member["shared_path"]
+    disk = paths.shared_dir() / member["shared_path"]
+    from app.gateway.routers._file_http import DescriptorFileResponse
+
+    read = DescriptorFileResponse._read
+
+    def replace_before_send(response, offset, size):
+        disk.write_bytes(b"grey")
+        return read(response, offset, size)
+
+    with monkeypatch.context() as changed:
+        changed.setattr(DescriptorFileResponse, "_read", replace_before_send)
+        assert client.get(href).content == b"blue"
+    for download in (False, True):
+        refused = client.get(href, params={"download": download})
+        assert refused.status_code == 410 and "no longer available" in refused.text
+    assert client.get(plain).content == b"grey"
+    disk.write_bytes(b"blue")
+    assert client.delete(plain, params={"expected_publication_id": member["publication_id"]}).status_code == 200
+    assert client.get(href).status_code == 410
+    new = client.post("/api/shared/publish", json={"folder": member["shared_path"].rsplit("/", 1)[0], "path": _own_file(paths, user, "note.txt", b"blue")}).json()
+    assert new["path"] == member["shared_path"] and new["publication_id"] != member["publication_id"]
+    for download in (False, True):
+        assert client.get(href, params={"download": download}).status_code == 410
+    assert client.get(plain).content == b"blue"

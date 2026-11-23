@@ -19,6 +19,14 @@ function entry(id: string) {
   return root + "/" + encodeURIComponent(id);
 }
 
+export function snapshotMemberHref(
+  snapshotId: string,
+  memberId: string,
+  download = false,
+) {
+  return `${getBackendBaseURL()}${entry(snapshotId)}/members/${encodeURIComponent(memberId)}${download ? "?download=true" : ""}`;
+}
+
 export class SnapshotError extends Error {
   constructor(
     public status: number,
