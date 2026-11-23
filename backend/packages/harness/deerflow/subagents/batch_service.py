@@ -469,6 +469,7 @@ class SubagentBatchService:
         batch_id: str,
         user_id: str,
         continuation_authority: Any = _TRUSTED,
+        requester_stop: bool = False,
     ) -> dict[str, Any] | None:
         current = None
         if self._claim_agent_jobs is not None or continuation_authority is not _TRUSTED:
@@ -482,7 +483,8 @@ class SubagentBatchService:
                 raise ValueError("Automatic follow-up requires an authorized Gateway runtime")
             await self._cancel_continuation(batch_id, user_id, thread_id=current["thread_id"], authority=continuation_authority, authorize_only=True)
         if current is not None and current.get("read_only") is True:
-            batch = await self._repository.cancel_bound_batch(batch_id, user_id=user_id)
+            reason = "stopped_by_requester" if requester_stop or continuation_authority is not _TRUSTED else "cancelled"
+            batch = await self._repository.cancel_bound_batch(batch_id, user_id=user_id, reason=reason)
             if batch is not None and batch.get("continuation_run_id") and self._cancel_continuation is not None:
                 await self._cancel_continuation(batch_id, user_id, thread_id=batch["thread_id"], bound_run_id=batch["continuation_run_id"])
             return batch

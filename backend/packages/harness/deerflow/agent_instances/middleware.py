@@ -118,6 +118,18 @@ class InstanceAuthorityMiddleware(AgentMiddleware):
             additional_kwargs={"hide_from_ui": True, "agent_instance_identity": True, **provenance_kwargs(ContentKind.DURABLE_CONTEXT, "agent_instance_identity")},
         )
         projections = [identity]
+        environment = self._bound_environment()
+        summary = environment.bound_batch_items.deadline_summary if environment is not None else None
+        if summary:
+            projections.append(
+                HumanMessage(
+                    content=(
+                        "The job reached its check deadline. In the final reply, say how many checks finished and how many missed the deadline. "
+                        "Use stored results for the partial answer and identify missing checks using read_batch_result at the listed zero-based positions.\n" + json.dumps(summary)
+                    ),
+                    additional_kwargs={"hide_from_ui": True, **provenance_kwargs(ContentKind.DURABLE_CONTEXT, "conversation_job_deadline")},
+                )
+            )
         local = _local_date(request.messages)
         if local is not None:
             projections.append(local)

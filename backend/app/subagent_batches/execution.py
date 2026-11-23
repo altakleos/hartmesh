@@ -26,6 +26,7 @@ class BoundBatchItems:
     instance_id: str
     work_seconds: int = 900
     _final_started: bool = field(default=False, init=False)
+    deadline_summary: dict[str, int | list[int]] | None = field(default=None, init=False)
 
     _deadline: datetime | None = field(default=None, init=False)
 
@@ -48,6 +49,13 @@ class BoundBatchItems:
                     if not await self.repository.begin_bound_final(self.batch_id, **identity, now=now):
                         break
                     self._final_started = True
+                    if positions := batch["timed_out_positions"]:
+                        counts = batch["counts"]
+                        self.deadline_summary = {
+                            "succeeded": counts["succeeded"],
+                            "failed": counts["failed"],
+                            "timed_out_item_positions": positions,
+                        }
                     return
                 self._deadline = batch["items_deadline"]
                 remaining = (self._deadline - now).total_seconds()

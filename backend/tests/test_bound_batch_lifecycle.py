@@ -171,7 +171,8 @@ async def test_cancel_before_commit_invalidates_held_dispatch(repo):
     await mark(repo, "run", "success")
     held = await claim(repo)
     assert not await repo.cancel_bound_batch("batch", user_id="other")
-    await repo.cancel_bound_batch("batch", user_id="owner")
+    stopped = await repo.cancel_bound_batch("batch", user_id="owner", reason="stopped_by_requester")
+    assert stopped["follow_up"]["reason"] == "stopped_by_requester"
     with pytest.raises(ConflictError):
         await admit(repo, held, "late")
     async with repo._sf() as s:
@@ -263,6 +264,59 @@ async def test_work_deadline_and_requester_stop_are_terminal(repo):
     assert (await repo.get_batch("batch", user_id="owner"))["continuation_status"] == "cancelled"
 
 
+@pytest.mark.parametrize("source", [False, True])
+@pytest.mark.parametrize("actor", ["owner", "manager"])
+async def test_first_accepted_web_stop_keeps_its_attribution(repo, source, actor):
+    if source:
+        await seed_source(repo)
+        await submit(repo)
+        run_id = "run"
+    else:
+        await start(repo)
+        run_id = "first-run"
+        (saved,) = await items(repo, run_id)
+        assert await finish(repo, saved["id"], run_id)
+    runs = RunRepository(repo._sf)
+    assert await runs.request_cancel(run_id, action="interrupt", requested_by=actor) == "interrupt"
+    other = "manager" if actor == "owner" else "owner"
+    assert await runs.request_cancel(run_id, action="rollback", requested_by=other) == "interrupt"
+    await mark(repo, run_id, "interrupted")
+    assert not await claim(repo)
+    batch = await repo.get_batch("batch", user_id="owner")
+    assert batch["follow_up"] == {"state": "ended", "reason": "stopped_by_requester" if actor == "owner" else "stopped_by_manager", "finished": 0 if source else 1, "total": 2}
+    assert batch["controls"] == []
+
+
+@pytest.mark.parametrize("first", ["manager", "panel", "legacy"])
+async def test_panel_and_conversation_stop_keep_the_first_accepted_disposition(repo, first):
+    await start(repo)
+    runs = RunRepository(repo._sf)
+    if first in {"manager", "legacy"}:
+        await runs.request_cancel("first-run", action="interrupt", requested_by="manager" if first == "manager" else None)
+    batch = await repo.cancel_bound_batch("batch", user_id="owner", reason="stopped_by_requester")
+    if first == "panel":
+        await runs.request_cancel("first-run", action="interrupt", requested_by="manager")
+    await mark(repo, "first-run", "interrupted")
+    assert not await claim(repo)
+    reasons = {"manager": "stopped_by_manager", "panel": "stopped_by_requester", "legacy": "cancelled"}
+    expected = {"state": "ended", "reason": reasons[first], "finished": 0, "total": 2}
+    assert batch["follow_up"] == expected
+    assert (await repo.get_batch("batch", user_id="owner"))["follow_up"] == expected
+
+
+async def test_stop_after_the_run_ends_does_not_relabel_a_lost_final_reply(repo):
+    await start(repo)
+    for _ in range(2):
+        (check,) = await items(repo, "first-run")
+        assert await finish(repo, check["id"], "first-run")
+    assert await repo.begin_bound_final("batch", **CTX, run_id="first-run", now=datetime.now(UTC))
+    await mark(repo, "first-run", "interrupted", "gateway_stopped")
+    assert await RunRepository(repo._sf).request_cancel("first-run", action="interrupt", requested_by="manager") is None
+    await repo.cancel_bound_batch("batch", user_id="owner", reason="stopped_by_requester")
+    assert not await claim(repo)
+    assert (await repo.get_batch("batch", user_id="owner"))["follow_up"] == {"state": "ended", "reason": "interrupted", "finished": 2, "total": 2}
+
+
 @pytest.mark.parametrize("final_recorded", [False, True])
 async def test_work_timeout_preserves_partial_results_for_the_one_final_reply(repo, final_recorded):
     await start(repo)
@@ -273,10 +327,11 @@ async def test_work_timeout_preserves_partial_results_for_the_one_final_reply(re
     state = await repo.get_bound_run("batch", **run)
     assert await repo.timeout_bound_items("batch", **run, now=state["items_deadline"])
     assert not await finish(repo, second["id"], "first-run")
+    assert (await repo.get_bound_run("batch", **run))["timed_out_positions"] == [1]
     saved, expired = await repo.list_items("batch", user_id="owner", include_result=True)
     assert (saved["status"], saved["result"]) == ("succeeded", "checked")
     assert (expired["status"], expired["result"], expired["stop_reason"], expired["error"]) == ("cancelled", None, "time_limit", "Not run: time limit.")
-    assert (await repo.get_batch("batch", user_id="owner"))["follow_up"] == {"state": "working", "finished": 1, "total": 2}
+    assert (await repo.get_batch("batch", user_id="owner"))["follow_up"] == {"state": "working", "finished": 1, "total": 2, "timed_out": 1}
     assert await repo.begin_bound_final("batch", **run, now=state["items_deadline"])
     assert not await repo.begin_bound_final("batch", **run, now=state["items_deadline"])
     if final_recorded:
@@ -288,7 +343,7 @@ async def test_work_timeout_preserves_partial_results_for_the_one_final_reply(re
         outcome = (await session.get(SubagentBatchRow, "batch")).continuation_json["outcome"]
     assert outcome == {"version": 1, "reason": reason, "finished": 1, "total": 2}
     expected = {"state": "done"} if final_recorded else {"state": "ended", "reason": reason}
-    assert (await repo.get_batch("batch", user_id="owner"))["follow_up"] == {**expected, "finished": 1, "total": 2}
+    assert (await repo.get_batch("batch", user_id="owner"))["follow_up"] == {**expected, "finished": 1, "total": 2, "timed_out": 1}
 
 
 @pytest.mark.parametrize("final_state", ["lost", "done", "live"])

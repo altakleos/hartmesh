@@ -1451,8 +1451,9 @@ async def cancel_run(
 
     from app.gateway.agent_conversations import require_run_cancellation
 
-    await require_run_cancellation(request, record)
-    outcome = await run_mgr.cancel(run_id, action=action)
+    requested_by = await require_run_cancellation(request, record)
+    attribution = {"requested_by": requested_by} if requested_by is not None else {}
+    outcome = await run_mgr.cancel(run_id, action=action, **attribution)
 
     # Success paths — the run was cancelled locally, durably requested from
     # a live owner, or taken over from a dead worker.
@@ -1553,8 +1554,9 @@ async def _stream_existing_run(
     if action is not None:
         from app.gateway.agent_conversations import require_run_cancellation
 
-        await require_run_cancellation(request, record)
-        outcome = await run_mgr.cancel(run_id, action=action)
+        requested_by = await require_run_cancellation(request, record)
+        attribution = {"requested_by": requested_by} if requested_by is not None else {}
+        outcome = await run_mgr.cancel(run_id, action=action, **attribution)
         if outcome == CancelOutcome.taken_over:
             # The run was on another worker and is now marked ``error`` in the
             # store.  There is no local stream to drain — return immediately so

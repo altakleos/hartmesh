@@ -11,16 +11,23 @@ from app.subagent_batches.execution import BoundBatchItems
 
 class Repository:
     def __init__(self, items=4):
+        self.total = items
         self.pending = list(range(items))
         self.results = []
         self.final = 0
         self.deadline = datetime.now(UTC) + timedelta(minutes=15)
         self.current = True
-        self.timed_out = 0
+        self.timed_out = []
 
     async def get_bound_run(self, *args, **kwargs):
         if self.current:
-            return {"unfinished": len(self.pending), "items_deadline": self.deadline, "max_running_items": 2}
+            return {
+                "unfinished": len(self.pending),
+                "items_deadline": self.deadline,
+                "max_running_items": 2,
+                "timed_out_positions": self.timed_out,
+                "counts": {"succeeded": len(self.results), "failed": 0},
+            }
 
     async def claim_bound_items(self, *args, limit, **kwargs):
         ids, self.pending = self.pending[:limit], self.pending[limit:]
@@ -33,8 +40,8 @@ class Repository:
         return True
 
     async def timeout_bound_items(self, *args, **kwargs):
+        self.timed_out = sorted(set(range(self.total)) - {int(item[0]) for item in self.results})
         self.pending.clear()
-        self.timed_out += 1
         return self.current
 
     async def begin_bound_final(self, *args, **kwargs):
@@ -98,9 +105,11 @@ async def test_timed_out_work_is_cancelled_and_stored_before_final():
         finally:
             left.set()
 
-    await bound(repo).run_items(wait, stopped=lambda: False)
+    job = bound(repo)
+    await job.run_items(wait, stopped=lambda: False)
     assert entered.is_set() and left.is_set()
-    assert repo.timed_out == 1 and repo.final == 1 and not repo.results
+    assert repo.timed_out == [0, 1] and repo.final == 1 and not repo.results
+    assert job.deadline_summary == {"succeeded": 0, "failed": 0, "timed_out_item_positions": [0, 1]}
 
 
 def test_host_job_binding_requires_both_halves_of_the_authority():
@@ -170,7 +179,7 @@ async def test_cutoff_is_durable_while_a_helper_drains():
     task = asyncio.create_task(job.run_items(late, stopped=lambda: False))
     try:
         await asyncio.wait_for(draining.wait(), 3)
-        assert repo.timed_out == 1 and not job.items_open() and not repo.final
+        assert repo.timed_out == [0, 1, 2] and not job.items_open() and not repo.final
     finally:
         release.set()
         await task

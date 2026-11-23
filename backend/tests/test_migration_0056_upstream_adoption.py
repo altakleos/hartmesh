@@ -36,7 +36,7 @@ async def test_published_work_head_upgrade_preserves_rows_and_both_branches(tmp_
             await conn.execute(text("INSERT INTO threads_meta (thread_id,user_id,status,metadata_json,created_at,updated_at) VALUES ('preserved','owner','idle','{}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"))
         await asyncio.to_thread(command.upgrade, config, "head")
         async with engine.connect() as conn:
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalars().all() == ["0056_upstream_adoption"]
+            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalars().all() == [bootstrap._get_head_revision()]
             assert (await conn.execute(text("SELECT user_id FROM threads_meta WHERE thread_id='preserved'"))).scalar_one() == "owner"
 
             def shape(sync):

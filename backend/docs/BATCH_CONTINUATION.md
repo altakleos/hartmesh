@@ -81,11 +81,16 @@ server's `follow_up` state and `controls`. Recognized scoped records retain
 `read_only` for earlier clients. Only the advertised Cancel is available to
 the owner with current thread access, Use and the cancellation permission.
 An agent manager can stop the running turn through normal Run cancellation.
+The owner can see whether the requester or a manager stopped the job. The role
+comes from the first accepted cancellation. Historical and operator stops can
+have an unspecified role.
 A startup cancellation can draw a dismissible notice above the owner's composer.
 The notice belongs to the viewer's browser and is outside the conversation history.
 
-Jobs have up to 50 checks, 15 minutes of work and one hour to start. After loss,
-one replacement can finish outstanding checks inside the recovery window.
+The conversation stays busy from submission until the job ends. Jobs have up to
+50 checks, 15 minutes of work and one hour to start. A deadline leaves completed
+results available for a partial answer and records which checks missed the limit.
+After loss, one replacement can finish outstanding checks inside the recovery window.
 Once all checks have ended, reconcile a durably completed final turn or stop
 as interrupted. A new request from the person can use the retained results.
 The final turn can use the agent's connections without the person present.

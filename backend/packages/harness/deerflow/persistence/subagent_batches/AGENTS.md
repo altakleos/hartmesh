@@ -21,7 +21,11 @@ items, leaves terminal results intact and reuses the original item deadline.
 Final model execution is claimed once in durable state. Monitor the admitted
 run after its items end. Confirm completion from its latest persisted lead
 reply, using the transcript visibility rules, before recording an outcome. Readers can reopen the
-existing status columns across versions.
+existing status columns across versions. Derive the deadline count and the
+final lead's item positions from persisted cancelled checks with the fixed
+`time_limit` reason. Web run cancellation records the role with the first
+accepted action on the run row. Panel cancellation checks that durable decision
+under the existing batch-before-run lock. Keep actor IDs out of the projection.
 
 Run `tests/test_bound_batch_lifecycle.py` on SQLite and PostgreSQL for changes
 to admission, cancellation, recovery or item ownership. Ordinary and previous

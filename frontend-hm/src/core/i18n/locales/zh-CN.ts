@@ -1565,6 +1565,8 @@ export function createZhCN(product: string): Translations {
         unavailable: "当时无法运行大型任务。",
         interrupted: "任务中断。你可以请智能体根据已保存的结果重新回复。",
         cancelled: "任务已停止。",
+        stopped_by_requester: "你已停止此任务。",
+        stopped_by_manager: "管理者已停止此任务。",
         source_ended: "原始请求已停止。",
         start_timeout: "任务未能在规定时间内启动。",
         time_limit: "任务已达到时限。",
@@ -1581,6 +1583,9 @@ export function createZhCN(product: string): Translations {
       },
       finishedChecks: (finished, total) =>
         `共 ${total} 项检查，已完成 ${finished} 项。`,
+      conversationBusy: "大型任务结束前，此对话处于忙碌状态。",
+      deadlineSummary: (count) => `已达到时间上限，${count} 项检查未及时完成。`,
+      itemDeadline: "此项检查未在时间上限内完成。",
       unavailableNotice: (finished, total) =>
         `大型任务尚未完成就被取消。当时无法运行大型任务。共 ${total} 项检查，已完成 ${finished} 项。你可以在批任务中查看结果。该任务不会继续运行。`,
       openPanel: "打开批任务",
@@ -2288,7 +2293,9 @@ export function createZhCN(product: string): Translations {
           connected: (n) => `已连接，共 ${n} 个工具。`,
         },
         title: "工具",
-        description: "为公司的对话连接外部系统。",
+        description: "个人对话、自定义智能体和定时任务使用各自配置的连接。",
+        agentGrantScope:
+          "个人 AI 助理和 AI 员工使用在各自的“访问权限”选项卡中授予的公司连接。授权适用于对话、任务、由获准软件包发起的工作，以及无人值守的大型任务的最终回复。智能体调用服务时无需逐次征求许可。",
         adminRequired: "需要管理员权限才能管理 MCP 工具。",
         empty: "暂无 MCP 工具。",
         addServer: "添加服务器",

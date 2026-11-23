@@ -37,6 +37,7 @@ export type SubagentBatch = {
     reason?: string;
     finished: number;
     total: number;
+    timed_out?: number;
   };
   continuation_status?:
     | "pending"
