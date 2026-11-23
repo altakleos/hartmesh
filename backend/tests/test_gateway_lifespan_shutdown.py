@@ -656,6 +656,9 @@ async def test_lifespan_recovers_bound_batches_before_starting_the_worker(monkey
         yield
 
     with (
+        # Account bootstrap caches the repository and provider for this temporary database.
+        patch("app.gateway.deps._cached_repo", None),
+        patch("app.gateway.deps._cached_local_provider", None),
         patch("app.gateway.app.get_app_config", return_value=startup_config),
         patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
         patch("app.gateway.app.langgraph_runtime", runtime),
