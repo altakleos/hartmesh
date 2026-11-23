@@ -34,8 +34,14 @@ async def request_child(e, monkeypatch, kind, *, reason=None):
     parent = await e.acts.resume_continuation(parent.id)
     child_id = parent.continuation["activation_continuation"]["child_id"]
     e.outcome_identity = parent.continuation["request_activation"]["outcome_id"]
-    await clear_outcome_cleanup(e)
-    await dispatch(e, 1001)
+    if kind == "decision":
+        from test_telegram_work_execution_outcomes import dispatch_edit
+
+        e.identity = e.outcome_identity
+        await dispatch_edit(e, 802)
+    else:
+        await clear_outcome_cleanup(e)
+        await dispatch(e, 1001)
     assert not e.dispatch_errors, e.dispatch_errors
     plans = WorkExecutionPlans(acts=e.acts, reader=WorkExecutionReader(work=e.human.work, authority=e.live.authority, links=e.db.links, clock=e.clock.now), outbox=e.sender.outbox, callbacks=e.channel._services.callbacks)
     e.channel._services.work_execution_sources = WorkNewsSources(plans)

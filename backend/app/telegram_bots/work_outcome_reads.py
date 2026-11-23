@@ -10,6 +10,7 @@ from sqlalchemy import and_, false, literal, select
 from sqlalchemy.orm import aliased
 
 from app.telegram_bots.attention_authority import current_attention
+from app.telegram_bots.notifications import aware
 from app.telegram_bots.producer import DeliveryRetry, ProductSourceRetired
 from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_details import WorkDetailsReader
@@ -40,6 +41,7 @@ class WorkOutcomeRead:
     detail_link: object = None
     detail_dates: dict | None = None
     origin_proof: dict | None = None
+    decided_at: str | None = None
 
     @property
     def attempt_unresolved(self):
@@ -104,6 +106,7 @@ class WorkOutcomeReader:
                 projection.recipient,
                 file_answer,
                 primary_work_revision=projection.primary_work_revision,
+                decided_at=projection.decided_at,
                 detail=detail,
                 detail_reader=self.details,
                 detail_link=link,
@@ -122,7 +125,7 @@ class _OutcomeProjection:
         self.file_answer = file_answer
         self.continued = False
         self.supervisor = self.recipient = None
-        self.primary_work_revision = None
+        self.primary_work_revision = self.decided_at = None
         self.native, self.proof = native, None
 
     def extend(self, query):
@@ -231,6 +234,8 @@ class _OutcomeProjection:
             from app.telegram_bots.work_outcome_proof import native_proof
 
             self.proof = native_proof(saved, event, effect, answer)
+        if self.act.kind == "decide":
+            self.decided_at = aware(effect.created_at).isoformat()
         self.primary_work_revision = effect.revision
         # The activation's expected Work revision provides logical ordering,
         # independent of wall-clock skew or current execution availability.

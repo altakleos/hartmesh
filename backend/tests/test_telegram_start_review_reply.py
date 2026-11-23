@@ -946,8 +946,13 @@ async def test_aged_request_review_handoff_retains_actual_request_confirmation(w
     monkeypatch.setattr(work_execution, "activate_work", submitted)
     record, _request, parent, outcome_id = await (ready_decision(e, monkeypatch) if kind == "decide" else ready_response(e, monkeypatch))
     e.work, e.outcome_identity, e.identity = record, outcome_id, outcome_id
-    await clear_outcome_cleanup(e)
-    await dispatch(e, 6464)
+    if kind == "decide":
+        from test_telegram_work_execution_outcomes import dispatch_edit
+
+        await dispatch_edit(e, 802)
+    else:
+        await clear_outcome_cleanup(e)
+        await dispatch(e, 6464)
     assert not e.dispatch_errors, e.dispatch_errors
     parent = await e.acts._work_record(parent.id)
     assert "work_outcome" in parent.continuation
