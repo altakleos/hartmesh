@@ -116,6 +116,9 @@ filesystem advisory lock retain ownership through recovery/settlement.
 Delete authorizes the current publication under that lock; optional
 `expected_publication_id` adds stale-client intent fencing (empty means no record).
 Reserve the thread; copy delivered files from finished visible runs. Bound shares require session Manage + Inspect, Home admin/export, and consent to the digest. Recheck on reads/writes. Keep names in drafts and bound thread IDs out of public rows/receipts. Publish separately, manifest last. Match live member ID, path, hash and time.
+Snapshot member GET validates the manifest and member publication IDs under the
+Shared read admission. Serve ranges from the bounded digest-verified capture,
+and require the current company export grant for managed downloads.
 Lists/publications carry nullable `publication_id`; Files/Undo pass it back.
 Removal journals stage bytes on the same filesystem before updating the immutable
 publication ID. Recovery matches record ID and path before using saved outcomes;

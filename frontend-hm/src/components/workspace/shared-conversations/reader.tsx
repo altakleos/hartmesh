@@ -17,11 +17,11 @@ import {
 } from "@/components/ui/dialog";
 import { MarkdownContent } from "@/components/workspace/messages/markdown-content";
 import { useFileActionLifetime } from "@/core/file-areas/file-action-lifetime";
-import { urlOfSharedFile } from "@/core/shared/api";
 import {
   continueSnapshot,
   SnapshotError,
   removeSnapshot,
+  snapshotMemberHref,
 } from "@/core/shared-conversations/api";
 import { saveContinuedDraft } from "@/core/shared-conversations/handoff";
 import {
@@ -44,7 +44,15 @@ import { getSessionComposerDraftStorage } from "@/core/threads/composer-draft";
 import { useSnapshotCopy } from "./copy";
 
 const listHref = "/workspace/files?tab=shared";
-function Member({ item, name }: { item: SharedMember; name?: string }) {
+function Member({
+  snapshotId,
+  item,
+  name,
+}: {
+  snapshotId: string;
+  item: SharedMember;
+  name?: string;
+}) {
   const w = useSnapshotCopy();
   return (
     <li className="flex flex-wrap items-center gap-3 py-2">
@@ -56,7 +64,7 @@ function Member({ item, name }: { item: SharedMember; name?: string }) {
         <>
           <a
             className="underline"
-            href={urlOfSharedFile(item.shared_path)}
+            href={snapshotMemberHref(snapshotId, item.publication_id)}
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -64,7 +72,7 @@ function Member({ item, name }: { item: SharedMember; name?: string }) {
           </a>
           <a
             className="underline"
-            href={urlOfSharedFile(item.shared_path, { download: true })}
+            href={snapshotMemberHref(snapshotId, item.publication_id, true)}
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -307,9 +315,13 @@ function ActiveSnapshot({
       <section>
         <h2 className="font-medium">{w.files}</h2>
         <ul>
-          <Member name={w.transcript} item={row.transcript} />
+          <Member
+            snapshotId={row.publication_id}
+            name={w.transcript}
+            item={row.transcript}
+          />
           {row.files.map((f) => (
-            <Member key={f.path} item={f} />
+            <Member snapshotId={row.publication_id} key={f.path} item={f} />
           ))}
         </ul>
       </section>

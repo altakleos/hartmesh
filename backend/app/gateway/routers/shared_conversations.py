@@ -7,6 +7,7 @@ from pydantic import Field
 
 from app.gateway.authz import require_permission
 from app.gateway.conversation_snapshots import SharedSnapshot, read_collection, read_snapshot
+from app.gateway.snapshot_file_response import SnapshotMemberResponse
 from app.gateway.snapshot_manifest import Digest, SnapshotModel
 from app.gateway.snapshot_publication import ShareRequest, draft, publish_snapshot, remove_snapshot
 from deerflow.utils.thread_id import ThreadId
@@ -48,6 +49,12 @@ async def snapshots(request: Request, response: Response, limit: int = Query(100
 async def snapshot(publication_id: str, request: Request, response: Response):
     response.headers["Cache-Control"] = "private, no-store"
     return await read_snapshot(request=request, publication_id=publication_id)
+
+
+@router.get("/{publication_id}/members/{member_id}", response_class=Response)
+@require_permission("threads", "read")
+async def snapshot_member(publication_id: str, member_id: str, request: Request, download: bool = False):
+    return SnapshotMemberResponse(request, publication_id, member_id, download)
 
 
 @router.delete("/{publication_id}")

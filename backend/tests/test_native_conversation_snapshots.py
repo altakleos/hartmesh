@@ -107,3 +107,61 @@ async def test_interrupted_snapshot_member_uses_the_existing_writer_and_recovers
     snapshot = detail.json()
     assert snapshot["transcript"]["available"] and snapshot["files"][0]["available"]
     assert (await client.get("/api/shared/" + snapshot["files"][0]["shared_path"])).content == b"Finished report"
+
+
+@pytest.mark.asyncio
+async def test_managed_member_links_require_current_grants_and_exact_publication(feature_app):
+    from app.gateway.snapshot_manifest import SnapshotMember, digest_of_bytes, freeze_manifest
+    from deerflow.spaces.contract import Permission
+
+    client, app, files, catalog, _, alice, bob, current = feature_app
+    native_request(app)
+    app.include_router(shared_conversations.router)
+    company = next(v for v in catalog.verified.values() if v.spec.kind == "company")
+    repo = app.state.shared_publications_repo
+    data = b"Finished report"
+    member = SnapshotMember(path="files/report.txt", size=len(data), sha256=digest_of_bytes(data))
+    frozen = freeze_manifest("Report", [{"type": "ai", "content": "Finished"}], [member])
+    disk = company.data_path / "shared" / frozen.folder
+    (disk / "files").mkdir(parents=True)
+    member_path = f"{frozen.folder}/{member.path}"
+
+    async def record(path, content, source):
+        (company.data_path / "shared" / path).write_bytes(content)
+        return await repo.record_publication(path=path, sha256=digest_of_bytes(content), size=len(content), published_by=str(alice.id), from_thread_id=THREAD, from_path=source)
+
+    row = await record(member_path, data, "/mnt/user-data/outputs/report.txt")
+    await record(f"{frozen.folder}/transcript.md", frozen.transcript, TRANSCRIPT_SOURCE)
+    manifest = await record(f"{frozen.folder}/conversation.json", frozen.document, MANIFEST_SOURCE)
+    snapshot_url = "/api/shared-conversations/" + manifest["publication_id"]
+    detail = (await client.get(snapshot_url)).json()
+    href = snapshot_url + "/members/" + detail["files"][0]["publication_id"]
+    for download, disposition in ((False, "inline"), (True, "attachment")):
+        opened = await client.get(href, params={"download": download})
+        assert opened.status_code == 200 and opened.content == data
+        assert opened.headers["content-disposition"].startswith(disposition)
+
+    current[0] = bob
+    for download in (False, True):
+        assert (await client.get(href, params={"download": download})).status_code == 404
+    current[0] = alice
+    actor = PrincipalRef("human", str(alice.id))
+    space = next(s for s in await files.registry.list(actor=actor) if s.custody.kind == "company")
+    await files.registry.host_grant(space.id, PrincipalRef("human", str(bob.id)), Permission.READ)
+    current[0] = bob
+    assert (await client.get(href)).content == data
+    assert (await client.get(href, params={"download": True})).status_code in {403, 404}
+    current[0] = alice
+    plain = "/api/shared/" + member_path
+    (disk / member.path).write_bytes(b"Changed content")
+    for download in (False, True):
+        assert (await client.get(href, params={"download": download})).status_code == 410
+    assert (await client.get(plain)).content == b"Changed content"
+    (disk / member.path).unlink()
+    assert (await client.get(href)).status_code == 410
+    await repo.record_removal(row["publication_id"], removed_by=str(alice.id))
+    await record(member_path, data, "/mnt/user-data/outputs/report.txt")
+    for download in (False, True):
+        refused = await client.get(href, params={"download": download})
+        assert refused.status_code == 410 and "no longer available" in refused.text
+    assert (await client.get(plain)).content == data

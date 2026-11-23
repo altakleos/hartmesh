@@ -458,6 +458,7 @@ operations, recheck restored paths and keep history in account memory. A refused
 versioned operation has no path-only fallback.
 
 Fold marked snapshot members after authorized discovery and collection reads.
+Build transcript and file links from the snapshot and member publication IDs.
 Agent publication requires agent_publish, Manage + Inspect and consent to the previewed company audience.
 Undo sends its exact receipt and created IDs. Copied-turn attribution needs the
 thread’s verified seed IDs. Continued attachment chips use the returned uploads
