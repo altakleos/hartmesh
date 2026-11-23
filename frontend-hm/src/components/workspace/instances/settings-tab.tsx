@@ -22,6 +22,7 @@ import { useSpaceActionSignal } from "@/core/spaces/lifetime";
 import { AgentAvailabilityNotice } from "./agent-header";
 import { BriefSettings } from "./brief-settings";
 import { CompanyCopyAction } from "./company-copy";
+import { ConfigurationProposals } from "./configuration-proposals";
 import { DeleteAgentDialog } from "./delete-agent-dialog";
 import {
   LifecycleFailure,
@@ -134,6 +135,9 @@ function SettingsControls() {
           disabled={unavailable || unconfirmed}
           onBusy={setBriefBusy}
         />
+      )}
+      {feature.configurationProposals && instance.custody === "company" && (
+        <ConfigurationProposals />
       )}
       <div className="flex flex-wrap gap-2">
         {instance.status === "active" && (
