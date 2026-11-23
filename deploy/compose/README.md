@@ -1922,6 +1922,15 @@ worker deadline returned HTTP 503 after 10.04 seconds while readiness returned
 HTTP 200. Container-wide memory exhaustion and adversarial documents or
 projectors remain outside the measured cases.
 
+The worker startup self-test recorded the time to load each Office projector
+and the worker process’s peak resident memory at that point.
+
+| Projector | Load time | Peak resident memory |
+| --- | ---: | ---: |
+| Workbook | 0.263 s | 26,272 KiB |
+| Document | 0.266 s | 26,280 KiB |
+| Slide deck | 0.255 s | 25,800 KiB |
+
 The signed backend image also passed a separate shared-formula workbook check.
 The installed Office preview package reported version 0.1.1 and rendered the
 adjusted formulas, saved zero and saved empty text. The workbook fixture SHA-256
@@ -3715,9 +3724,10 @@ The evidence tiers establish different facts. Each is recorded separately:
   during an ordinary chat, observed folder timings and the one-second target.
   First browser visits use fresh contexts on the same host. The standard mounted
   storage qualification runs separately.
-- `managed-storage` runs all 27 required native cases on real loop-mounted ext4
+- `managed-storage` runs the full native suite (37 cases at .78) on real loop-mounted ext4
   filesystems and actual containers, using the resident builder and byte-coherence
-  probes. It rejects every skip; directories and engine doubles cannot replace it.
+  probes. CI requires at least 30 cases, checks for specific scenarios by name,
+  and rejects every skip.
 - `bundle-instances` runs the shipped profile through nginx with all seven keys,
   a scripted model and 27 named acceptance cases. It checks accounts/seats,
   ordinary chats, files/publication, full-storage refusals, resident persistence,
