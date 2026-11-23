@@ -29,7 +29,7 @@ never silently truncates a table. Use a concise view with an explicit omission
 notice and complete exports when a result exceeds these bounds. The optional
 six-digit hex accent affects decorative borders; readable text follows the
 viewer theme. Notice tones are producer-authored presentation, without a
-platform verification claim.
+platform verification claim. A fact with a nonempty value and multiline detail lets the reader open the value to inspect the detail. Single-line details appear below their value.
 
 ## Local references and file actions
 

@@ -13,6 +13,8 @@ import {
 const state = rs.hoisted(() => ({
   changed: rs.fn(),
   versionedReads: false,
+  discoveryPending: false,
+  discoveryFailed: false,
   feature: {
     known: true,
     enabled: true,
@@ -43,8 +45,8 @@ rs.mock("@/core/features", () => ({
     data: state.versionedReads
       ? { agent: ["folder", "content", "text"] }
       : undefined,
-    isPending: false,
-    isError: false,
+    isPending: state.discoveryPending,
+    isError: state.discoveryFailed,
   }),
   useAgentInstances: () => state.feature,
   useStorage: () => null,
@@ -146,6 +148,8 @@ beforeEach(() => {
   rs.mocked(fetcher).mockReset();
   state.changed.mockReset();
   state.versionedReads = false;
+  state.discoveryPending = false;
+  state.discoveryFailed = false;
   window.history.replaceState(null, "", "/workspace/instances");
   state.feature = {
     known: true,
@@ -826,6 +830,49 @@ test("reloading a conflicted edit preserves the draft and uses the newly read re
   expect(
     rs.mocked(transfers.putAgentFile).mock.calls[1]![4]?.expectedSha256,
   ).toBe("new-revision");
+});
+
+test.each([
+  "busy",
+  "failed listing",
+  "failed discovery",
+  "pending discovery",
+] as const)("Locations stays usable during %s", async (condition) => {
+  state.discoveryFailed = condition === "failed discovery";
+  state.discoveryPending = condition === "pending discovery";
+  if (!state.discoveryFailed && !state.discoveryPending) {
+    rs.mocked(spaces.listSpaceFiles).mockRejectedValue(
+      condition === "busy"
+        ? new spaces.StorageRequestError(409, "busy", "storage-busy")
+        : new Error("offline"),
+    );
+  }
+  const available = { ...instance, id: "c".repeat(32), name: "Analyst" };
+  rs.mocked(fetcher).mockImplementation(async (request) => {
+    const url = new URL(
+      request instanceof Request ? request.url : request,
+      window.location.origin,
+    );
+    return Response.json({
+      instances:
+        url.searchParams.get("custody") === "personal" ? [available] : [],
+    });
+  });
+  show();
+  await screen.findByText(
+    condition === "busy"
+      ? /files are being changed/
+      : condition === "pending discovery"
+        ? /loading/i
+        : /files could not be loaded/,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Locations" }));
+  const dialog = screen.getByRole("dialog", { name: "Locations" });
+  const link = await within(dialog).findByRole("link", { name: "Analyst" });
+  expect(link.getAttribute("href")).toBe(
+    `/workspace/instances?instance=${available.id}&tab=files`,
+  );
+  expect(screen.queryByRole("button", { name: "Upload" })).toBeNull();
 });
 
 test("the actual nested busy envelope replaces the list and recovers through read polling", async () => {

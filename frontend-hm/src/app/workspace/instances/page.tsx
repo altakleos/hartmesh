@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { BrowserLocations } from "@/components/workspace/file-browser/locations";
 import { AccessTab } from "@/components/workspace/instances/access-tab";
 import {
   AgentHeader,
@@ -51,6 +52,11 @@ export default function InstancesPage() {
     requested && /^[0-9a-f]{32}$/.test(requested) ? requested : null;
   const fallback = user?.system_role === "admin" ? "company" : "personal";
   const canRead = !!user && hasCeiling(user.permissions, "agents:read");
+  const showLocations =
+    canRead &&
+    selected &&
+    search.get("tab") === "files" &&
+    (feature.isLoading || !feature.known);
   const scope = JSON.stringify([
     user?.id,
     user?.system_role,
@@ -112,6 +118,9 @@ export default function InstancesPage() {
             />
           ) : (
             <NotFound kind={fallback} />
+          )}
+          {showLocations && (
+            <BrowserLocations area="agent" instance={selected} />
           )}
         </div>
       </WorkspaceBody>

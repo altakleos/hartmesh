@@ -64,13 +64,15 @@ const collected = (suffix: string, marked: boolean) => ({
   published_at: summary.published_at,
   ...(marked ? { snapshot_publication_id: publication } : {}),
 });
-async function setup(page: Page, supports = true) {
+async function setup(page: Page, supports = true, emptyThread = false) {
   mockLangGraphAPI(page, {
     threads: [
       {
         thread_id: MOCK_THREAD_ID,
         title: summary.title,
-        messages: [{ id: "src-one", type: "human", content: "Hello" }],
+        messages: emptyThread
+          ? []
+          : [{ id: "src-one", type: "human", content: "Hello" }],
       },
       {
         thread_id: MOCK_THREAD_ID_2,
@@ -359,6 +361,7 @@ for (const hasUndo of [true, false]) {
       .click();
     const dialog = page.getByRole("dialog");
     await expect(dialog).toContainText("2 messages");
+    await expect(dialog).toContainText(/outside.*Export/);
     await expect(dialog).toContainText("17 byte");
     await expect(dialog).toContainText("Also named other/report.pdf");
     await expect(dialog).toContainText("their assistants");
@@ -493,16 +496,16 @@ test("a different chat owner and a read-only member cannot request publication o
       writes.push(request.url());
   });
   await page.goto("/workspace/chats/" + MOCK_THREAD_ID);
-  await refreshAccount(page);
   await expect(page.getByText("Hello", { exact: true }).last()).toBeVisible();
+  await refreshAccount(page);
   await expect(
     page.getByRole("button", { name: "Share conversation with everyone" }),
   ).toHaveCount(0);
   await page.goto("/workspace/files/conversations/" + publication);
-  await refreshAccount(page);
   await expect(
     page.getByRole("heading", { name: summary.title }),
   ).toBeVisible();
+  await refreshAccount(page);
   await expect(
     page.getByRole("button", { name: /Continue with|Remove/ }),
   ).toHaveCount(0);
@@ -562,8 +565,8 @@ test("a thread owner without history-read permission cannot preview or publish a
     }),
   );
   await page.goto("/workspace/chats/" + MOCK_THREAD_ID);
-  await refreshAccount(page);
   await expect(page.getByText("Hello", { exact: true }).last()).toBeVisible();
+  await refreshAccount(page);
   await expect(
     page.getByRole("button", { name: "Share conversation with everyone" }),
   ).toHaveCount(0);
@@ -1030,4 +1033,138 @@ test("Chinese names the existing and company audiences before agent publication"
   await expect(
     dialog.getByRole("button", { name: "分享", exact: true }),
   ).toBeDisabled();
+});
+
+test("a damaged snapshot opens current Shared folder files through the file browser", async ({
+  page,
+}) => {
+  await setup(page);
+  const folder = "Conversations/Handbook · 01234567";
+  const detail = {
+    code: "snapshot-folder-available",
+    publication_id: publication,
+    folder,
+    entries: ["new-arrival.txt", "files/"],
+    truncated: false,
+  };
+  await page.route("**/api/shared-conversations/" + publication, (route) =>
+    route.fulfill({ status: 404, json: { detail } }),
+  );
+  await page.route("**/api/file-browser/v1/shared/folder?**", (route) => {
+    const current = collected("new-arrival.txt", false);
+    return route.fulfill({
+      json: {
+        files: [{ ...current, path: folder + "/" + current.name }],
+        truncated: false,
+      },
+    });
+  });
+  await page.goto("/workspace/files/conversations/" + publication);
+  const main = page.getByRole("main");
+  await expect(
+    main.getByRole("button", { name: /Continue|Remove/ }),
+  ).toHaveCount(0);
+  await expect(main.getByRole("link", { name: /Download/ })).toHaveCount(0);
+  await expect(
+    main.getByRole("listitem").filter({ hasText: "new-arrival.txt" }),
+  ).toBeVisible();
+  await main.getByRole("link", { name: "View current folder files" }).click();
+  await expect(page).toHaveURL(
+    (url) =>
+      url.pathname === "/workspace/files" &&
+      url.searchParams.get("folder") === folder,
+  );
+  await expect(
+    page.getByText("new-arrival.txt", { exact: true }).first(),
+  ).toBeVisible();
+});
+
+test("share dialog names the limit blocking the draft", async ({ page }) => {
+  await setup(page);
+  const cases = [
+    ["snapshot-file-count", "64 files"],
+    ["snapshot-path-limit", "1,024 characters"],
+    ["snapshot-path-depth", "16 parts"],
+    ["snapshot-source-path-limit", "4,096 characters"],
+    ["snapshot-manifest-limit", "file details, exceeds 10 MiB"],
+    ["snapshot-transcript-limit", "transcript exceeds 10 MiB"],
+    ["snapshot-message-count", "10,000 messages"],
+    ["snapshot-file-limit", "individual shared file exceeds 20 MiB"],
+    ["snapshot-total-limit", "exceed 100 MiB in total"],
+  ] as const;
+  let code: string = cases[0][0];
+  await page.route("**/api/shared-conversations/draft?**", (route) =>
+    route.fulfill({ status: 413, json: { detail: { code } } }),
+  );
+  await page.goto("/workspace/chats/" + MOCK_THREAD_ID);
+  await page
+    .getByRole("button", { name: "Share conversation with everyone" })
+    .click();
+  const alert = page.getByRole("dialog").getByRole("alert");
+  for (const [next, message] of cases) {
+    if (code !== next) {
+      code = next;
+      await alert.getByRole("button").click();
+    }
+    await expect(alert).toContainText(message);
+  }
+});
+
+test("reader ignores a recovery folder for a different publication or a refused read", async ({
+  page,
+}) => {
+  await setup(page);
+  const main = page.getByRole("main");
+  let status = 404;
+  let id = "another-publication";
+  await page.route("**/api/shared-conversations/" + publication, (route) =>
+    route.fulfill({
+      status,
+      json: {
+        detail: {
+          code: "snapshot-folder-available",
+          publication_id: id,
+          folder: "Conversations/Handbook · 01234567",
+        },
+      },
+    }),
+  );
+  await page.goto("/workspace/files/conversations/" + publication);
+  const retry = main.getByRole("button", { name: "Try again" });
+  await expect(retry).toBeVisible();
+  await expect(
+    main.getByRole("link", { name: "View current folder files" }),
+  ).toHaveCount(0);
+  status = 403;
+  id = publication;
+  const response = page.waitForResponse(
+    (r) =>
+      r.url().endsWith("/api/shared-conversations/" + publication) &&
+      r.status() === 403,
+  );
+  await retry.click();
+  await response;
+  await expect(retry).toBeVisible();
+  await expect(
+    main.getByRole("link", { name: "View current folder files" }),
+  ).toHaveCount(0);
+});
+
+test("empty conversation offers no outside-recipient export hint", async ({
+  page,
+}) => {
+  await setup(page, true, true);
+  await page.route("**/api/shared-conversations/draft?**", (route) =>
+    route.fulfill({
+      status: 409,
+      json: { detail: { code: "conversation-empty" } },
+    }),
+  );
+  await page.goto("/workspace/chats/" + MOCK_THREAD_ID);
+  await page
+    .getByRole("button", { name: "Share conversation with everyone" })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("alert")).toContainText("no messages");
+  await expect(dialog.getByText(/outside the company/)).toHaveCount(0);
 });

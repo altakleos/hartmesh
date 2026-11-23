@@ -88,13 +88,14 @@ export function BrowserView({
     copy = useBrowserCopy(),
     router = useRouter(),
     { user } = useAuth();
-  const { view, save, container, heading } = useBrowserHistory(
-    area === "agent" ? "agent:" + instance : area,
-    scope,
-    folder,
-    !loading,
-    searchMode,
-  );
+  const { view, save, container, heading, openCurrentFolder } =
+    useBrowserHistory(
+      area === "agent" ? "agent:" + instance : area,
+      scope,
+      folder,
+      !loading,
+      searchMode,
+    );
   const searching = Boolean(view.query.trim());
   useLayoutEffect(() => {
     onSearchMode?.(searching);
@@ -158,7 +159,8 @@ export function BrowserView({
   const step = (path: string) => {
     setSelected(null);
     setTrail(false);
-    if (navigate) navigate(path);
+    if (path === folder && searching) openCurrentFolder();
+    else if (navigate) navigate(path);
     else router.push(browserHref(area, path, { instance }), { scroll: false });
   };
   const editing = view.query.trim() !== "",
@@ -346,6 +348,7 @@ export function BrowserView({
                   (!folderRow && row.kind !== "file"),
                 href = hrefFor?.(row);
               const id = "open:" + row.path;
+              const parentId = "parent:" + row.path;
               const extension = /\.([a-z0-9]{1,5})$/i.exec(row.name)?.[1];
               const visibleName =
                 area === "agent" &&
@@ -402,9 +405,12 @@ export function BrowserView({
                     {editing && area !== "agent" && (
                       <button
                         className={styles.parent}
-                        data-file-control={"parent:" + row.path}
-                        onFocus={() => focus("parent:" + row.path)}
-                        onClick={() => step(parentFolder(row.path))}
+                        data-file-control={parentId}
+                        onFocus={() => focus(parentId)}
+                        onClick={() => {
+                          focus(parentId);
+                          step(parentFolder(row.path));
+                        }}
                         aria-label={copy.parent(
                           parentFolder(row.path) || title,
                         )}

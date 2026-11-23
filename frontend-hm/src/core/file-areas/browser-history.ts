@@ -46,7 +46,7 @@ export function useBrowserHistory(
   const [view, setView] = useState<ViewState>(initial);
   const value = useRef<ViewState>(initial);
   const restore = useRef(false);
-  useLayoutEffect(() => {
+  const readEntry = useCallback(() => {
     let map = sessions.get(signal);
     if (!map) {
       map = new Map();
@@ -71,6 +71,27 @@ export function useBrowserHistory(
     setView(next);
     restore.current = true;
   }, [source, grant, scope, signal]);
+  useLayoutEffect(() => {
+    const href = window.location.href;
+    readEntry();
+    const onPopState = () => {
+      const key: unknown = history.state?.fileBrowserEntry;
+      if (key === entry.current) return;
+      const matchingEntry =
+        typeof key === "string" &&
+        sessions.get(signal)?.get(key)?.scope === scope;
+      if (matchingEntry || window.location.href === href) {
+        readEntry();
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [readEntry, scope, signal]);
+  function openCurrentFolder() {
+    // Search and its containing folder can share a URL but have distinct Back entries.
+    history.pushState({ ...history.state, fileBrowserEntry: undefined }, "");
+    readEntry();
+  }
   const save = useCallback(
     (change: Partial<ViewState>, render = true) => {
       const record = sessions.get(signal)?.get(entry.current);
@@ -103,5 +124,5 @@ export function useBrowserHistory(
     (target ?? heading.current)?.focus({ preventScroll: true });
     container.current.scrollTop = value.current.scroll;
   }, [view, scope, ready, searchMode]);
-  return { view, save, container, heading };
+  return { view, save, container, heading, openCurrentFolder };
 }

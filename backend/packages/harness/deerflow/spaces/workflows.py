@@ -4,6 +4,7 @@ import fcntl
 import os
 import stat
 import time
+from contextlib import contextmanager
 from contextvars import ContextVar
 from enum import StrEnum
 
@@ -15,6 +16,7 @@ READ_LOCK_POLL_SECONDS = 0.05
 _owner = ContextVar("storage_host_workflow_owner", default=None)
 _LOCK = ".host-workflow.lock"
 _effect = ContextVar("storage_host_workflow_effect", default=None)
+caller_retries_storage_locks = ContextVar("storage_caller_retries_locks", default=False)
 _read_only = ContextVar("storage_host_read_only", default=False)
 
 
@@ -72,6 +74,16 @@ def probe(volume):
         os.close(fd)
 
 
+@contextmanager
+def try_storage_locks_once():
+    """Let a caller with a shared retry budget own contention waits."""
+    token = caller_retries_storage_locks.set(True)
+    try:
+        yield
+    finally:
+        caller_retries_storage_locks.reset(token)
+
+
 def acquire(volumes, *, shared=False, create=True, control_fds=None):
     from deerflow.spaces.service import SpaceOperationPending
 
@@ -88,7 +100,7 @@ def acquire(volumes, *, shared=False, create=True, control_fds=None):
                     break
                 except SpaceOperationPending:
                     remaining = deadline - time.monotonic()
-                    if not shared or remaining <= 0:
+                    if not shared or caller_retries_storage_locks.get() or remaining <= 0:
                         raise
                     time.sleep(min(READ_LOCK_POLL_SECONDS, remaining))
         return descriptors

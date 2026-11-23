@@ -21,6 +21,10 @@ TRANSCRIPT_SOURCE = "/conversation-snapshot/transcript"
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
+class SnapshotLimit(ValueError):
+    """An identified publication limit for the sharing dialog."""
+
+
 class SnapshotModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
 
@@ -103,12 +107,14 @@ def freeze_manifest(title: str, messages: Iterable[dict], files: Iterable[Snapsh
         if message.get("type") in {"human", "ai"} and is_visible(message) and (text := visible_text(message)):
             rows.append(SnapshotMessage(type=message["type"], content=text))
             if len(rows) > 10000:
-                raise ValueError("Snapshot has too many messages")
+                raise SnapshotLimit("snapshot-message-count")
     lines = [f"# {title}", ""]
     for row in rows:
         heading = "## 🧑 User" if row.type == "human" else "## 🤖 Assistant"
         lines.extend([heading, "", row.content, "", "---", ""])
     transcript = ("\n".join(lines).rstrip() + "\n").encode()
+    if len(transcript) > MANIFEST_LIMIT:
+        raise SnapshotLimit("snapshot-transcript-limit")
     grouped = {}
     for item in sorted(files, key=lambda item: item.path):
         path = PurePosixPath(item.path)
@@ -120,7 +126,7 @@ def freeze_manifest(title: str, messages: Iterable[dict], files: Iterable[Snapsh
     manifest = SnapshotManifest(title=title, with_agent=with_agent, messages=rows, transcript=SnapshotMember(path="transcript.md", size=len(transcript), sha256=digest_of_bytes(transcript)), files=list(grouped.values()))
     document = json.dumps(manifest.model_dump(by_alias=True, exclude_none=True), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     if len(document) > MANIFEST_LIMIT:
-        raise ValueError("Snapshot manifest is too large")
+        raise SnapshotLimit("snapshot-manifest-limit")
     digest = digest_of_bytes(document)
     stem = transcript_stem(title)[:80]
     suffix = " · " + digest[:8]

@@ -32,6 +32,10 @@ def _private_directory(parent_fd: int, name: str) -> int:
     return fd
 
 
+class SharedMutationBusy(Exception):
+    """Another writer owns the ordinary Shared filesystem lock."""
+
+
 class SharedMutationState:
     """Own the filesystem mutex and all staging descriptors until settled."""
 
@@ -42,7 +46,7 @@ class SharedMutationState:
         self.state_fd: int | None = None
         self.lock_fd: int | None = None
 
-    def acquire(self) -> None:
+    def acquire(self, *, blocking: bool = True) -> None:
         try:
             import fcntl
         except ImportError:
@@ -66,7 +70,10 @@ class SharedMutationState:
         metadata = os.fstat(self.lock_fd)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o600:
             raise StoreError("Shared mutation lock must be a private regular file")
-        fcntl.flock(self.lock_fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(self.lock_fd, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise SharedMutationBusy from exc
 
     def close(self) -> None:
         for attribute in ("lock_fd", "state_fd", "root_fd"):

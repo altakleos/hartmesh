@@ -8,6 +8,34 @@ import {
   setupAgents,
 } from "../e2e-real-backend/utils/compose-agents";
 
+test("an agent Files URL offers other locations when feature discovery fails", async ({
+  page,
+}) => {
+  await setupAgents(page);
+  await page.route("**/api/features", (route) =>
+    route.fulfill({ status: 503, json: { detail: "Unavailable" } }),
+  );
+  await page.goto(`/workspace/instances?instance=${AGENT_ID}&tab=files`, {
+    timeout: 90_000,
+  });
+  await expect(
+    page.getByRole("paragraph").filter({
+      hasText: "AI assistants and AI employees are not available right now.",
+    }),
+  ).toBeVisible({ timeout: 15_000 });
+  await page
+    .getByRole("button", { name: "Locations" })
+    .click({ timeout: 3000 });
+  const locations = page.getByRole("dialog", { name: "Locations" });
+  await expect(
+    locations.getByRole("link", { name: "My files" }),
+  ).toHaveAttribute("href", "/workspace/files");
+  await expect(
+    locations.getByRole("link", { name: "Company shared" }),
+  ).toHaveAttribute("href", "/workspace/files?tab=shared");
+  await expect(page.getByRole("button", { name: "Upload" })).toHaveCount(0);
+});
+
 test("discovery pages past inventory-only entries and the selected agent uses versioned reads", async ({
   page,
 }) => {

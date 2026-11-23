@@ -1,5 +1,13 @@
 ### Python Extension System (Runtime and Distribution)
 
+`registry.web_chat_middlewares(contributor)` (extension-api 0.2.14) registers
+middleware for an ordinary authenticated or auth-disabled Gateway web chat.
+This includes dispatch of an authenticated user’s persisted queued input.
+Only the lead graph build receives those entries. Helpers and captured runs
+retain the base extension snapshot. Global middleware contributors continue
+to disqualify the terminal presentation inventory even if they return no
+placements. Preserve this guard when adding a scoped registration.
+
 HartMesh and upstream each spent extension API patch numbers 0.2.5–0.2.7 on
 different contracts; the 0.2.12 host combined both sets,
 so a version below means "added in that line's history", not a shared order.

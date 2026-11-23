@@ -121,6 +121,81 @@ test("bounded search and Back preserve a later result's row control", async ({
   await expect(page.getByRole("searchbox")).toHaveValue("report-");
   await expect(parent).toBeFocused();
 });
+for (const [area, directFolders] of [
+  ["personal", false],
+  ["personal", true],
+  ["shared", false],
+  ["shared", true],
+] as const) {
+  test(`opening the current containing folder in ${area} preserves the search on Back (${directFolders ? "folder read" : "loaded list"})`, async ({
+    page,
+  }) => {
+    const paths = ["reports/match.txt", "reports/sibling.txt"];
+    const files = paths.map((path) => ({
+      ...makeFile(path),
+      ...(area === "shared" && {
+        published_at: null,
+        published_by: null,
+        from_thread_id: null,
+        can_remove: false,
+      }),
+    }));
+    await setup(page, paths, false, directFolders);
+    if (area === "shared") {
+      await page.route("**/api/shared", (route) =>
+        route.fulfill({
+          json: { files, count: files.length, truncated: false },
+        }),
+      );
+    }
+    if (directFolders) {
+      await page.route(
+        `**/api/file-browser/v1/${area}/folder?path=reports`,
+        (route) =>
+          route.fulfill({
+            json: {
+              files: files.map((file) => ({ ...file, kind: "file" })),
+              truncated: false,
+            },
+          }),
+      );
+    }
+    const params = new URLSearchParams({ folder: "reports" });
+    if (area === "shared") params.set("tab", area);
+    const href = "/workspace/files?" + params.toString();
+    await page.goto(href);
+    const query = page.getByRole("searchbox");
+    const sibling = page.getByRole("link", {
+      name: "sibling.txt",
+      exact: true,
+    });
+    const parent = page.getByRole("button", {
+      name: "Open containing folder: reports",
+    });
+    await expect(sibling).toBeVisible();
+    await query.fill("match");
+    await expect(sibling).toHaveCount(0);
+    if (directFolders) {
+      // Some browsers activate a button without moving focus to it.
+      await expect(query).toBeFocused();
+      await parent.evaluate((button) => (button as HTMLButtonElement).click());
+    } else {
+      await parent.click();
+    }
+    await expect(query).toHaveValue("");
+    await expect(sibling).toBeVisible();
+    const heading = page.getByRole("heading", { name: "reports" });
+    await expect(page).toHaveURL(href);
+    await expect(heading).toBeFocused();
+    await page.goBack();
+    await expect(query).toHaveValue("match");
+    await expect(parent).toBeFocused();
+    await page.goForward();
+    await expect(query).toHaveValue("");
+    await expect(sibling).toBeVisible();
+    await expect(heading).toBeFocused();
+  });
+}
 test("saved classic URLs use the browser and unavailable destructive actions send no request", async ({
   page,
 }) => {

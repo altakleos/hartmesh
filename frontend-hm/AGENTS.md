@@ -454,11 +454,14 @@ History, replay and busy-run inputs never initiate that anchor.
 
 Workspace and agent Files share `components/workspace/file-browser`. Use one
 renderer on every device. Read older Gateways through the authorized file lists. Negotiate each source’s
-operations, recheck restored paths and keep history in account memory. A refused
+operations, recheck restored paths and keep history in account memory. A search and its
+containing folder have distinct history entries even when they share a URL. Keep Locations
+reachable when Home discovery or listing fails. A refused
 versioned operation has no path-only fallback.
 
 Fold marked members after authorized discovery and collection reads. Link by snapshot
-and member publication IDs. Agent sharing requires agent_publish, Manage + Inspect and
+and member publication IDs. An unreadable snapshot can show current folder names and link to the Shared folder browser
+only for a matching publication ID from the authorized reader. Agent sharing requires agent_publish, Manage + Inspect and
 consent to the previewed company audience. Undo sends the exact receipt and created IDs.
 Attribute copied turns by verified thread seed IDs. Bind continued upload paths to the
 account, thread and confirmed answerer. Retry transport with the same request. Changing answerer needs a new click.

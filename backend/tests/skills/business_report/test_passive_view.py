@@ -138,3 +138,22 @@ def test_browser_fixture_is_exact_current_serializer_output(serializer):
     fixtures = ROOT / "frontend-hm/tests/fixtures/business-report"
     source = json.loads((fixtures / "2026-08-business-review.report.json").read_text(encoding="utf-8"))
     assert json.loads((fixtures / "generated-passive.view.json").read_text(encoding="utf-8")) == json.loads(serializer.serialize_view(source, "source.json", ["summary.pdf", "summary.docx"]))
+
+
+def test_preferences_disclosure_fits_large_rules_without_losing_any_choices(serializer, document):
+    rules = [{"column": "x" * 1024, "equals": str(i).zfill(1024)} for i in range(30)]
+    document["meta"]["preferences_applied"] = [f"exclusions[{i}]" for i in range(len(rules))]
+    receipt = {"preferences": {"version": 1, "exclusions": rules}}
+    view = json.loads(serializer.serialize_view(document, "source.json", [], receipt))
+    Draft202012Validator(VIEW_SCHEMA).validate(view)
+    chunks = [item for block in view["blocks"] if block["type"] == "facts" for item in block["items"] if item["label"] == "Report settings"]
+    assert chunks[0]["value"].startswith("30 saved preferences")
+    shown = [line for item in chunks for line in item["detail"].splitlines()[1:]]
+    assert shown == [f"Exclude rows where {rule['column']} = {rule['equals']}" for rule in rules]
+
+
+def test_temporary_only_and_legacy_reports_have_no_saved_preference_count(serializer, document):
+    document["meta"]["preferences_applied"] = ["summary_length"]
+    for receipt in (None, {"preferences": {"version": 1}, "override": {"preferences": {"summary_length": "short"}}}):
+        view = serializer.serialize_view(document, "source.json", [], receipt)
+        assert b"saved preference" not in view

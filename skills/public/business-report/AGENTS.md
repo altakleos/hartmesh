@@ -46,7 +46,7 @@ into core. Legacy valid v1 reads are byte-preserving; managed writes add optiona
 `_mutation` metadata and reset retains a new revision. Reporting build validates
 all fields before applying any, supports temporary field replacement, and retains
 `preferences-used.json` as a hashed supporting bundle member. Prose/render copy
-that exact verified snapshot. Report/view schemas are unchanged. The first-command
+that exact verified snapshot. The preview describes only saved choices applied to the draft, omitting fields replaced for this build; it reads the staged preference receipt. Report/view schemas are unchanged. The first-command
 declaration admits report.py so explicit settings-only requests need no build.
 
 `business_report_product.py` owns the strict offline shared identity projection.
@@ -76,3 +76,20 @@ HTML/PDF carry needs full presentation equality; DOCX needs tenant/palette
 compatibility; XLSX carries unchanged facts. Keep previews neutral and actual
 export lists truthful. Existing schemas, source fences and publication uncertainty
 remain. See [the full contract](../../../docs/OFFLINE_REPORT_PRESENTATION.md).
+
+The installed report adapter consumes the normal tagged view/canonical handoff
+and the canonical `meta.inputs` and `meta.build.sources` pairs for live-source
+notices. Keep path, optional sheet, basename and digest aligned across build,
+prose and render. Keep import paths under uploads. The owning Gateway qualifies
+current mount identity; the skill never probes the original behind a copy.
+
+An ordinary chat owns its parsed-input cache under workspace/.cache/. Every
+build reads the authorized source before reuse. Key on source bytes, parser
+code and library versions, suffix, sheet and profile. Verification parses the
+source independently. Employee Home aliases bypass caching. Ten 8 MiB slots
+hold a full ten-input report. One locked 8 MiB temporary brings peak payload
+storage to 88 MiB, plus a 32-byte workspace key. Signed typed records trust the local
+sandbox account. Cache failures fall back to parsing.
+
+The optional person trend uses the existing period buckets after exclusions.
+Keep the canonical table, retained line series and all exports in agreement.

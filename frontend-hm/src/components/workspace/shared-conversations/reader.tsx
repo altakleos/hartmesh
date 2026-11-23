@@ -16,12 +16,14 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { MarkdownContent } from "@/components/workspace/messages/markdown-content";
+import { browserHref } from "@/core/file-areas/browser";
 import { useFileActionLifetime } from "@/core/file-areas/file-action-lifetime";
 import {
   continueSnapshot,
   SnapshotError,
   removeSnapshot,
   snapshotMemberHref,
+  snapshotRecoveryFolder,
 } from "@/core/shared-conversations/api";
 import { saveContinuedDraft } from "@/core/shared-conversations/handoff";
 import {
@@ -90,6 +92,10 @@ export function SnapshotReader({ id }: { id: string }) {
     access = useSharing(),
     detail = useSnapshotDetail(id, access.can("read"), access.scope);
   const row = !detail.isError && access.can("read") ? detail.data : undefined;
+  const folder =
+    access.can("read") && detail.isError
+      ? snapshotRecoveryFolder(detail.error, id)
+      : null;
   return (
     <main className="mx-auto w-full max-w-3xl overflow-auto p-4 sm:p-8">
       <Link href={listHref} className="underline">
@@ -111,14 +117,34 @@ export function SnapshotReader({ id }: { id: string }) {
           refresh={() => void detail.refetch()}
         />
       ) : (
-        <p role="status">
-          {detail.isFetching ? w.loading : w.unavailable}{" "}
+        <section className="space-y-3 py-4">
+          <p role="status">
+            {folder ? w.damaged : detail.isFetching ? w.loading : w.unavailable}
+          </p>
+          {folder && (
+            <>
+              <ul className="list-disc ps-6">
+                {folder.entries.map((name) => (
+                  <li className="break-all" key={name}>
+                    {name}
+                  </li>
+                ))}
+              </ul>
+              {folder.truncated && <p>{w.moreFolderFiles}</p>}
+              <Link
+                className="underline"
+                href={browserHref("shared", folder.path)}
+              >
+                {w.folderFiles}
+              </Link>
+            </>
+          )}{" "}
           {detail.isError && (
             <Button onClick={() => void detail.refetch()} variant="outline">
               {w.retry}
             </Button>
           )}
-        </p>
+        </section>
       )}
     </main>
   );

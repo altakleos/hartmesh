@@ -29,6 +29,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import warnings
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
+    import business_report_input_cache as input_cache
     import business_report_settings as settings
     import openpyxl  # noqa: F401  (pandas' xlsx engine; asserted so a missing engine fails here, not mid-build)
     import pandas as pd
@@ -233,12 +235,14 @@ def _named_columns(columns: list[str]) -> list[str]:
     return [*columns[:MAX_NAMED_COLUMNS], f"… {len(columns) - MAX_NAMED_COLUMNS} more"]
 
 
-def _read_csv(path: Path, *, headerless: bool = False) -> pd.DataFrame:
+def _read_csv(path: Path, *, content=None, headerless: bool = False) -> pd.DataFrame:
     """The file as a table. ``headerless`` reads every line as data, so a title
     row above the real header cannot decide the shape of the frame: a header of
     one field over rows of three leaves pandas a one-column table, and nothing
     downstream can recover the columns from that."""
-    raw = path.read_bytes()
+    if content is not None:
+        content.seek(0)
+    raw = content.read() if content is not None else path.read_bytes()
     for encoding in ("utf-8-sig", "cp1252"):
         try:
             text = raw.decode(encoding)
@@ -269,9 +273,9 @@ def _read_csv(path: Path, *, headerless: bool = False) -> pd.DataFrame:
     return frame
 
 
-def _read_workbook(path: Path) -> dict[str, pd.DataFrame]:
+def _read_workbook(path: Path, content=None) -> dict[str, pd.DataFrame]:
     try:
-        sheets = pd.read_excel(path, sheet_name=None)
+        sheets = pd.read_excel(content if content is not None else path, sheet_name=None)
     except Exception as error:  # xlrd/openpyxl raise their own families
         raise InputError(f"{path.name} could not be read as a workbook: {error}") from error
     result: dict[str, pd.DataFrame] = {}
@@ -318,15 +322,15 @@ def reheadered(frame: pd.DataFrame, profile: dict) -> pd.DataFrame | None:
     return None
 
 
-def read_tables(path: Path, profile: dict) -> tuple[list[tuple[str | None, pd.DataFrame]], list[dict], bool]:
+def read_tables(path: Path, profile: dict, *, content=None) -> tuple[list[tuple[str | None, pd.DataFrame]], list[dict], bool]:
     """Every data table in a file, the sheets skipped and why, and whether it is a workbook."""
 
-    if not path.is_file():
+    if content is None and not path.is_file():
         raise InputError(f"No such file: {path}")
     if path.suffix.lower() in (".csv", ".txt", ".tsv"):
-        frame = _read_csv(path)
+        frame = _read_csv(path, content=content)
         if suggest_mapping(frame, profile).missing:
-            repaired = reheadered(_read_csv(path, headerless=True), profile)
+            repaired = reheadered(_read_csv(path, content=content, headerless=True), profile)
             if repaired is not None:
                 frame = repaired
         return [(None, frame)], [], False
@@ -334,7 +338,7 @@ def read_tables(path: Path, profile: dict) -> tuple[list[tuple[str | None, pd.Da
         raise InputError(f"{path.name}: only .csv, .xlsx, .xlsm and .xls files are supported.")
     tables: list[tuple[str | None, pd.DataFrame]] = []
     skipped: list[dict] = []
-    for sheet, frame in _read_workbook(path).items():
+    for sheet, frame in _read_workbook(path, content).items():
         if frame.shape[0] == 0 or frame.shape[1] == 0:
             skipped.append({"sheet": sheet, "reason": "empty"})
             continue
@@ -349,12 +353,7 @@ def read_tables(path: Path, profile: dict) -> tuple[list[tuple[str | None, pd.Da
     return tables, skipped, True
 
 
-def read_table(source: str, profile: dict | None = None) -> LoadedTable:
-    """One data table from ``path`` or ``path::Sheet``."""
-
-    profile = profile or load_profile(None, None)
-    path, sheet = parse_source(source)
-    tables, skipped, is_workbook = read_tables(path, profile)
+def _select_sheet(path, sheet, tables, skipped):
     if sheet is not None:
         chosen = [table for table in tables if table[0] == sheet]
         if not chosen:
@@ -375,14 +374,49 @@ def read_table(source: str, profile: dict | None = None) -> LoadedTable:
             f"{path.name} has several sheets with data: {', '.join(names)}. Which one is the export? Pass it as {path.name}::<sheet>.",
             {"file": path.name, "sheets": names},
         )
+    return sheet, frame
+
+
+def read_table(source: str, profile: dict | None = None, *, cache: bool = False) -> LoadedTable:
+    """Hash and parse one open source, rejecting concurrent in-place edits."""
+    path, sheet = parse_source(source)
+    profile = profile or load_profile(None, None)
+    try:
+        # One descriptor pins the source across hashing and parsing. An arriving
+        # FIFO or device is never a data table, even if a path is replaced.
+        with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)), "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise InputError(f"{path.name} is not a regular file.")
+            uploaded = dt.date.fromtimestamp(before.st_mtime).isoformat()
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                digest.update(chunk)
+            key = input_cache.entry(digest.hexdigest(), path.suffix.lower(), sheet, profile) if cache else None
+            result = input_cache.load(key)
+            if result is None:
+                stream.seek(0)
+                tables, skipped, is_workbook = read_tables(path, profile, content=stream)
+                sheet, frame = _select_sheet(path, sheet, tables, skipped)
+            else:
+                sheet, frame, skipped, is_workbook = result
+            after = os.fstat(stream.fileno())
+            if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                raise InputError(f"{path.name} changed while being read. Run the build again with the completed export.")
+    except FileNotFoundError:
+        raise InputError(f"No such file: {path}") from None
+    except OSError as error:
+        raise InputError(f"{path.name} could not be read: {error}") from error
+    if result is None:
+        input_cache.store(key, sheet, frame, skipped, is_workbook)
     return LoadedTable(
         name=path.name,
         path=str(path),
         sheet=sheet,
         frame=frame,
-        sha256=sha256_of(path),
+        sha256=digest.hexdigest(),
         rows=int(frame.shape[0]),
-        uploaded=dt.date.fromtimestamp(path.stat().st_mtime).isoformat(),
+        uploaded=uploaded,
         is_workbook=is_workbook,
         skipped_sheets=skipped,
     )
@@ -880,7 +914,7 @@ def _rows_per_month(dates, counted: str = "") -> str:
     return f", {heading}: " + ", ".join(f"{month}: {int(count)}" for month, count in listed.items())
 
 
-def prepare(sources: list[str], period_text: str | None, options: BuildOptions, mapping_override: dict | None, profile: dict, *, resolved_mappings: list[dict] | None = None) -> BuildContext:
+def prepare(sources: list[str], period_text: str | None, options: BuildOptions, mapping_override: dict | None, profile: dict, *, resolved_mappings: list[dict] | None = None, cache: bool = False) -> BuildContext:
     """Read, map, clean and filter the inputs; raises DecisionNeeded when a question is due.
 
     ``period_text`` of ``None`` means the caller named no period -- the common
@@ -893,7 +927,7 @@ def prepare(sources: list[str], period_text: str | None, options: BuildOptions, 
     if not sources:
         raise InputError("Give at least one CSV, XLSX or XLS file.")
     profile = copy.deepcopy(profile)
-    tables = [read_table(source, profile) for source in sources]
+    tables = [read_table(source, profile, cache=cache) for source in sources]
     if resolved_mappings is not None and len(resolved_mappings) != len(tables):
         raise InputError("The saved mappings do not match the number of inputs; rebuild the report.")
     mappings: list[Mapping] = []
@@ -1068,7 +1102,7 @@ def compute_checks(ctx: BuildContext, rows: pd.DataFrame, revenue: float, count:
         if not table or not table.get("totals") or "Revenue" not in table["columns"] or section["id"] == "customers":
             continue
         index = table["columns"].index("Revenue")
-        section_total = sum(row[index] or 0 for row in table["rows"])
+        section_total = independent_amount_total([row[index] for row in table["rows"]])
         if not math.isclose(section_total, revenue, rel_tol=1e-12, abs_tol=1e-9):
             mismatches.append(f"the {section['heading'].lower()} table sums to {format_value(section_total, 'currency', currency)}")
     if mismatches:
@@ -1522,13 +1556,14 @@ def command_build(args) -> int:
     options.currency = args.currency or options.currency
     options.draft = args.draft
     options.name = args.name
+    options.trend_by_person = args.trend_by == "person"
     if args.short:
         options.summary_length = "short"
     if args.summary_length:
         options.summary_length = args.summary_length
     mapping_override = _load_json_file(args.mapping, "mapping file") if args.mapping else None
     targets = parse_targets(args.render, "--render")
-    ctx = prepare(args.files, args.period, options, mapping_override, profile)
+    ctx = prepare(args.files, args.period, options, mapping_override, profile, cache=True)
     out_dir = Path(args.out)
     base = _report_base_name(out_dir, options.name)
     with publication_lock(out_dir, base):
@@ -1560,11 +1595,12 @@ def command_build(args) -> int:
                     "effective": effective if args.prefs_override else snapshot["preferences"],
                     "cli_summary_length": args.summary_length or ("short" if args.short else None),
                     "cli_currency": args.currency,
+                    **({"cli_trend_by": args.trend_by} if args.trend_by else {}),
                     "cli_exclusions": args.exclude or [],
                 },
             )
 
-    report_path = publish_bundle(out_dir, base, report, targets, tenant_dir, renderer, stage_charts, bundle_id=args.bundle_id, expected_current=expected, verify_current=False, product_identity=product_identity, presentation=presentation)
+    report_path = publish_bundle(out_dir, base, report, targets, tenant_dir, renderer, stage_charts, bundle_id=args.bundle_id, expected_current=expected, verify_current=False, fresh_inputs=True, product_identity=product_identity, presentation=presentation)
     print(f"Built draft {report['meta']['draft']}: {report['meta']['title']} -> {report_path}")
     if previous and any(check["id"] == "prose_numbers" for check in previous.get("checks", [])):
         print("The previous draft carried written text (summary or actions); this rebuild replaced it with the computed text. Run prose again if it still applies.")
@@ -1744,6 +1780,7 @@ def command_checks(args) -> int:
         profile = recipe["profile"] if recipe else load_profile(report["meta"].get("profile"), tenant_dir)
         options = BuildOptions(exclusions=list(build.get("exclusions", [])), currency=report["meta"]["currency"]["code"] if report["meta"]["currency"]["source"] == "preferences" else None)
         if recipe:
+            options.charts = [chart["id"] for chart in report["charts"]]
             options.comparisons = recipe["comparisons"]
             options.top_n = recipe["top_n"]
             options.summary_length = recipe["summary_length"]
@@ -1820,6 +1857,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_parser_.add_argument("--summary-length", choices=("short", "standard"), help="Override saved summary length for this build only")
     build_parser_.add_argument("--tenant", help="Tenant bundle directory (default: /mnt/tenant when present)")
     build_parser_.add_argument("--exclude", action="append", help="role=value or column=value; repeatable")
+    build_parser_.add_argument("--trend-by", choices=("person",), help="Split the revenue time trend by the mapped technician or provider")
     build_parser_.add_argument("--title", help="Report title (default from the profile)")
     build_parser_.add_argument("--company", help="Company name shown on the report")
     build_parser_.add_argument("--currency", help="Three-letter code when the file does not say")

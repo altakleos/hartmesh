@@ -149,7 +149,7 @@ def retained_presentation(directory, members):
         raise InputError("The retained shared identity changed or presentation is invalid. Restore the verified draft.") from None
 
 
-def publish_bundle(root: Path, base: str, report: dict, targets: list[str], tenant_dir, render, prepare, *, bundle_id: str | None, expected_current, verify_current: bool = True, source: Path | None = None, carry: list[str] = (), product_identity=None, presentation) -> Path:
+def publish_bundle(root: Path, base: str, report: dict, targets: list[str], tenant_dir, render, prepare, *, bundle_id: str | None, expected_current, verify_current: bool = True, fresh_inputs: bool = False, source: Path | None = None, carry: list[str] = (), product_identity=None, presentation) -> Path:
     """Generate privately, then lock only for the conditional publication.
 
     A crash after rename but before pointer replacement leaves a complete,
@@ -199,7 +199,9 @@ def publish_bundle(root: Path, base: str, report: dict, targets: list[str], tena
         # Only files successfully staged for this exact draft become exports.
         view_path = stage / f"{base}{VIEW_SUFFIX}"
         try:
-            content = serialize_view(report, path.name, sorted(set(names)))
+            receipt = stage / "preferences-used.json"
+            preferences = json.loads(receipt.read_bytes()) if receipt.is_file() else None
+            content = serialize_view(report, path.name, sorted(set(names)), preferences)
             if not isinstance(content, bytes) or len(content) > MAX_BYTES:
                 raise ValueError("Preview bytes exceed the supported presentation limit.")
             view_path.write_bytes(content)
@@ -207,6 +209,32 @@ def publish_bundle(root: Path, base: str, report: dict, targets: list[str], tena
             view_path.unlink(missing_ok=True)
             sys.stderr.write("Report preview unavailable; continuing with ordinary formats.\n")
         members = {member.relative_to(stage).as_posix(): hashlib.sha256(member.read_bytes()).hexdigest() for member in sorted(stage.rglob("*")) if member.is_file()}
+        # A bounded projection lets the host check a delivered view without
+        # reading the (potentially very large) historical Rows payload.
+        inputs = report["meta"].get("inputs")
+        build = report["meta"].get("build")
+        sources = build.get("sources") if isinstance(build, dict) else None
+        if (
+            isinstance(inputs, list)
+            and isinstance(sources, list)
+            and len(inputs) == len(sources) <= 10
+            and all(isinstance(row, dict) for row in inputs)
+        ):
+            evidence_path = stage / "input-sources.json"
+            evidence = {
+                "version": 1,
+                "report_sha256": members[path.name],
+                "fresh_inputs": fresh_inputs,
+                "sources": sources,
+                "inputs": [
+                    {key: row.get(key) for key in ("name", "sheet", "sha256")}
+                    for row in inputs
+                ],
+            }
+            write_json(evidence_path, evidence)
+            members[evidence_path.name] = hashlib.sha256(
+                evidence_path.read_bytes()
+            ).hexdigest()
         retained_presentation(stage, members)
         write_json(stage / "renders.json", {"version": 2, "base": base, "bundle": identity, "draft": report["meta"]["draft"], "files": sorted(set(names)), "sha256": members})
         # Flush every member and child directory before the one visibility boundary.

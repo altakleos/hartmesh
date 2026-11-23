@@ -137,13 +137,28 @@ function ViewBlock({
                 <dt className="text-muted-foreground text-sm break-words">
                   {item.label}
                 </dt>
-                <dd className="mt-1 text-2xl font-semibold break-words tabular-nums">
-                  {item.value}
-                </dd>
-                {item.detail && (
-                  <dd className="text-muted-foreground mt-1 text-sm break-words whitespace-pre-wrap">
-                    {item.detail}
+                {item.value && item.detail?.includes("\n") ? (
+                  <dd>
+                    <details>
+                      <summary className="focus-visible:outline-auto mt-1 w-fit max-w-full cursor-pointer rounded-md border px-2 py-1 text-sm font-medium [overflow-wrap:anywhere]">
+                        {item.value}
+                      </summary>
+                      <p className="text-muted-foreground mt-2 text-sm break-words whitespace-pre-wrap">
+                        {item.detail}
+                      </p>
+                    </details>
                   </dd>
+                ) : (
+                  <>
+                    <dd className="mt-1 text-2xl font-semibold break-words tabular-nums">
+                      {item.value}
+                    </dd>
+                    {item.detail && (
+                      <dd className="text-muted-foreground mt-1 text-sm break-words whitespace-pre-wrap">
+                        {item.detail}
+                      </dd>
+                    )}
+                  </>
                 )}
               </div>
             ))}

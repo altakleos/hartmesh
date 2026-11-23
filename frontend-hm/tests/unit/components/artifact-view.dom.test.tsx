@@ -102,6 +102,34 @@ describe("generic passive result rendering", () => {
     ),
   );
 
+  it("lets the reader open multiline fact details from the displayed value", () => {
+    const view = {
+      ...document,
+      blocks: [
+        {
+          type: "facts" as const,
+          items: [
+            {
+              label: "Applied choices",
+              value: "2 saved preferences",
+              detail: "Applied to this draft\nCurrency: EUR\nSummary: short",
+            },
+            { label: "Revenue", value: "€42", detail: "+2% vs April" },
+          ],
+        },
+      ],
+    };
+    render(<ArtifactView {...imageProps} view={view} />);
+    const control = screen.getByText("2 saved preferences").closest("summary");
+    expect(control).not.toBeNull();
+    const details = control!.parentElement as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    fireEvent.click(control!);
+    expect(details.open).toBe(true);
+    expect(details.textContent).toContain("Currency: EUR");
+    expect(screen.getByText("+2% vs April").closest("details")).toBeNull();
+  });
+
   function rasterEnvironment() {
     const create = rs.fn(() => "blob:current-view");
     const revoke = rs.fn();

@@ -16,7 +16,7 @@ class OfflineProfileModel(FakeMessagesListChatModel):
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
 
-def assemble_offline(monkeypatch, *, mode="full", custom=False, tools=(), transform_middlewares=None, bootstrap=False, plan=False, tool_objects=None, runtime_context=None):
+def assemble_offline(monkeypatch, *, mode="full", custom=False, tools=(), transform_middlewares=None, bootstrap=False, plan=False, tool_objects=None, runtime_context=None, extensions=None):
     """Actual first-party builder/SDK; isolate operator files and provider I/O."""
     import deerflow.tools
     from deerflow.agents.lead_agent import agent
@@ -60,7 +60,7 @@ def assemble_offline(monkeypatch, *, mode="full", custom=False, tools=(), transf
         return actual_create(**kwargs)
 
     monkeypatch.setattr(agent, "create_agent", create)
-    with bind_agent_build_extensions(ExtensionRegistry().build()):
+    with bind_agent_build_extensions(extensions or ExtensionRegistry().build()):
         result = agent.assemble_lead_agent(
             {
                 "configurable": {"thread_id": "profile-fixture", "thinking_enabled": False, "is_bootstrap": bootstrap, "is_plan_mode": plan, **({"agent_name": "profile-agent"} if custom else {})},
@@ -298,6 +298,36 @@ def test_present_malformed_middleware_tools_are_unsupported(monkeypatch, malform
         )
         is None
     )
+
+
+def test_web_chat_contributor_is_absent_from_captured_graphs_and_cannot_qualify_when_selected(monkeypatch):
+    from deerflow_extension_api import AgentScope, MiddlewarePlacement, Placement
+    from langchain.agents.middleware import AgentMiddleware
+
+    from deerflow.extensions.registry import ExtensionRegistry
+
+    calls = []
+
+    class WebAnswer(AgentMiddleware):
+        pass
+
+    class Contributor:
+        def contribute_middlewares(self, store, context):
+            calls.append(context.scope)
+            return (MiddlewarePlacement(WebAnswer(), Placement.STANDARD, AgentScope.LEAD),)
+
+    registry = ExtensionRegistry()
+    with registry.attributed_to("ordinary-web-test"):
+        assert registry.web_chat_middlewares(Contributor()) is True
+    installed = registry.build()
+    captured, _, _ = assemble_offline(monkeypatch, extensions=installed)
+    assert captured.inventory_profile is not None and calls == []
+    web_chat, _, _ = assemble_offline(monkeypatch, extensions=installed.for_web_chat_lead())
+    assert web_chat.inventory_profile is None and calls == [AgentScope.LEAD]
+    with registry.attributed_to("global-test"):
+        registry.middlewares(Contributor())
+    captured, _, _ = assemble_offline(monkeypatch, extensions=registry.build())
+    assert captured.inventory_profile is None and calls == [AgentScope.LEAD, AgentScope.LEAD]
 
 
 @pytest.mark.parametrize(("field", "qualifies"), [("middleware_contributors", False), ("plugins", True)])

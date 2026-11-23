@@ -335,14 +335,22 @@ def draw_charts(charts: dict[str, dict], out_dir: Path, brand: dict, currency: s
     written = []
     for chart_id, data in charts.items():
         figure, axis = plt.subplots(figsize=CHART_SIZE_INCHES, dpi=CHART_DPI)
-        labels, values = data["labels"], data["values"]
+        labels = data["labels"]
         formatter = FuncFormatter(lambda value, _pos, fmt=data["format"]: axis_label(value, fmt, currency))
         if data["type"] == "barh":
-            axis.barh(labels[::-1], values[::-1], color=brand["primary"])
+            axis.barh(labels[::-1], data["values"][::-1], color=brand["primary"])
             axis.xaxis.set_major_formatter(formatter)
             axis.grid(axis="x", color="#dddddd", linewidth=0.6)
         else:
-            axis.bar(labels, values, color=brand["primary"])
+            if data["type"] == "line":
+                for index, series in enumerate(data["series"]):
+                    color = brand["primary"] if index == 0 else f"C{index}"
+                    axis.plot(labels, series["values"], marker="o", markersize=3, color=color)
+                legend = axis.legend(axis.lines, [series["name"] for series in data["series"]], fontsize=7)
+                for label in legend.get_texts():
+                    label.set_parse_math(False)
+            else:
+                axis.bar(labels, data["values"], color=brand["primary"])
             axis.yaxis.set_major_formatter(formatter)
             axis.grid(axis="y", color="#dddddd", linewidth=0.6)
             if len(labels) > 6 or max((len(label) for label in labels), default=0) > 8:
