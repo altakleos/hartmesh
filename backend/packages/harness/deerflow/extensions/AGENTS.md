@@ -2,7 +2,9 @@
 
 `registry.web_chat_middlewares(contributor)` (extension-api 0.2.14) registers
 middleware for an ordinary authenticated or auth-disabled Gateway web chat.
-This includes dispatch of an authenticated user’s persisted queued input.
+Extensions check for the optional `WebChatMiddlewareRegistry` protocol before
+registering. Keep the structural `ExtensionRegistry` contract stable across patch
+releases. Web scope includes dispatch of an authenticated user’s persisted queued input.
 Only the lead graph build receives those entries. Helpers and captured runs
 retain the base extension snapshot. Global middleware contributors continue
 to disqualify the terminal presentation inventory even if they return no

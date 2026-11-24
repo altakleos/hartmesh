@@ -37,6 +37,33 @@ def load_report(**config):
     return load_extensions([ExtensionSpec(use=ENTRY, required=True, config={"enabled": True, **config})])
 
 
+def test_freshness_requires_optional_host_capability_only_when_enabled():
+    from deerflow_extension_api import ExtensionRegistry, WebChatMiddlewareRegistry
+    from hartmesh_legacy_report import install
+
+    class ArtifactRegistry(ExtensionRegistry):
+        def __init__(self):
+            self.plugins = []
+
+        def plugin(self, contribution):
+            self.plugins.append(contribution)
+            return True
+
+    class DecliningRegistry(ArtifactRegistry):
+        def web_chat_middlewares(self, contributor):
+            return False
+
+    legacy = ArtifactRegistry()
+    assert isinstance(legacy, ExtensionRegistry)
+    assert not isinstance(legacy, WebChatMiddlewareRegistry)
+    for registry in (legacy, DecliningRegistry()):
+        with pytest.raises(RuntimeError, match="require web chat middleware support"):
+            install(registry, {"enabled": True})
+        assert registry.plugins == []
+    install(legacy, {"enabled": False})
+    assert len(legacy.plugins) == 1
+
+
 def test_artifact_router_has_no_builtin_report_dispatch():
     assert "report_preview" not in inspect.signature(artifacts.get_artifact).parameters
     assert not (ROOT / "backend/app/gateway/routers/_report_projection.py").exists()

@@ -43,6 +43,7 @@ from deerflow_extension_api.contracts import (
     TaskInfo,
     TaskLifecycleContributor,
     TaskOutcome,
+    WebChatMiddlewareRegistry,
     extension,
 )
 from deerflow_extension_api.host_capabilities import HostCapabilityError
@@ -224,6 +225,7 @@ __all__ = [
     "TaskInfo",
     "TaskLifecycleContributor",
     "TaskOutcome",
+    "WebChatMiddlewareRegistry",
     "ToolDescriptor",
     "canonical_hash",
     "canonical_json",
