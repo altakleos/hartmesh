@@ -1,8 +1,8 @@
 """The extension contracts and their data types.
 
 Compatibility rules enforced throughout this module:
-  * every Protocol method carries a default implementation, so adding a method
-    later stays additive for already-released extensions;
+  * expose new registration capabilities through independent protocols to
+    keep runtime-checkable structural protocols stable.
   * every optional dataclass field carries a default, so adding a field stays
     additive.
 """
@@ -189,11 +189,20 @@ class ExtensionService(Protocol):
 
 
 @runtime_checkable
+class WebChatMiddlewareRegistry(Protocol):
+    """Optional registration capability for middleware on ordinary Gateway web chats."""
+
+    def web_chat_middlewares(self, contributor: MiddlewareContributor) -> bool:
+        """Return True when the host accepts the contributor for the lead graph."""
+        ...
+
+
+@runtime_checkable
 class ExtensionRegistry(Protocol):
     """The write-only registration surface handed to ``install()``.
 
-    Structural and minimal on purpose. Every method has a default so additive
-    contract releases remain compatible with older registry implementations.
+    Structural extension implementations can also be checked at runtime.
+    Keep optional patch-release capabilities on separate protocols.
     The host's concrete registry additionally carries host-only machinery
     (attribution, positional rollback, build) that is deliberately absent here.
     """
@@ -214,10 +223,6 @@ class ExtensionRegistry(Protocol):
 
     def workspace_search(self, provider: Any) -> bool:
         """Register one WorkspaceSearchProvider; False on hosts without search."""
-        return False
-
-    def web_chat_middlewares(self, contributor: MiddlewareContributor) -> bool:
-        """Register middleware for the lead graph of an ordinary Gateway web chat."""
         return False
 
     def middlewares(self, contributor: MiddlewareContributor) -> None:
