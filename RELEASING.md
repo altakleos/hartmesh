@@ -319,6 +319,26 @@ reply, the replacement run's newly granted connection, and the switched-off
 control. The scripted provider reports fixed token usage. Tenant performance
 and provider pricing require separate measurements.
 
+### Employee configuration proposals
+
+After pinning a release that changes employee configuration proposals, run the
+installed browser qualification on the pin commit. The script verifies the
+signed backend and frontend against the bundle pins.
+
+```sh
+gh workflow run compose-instances.yml --repo altakleos/hartmesh --ref <release-branch> \
+  -f connections=skip -f verify_configuration_proposals=true \
+  -f backend_image=<backend-repository>@sha256:<digest>
+```
+
+Check `employee-proposals.xml` and `employee-proposals.json` in the attempt’s
+artifact. The scripted employee proposes enabling and disabling tracked
+assignments during web conversations. Chromium opens the manager’s Settings,
+declines a stale proposal, and adopts the fresh proposals. The evidence
+records the browser write outcome, the completed manager decision, and the
+revision used by a new assignment. It also checks retained Work, both users’
+notification preferences and the operator’s package switch.
+
 ### Conversation title search measurements
 
 Pull requests changing the title search measurement or its search handler build
