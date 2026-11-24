@@ -353,6 +353,7 @@ async def test_multipart_outcome_waits_for_its_last_actual_ack(work_delivery):
 async def test_decision_and_review_changes_keep_their_canonical_event_family(work_delivery, kind):
     from test_telegram_work_control_admission import admissions
     from test_telegram_work_control_admission import test_decision_confirmation_records_only_the_displayed_choice as decision
+    from test_telegram_work_execution_outcomes import dispatch_edit
     from test_telegram_work_input_capture import accept, prompt
 
     from app.telegram_bots.work_start_controls import WorkStartAdmissions
@@ -386,12 +387,16 @@ async def test_decision_and_review_changes_keep_their_canonical_event_family(wor
     identity = await outcomes.plan(e.link, primary_id, guard=await guard_for(e))
     e.outcome_identity = identity
     await clear_outcome_cleanup(e)
-    await dispatch(e, 830)
     e.identity = identity
+    message_id = 802 if kind == "decide" else 830
+    if kind == "decide":
+        await dispatch_edit(e, message_id)
+    else:
+        await dispatch(e, message_id)
     button = await selected(e, "work_start")
-    assert button is not None
+    assert button is not None and button.message_id == message_id
     views = WorkViewPlans(reader=WorkViewReader(work=e.human.work, authority=e.live.authority, links=e.db.links, clock=e.sender.outbox.clock), outbox=e.sender.outbox, callbacks=e.channel._services.callbacks)
-    staged = await WorkStartAdmissions(views, acts).stage(e.link, button.id, chat_id=e.link.chat_id, message_id=830, message_thread_id=None, guard=await guard_for(e))
+    staged = await WorkStartAdmissions(views, acts).stage(e.link, button.id, chat_id=e.link.chat_id, message_id=message_id, message_thread_id=None, guard=await guard_for(e))
     assert staged.kind == "activate" and staged.state == "pending"
     async with e.db.sessions() as reader:
         basis = (await reader.get(TelegramOutboxRow, identity)).payload["work_outcome_basis"]["context"]
