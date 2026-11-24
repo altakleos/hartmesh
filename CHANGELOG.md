@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.82] - 2026-11-24
+
+### Employee configuration proposals
+
+- During a web conversation, a company AI employee can propose turning tracked assignments on or off. Its manager can open the employee's **Settings** to see the proposed change, the definition revision it was based on, the current setting and the assignment rules that would apply. Proposing a change leaves the employee's settings in place.
+- A manager with inspection and management access can decline a proposal. Adopting it also requires Home administration, ownership of the current source definition and an idle employee. Adoption affects only that employee. If the employee is busy, the manager can return later. If the employee has moved to a different revision or generation, the manager can request a fresh proposal.
+- The Compose configuration enables the installed proposal extension. To enable it in an existing custom configuration, use the entry in `config.example.yaml` and restart the Gateway. Disabling the package hides the submission and review surfaces and preserves past decisions.
+
+### Schema changes
+
+Since v2.2.0+hartmesh.81, migration `0058_agent_proposals` adds the `agent_configuration_proposals` table for proposals, the reviewed revision and their decision history. Upgrade leaves existing employees, Work and definitions intact. Before rolling back, disable proposals, resolve or explicitly abandon linked pending adoptions and back up the database. The downgrade refuses unresolved operations and keeps a populated audit table. Re-upgrading restores access to its history. To reverse an adopted setting, a manager must authorize a new change.
+
 ## [2.2.0+hartmesh.81] - 2026-11-24
 
 ### Employee jobs and connections
