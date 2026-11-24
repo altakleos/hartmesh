@@ -1,5 +1,7 @@
 Current head `0057_run_cancel_actor_kind` appends a nullable run column for
 first-accepted conversation Stop attribution. Old rows keep an unspecified role.
+Legacy metadata bootstrap can create this column before Alembic reaches 0057.
+The guarded upgrade preserves an existing column and its values.
 
 `0056_upstream_adoption` joins HartMesh's published
 `0053_work_operation_indexes` and upstream `0055_thread_shares` without DDL.
