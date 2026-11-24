@@ -13,12 +13,14 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from test_telegram_copy_guard_supervisor import environment, owned_link, stop_environment, wait_until
 from test_telegram_supervisor import _supervisor_logging as _supervisor_logging
+from test_telegram_supervisor import credential
 
 from app.telegram_bots.config import TelegramBotsConfig
 from app.telegram_bots.links import BotLinkRepository
 from app.telegram_bots.settings import SettingsRepository
 from deerflow.persistence.base import Base
 from deerflow.persistence.channel_connections.sql import ChannelConnectionRepository
+from deerflow.persistence.telegram_bots.model import TelegramDeploymentRow
 
 pytestmark = pytest.mark.asyncio
 
@@ -126,3 +128,55 @@ async def test_retirement_drains_native_select_cursor_before_independent_writer(
         if retiring is not None:
             await asyncio.gather(retiring, return_exceptions=True)
         await stop_environment(e)
+
+
+async def test_copy_latch_drains_poll_failure_writer_before_persisting_refusal(sqlite_links, monkeypatch):
+    db = sqlite_links
+    reply, entered, release, interrupted = (asyncio.Event() for _ in range(4))
+
+    def script(link, normal, updates):
+        updates.enqueue("getUpdates", status=503, body={"ok": False, "error_code": 503, "description": "temporary"}, release=reply)
+
+    e = environment(db, monkeypatch, script=script)
+    link, _token = await credential(db, e.env)
+    latch = None
+    try:
+        await e.supervisor.start()
+        runner = e.supervisor._runners[link.id]
+        execute = aiosqlite.Connection._execute
+
+        async def hold_owner_read(connection, function, *args, **kwargs):
+            result = await execute(connection, function, *args, **kwargs)
+            # The poll's error-status transaction already holds BEGIN IMMEDIATE.
+            # Pause after SQLite has produced the owner-settings cursor, before fetch.
+            if not entered.is_set() and getattr(function, "__name__", "") == "execute" and args and str(args[0]).startswith("SELECT telegram_person_settings."):
+                entered.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    interrupted.set()
+                    raise
+            return result
+
+        monkeypatch.setattr(aiosqlite.Connection, "_execute", hold_owner_read)
+        reply.set()
+        await asyncio.wait_for(entered.wait(), 3)
+        latch = asyncio.create_task(e.supervisor._latch_copy_conflict())
+        await wait_until(lambda: runner.cancelling() > 0)
+        runner.cancel()
+        await asyncio.sleep(0)
+        assert not interrupted.is_set()
+        assert not latch.done()
+        release.set()
+        await asyncio.wait_for(asyncio.shield(latch), 3)
+        assert runner.cancelled()
+        assert (await db.links.get(link.id)).last_error == "NetworkError"
+        # The latch itself needs an independent SQLite writer and commit.
+        async with db.sessions() as session:
+            assert (await session.get(TelegramDeploymentRow, 1)).polling_state == "polled_elsewhere"
+    finally:
+        reply.set()
+        release.set()
+        if latch is not None and not latch.done():
+            await asyncio.wait_for(e.supervisor.drain_after_stop_timeout(), 5)
+        await asyncio.wait_for(stop_environment(e), 5)
