@@ -1000,7 +1000,7 @@ extensions = [
 
 [[package]]
 name = "deerflow-extension-api"
-version = "0.2.13"
+version = "0.2.14"
 source = { editable = "packages/extension-api" }
 
 [[package]]
@@ -1718,14 +1718,14 @@ wheels = [
 
 [[package]]
 name = "hartmesh-legacy-report"
-version = "0.1.0"
+version = "0.2.0"
 source = { directory = "extensions/sources/hartmesh-legacy-report" }
 dependencies = [
     { name = "deerflow-extension-api" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "deerflow-extension-api", specifier = ">=0.2.5,<0.3" }]
+requires-dist = [{ name = "deerflow-extension-api", specifier = ">=0.2.14,<0.3" }]
 
 [[package]]
 name = "hartmesh-message-search"

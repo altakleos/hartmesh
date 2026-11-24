@@ -77,6 +77,12 @@ compatibility; XLSX carries unchanged facts. Keep previews neutral and actual
 export lists truthful. Existing schemas, source fences and publication uncertainty
 remain. See [the full contract](../../../docs/OFFLINE_REPORT_PRESENTATION.md).
 
+The installed report adapter consumes the normal tagged view/canonical handoff
+and the canonical `meta.inputs` and `meta.build.sources` pairs for live-source
+notices. Keep path, optional sheet, basename and digest aligned across build,
+prose and render. Keep import paths under uploads. The owning Gateway qualifies
+current mount identity; the skill never probes the original behind a copy.
+
 An ordinary chat owns its parsed-input cache under workspace/.cache/. Every
 build reads the authorized source before reuse. Key on source bytes, parser
 code and library versions, suffix, sheet and profile. Verification parses the

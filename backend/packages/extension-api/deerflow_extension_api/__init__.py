@@ -43,6 +43,7 @@ from deerflow_extension_api.contracts import (
     TaskInfo,
     TaskLifecycleContributor,
     TaskOutcome,
+    WebChatMiddlewareRegistry,
     extension,
 )
 from deerflow_extension_api.host_capabilities import HostCapabilityError
@@ -118,7 +119,7 @@ from deerflow_extension_api.storage import (
 
 #: Contract version. Before 1.0, minors may break and patches are additive.
 #: From 1.0 on, bump the major for breaking changes.
-API_VERSION = "0.2.13"
+API_VERSION = "0.2.14"
 
 __all__ = [
     "StorageAccessDenied",
@@ -224,6 +225,7 @@ __all__ = [
     "TaskInfo",
     "TaskLifecycleContributor",
     "TaskOutcome",
+    "WebChatMiddlewareRegistry",
     "ToolDescriptor",
     "canonical_hash",
     "canonical_json",

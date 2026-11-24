@@ -18,6 +18,8 @@ class SandboxProvider(ABC):
     """Abstract base class for sandbox providers"""
 
     uses_thread_data_mounts: bool = False
+    # Ordinary chat My files and Shared are independent of the thread data mount.
+    uses_personal_and_shared_mounts: bool = False
     needs_upload_permission_adjustment: bool = True
     # Capability for enforcing a lead Agent's physical skill view across the
     # provider's current Agent-accessible tool surface. Host-backed providers

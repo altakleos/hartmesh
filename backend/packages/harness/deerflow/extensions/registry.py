@@ -22,6 +22,7 @@ from deerflow_extension_api import (
     MiddlewareContributor,
     SystemModelCallObserver,
     TaskLifecycleContributor,
+    WebChatMiddlewareRegistry,
 )
 from deerflow_extension_api import ExtensionRegistry as ExtensionRegistryContract
 from deerflow_extension_api.plugins import ArtifactPresentation, BrowserAssets, BrowserModule, PluginContribution
@@ -68,9 +69,22 @@ class LoadedExtensions:
     has_system_model_observers: bool = False
     has_agent_assembly_observers: bool = False
     needs_task_store: bool = False
+    web_chat_middleware_contributors: tuple[tuple[str, MiddlewareContributor], ...] = ()
+
+    def for_web_chat_lead(self) -> LoadedExtensions:
+        """Activate this run's optional web contributors only for its lead graph build."""
+        if not self.web_chat_middleware_contributors:
+            return self
+        return replace(
+            self,
+            middleware_contributors=self.middleware_contributors + self.web_chat_middleware_contributors,
+            web_chat_middleware_contributors=(),
+            has_middleware_contributors=True,
+            needs_task_store=True,
+        )
 
 
-class ExtensionRegistry(ExtensionRegistryContract):
+class ExtensionRegistry(ExtensionRegistryContract, WebChatMiddlewareRegistry):
     """Mutable, registration-phase only.
 
     Subclasses the public contract Protocol so the host implementation is
@@ -81,6 +95,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
 
     def __init__(self) -> None:
         self._middlewares: list[_Entry] = []
+        self._web_chat_middlewares: list[_Entry] = []
         self._task_lifecycle: list[_Entry] = []
         self._system_model_observers: list[_Entry] = []
         self._agent_assembly_observers: list[_Entry] = []
@@ -215,6 +230,10 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._workspace_search_providers.append((self._source(), provider))
         return True
 
+    def web_chat_middlewares(self, contributor: MiddlewareContributor) -> bool:
+        self._web_chat_middlewares.append((self._source(), contributor))
+        return True
+
     def middlewares(self, contributor: MiddlewareContributor) -> None:
         self._middlewares.append((self._source(), contributor))
 
@@ -274,6 +293,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             self._plugins,
             self._knowledge_providers,
             self._workspace_search_providers,
+            self._web_chat_middlewares,
         ):
             bucket[:] = [entry for entry in bucket if entry[0] != source]
 
@@ -290,6 +310,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             len(self._plugins),
             len(self._knowledge_providers),
             len(self._workspace_search_providers),
+            len(self._web_chat_middlewares),
         )
 
     def rollback_to(self, mark: tuple[int, ...]) -> None:
@@ -311,6 +332,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 self._plugins,
                 self._knowledge_providers,
                 self._workspace_search_providers,
+                self._web_chat_middlewares,
             ),
             mark,
             strict=True,
@@ -321,6 +343,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         return LoadedExtensions(
             app_store=ExtensionData("app"),
             middleware_contributors=tuple(self._middlewares),
+            web_chat_middleware_contributors=tuple(self._web_chat_middlewares),
             task_lifecycle=tuple(self._task_lifecycle),
             system_model_observers=tuple(self._system_model_observers),
             agent_assembly_observers=tuple(self._agent_assembly_observers),

@@ -546,6 +546,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._start_idle_checker()
 
     @property
+    def uses_personal_and_shared_mounts(self) -> bool:
+        # The provisioner can share thread data but omits these two extra binds.
+        return isinstance(self._backend, LocalContainerBackend)
+
+    @property
     def uses_thread_data_mounts(self) -> bool:
         """Whether thread workspace/uploads/outputs are visible via mounts.
 

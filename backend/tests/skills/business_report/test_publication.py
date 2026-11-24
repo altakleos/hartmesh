@@ -112,6 +112,13 @@ def test_passive_view_is_a_hashed_bundle_member_with_only_successful_current_exp
     manifest = json.loads((path.parent / "renders.json").read_text(encoding="utf-8"))
     assert manifest["sha256"][view_path.name] == hashlib.sha256(view_path.read_bytes()).hexdigest()
     assert view_path.name not in manifest["files"], "the render carry list remains genuine formats only"
+    evidence = json.loads((path.parent / "input-sources.json").read_bytes())
+    canonical = json.loads(path.read_bytes())
+    assert evidence["fresh_inputs"] == (command == "build")
+    assert evidence["report_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert evidence["sources"] == canonical["meta"]["build"]["sources"]
+    assert evidence["inputs"] == [{key: row.get(key) for key in ("name", "sheet", "sha256")} for row in canonical["meta"]["inputs"]]
+    assert "input-sources.json" in manifest["sha256"] and "input-sources.json" not in manifest["files"]
     assert view["primary_source"] == {"path": path.name}
     expected = {"out.docx", "out.xlsx"} if command == "render" else {"out.xlsx"} if command == "prose" else {"out.docx"}
     assert {item["path"] for item in view["exports"]} == expected
