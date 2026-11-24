@@ -65,7 +65,14 @@ export function ToolSettingsPage() {
   return (
     <SettingsSection
       title={t.settings.tools.title}
-      description={t.settings.tools.description}
+      description={
+        <>
+          <p>{t.settings.tools.description}</p>
+          {feature.connections && (
+            <p className="mt-2">{t.settings.tools.agentGrantScope}</p>
+          )}
+        </>
+      }
     >
       <div className="flex w-full flex-col gap-4">
         {isLoading ? (

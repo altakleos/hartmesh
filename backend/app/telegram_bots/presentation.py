@@ -50,7 +50,7 @@ def visible_connections(instance_id):
     return list_connections(instance_id, manager=False)
 
 
-CONNECTION_DISCLOSURE_KEYS = {"hello.employee", "hello.assistant", "new.done", "privacy.full"}
+CONNECTION_DISCLOSURE_KEYS = {"hello.employee", "hello.assistant", "new.done", "new.done_instance", "privacy.full"}
 
 
 async def connection_disclosure(services, link, key, locale, renderer):

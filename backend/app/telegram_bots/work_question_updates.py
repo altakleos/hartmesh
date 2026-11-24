@@ -1,10 +1,12 @@
 """Canonical closure/routing evidence, independent of question actionability."""
 
+from datetime import timedelta
+
 from sqlalchemy import String, and_, cast, false
 from sqlalchemy.orm import aliased
 
 from app.telegram_bots.notifications import aware
-from app.telegram_bots.producer import ProductSourceRetired, _item
+from app.telegram_bots.producer import DeliveryRetry, ProductSourceRetired, _item
 from app.telegram_bots.settings import _snapshot, format_time
 from app.telegram_bots.work_actions import same_body
 from app.telegram_bots.work_answer_news import AnswerNews
@@ -14,7 +16,7 @@ from deerflow.agent_instances.human_input_contract import RequestCommand
 from deerflow.agent_instances.work_execution_contract import ReportWork
 from deerflow.persistence.agent_instances.human_input import HumanInputEventRow, HumanInputRequestRow, HumanInputResponseRow
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow, AgentWorkRow
-from deerflow.persistence.telegram_bots.model import TelegramBotLinkRow, TelegramOutboxRow, TelegramPersonSettingsRow
+from deerflow.persistence.telegram_bots.model import TelegramActRow, TelegramBotLinkRow, TelegramOutboxRow, TelegramPersonSettingsRow
 from deerflow.persistence.user.model import UserRow
 
 UPDATE_KEYS = {
@@ -22,6 +24,7 @@ UPDATE_KEYS = {
     "request.answered_by": "human_response",
     "request.rerouted": "request_route",
     "request.withdrawn": "request_withdraw",
+    "decide.done_line": "decide",
     "request.assessed": "assess_input",
 }
 
@@ -36,7 +39,7 @@ class QuestionUpdateProjection:
         receipt, request, response = HumanInputEventRow, HumanInputRequestRow, HumanInputResponseRow
         actor, recipient = aliased(UserRow), aliased(UserRow)
         assessment = aliased(HumanInputEventRow)
-        return (
+        result = (
             query.add_columns(work, event, delivery, receipt, request, response, false(), actor.email, recipient.email, TelegramPersonSettingsRow, AgentWorkAttemptRow, assessment)
             .join(work, work.id == self.item.work_id)
             .join(event, event.id == self.item.event_id)
@@ -50,6 +53,10 @@ class QuestionUpdateProjection:
             .outerjoin(AgentWorkAttemptRow, AgentWorkAttemptRow.id == event.request["attempt_id"].as_string())
             .outerjoin(assessment, and_(assessment.request_id == request.id, assessment.action == "assess", cast(assessment.revision - 1, String) == cast(event.request["request_basis"]["revision"].as_string(), String)))
         )
+
+        if self.item.payload.get("work_event_intent", {}).get("key") == "decide.done_line":
+            result = result.add_columns(TelegramActRow).outerjoin(TelegramActRow, TelegramActRow.id == event.operation_id)
+        return result
 
     def check(self, rows):
         instance, policy = rows[0][1], rows[0][3]
@@ -87,6 +94,27 @@ class QuestionUpdateProjection:
             if (event.actor_id == self.link.owner_user_id) != (key == "request.answered_elsewhere") or intent["edit_request_revision"] != intent["request_revision"]:
                 raise ProductSourceRetired()
             values["time"] = format_time(aware(response.created_at), settings=settings, now=self.clock.now(), zone=self.clock.zone)
+        elif event.action == "decide":
+            from app.telegram_bots.work_request_continuation_sources import qualify_request_primary
+
+            act = rows[0][self.column + 12]
+            if (
+                act is None
+                or (act.kind, act.link_id, act.binding_generation, act.owner_user_id, act.request_id) != ("decide", self.link.id, self.link.binding_generation, self.link.owner_user_id, request.id)
+                or intent.get("decision_operation") != event.operation_id
+                or intent["edit_request_revision"] != intent["request_revision"]
+                or request.purpose != "decision"
+            ):
+                raise ProductSourceRetired()
+            if act.state != "done":
+                raise DeliveryRetry(timedelta(seconds=5))
+            try:
+                qualify_request_primary(act, {"assignment_revision": intent["assignment_revision"]}, event, receipt, None)
+            except (KeyError, ValueError, TypeError):
+                raise ProductSourceRetired() from None
+            stamp = aware(event.created_at)
+            values = {"decision": event.request["note"], "time": stamp.astimezone(self.clock.zone).strftime("%Y-%m-%d %H:%M")}
+            signature = digest([event_signature(event, receipt, intent), stamp.isoformat()])
         elif event.action == "assess_input":
             body = {name: value for name, value in event.request.items() if name != "attempt_id"}
             try:
@@ -121,6 +149,7 @@ class QuestionUpdateProjection:
             self._command(event, request, receipt, intent)
             signature = event_signature(event, receipt, intent)
         fresh = {
+            **({"decision_anchor": intent["decision_anchor"]} if key == "decide.done_line" else {}),
             "key": "stale.not_waiting" if key == "request.rerouted" and event.request.get("recipient_id") is None else key,
             "values": values,
             "event_signature": signature,

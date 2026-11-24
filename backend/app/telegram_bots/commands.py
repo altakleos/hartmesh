@@ -95,6 +95,8 @@ class CallbackCommands:
 
             values = await instance_values(self.services.authority, link, product=values["product"])
         if word == "new":
+            if link.agent_kind == "instance":
+                return {"key": "new.confirm", "values": {"name": values["name"]}, "keyboard_template": "new.confirm_plain"}
             return {"key": "new.confirm_plain", "values": {}, "keyboard_template": "new.confirm_plain"}
         if word == "settings":
             owner = getattr(self.services, "message_settings", None)
@@ -228,7 +230,7 @@ class CallbackCommands:
             return await fixed_source(self.services, link, "new.files_full")
         except ThreadPreparationStale:
             return {"key": "stale.not_waiting", "values": {}}
-        return {"key": "new.done", "values": {}}
+        return {"key": "new.done_instance" if link.agent_kind == "instance" else "new.done", "values": {}}
 
     async def _finish_new(self, link, row, guard, claimed, source):
         async with self.services.outbox.sessions() as writer, writer.begin():

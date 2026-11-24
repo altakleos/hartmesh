@@ -2905,7 +2905,7 @@ class InboxRepository:
                 or mark.run_id is not None
                 or mark.assistant_message_id is not None
                 or mark.grouped_message_ids
-                or basis.get("key") != "new.confirm_plain"
+                or basis.get("key") not in ({"new.confirm_plain", "new.confirm"} if link.agent_kind == "instance" else {"new.confirm_plain"})
                 or basis.get("keyboard_template") != "new.confirm_plain"
                 or type(basis.get("values")) is not dict
                 or type(prep) is not dict
@@ -2928,7 +2928,7 @@ class InboxRepository:
                 "chat_id": link.chat_id,
                 "message_thread_id": None,
                 "finish_route": False,
-                "parts": [{"kind": "text", "source_ref": {"key": "new.confirm_plain", "values": basis["values"]}}],
+                "parts": [{"kind": "text", "source_ref": {"key": basis["key"], "values": basis["values"]}}],
             }
             bookmark = prep["expected_thread_id"] or prep["creation_id"]
             if (

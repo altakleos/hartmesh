@@ -694,9 +694,13 @@ An independently scoped witness retains its actual original ACK and primary
 through combined public-control/journal loss. Such holds never renew consent or
 authorize a retry; native entry still needs its actual source and control.
 
-Completed routing uses a closed V2
-edit proof tied to the original command's acknowledged selection, message and
-protection. The final SDK check and ACK settlement recheck that proof. Protection
+Completed routing and decisions use a V2 edit proof tied to the original
+command's acknowledged selection, message and protection. A decision resolves
+its confirmation prompt with the canonical event statement and timestamp in the
+reader's timezone. Its event also updates the exact earlier request identified
+by the confirmed choice or typed-input callback chain. The original request
+edit keeps concealment and rechecks any referenced Space grants. The final SDK
+check and ACK settlement recheck that proof. Protection
 upgrades use a new protected reply and clear the previous keyboard, including
 when an earlier queued result already consumed its controls. Missing/incompatible
 anchors hold with `work-outcome-refresh-required`; the next receipt observation

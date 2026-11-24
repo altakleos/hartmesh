@@ -26,8 +26,16 @@ rs.mock("@/core/i18n/hooks", () => ({
     t: {
       common: { loading: "Loading", loadMore: "Load more" },
       subagentBatches: {
-        jobState: { working: "Working", ended: "Ended" },
-        jobReasons: { unavailable: "Unavailable" },
+        jobState: { waiting: "Waiting", working: "Working", ended: "Ended" },
+        jobReasons: {
+          unavailable: "Unavailable",
+          stopped_by_requester: "Stopped by you.",
+          stopped_by_manager: "Stopped by a manager.",
+        },
+        conversationBusy: "This conversation is busy until the large job ends.",
+        deadlineSummary: (count: number) =>
+          `Time limit reached for ${count} checks.`,
+        itemDeadline: "This check did not finish before the time limit.",
         unavailableNotice: (finished: number, total: number) =>
           `${finished} of ${total} checks finished`,
         finishedChecks: (finished: number, total: number) =>
@@ -241,6 +249,59 @@ describe("agent conversation jobs", () => {
       action: "cancel",
     });
   });
+
+  it.each([
+    ["stopped_by_requester", "Stopped by you."],
+    ["stopped_by_manager", "Stopped by a manager."],
+  ])(
+    "shows the deadline and stop actor when a large job ends (%s)",
+    async (reason, copy) => {
+      const mount = document.createElement("div");
+      document.body.appendChild(mount);
+      featureState.workerRunning = true;
+      const working = {
+        ...HISTORICAL_BATCH,
+        follow_up: { state: "waiting", finished: 0, total: 2 },
+      };
+      batchState.batches = [working];
+      const component = (
+        <ThreadSubagentBatches
+          accountId="starter"
+          threadId="thread-1"
+          noticeContainer={mount}
+        />
+      );
+      const view = render(component);
+      expect(mount.textContent).toContain("This conversation is busy");
+      batchState.batches = [
+        {
+          ...working,
+          status: "cancelled",
+          follow_up: {
+            state: "ended",
+            reason,
+            finished: 1,
+            total: 2,
+            timed_out: 1,
+          },
+        },
+      ];
+      view.rerender(
+        <ThreadSubagentBatches
+          accountId="starter"
+          threadId="thread-1"
+          noticeContainer={mount}
+        />,
+      );
+      expect(mount.textContent).toBe("");
+      fireEvent.click(screen.getByRole("button", { name: "Batches" }));
+      expect(
+        await screen.findByText(/Time limit reached for 1 checks/),
+      ).toBeDefined();
+      expect(screen.getByText(copy, { exact: false })).toBeDefined();
+      mount.remove();
+    },
+  );
 
   it("shows only the newest unavailable job above the composer and remembers dismissal per account", async () => {
     const mount = document.createElement("div");

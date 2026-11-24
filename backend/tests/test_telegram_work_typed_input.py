@@ -135,6 +135,7 @@ async def test_actual_typed_decision_waits_for_complete_preview_and_confirmation
         if note:
             (await writer.get(HumanInputRequestRow, request["id"])).choices = ["Use the reviewed source"]
     e.identity = await e.plans.plan(e.link, request_id=request["id"], dedupe_key="actual-typed-decision")
+    original_request = e.identity
     await dispatch(e, 801)
     e.identity = await open_view(e, await selected(e, "decide_choice" if note else "decide_own"))
     await clear_old(e)
@@ -175,6 +176,20 @@ async def test_actual_typed_decision_waits_for_complete_preview_and_confirmation
     async with e.db.sessions() as reader:
         assert len(list(await reader.scalars(select(TelegramActRow)))) == 1
         assert (await reader.get(TelegramActRow, callback.id)).attempts == saved.attempts
+    if not unknown:
+        from app.telegram_bots.work_event_intents import WorkEventIntents
+        from app.telegram_bots.work_question_edits import WorkQuestionEdits
+        from deerflow.persistence.agent_instances.work import AgentWorkEventRow
+
+        async with e.db.sessions.begin() as writer:
+            event = await writer.scalar(select(AgentWorkEventRow).where(AgentWorkEventRow.operation_id == callback.id))
+            await WorkEventIntents(links=e.db.links, human=e.human).project(writer, e.link, event)
+            edit = (await writer.scalars(select(TelegramOutboxRow).where(TelegramOutboxRow.dedupe_key == "edit:" + event.id))).one()
+            assert edit.payload["work_event_intent"]["decision_anchor"] == original_request
+        assert await WorkQuestionEdits(e.plans).materialize(e.link, edit.id)
+        async with e.db.sessions() as reader:
+            receipt = (await reader.get(TelegramOutboxRow, edit.id)).parts[0]
+            assert receipt["target_message_id"] == 801 and expected in receipt["visible_text"]
 
 
 @pytest.mark.asyncio

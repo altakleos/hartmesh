@@ -918,7 +918,7 @@ class ResidentRuntime:
 
     async def apply_hold(self):
         """Close current local Homes; a live foreign lease grants no takeover."""
-        from app.gateway.storage_spaces import hold_present
+        from app.gateway.storage_spaces import hold_present, hold_reason
 
         status = self.app.state.agent_execution
         if not await run_sync_lifecycle_operation(hold_present):
@@ -926,9 +926,22 @@ class ResidentRuntime:
                 status.hold_since = None
                 logger.info("agents: hold lifted")
             return
-        first = status.hold_since is None
-        if first:
-            status.hold_since = datetime.now(UTC)
+        if status.hold_since is not None:
+            await self._contain_held_workspaces(status)
+            return
+
+        status.hold_since = datetime.now(UTC)
+        reason = None
+        outcome = "containment incomplete"
+        try:
+            reason = await run_sync_lifecycle_operation(hold_reason)
+            closed = await self._contain_held_workspaces(status)
+            outcome = f"{closed} workspaces closed"
+        finally:
+            suffix = ": " + "".join(c if c.isprintable() else ascii(c)[1:-1] for c in reason) if reason else ""
+            logger.warning("agents: held (operator hold present since %s%s; %s)", status.hold_since.isoformat(), suffix, outcome)
+
+    async def _contain_held_workspaces(self, status):
         rows = await self.inventory_runs()
         foreign = {row.get("metadata", {}).get("agent_instance_id") for row in rows if row["run_id"] in self.foreign_run_blocks}
         closed = 0
@@ -954,8 +967,7 @@ class ResidentRuntime:
                         status.attachments_fenced += 1
                 finally:
                     entry.reconciling = False
-        if first:
-            logger.warning("agents: held (operator hold present since %s; %s workspaces closed)", status.hold_since.isoformat(), closed)
+        return closed
 
     async def reconcile(self):
         from app.gateway.storage_spaces import reconcile_residents, storage_state

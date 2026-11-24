@@ -166,6 +166,20 @@ def admitted_run(batch, run):
     )
 
 
+def attributed_stop(run):
+    if run.cancel_action is None:
+        return None
+    if run.cancel_actor_kind == "requester":
+        return "stopped_by_requester"
+    if run.cancel_actor_kind == "manager":
+        return "stopped_by_manager"
+    return None
+
+
+def run_was_lost(run):
+    return not run.cancel_requested_at and not run.cancel_action and (run.stop_reason in LOST or run.status == "error")
+
+
 async def reserve_submission(session, batch):
     """Serialize first submissions on the existing physical conversation, including across owners."""
     if session.get_bind().dialect.name == "sqlite":
@@ -340,7 +354,7 @@ async def reconcile_unavailable_final(session, batch, now):
         if await confirmed_reply(session, batch, run):
             await record_outcome(session, batch, "completed", now)
             return True
-    await close_job(session, batch, "interrupted", now)
+    await close_job(session, batch, (attributed_stop(run) if admitted_run(batch, run) else None) or "interrupted", now)
     return True
 
 
@@ -369,10 +383,11 @@ class BoundBatchDispatch:
                     return None
                 state = carry(batch)
             source = await session.get(RunRow, batch.run_id, with_for_update=True) if batch.run_id else None
-            if source_run(batch, source) and source.status in ACTIVE_RUN:
+            is_source = source_run(batch, source)
+            if is_source and source.status in ACTIVE_RUN:
                 return None
-            if not source_run(batch, source) or source.status != "success" or source.stop_reason in GOAL_RUN_HARD_STOP_REASONS:
-                await close_job(session, batch, "source_ended", now)
+            if not is_source or source.status != "success" or source.stop_reason in GOAL_RUN_HARD_STOP_REASONS:
+                await close_job(session, batch, (attributed_stop(source) if is_source else None) or "source_ended", now)
                 return None
             if state["replacements"]:
                 until = _time(state.get("replace_by"))
@@ -416,11 +431,11 @@ class BoundBatchDispatch:
         if not unfinished and await confirmed_reply(session, batch, run):
             await record_outcome(session, batch, "completed", now)
             return False
-        lost = not run.cancel_requested_at and not run.cancel_action and (run.stop_reason in LOST or run.status == "error")
+        lost = run_was_lost(run)
         loss = utc(run.lease_expires_at or run.updated_at)
         until = loss + timedelta(seconds=start_wait_seconds)
         if not (lost and unfinished and state["replacements"] == 0 and now < until and state.get("final_started") is None):
-            await close_job(session, batch, "interrupted" if lost or run.status == "success" else "cancelled", now)
+            await close_job(session, batch, attributed_stop(run) or ("interrupted" if lost or run.status == "success" else "cancelled"), now)
             return False
         await session.execute(update(Item).where(Item.batch_id == batch.id, Item.status.in_(("leased", "running"))).values(status="queued", lease_owner=None, lease_expires_at=None, started_at=None))
         set_carry(batch, replacements=1, replace_by=until.isoformat())
@@ -460,13 +475,21 @@ class BoundBatchDispatch:
                 return None
             if not open_job(batch):
                 return None if only_open else await self._with_counts(session, batch)
-            state = carry(batch)
-            if batch.continuation_status == "dispatched" and state is not None and state.get("final_started") is True:
-                run = await session.get(RunRow, batch.continuation_run_id, with_for_update=True)
-                if admitted_run(batch, run) and run.status not in ACTIVE_RUN and await confirmed_reply(session, batch, run):
-                    await record_outcome(session, batch, "completed", datetime.now(UTC))
-                    return None if only_open else await self._with_counts(session, batch)
-            await close_job(session, batch, reason, datetime.now(UTC))
+            run_id = batch.continuation_run_id if batch.continuation_status == "dispatched" else batch.run_id
+            run = await session.get(RunRow, run_id, with_for_update=True) if run_id else None
+            now = datetime.now(UTC)
+            if admitted_run(batch, run):
+                if run.cancel_requested_at or run.cancel_action:
+                    reason = attributed_stop(run) or "cancelled"
+                if run.status not in ACTIVE_RUN:
+                    if await confirmed_reply(session, batch, run):
+                        await record_outcome(session, batch, "completed", now)
+                        return None if only_open else await self._with_counts(session, batch)
+                    if carry(batch).get("final_started") is True and (run_was_lost(run) or run.status == "success"):
+                        reason = "interrupted"
+            elif source_run(batch, run) and (run.cancel_requested_at or run.cancel_action):
+                reason = attributed_stop(run) or "cancelled"
+            await close_job(session, batch, reason, now)
             return await self._with_counts(session, batch)
 
 

@@ -10,7 +10,14 @@ from app.telegram_bots.adapter import TelegramBotChannel
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("key", "locale", "text"),
-    [("new.done", "en", "Send /privacy"), ("hello.employee", "en", "Send /privacy"), ("hello.assistant", "zh-CN", "/privacy"), ("privacy.full", "en", "the conversation on the web"), ("privacy.full", "zh-CN", "网页")],
+    [
+        ("new.done", "en", "Send /privacy"),
+        ("new.done_instance", "en", "Send /privacy"),
+        ("hello.employee", "en", "Send /privacy"),
+        ("hello.assistant", "zh-CN", "/privacy"),
+        ("privacy.full", "en", "the conversation on the web"),
+        ("privacy.full", "zh-CN", "网页"),
+    ],
 )
 async def test_render_uses_live_authority_and_only_current_connection_names(monkeypatch, key, locale, text):
     link = SimpleNamespace(agent_kind="instance", agent_ref="agent", owner_user_id="person", binding_generation=1)

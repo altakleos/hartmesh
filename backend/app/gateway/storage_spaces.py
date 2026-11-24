@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import stat
 import subprocess
 import time
 import uuid
@@ -88,6 +89,21 @@ def hold_present():
     except OSError:
         logger.warning("agents: operator hold status is unreadable; admission remains held")
     return True
+
+
+def hold_reason() -> str | None:
+    """Read the optional first line without waiting on a non-regular marker."""
+    try:
+        fd = os.open(AGENTS_HOLD_PATH, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                with open(fd, encoding="utf-8", errors="replace", closefd=False) as stream:
+                    return stream.readline(4096).strip() or None
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+    return None
 
 
 @dataclass(frozen=True)

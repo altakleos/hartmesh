@@ -345,6 +345,48 @@ async def test_operator_hold_contains_only_current_locally_owned_home(execution,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reason", [b"maintenance\twindow\x1b\nprivate second line", b"", None])
+async def test_hold_journal_records_optional_reason_once_without_control_characters(execution, fixture, monkeypatch, tmp_path, caplog, reason):
+    from app.gateway.agent_operator_services import _hold
+
+    module, app, host, _attachments, adapter, claim = await build(execution, fixture, monkeypatch)
+    marker = tmp_path / "agents-hold"
+    if reason is None:
+        marker.mkdir()  # An unreadable reason must still hold execution.
+    else:
+        marker.write_bytes(reason)
+    monkeypatch.setattr(module, "AGENTS_HOLD_PATH", marker)
+    await host.apply_hold()
+    await host.apply_hold()
+    assert claim.container_id not in adapter.containers
+    assert app.state.agent_execution.hold_since is not None
+    messages = [record.getMessage() for record in caplog.records if "agents: held (" in record.getMessage()]
+    assert len(messages) == 1
+    prefix = f"agents: held (operator hold present since {app.state.agent_execution.hold_since.isoformat()}"
+    suffix = r": maintenance\twindow\x1b" if reason else ""
+    assert messages[0] == f"{prefix}{suffix}; 1 workspaces closed)"
+    assert _hold()["reason"] == ("maintenance\twindow\x1b" if reason else None)
+
+
+@pytest.mark.asyncio
+async def test_hold_journal_keeps_reason_when_first_inventory_fails(execution, fixture, monkeypatch, tmp_path, caplog):
+    module, app, host, _attachments, adapter, claim = await build(execution, fixture, monkeypatch)
+    marker = tmp_path / "agents-hold"
+    marker.write_text("service maintenance", encoding="utf-8")
+    monkeypatch.setattr(module, "AGENTS_HOLD_PATH", marker)
+    app.state.run_store.list_inflight.side_effect = RuntimeError("inventory unavailable")
+    with pytest.raises(StorageRuntimeUnavailable):
+        await host.apply_hold()
+    messages = [record.getMessage() for record in caplog.records if "agents: held (" in record.getMessage()]
+    assert len(messages) == 1
+    assert ": service maintenance; containment incomplete)" in messages[0]
+    app.state.run_store.list_inflight.side_effect = None
+    await host.apply_hold()
+    assert claim.container_id not in adapter.containers
+    assert len([record for record in caplog.records if "agents: held (" in record.getMessage()]) == 1
+
+
+@pytest.mark.asyncio
 async def test_operator_hold_rechecks_foreign_lease_after_home_lock_wait(execution, fixture, monkeypatch, tmp_path):
     module, app, host, _attachments, adapter, claim = await build(execution, fixture, monkeypatch)
     held = tmp_path / "agents-hold"

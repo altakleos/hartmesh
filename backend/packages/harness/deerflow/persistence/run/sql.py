@@ -61,6 +61,7 @@ def _origin_kind(operation_kind: str, metadata: Any) -> str | None:
 
 class RunRepository(RunStore):
     supports_terminal_recovery = True
+    supports_cancel_attribution = True
     supports_output_receipts = True
     supports_output_inventory = True
     supports_event_producer_fencing = True
@@ -190,6 +191,7 @@ class RunRepository(RunStore):
     def _row_to_dict(row: RunRow) -> dict[str, Any]:
         d = row.to_dict()
         # Remap JSON columns to match RunStore interface
+        d.pop("cancel_actor_kind", None)
         d["metadata"] = d.pop("metadata_json", {})
         d["kwargs"] = d.pop("kwargs_json", {})
         d["run_inputs"] = d.pop("run_inputs_json", None)
@@ -1196,7 +1198,7 @@ class RunRepository(RunStore):
             return LeaseRenewal(renewed=False)
         return LeaseRenewal(renewed=True, cancel_action=row.cancel_action)
 
-    async def request_cancel(self, run_id: str, *, action: str, execution_fence=None, user_id=None) -> str | None:
+    async def request_cancel(self, run_id: str, *, action: str, execution_fence=None, user_id=None, requested_by: str | None = None) -> str | None:
         """Atomically persist the first cancellation action on an active run."""
         if action not in ("interrupt", "rollback"):
             raise ValueError(f"Unsupported cancellation action: {action}")
@@ -1207,6 +1209,15 @@ class RunRepository(RunStore):
                 from deerflow.persistence.extension_leases.fence import lock_execution_fence
 
                 await lock_execution_fence(session, execution_fence, user_id)
+            attribution = {}
+            if requested_by is not None:
+                attribution["cancel_actor_kind"] = case(
+                    (
+                        RunRow.cancel_action.is_(None) & RunRow.cancel_requested_at.is_(None),
+                        case((RunRow.user_id == requested_by, "requester"), else_="manager"),
+                    ),
+                    else_=RunRow.cancel_actor_kind,
+                )
             result = await session.execute(
                 update(RunRow)
                 .where(
@@ -1225,6 +1236,7 @@ class RunRepository(RunStore):
                     ),
                     updated_at=now,
                     change_seq=change_seq,
+                    **attribution,
                 )
                 .returning(RunRow.cancel_action)
             )

@@ -13,6 +13,8 @@ _PUBLIC_REASONS = frozenset(
         "unavailable",
         "interrupted",
         "cancelled",
+        "stopped_by_requester",
+        "stopped_by_manager",
         "source_ended",
         "start_timeout",
         "account-changed",
@@ -56,6 +58,8 @@ def bound_followup_projection(row: SubagentBatchRow, counts: Mapping[str, int]) 
     else:
         state = "ended"
     follow_up = {"state": state, "finished": counts.get("succeeded", 0) + counts.get("failed", 0), "total": row.total_items}
+    if timed_out := counts.get("timed_out", 0):
+        follow_up["timed_out"] = timed_out
     if isinstance(reason, str) and reason in _PUBLIC_REASONS:
         follow_up["reason"] = reason
     return {"follow_up": follow_up, "controls": ["cancel"] if state in ("waiting", "working") else []}

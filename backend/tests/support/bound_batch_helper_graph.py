@@ -3,6 +3,7 @@
 import asyncio
 import shlex
 from dataclasses import replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -28,7 +29,8 @@ from deerflow.sandbox.tools import write_file_tool
 
 
 @pytest.mark.asyncio
-async def test_job_helpers_use_the_employees_home_and_fenced_inventory(instances, tmp_path, monkeypatch):
+@pytest.mark.parametrize("partial", [False, True])
+async def test_job_helpers_use_the_employees_home_and_fenced_inventory(instances, tmp_path, monkeypatch, partial):
 
     agents, authority, _, _ = await conversations(instances)
     instance = await create(agents)
@@ -59,7 +61,18 @@ async def test_job_helpers_use_the_employees_home_and_fenced_inventory(instances
             path = self.local(shlex.split(command)[-2])
             return str(path.stat().st_size) if path.is_file() else "NOFILE"
 
-    repo = Repository(1)
+    class JobRepository(Repository):
+        async def get_bound_run(self, *args, **kwargs):
+            batch = await super().get_bound_run(*args, **kwargs)
+            return {**batch, "max_running_items": 1}
+
+        async def finish_bound_item(self, *args, **kwargs):
+            saved = await super().finish_bound_item(*args, **kwargs)
+            if partial:
+                self.deadline = datetime.now(UTC)
+            return saved
+
+    repo = JobRepository(2 if partial else 1)
     original = repo.claim_bound_items
 
     async def claim(*args, **kwargs):
@@ -96,9 +109,15 @@ async def test_job_helpers_use_the_employees_home_and_fenced_inventory(instances
     monkeypatch.setattr("deerflow.tools.get_available_tools", inventory)
 
     class Lead(ScriptedModel):
-        def _generate(self, *args, **kwargs):
+        def _generate(self, messages, *args, **kwargs):
             assert repo.final == 1 and len(repo.results) == 1
-            return super()._generate(*args, **kwargs)
+            deadline = [message.content for message in messages if "timed_out_item_positions" in str(message.content)]
+            if partial:
+                assert len(deadline) == 1
+                assert '"succeeded": 1, "failed": 0, "timed_out_item_positions": [1]' in deadline[0]
+            else:
+                assert not deadline
+            return super()._generate(messages, *args, **kwargs)
 
     with execution_scope(employee) as env, bind_agent_build_extensions(extensions):
         set_app_config(app_config)
@@ -112,6 +131,7 @@ async def test_job_helpers_use_the_employees_home_and_fenced_inventory(instances
         assert not any("Wrote report." in str(data) or "Employee report" in str(data) or (kind == "custom" and str(data.get("type", "")).startswith("task_")) for kind, data in stream)
         output = [data for kind, data in stream if kind == "values"][-1]
     assert output["messages"][-1].content == "Finished."
+    assert all("timed_out_item_positions" not in str(message.content) for message in output["messages"])
     from deerflow.agent_instances.contract import AgentDenied
 
     for child in helpers:

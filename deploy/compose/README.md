@@ -1952,6 +1952,15 @@ worker deadline returned HTTP 503 after 10.04 seconds while readiness returned
 HTTP 200. Container-wide memory exhaustion and adversarial documents or
 projectors remain outside the measured cases.
 
+The worker startup self-test recorded the time to load each Office projector
+and the worker process’s peak resident memory at that point.
+
+| Projector | Load time | Peak resident memory |
+| --- | ---: | ---: |
+| Workbook | 0.263 s | 26,272 KiB |
+| Document | 0.266 s | 26,280 KiB |
+| Slide deck | 0.255 s | 25,800 KiB |
+
 The signed backend image also passed a separate shared-formula workbook check.
 The installed Office preview package reported version 0.1.1 and rendered the
 adjusted formulas, saved zero and saved empty text. The workbook fixture SHA-256
@@ -3602,7 +3611,9 @@ hm logs --no-log-prefix gateway | grep 'agents: hold lifted'
 ```
 
 The Gateway reads this operator-owned file through its read-only mount. Its owner
-is `1000:1000`, mode `0640`; the optional first line appears in the journal only.
+is `1000:1000`, mode `0640`. The hold entry in the Gateway journal and the
+operator’s `ai status` include the optional first line. The journal escapes control
+characters. An empty or unreadable reason still holds execution.
 `/health` reports agents `held`. Removing it lifts the hold at admission, but
 qualification must still succeed. The next message or explicit activation starts
 work; removing the file starts no assignment.
@@ -3743,9 +3754,10 @@ The evidence tiers establish different facts. Each is recorded separately:
   during an ordinary chat, observed folder timings and the one-second target.
   First browser visits use fresh contexts on the same host. The standard mounted
   storage qualification runs separately.
-- `managed-storage` runs all 27 required native cases on real loop-mounted ext4
+- `managed-storage` runs the full native suite (37 cases at .78) on real loop-mounted ext4
   filesystems and actual containers, using the resident builder and byte-coherence
-  probes. It rejects every skip; directories and engine doubles cannot replace it.
+  probes. CI requires at least 30 cases, checks for specific scenarios by name,
+  and rejects every skip.
 - `bundle-instances` runs the shipped profile through nginx with all seven keys,
   a scripted model and 27 named acceptance cases. It checks accounts/seats,
   ordinary chats, files/publication, full-storage refusals, resident persistence,
@@ -3929,7 +3941,7 @@ It reads the rendered configuration, the row of `telegram_deployment`, the Docke
 | `people` | integer | People who own at least one link. |
 | `by_state` | object | Counts for `waiting_connect`, `connected`, `held` and `blocked`. |
 | `by_health` | object | Counts for `ok`, `token_rejected`, `conflict`, `unreachable`, `secret_unreadable`, `agent_unavailable`, `stopped` and `policy_off`. |
-| `by_kind` | object | Counts for `lead_agent`, which is the ordinary chat, and `custom_agent`. `instance` is always 0 in this release. |
+| `by_kind` | object | Counts of bot links for ordinary chats (`lead_agent`), custom agents (`custom_agent`) and personal assistants or AI employees (`instance`). The three counts sum to the number of links in the selected scope. |
 | `acts_paused` | integer | Links under the pause. |
 | `limited` | integer | Links Telegram is limiting. |
 | `tokens` | object | `current`: tokens that open under the secret; `previous`: tokens that open only under `HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS`; `unreadable`: tokens that open under neither. All three are null when `secret` is not `set`. |
@@ -3944,7 +3956,7 @@ It reads the rendered configuration, the row of `telegram_deployment`, the Docke
 | `attention[].bot_id` | integer | The Telegram bot id. |
 | `attention[].owner` | string | The owner's account id. |
 | `attention[].agent_kind` | string | `lead_agent`, `custom_agent` or `instance`. |
-| `attention[].agent_ref` | string | `lead_agent`, or the custom agent's name. |
+| `attention[].agent_ref` | string | `lead_agent`, the custom agent's name, or the assistant or employee instance ID. |
 | `attention[].origin` | string | `pasted` or `managed`. |
 | `attention[].state` | string | The link's `state`. |
 | `attention[].health` | string | The link's `health`. |
@@ -3960,7 +3972,7 @@ It reads the rendered configuration, the row of `telegram_deployment`, the Docke
 Example:
 
 ```json
-{"acts_paused": 1, "attention": [{"acts_paused_since": "2026-11-03T09:14:02+00:00", "agent_kind": "custom_agent", "agent_ref": "reader", "bot_id": 7512345678, "conflict_since": "2026-11-03T09:14:02+00:00", "health": "conflict", "last_error": null, "last_ok_at": "2026-11-03T09:12:58+00:00", "limited_since": null, "delivery_pending": 0, "delivery_degraded": false, "delivery_failed": 0, "link": "4c1f0a9e2b7d4e6f8a1c3d5e7f9b0a2c", "oldest_open_input_at": null, "open_inputs": 0, "origin": "pasted", "owner": "1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c", "polling_stale": false, "probe_until": "2026-11-04T09:14:02+00:00", "state": "connected", "token": "current", "webhook": false}], "bots": "ready", "by_health": {"agent_unavailable": 0, "conflict": 1, "ok": 11, "policy_off": 0, "secret_unreadable": 0, "stopped": 0, "token_rejected": 0, "unreachable": 0}, "by_kind": {"custom_agent": 7, "instance": 0, "lead_agent": 5}, "by_state": {"blocked": 0, "connected": 11, "held": 0, "waiting_connect": 1}, "command": "status", "enabled": true, "host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "limited": 0, "limits": {"deployment": 100, "per_person": 10}, "links": 12, "note": "telegram on: 12 bot links of 7 people; 1 needs attention; the next start would find polling running", "people": 7, "polling_state": "running", "public_base_url": "https://acme.example.com", "reason": null, "returncode": 0, "secret": "set", "this_host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "tokens": {"current": 12, "previous": 0, "unreadable": 0}, "voice": "openai"}
+{"acts_paused": 1, "attention": [{"acts_paused_since": "2026-11-03T09:14:02+00:00", "agent_kind": "custom_agent", "agent_ref": "reader", "bot_id": 7512345678, "conflict_since": "2026-11-03T09:14:02+00:00", "health": "conflict", "last_error": null, "last_ok_at": "2026-11-03T09:12:58+00:00", "limited_since": null, "delivery_pending": 0, "delivery_degraded": false, "delivery_failed": 0, "link": "4c1f0a9e2b7d4e6f8a1c3d5e7f9b0a2c", "oldest_open_input_at": null, "open_inputs": 0, "origin": "pasted", "owner": "1f9b6a2c-4d3e-4f5a-8b7c-9d0e1f2a3b4c", "polling_stale": false, "probe_until": "2026-11-04T09:14:02+00:00", "state": "connected", "token": "current", "webhook": false}], "bots": "ready", "by_health": {"agent_unavailable": 0, "conflict": 1, "ok": 11, "policy_off": 0, "secret_unreadable": 0, "stopped": 0, "token_rejected": 0, "unreachable": 0}, "by_kind": {"custom_agent": 3, "instance": 4, "lead_agent": 5}, "by_state": {"blocked": 0, "connected": 11, "held": 0, "waiting_connect": 1}, "command": "status", "enabled": true, "host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "limited": 0, "limits": {"deployment": 100, "per_person": 10}, "links": 12, "note": "telegram on: 12 bot links of 7 people; 1 needs attention; the next start would find polling running", "people": 7, "polling_state": "running", "public_base_url": "https://acme.example.com", "reason": null, "returncode": 0, "secret": "set", "this_host_id": "7b9c1e6f-4d2a-4c5e-9f0a-1b2c3d4e5f60", "tokens": {"current": 12, "previous": 0, "unreadable": 0}, "voice": "openai"}
 ```
 
 Refusal, exit 1, beside the common ones: `no account has id <value>`, with `--owner`.
@@ -4368,8 +4380,8 @@ Lines about a run do not begin with `telegram_bots`. Search for the `run` of a `
 | Record | Kept for |
 | --- | --- |
 | Bot links with their encrypted tokens | Until the person removes the bot or replaces it by the token of another bot, or `tb remove`. The deletion of a custom agent keeps the link. |
-| Three things done from a chat, with who did it and through which bot (`telegram_acts`): an answer to a blocked site's card, a voice note and a change of settings. A reply, a stop or a file is not an act; an answer's text is in `telegram_outbox`. | 400 days (`ACT_RETENTION_DAYS`). An unresolved act is kept until settled. |
-| What happened to each bot link: added, connected, token replaced, held, a conflict and its end, a rejected token, stopped, removed (`telegram_bot_link_events`) | 400 days (`LINK_EVENT_RETENTION_DAYS`); kept after the link is gone. |
+| Actions journaled from a chat, with the actor, bot and operation ID (`telegram_acts`). These include network decisions, voice notes, settings changes, instance file writes and Work actions. | 400 days (`ACT_RETENTION_DAYS`) for eligible settled actions. An unfinished delivery or continuation retains the records it needs. |
+| What happened to each bot link: added, connected, token replaced, held, a conflict and its end, a rejected token, stopped, policy off/on and removal (including agent deletion) (`telegram_bot_link_events`) | 400 days (`LINK_EVENT_RETENTION_DAYS`); kept after the link is gone. |
 | Durable replies (`telegram_outbox`), with ordered part/source references, acknowledgements, binding generation and claim ownership | At least 30 days after a row was sent, skipped or terminally failed (`OUTBOX_RETENTION_DAYS`), and longer while live callback dependencies, unfinished inputs or an unresolved attempt need it. Recoverable pending delivery is kept until settled; an immediate retry limit does not discard it. |
 | Durable inbound classification, stable action ids, exact conversation/run/output references and joined-message membership (`telegram_inbound_marks`) | Pending until settled, then seven days (`INBOUND_RETENTION_DAYS`). The row holds the person's text so that **Try again** can resend it, so that button stops working after those seven days. No raw voice audio is stored. |
 | Buttons (`telegram_callbacks`), which can hold the text sent with a file and what was typed into a form | Seven days after use, and 180 days at most. A closed prompt, which holds no typed text, stays the 180 days so that a late reply to it can be recognized. Authorization ends at 180 days or an earlier expiry. Unfinished delivery may retain bookkeeping longer without extending authority. |
@@ -4399,13 +4411,15 @@ The acts of the last seven days:
 
 ```sql
 SELECT a.created_at, a.kind, a.state, a.reason, u.email AS person, a.owner_user_id,
-       a.bot_id, a.request_id, a.id AS operation_id
+       a.bot_id, a.instance_id, a.work_id, a.request_id, a.id AS operation_id
 FROM telegram_acts a LEFT JOIN users u ON u.id = a.owner_user_id
 WHERE a.created_at >= now() - interval '7 days'
 ORDER BY a.created_at;
 ```
 
-`kind` is `network`, `voice_note` or `settings`. `state` `done` means the product recorded it, and `pending` that it has not yet. The history of one bot, by its `bot_id`, is in `telegram_bot_link_events` (`action`, `actor_id`, `created_at`), where the actor `system` is the Gateway and `host` an operator command. A bot's `conflict`, `conflict_ended`, `token_rejected` and `stopped` rows say when another program took it, when that ended, and when it stopped.
+The channel journals `network`, `voice_note`, `settings` and `file_put`. Work journals `delegate`, `edit`, `cancel`, `respond`, `route`, `decide`, `accept`, `changes_requested`, `activate`, `activate_context` and `stop`. A combined decision and resume can have a primary decision and a separate activation. Inspect each operation’s `state` and `reason`. For a Work action, `done` records a confirmed effect, `pending` and `waiting` can still need reconciliation, and `uncertain` leaves the effect unconfirmed. `refused` and `conflict` record an unsuccessful action. The journal creation time is the admission time. To see when a decision took effect, match the `decide` operation ID, instance and Work ID to `agent_work_events` and read its `created_at` timestamp.
+
+The history of one bot, by its `bot_id`, is in `telegram_bot_link_events` (`action`, `actor_id`, `created_at`), where the actor `system` is the Gateway and `host` an operator command. A bot's `conflict`, `conflict_ended`, `token_rejected` and `stopped` rows say when another program took it, when that ended, and when it stopped. The `policy_off` and `policy_on` events record employee policy availability changes. The `agent_removed` event records bot removal after confirmed agent deletion.
 
 ### What people should know about Telegram
 
@@ -4431,7 +4445,7 @@ Telegram is a service of its own, and some of what it does no setting of this pr
 
 ## MCP connections
 
-When company connections are enabled, a manager can give an AI employee or personal AI assistant a connection on its **Access** tab. It can then use the connection in conversations, assignments and work started by an approved package, without asking before each action. Anyone who can chat with the agent can ask it to send information it can read, including conversations, attachments, its files and the company’s Shared folder. The agent can also act on information returned by an outside service. Give only the connections the work needs and use a service account with limited rights. The service sees that account regardless of who asked. Helpers have no connection of their own. An administrator’s changes apply from the next action. Telegram shows the agent’s answers. Open the conversation on the web for connection activity.
+Personal chats, custom agents and schedules use the MCP connections configured for them. When company connections are enabled, a manager grants a connection to a specific personal AI assistant or AI employee on that agent’s **Access** tab. That agent can use the grant in conversations, assignments, work started by a package the operator has approved, and the final reply for an unattended large job. Each of those uses can call the service without asking for permission first. Anyone who can chat with the agent can ask it to send information it can read, including conversations, attachments, its files and the company’s Shared folder. The agent can also act on information returned by an outside service. Give only the connections the work needs and use a service account with limited rights. The service sees that account regardless of who asked. Helpers have no connection of their own. An administrator’s changes apply from the next action. Telegram shows the agent’s answers. Open the conversation on the web for connection activity.
 
 In this profile the people who administer a deployment are tenants, not its
 operator. `compose.yaml` says so to the Gateway with
@@ -4516,7 +4530,7 @@ every stored connection; the two lines are ignored by an older Gateway.
 
 Set `HARTMESH_BATCHES=on` in the tenant environment and recreate the Gateway to enable personal batches and large jobs in conversations with AI assistants and AI employees. An absent setting means `off`. Other values fail configuration rendering. The renderer owns `subagent_batches.enabled`. The shared template sets limits for agent jobs separately from the existing personal worker.
 
-In Ultra mode a large job starts after the requesting reply ends. One job occupies the conversation and a workspace execution slot. It has up to 50 checks, 15 minutes of work, and one hour to start. Personal background batches retain their existing limits and tools. Both kinds can consume additional model tokens. Telegram, assignments and schedules do not start agent jobs.
+In Ultra mode a large job starts after the requesting reply ends. The conversation stays busy until the job ends. One job occupies a workspace execution slot. It has up to 50 checks, 15 minutes of work, and one hour to start. If the checks reach their deadline, Batches shows how many missed it and marks the affected checks. The final reply uses the available results. The requester can stop the job from Batches or with Stop in the conversation. A manager can stop a running turn through the conversation's Stop control, and the requester sees that a manager stopped it. Personal background batches retain their existing limits and tools. Both kinds can consume additional model tokens. Telegram, assignments and schedules do not start agent jobs.
 
 The checks use the agent's Home and permitted web tools. People with Can chat can ask about files in that Home. The final reply can use the connections the manager granted the agent, including sending information to an external service while the requester is away. Check results, including text from the web, reach that reply. Setting `HARTMESH_AGENT_CONNECTIONS=off` removes those connection tools.
 

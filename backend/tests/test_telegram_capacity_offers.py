@@ -120,20 +120,22 @@ async def test_closed_assignment_retires_capacity_wait_without_an_offer(work_del
 
 
 @pytest.mark.asyncio
-async def test_protected_offer_reveals_complete_preview_without_starting(work_delivery, monkeypatch):
+@pytest.mark.parametrize(("locale", "teaser"), [("en-US", "A place is free. An assignment can start."), ("zh-CN", "现在有空位，可以开始一项任务。")])
+async def test_protected_offer_reveals_complete_preview_without_starting(work_delivery, monkeypatch, locale, teaser):
     from test_telegram_work_execution_outcomes import dispatch_edit
 
     from deerflow.persistence.telegram_bots.model import TelegramInstancePolicyRow
 
     e = work_delivery
     offers, old, _ = await waiting(e, monkeypatch)
+    await e.plans.settings.update(e.link.owner_user_id, locale=locale)
     async with e.db.sessions.begin() as writer:
         writer.add(TelegramInstancePolicyRow(instance_id=e.link.agent_ref, policy="protected", updated_by=e.link.owner_user_id, updated_at=e.clock.now()))
     e.identity = await offers.poll()
     await dispatch(e, 4030)
     assert not e.dispatch_errors, e.dispatch_errors
     sent = [c.parameters for c in e.channel.bot.request.calls if c.endpoint == "sendMessage"][-1]
-    assert sent["text"] == "There is news about an assignment." and sent["protect_content"]
+    assert sent["text"] == teaser and sent["protect_content"]
     show = await selected(e, "reveal")
     sources = e.channel._services.work_capacity_sources
     assert await sources.recovery.reveal(e.link, show.id, chat_id=e.link.chat_id, message_id=4030, message_thread_id=None, guard=await guard_for(e)) == e.identity

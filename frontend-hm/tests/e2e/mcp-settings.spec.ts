@@ -2,6 +2,55 @@ import { expect, test } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
 
+for (const entry of [
+  {
+    locale: "en-US",
+    settings: "Settings",
+    personal:
+      "Personal chats, custom agents and schedules use their configured connections.",
+    grants:
+      "Personal AI assistants and AI employees use the company connections granted on their Access tab.",
+    final: "the final reply for an unattended large job",
+  },
+  {
+    locale: "zh-CN",
+    settings: "设置",
+    personal: "个人对话、自定义智能体和定时任务使用各自配置的连接。",
+    grants:
+      "个人 AI 助理和 AI 员工使用在各自的“访问权限”选项卡中授予的公司连接。",
+    final: "无人值守的大型任务的最终回复",
+  },
+] as const) {
+  test(`explains connection grants in Settings in ${entry.locale}`, async ({
+    page,
+    baseURL,
+  }) => {
+    await page
+      .context()
+      .addCookies([{ name: "locale", value: entry.locale, url: baseURL! }]);
+    mockLangGraphAPI(page, { features: { agentInstancesEnabled: true } });
+    await page.route("**/api/features", (route) =>
+      route.fulfill({
+        json: {
+          agent_instances: {
+            enabled: true,
+            execution: "ready",
+            connections: true,
+          },
+        },
+      }),
+    );
+    await page.route("**/api/mcp/config", (route) =>
+      route.fulfill({ json: { mcp_servers: {} } }),
+    );
+    await page.goto("/workspace/chats/new?settings=tools");
+    const settings = page.getByRole("dialog", { name: entry.settings });
+    await expect(settings).toContainText(entry.personal);
+    await expect(settings).toContainText(entry.grants);
+    await expect(settings).toContainText(entry.final);
+  });
+}
+
 test.describe("MCP server settings", () => {
   test("edits one server without dropping advanced fields or siblings", async ({
     page,

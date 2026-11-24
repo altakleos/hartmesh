@@ -32,11 +32,18 @@ async def test_request_primary_survives_unadmitted_start(capture_environment, mo
     await asyncio.to_thread(render_compose_config, tmp_path, monkeypatch, keys={"OPENAI_API_KEY": "sk-synthetic"})
     async with installed_worker(capture_environment, monkeypatch, tmp_path) as e:
         sdk_request = e.normal.do_request
+        rate_limited_edit = None
+        rate_limit_reply = {"ok": False, "error_code": 429, "description": "Too Many Requests", "parameters": {"retry_after": 100}}
 
         async def sdk(url, method, request_data=None, **kwargs):
+            nonlocal rate_limited_edit
             if url.rsplit("/", 1)[-1] == "editMessageText" and not e.normal.replies["editMessageText"]:
                 values = request_data.parameters
-                e.normal.enqueue("editMessageText", result={"message_id": values["message_id"], "date": 1_893_456_000, "chat": {"id": values["chat_id"], "type": "private"}, "text": values["text"]})
+                if values["message_id"] == rate_limited_edit:
+                    rate_limited_edit = None
+                    e.normal.enqueue("editMessageText", status=429, body=rate_limit_reply)
+                else:
+                    e.normal.enqueue("editMessageText", result={"message_id": values["message_id"], "date": 1_893_456_000, "chat": {"id": values["chat_id"], "type": "private"}, "text": values["text"]})
             return await sdk_request(url, method, request_data, **kwargs)
 
         monkeypatch.setattr(e.normal, "do_request", sdk)
@@ -86,6 +93,7 @@ async def test_request_primary_survives_unadmitted_start(capture_environment, mo
                 await asyncio.sleep(0.05)
 
         async def deny_child(identity, **kwargs):
+            nonlocal rate_limited_edit
             if identity != control.id:
                 return await resume(identity, **kwargs)
             if entered and not captured:
@@ -101,6 +109,10 @@ async def test_request_primary_survives_unadmitted_start(capture_environment, mo
                     primary = await writer.get(TelegramOutboxRow, act.continuation["request_activation"]["outcome_id"])
                     if pending_primary:
                         assert primary.state == "pending" and all(not part["message_ids"] for part in primary.parts)
+                        if kind == "decision":
+                            # The decision receipt edits the confirmation card. The earlier question has its own edit.
+                            rate_limited_edit = primary.payload["work_outcome_basis"]["edit"]["message_id"]
+                            assert rate_limited_edit == control.message_id
                     else:
                         assert primary.state == "sent" and primary.parts[-1]["state"] == "sent"
                     assert await writer.scalar(select(AgentWorkEventRow.id).where(AgentWorkEventRow.operation_id == identity)) is not None
@@ -123,17 +135,23 @@ async def test_request_primary_survives_unadmitted_start(capture_environment, mo
         await tap(e, control, 7070)
         await e.host.work_callbacks.outcomes.observe_start_refusal(e.link, control.id, guard=e.host.notifications.chat.guard(e.channel, e.link))
         if pending_primary:
-            e.normal.enqueue("sendMessage", status=429, body={"ok": False, "error_code": 429, "description": "Too Many Requests", "parameters": {"retry_after": 100}})
+            if kind != "decision":
+                e.normal.enqueue("sendMessage", status=429, body=rate_limit_reply)
             paused[0] = False
             for _ in range(2):
                 e.clock.advance(1)
                 await tick()
                 await e.host.sender.drain()
             async with e.e.sf() as reader:
+                act = await reader.get(TelegramActRow, control.id)
+                primary_id = act.continuation["request_activation"]["outcome_id"]
+                primary = await reader.get(TelegramOutboxRow, primary_id)
+                assert primary.state == "pending" and any(part.get("dispatched_at") for part in primary.parts)
+                assert all(not part["message_ids"] for part in primary.parts)
                 fixed = await reader.scalar(select(TelegramOutboxRow).where(TelegramOutboxRow.payload["work_saved_refusal"]["act_id"].as_string() == control.id))
                 assert fixed is not None and fixed.state == "pending" and all(not part["message_ids"] for part in fixed.parts), "an actually pending primary must defer its fixed reply"
                 assert all(part.get("dispatched_at") is None for part in fixed.parts), "dependent advice cannot claim the sender before its primary"
-                assert fixed.payload["after_delivery_id"] == (await reader.get(TelegramActRow, control.id)).continuation["request_activation"]["outcome_id"]
+                assert fixed.payload["after_delivery_id"] == primary_id
                 fixed_id, fixed_intent = fixed.id, dict(fixed.payload["work_saved_refusal"])
             e.clock.advance(101)
             try:

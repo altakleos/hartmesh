@@ -1,5 +1,6 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -79,6 +80,7 @@ import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
+import { subagentBatchesKey } from "@/core/subagent-batches";
 import type { AgentTarget } from "@/core/telegram-bots/web-pages";
 import {
   useBranchThread,
@@ -110,6 +112,7 @@ import { useThreadChat } from "./use-thread-chat";
 export default function ChatPage() {
   const { t } = useI18n();
   const { user } = useAuth();
+  const queryClient = useQueryClient();
   const runInputsEnabled = useRunInputsEnabled(!!user);
   const locallyCreated = useRef<string | null>(null);
   const [batchNoticeContainer, setBatchNoticeContainer] =
@@ -224,6 +227,11 @@ export default function ChatPage() {
       setIsNewThread(false);
     },
     onFinish: (state) => {
+      if (binding) {
+        void queryClient.invalidateQueries({
+          queryKey: subagentBatchesKey(threadId),
+        });
+      }
       if (document.hidden || !document.hasFocus()) {
         let body = "Conversation finished";
         const lastMessage = state.messages.at(-1);

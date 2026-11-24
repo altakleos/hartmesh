@@ -2011,7 +2011,7 @@ without waiting for the agent’s tools to finish loading.
 
 While signed in, you can leave an assistant’s or AI employee’s Files tab during an upload and return to its original folder to see the result. If the connection drops, HartMesh checks the original operation and shows the filename the Home saved. Changing accounts or losing access clears the transfer from view.
 
-When company connections are enabled, a manager can give an AI employee or personal AI assistant a connection on its **Access** tab. It can then use the connection in conversations, assignments, work started by an approved package and the final reply for an unattended large job, without asking before each action. Anyone who can chat with the agent can ask it to send information it can read, including conversations, attachments, its files and the company’s Shared folder. The agent can also act on information returned by an outside service. Give only the connections the work needs and use a service account with limited rights. The service sees that account regardless of who asked. Helpers have no connection of their own. An administrator’s changes apply from the next action. Telegram shows the agent’s answers. Open the conversation on the web for connection activity.
+Personal chats, custom agents and schedules use the MCP connections configured for them. When company connections are enabled, a manager grants a connection to a specific personal AI assistant or AI employee on that agent’s **Access** tab. That agent can use the grant in conversations, assignments, work started by a package the operator has approved, and the final reply for an unattended large job. Each of those uses can call the service without asking for permission first. Anyone who can chat with the agent can ask it to send information it can read, including conversations, attachments, its files and the company’s Shared folder. The agent can also act on information returned by an outside service. Give only the connections the work needs and use a service account with limited rights. The service sees that account regardless of who asked. Helpers have no connection of their own. An administrator’s changes apply from the next action. Telegram shows the agent’s answers. Open the conversation on the web for connection activity.
 
 Inline MCP audio results are not supported. Stdio tools report an explicit error, matching HTTP/SSE tools, rather than treating base64 audio as a successful text result.
 When durable MCP background tasks are enabled, agents can use `list_background_tasks(status="failed")` or `status="input_required"` to find failed tasks or tasks awaiting input in the current chat. Other supported statuses are `submitted`, `working`, `completed`, and `cancelled`; omitting the status preserves existing behavior. The database applies the filter before limiting results to the 20 most recent matching tasks. When combined with `active_only=true`, both filters apply: active statuses are `submitted`, `working`, and `input_required`, so terminal statuses return an empty list. `GET /api/threads/{thread_id}/mcp-tasks` supports the same `status` and `active_only` filters before its `limit` (default 50, range 1–100); for example, `?status=failed&limit=20`. Unknown statuses return 422, and omitting the filters preserves the existing response.
@@ -2146,6 +2146,12 @@ and current access before opening setup. Setup explains shared readers and
 protected delivery, retires late replies after access changes, and offers the
 first currently connectable next target. Deletion notices remain visible until
 Settings closes. Agent avatars share Telegram bot initials and colors.
+
+In an assistant or employee chat, starting a new conversation keeps the agent’s
+memory, files and assignments. After **Confirm** or **Confirm and resume**, the
+decision receipt shows what you chose and when you decided, in your Telegram
+settings timezone. A protected availability notice reveals the assignment after
+you tap **Show**. Starting it requires a separate press.
 
 On an employee's Access tab, managers can allow Telegram, prevent forwarding and
 saving, or turn it off after confirming the connected-bot count. This policy
@@ -3958,8 +3964,11 @@ The token budget counts separate accepted model calls even when their response m
 
 In a signed-in web conversation with an AI employee, you can ask it to run up to
 50 checks on its own files and tell it what to do with the results. Open the
-job panel to see progress, read individual results or cancel the job. Checks
-run in the employee’s workspace. Its final reply can use the company
+Batches panel to see progress, read individual results or cancel the job. The
+conversation is busy until the job ends. If checks run out of time, the panel
+shows how many missed the deadline and the final reply uses the available results.
+The requester sees whether they or a manager stopped the job. Checks run in the
+employee’s workspace. Its final reply can use the company
 connections its manager granted. If HartMesh restarts after the checks finish
 and before the final reply is saved, the job stops and keeps the results.
 You can ask the employee to use them in a new message.

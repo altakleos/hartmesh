@@ -220,6 +220,30 @@ async def test_use_only_staff_can_stop_own_run_but_cannot_stop_other_requesters(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("requester", [ALICE, BOB])
+async def test_http_conversation_stop_records_authorized_actor_kind(instances, monkeypatch, requester):
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+    from deerflow.persistence.run.sql import RunRepository
+
+    agents, authority, threads, sf = await conversations(instances)
+    async with sf.kw["bind"].begin() as connection:
+        await connection.run_sync(Base.metadata.create_all, tables=[RunRow.__table__, RunChangeClockRow.__table__])
+    employee = await create(agents, custody="company", supervisor=BOB)
+    chat = await authority.create(actor=requester, instance_id=employee.id, creation_id=operation())
+    app = app_for(agents, authority, threads, monkeypatch, actor=BOB)
+    app.state.run_store = RunRepository(sf)
+    app.state.run_manager = RunManager(store=app.state.run_store)
+    run = await app.state.run_manager.create(chat["thread_id"], user_id=requester.subject_id)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", cookies={"access_token": "fixture"}) as client:
+        stopped = await client.post(f"/api/threads/{chat['thread_id']}/runs/{run.run_id}/cancel")
+    assert stopped.status_code in (202, 204), stopped.text
+    async with sf() as session:
+        row = await session.get(RunRow, run.run_id)
+        assert (row.cancel_action, row.cancel_actor_kind) == ("interrupt", "requester" if requester == BOB else "manager")
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_branch_retains_instance_and_never_clones_requester_workspace(instances, monkeypatch):
     from langchain_core.messages import AIMessage, HumanMessage
     from langgraph.checkpoint.base import uuid6

@@ -27,6 +27,8 @@ from deerflow.utils.file_io import await_drained
 def anchor(link, row, source, moved=None):
     if (row.link_id, row.owner_user_id, row.binding_generation, row.chat_id, row.work_id, row.request_id) != (link.id, link.owner_user_id, link.binding_generation, link.chat_id, source["work_id"], source["request_id"]):
         raise ProductSourceRetired()
+    if source.get("decision_anchor", row.id) != row.id:
+        raise ProductSourceRetired()
     if row.state == "skipped":
         raise ProductSourceRetired()
     if row.state != "sent":
@@ -36,7 +38,15 @@ def anchor(link, row, source, moved=None):
     if not current:
         raise ProductSourceRetired()
     last = current[-1]
-    basis, request, _recipe = frozen(SimpleNamespace(link=link, item=item, part=last), acknowledged=True)
+    if "decision_anchor" in source and item.payload.get("work_outcome_basis", {}).get("version") == 5:
+        from app.telegram_bots.work_comment_cards import acknowledged_comment
+
+        request = acknowledged_comment(link, row)
+        basis = item.payload["work_outcome_basis"]
+        concealed = False
+    else:
+        basis, request, _recipe = frozen(SimpleNamespace(link=link, item=item, part=last), acknowledged=True)
+        concealed = basis["concealed"]
     if (request.seen["request_revision"], request.seen["assignment_revision"], request.request["id"]) != (source["request_revision"], source["assignment_revision"], source["request_id"]):
         raise ProductSourceRetired()
     if len(last["message_ids"]) != 1 or type(last["message_ids"][0]) is not int:
@@ -48,7 +58,7 @@ def anchor(link, row, source, moved=None):
         "message_id": last["message_ids"][0],
         "original_message_id": last["message_ids"][0],
         "protected": bool(last.get("protect_content")),
-        "concealed": basis["concealed"],
+        "concealed": concealed,
         "html": last["html"],
         "group_id": last.get("callback_group_id"),
         "message_thread_id": row.message_thread_id,
@@ -269,7 +279,7 @@ class WorkQuestionEdits:
                         TelegramOutboxRow.link_id == link.id,
                         TelegramOutboxRow.binding_generation == link.binding_generation,
                         TelegramOutboxRow.request_id == row.request_id,
-                        TelegramOutboxRow.class_ == "question",
+                        TelegramOutboxRow.id == source["decision_anchor"] if "decision_anchor" in source else TelegramOutboxRow.class_ == "question",
                         ~TelegramOutboxRow.dedupe_key.startswith("edit:"),
                     )
                     .order_by(TelegramOutboxRow.created_at.desc(), TelegramOutboxRow.id.desc())
@@ -277,6 +287,8 @@ class WorkQuestionEdits:
                 )
             )
             matching = [parent for parent in parents if parent.payload.get("work_request_basis", {}).get("source", {}).get("seen", {}).get("request_revision") == source["request_revision"]]
+            if "decision_anchor" in source:
+                matching = parents  # anchor() proves the exact acknowledged card and revisions.
             if not matching:
                 # A conclusively retired raw question has no Telegram message
                 # to edit. Missing or ambiguous anchors must remain held.

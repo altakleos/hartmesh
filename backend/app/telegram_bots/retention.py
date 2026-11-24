@@ -78,13 +78,14 @@ def question_cleanup_anchors():
             edit.binding_generation == delivery.binding_generation,
             edit.request_id == delivery.request_id,
             edit.class_ == "question",
+            or_(delivery.class_ == "question", edit.payload["work_event_intent"]["decision_anchor"].as_string() == delivery.id),
             edit.dedupe_key.startswith("edit:"),
             edit.state.in_(("pending", "sending", "failed")),
         )
         .correlate(delivery)
         .exists()
     )
-    return select(delivery.id).where(delivery.class_ == "question", ~delivery.dedupe_key.startswith("edit:"), awaiting_cleanup)
+    return select(delivery.id).where(~delivery.dedupe_key.startswith("edit:"), awaiting_cleanup)
 
 
 async def status_cleanup_anchors(session):
@@ -365,7 +366,11 @@ async def _sweep_acts(sessions, now, *, draft_ttl_hours=24, callback_max_age_day
                 delivery.link_id == TelegramActRow.link_id,
                 delivery.binding_generation == TelegramActRow.binding_generation,
                 delivery.state.in_(("pending", "sending", "failed")),
-                or_(delivery.payload["work_outcome_basis"]["context"]["act"]["id"].as_string() == TelegramActRow.id, delivery.payload["work_execution_intent"]["act_id"].as_string() == TelegramActRow.id),
+                or_(
+                    delivery.payload["work_outcome_basis"]["context"]["act"]["id"].as_string() == TelegramActRow.id,
+                    delivery.payload["work_execution_intent"]["act_id"].as_string() == TelegramActRow.id,
+                    delivery.payload["work_event_intent"]["decision_operation"].as_string() == TelegramActRow.id,
+                ),
             )
             .exists()
         )

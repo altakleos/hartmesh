@@ -231,7 +231,7 @@ class WorkCapacityOffers(WorkNewsPlans):
                         state="pending",
                         parts=[],
                         silent=False,
-                        payload={"presentation_version": 0, "capacity_offer_intent": {"version": 1, "act_id": act.id, "ordinal": ordinal, "origin": origin}},
+                        payload={"presentation_version": 0, "capacity_offer_intent": {"version": 2, "act_id": act.id, "ordinal": ordinal, "origin": origin}},
                         message_thread_id=topic,
                         not_before=now,
                         created_at=queued_at,

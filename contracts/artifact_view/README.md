@@ -49,9 +49,11 @@ availability, with four concurrent probes and a ten-second deadline. Temporary
 failures remain uncertain and offer Retry check.
 
 Download operates on the named file. Save to My Files and Share use only the
-selected available exports and the existing individual file operations,
-partial-success messages and publication Undo. Sources and images are not
-automatically copied. If an image or source is also an explicit presented
+selected available exports. Each file has its own result, so a partial success
+identifies how many were shared. Share offers Undo when the caller can remove
+files and each newly published file has a removable publication identity and
+revision. Undo covers only files newly published by that Share action.
+Sources and images are not automatically copied. If an image or source is also an explicit presented
 export, it can be selected normally. Saving outputs does not create a portable
 rich bundle.
 

@@ -132,7 +132,8 @@ async def cancel_batch(thread_id: ThreadId, batch_id: str, request: Request) -> 
         raise HTTPException(status_code=503, detail="Subagent batch worker is not running")
     _repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id, action="cancel")
     require_cancel_permission_if(request, _batch.get("continuation_status") is not None)
-    result = await get_subagent_batch_service(request).cancel_batch(batch_id=batch_id, user_id=user_id)
+    attribution = {"requester_stop": True} if _batch.get("follow_up") else {}
+    result = await get_subagent_batch_service(request).cancel_batch(batch_id=batch_id, user_id=user_id, **attribution)
     if result is None:
         raise HTTPException(status_code=404, detail="Subagent batch not found")
     return result

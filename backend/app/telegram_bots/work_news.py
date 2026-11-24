@@ -67,13 +67,17 @@ def news_owner(payload):
 
 
 def present_news(key, *, values, locale, protected, concealed=False, outbox_id=None):
-    if key not in NEWS_KEYS | STATUS_KEYS:
+    if key not in NEWS_KEYS | STATUS_KEYS and not (key == "capacity.offer" and concealed):
         raise ValueError("unsupported-work-news")
     keyboard = []
     if concealed:
         if type(outbox_id) is not str or len(outbox_id) != 32 or any(char not in "0123456789abcdef" for char in outbox_id):
             raise ValueError("concealed-source-required")
-        html = render("concealed.progress" if key in STATUS_KEYS else concealed_attempt(key, values) if key in ATTEMPT_KEYS else "concealed.proposed" if key == "work.proposed" else "concealed.info", locale)
+        # No private field appears until Show. Capacity and proposals have
+        # distinct fixed teasers even when the assignment title is concealed.
+        teasers = {"capacity.offer": "concealed.place_free", "work.proposed": "concealed.proposed"}
+        teaser = "concealed.progress" if key in STATUS_KEYS else concealed_attempt(key, values) if key in ATTEMPT_KEYS else teasers.get(key, "concealed.info")
+        html = render(teaser, locale)
         keyboard = [[{"label": "label.show", "kind": "reveal", "target_kind": "outbox", "target_id": outbox_id, "payload": {"outbox_id": outbox_id}}]]
     else:
         html = status_html(key, values, locale) if key in STATUS_KEYS else attempt_html(key, values, locale) if key in ATTEMPT_KEYS else render(key, locale, **values)

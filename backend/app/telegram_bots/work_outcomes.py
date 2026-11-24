@@ -73,6 +73,8 @@ def present_outcome(act, *, purpose, permissions, attempt_status, locale, values
     if act.kind == "changes_requested" and act.state == "done":
         supplied["text"] = act.body["note"]
     html = render(shown.key, locale, **supplied)
+    if act.kind == "decide" and act.state == "done" and "decision_time" in supplied:
+        html = render("decide.done_line", locale, time=supplied["decision_time"], decision=act.body["note"]) + "\n\n" + html
     if shown.echo is not None:
         if file_answer is None:
             html = render("ask.saved_echo", locale, text=shown.echo) + "\n\n" + html
