@@ -22,6 +22,7 @@ from deerflow_extension_api import (
     MiddlewareContributor,
     SystemModelCallObserver,
     TaskLifecycleContributor,
+    WebChatMiddlewareRegistry,
 )
 from deerflow_extension_api import ExtensionRegistry as ExtensionRegistryContract
 from deerflow_extension_api.plugins import ArtifactPresentation, BrowserAssets, BrowserModule, PluginContribution
@@ -83,7 +84,7 @@ class LoadedExtensions:
         )
 
 
-class ExtensionRegistry(ExtensionRegistryContract):
+class ExtensionRegistry(ExtensionRegistryContract, WebChatMiddlewareRegistry):
     """Mutable, registration-phase only.
 
     Subclasses the public contract Protocol so the host implementation is
