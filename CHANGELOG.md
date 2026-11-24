@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.79] - 2026-11-24
+
+### Monthly reports
+
+- When a live input in My files or Shared changes, the next conversation reply names it and offers to rebuild the report. The existing draft keeps its original data. Uploads and imported copies keep the source data captured in the conversation.
+- Ask for a weekly or monthly revenue trend by technician or provider. The chart and table show up to six people by revenue and group the rest. The report also shows which saved choices applied to that draft.
+- Rebuilding an ordinary chat report can reuse parsed inputs. Each build reads and hashes the authorized file first. A change to the data, selected sheet, profile or parser invalidates the cached result.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.78.
+
+### Office preview measurements
+
+Office previews are opt-in. On the signed release images, median chat latency rose 9.20% and median file-listing latency rose 28.94%. File listing exceeded the 10% allowance. All three Office previews rendered and their original downloads matched the source files.
+
 ## [2.2.0+hartmesh.78] - 2026-11-23
 
 ### Workbook previews
