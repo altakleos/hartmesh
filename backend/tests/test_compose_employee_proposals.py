@@ -56,6 +56,33 @@ def turn(compose, person, instance_url, mode):
     return {"thread_id": thread, "run_id": match[1]}
 
 
+def recovery_read(detail_requests, list_responses, instance_responses, proposal, expected):
+    identity_fields = ("id", "instance_id", "base_revision", "base_generation", "candidate_digest")
+    detail_url = f"{INSTANCES}/{proposal['instance_id']}/proposals/{proposal['id']}"
+    assert len(detail_requests) <= 1
+    if detail_requests:
+        response = detail_requests[0].response()
+        if response is not None and response.status == 200:
+            card = response.json()
+            assert all(card[key] == proposal[key] for key in identity_fields)
+            assert card["status"] in ({"applying", "adopted"} if expected == "adopted" else {"declined"})
+            return {"kind": "detail", "path": detail_url, "http_status": 200, "proposal_status": card["status"]}
+
+    # A newer instance generation retires the old write's owner before its
+    # deadline. Settings remounts and reads the list under the new generation.
+    generations = set()
+    for response in instance_responses:
+        instance = response.json()
+        if instance["id"] == proposal["instance_id"] and instance["generation"] > proposal["current_generation"]:
+            generations.add(instance["generation"])
+    assert generations, "No browser instance response advanced the proposal scope"
+    for response in reversed(list_responses):
+        for card in response.json()["proposals"]:
+            if card["status"] == expected and card["current_generation"] in generations and all(card[key] == proposal[key] for key in identity_fields):
+                return {"kind": "list", "path": urlsplit(response.url).path, "http_status": 200, "proposal_status": card["status"], "generation": card["current_generation"]}
+    raise AssertionError("The new instance scope did not read the terminal proposal")
+
+
 def settings(compose, manager, instance, proposal, action, *, stale=False):
     url = f"{INSTANCES}/{instance['id']}/proposals/{proposal['id']}"
     endpoint = f"{url}/{action}"
@@ -78,6 +105,15 @@ def settings(compose, manager, instance, proposal, action, *, stale=False):
             return request.method == "POST" and urlsplit(request.url).path == endpoint
 
         writes, reads = [], []
+        list_responses, instance_responses = [], []
+
+        def record_response(response):
+            if writes and response.request.method == "GET" and response.status == 200:
+                path = urlsplit(response.url).path
+                if path == f"{INSTANCES}/{instance['id']}/proposals":
+                    list_responses.append(response)
+                elif path == f"{INSTANCES}/{instance['id']}":
+                    instance_responses.append(response)
 
         def record_request(request):
             if is_decision(request):
@@ -86,6 +122,7 @@ def settings(compose, manager, instance, proposal, action, *, stale=False):
                 reads.append(request)
 
         page.on("request", record_request)
+        page.on("response", record_response)
         started = time.monotonic()
         with page.expect_request(is_decision, timeout=30000) as issuance:
             row.get_by_role("button", name="Adopt change" if action == "adopt" else "Decline", exact=True).click()
@@ -104,13 +141,7 @@ def settings(compose, manager, instance, proposal, action, *, stale=False):
         if response is None:
             assert action == "adopt" and request.failure == "net::ERR_ABORTED", request.failure
         if response is None or response.status == 408 or response.status >= 500:
-            (read,) = reads
-            read_response = read.response()
-            assert read_response is not None and read_response.status == 200
-            card = read_response.json()
-            assert all(card[key] == proposal[key] for key in ("id", "instance_id", "base_revision", "base_generation", "candidate_digest"))
-            assert card["status"] in ({"applying", "adopted"} if action == "adopt" else {"declined"})
-            browser_read = {"path": url, "http_status": read_response.status, "proposal_status": card["status"]}
+            browser_read = recovery_read(reads, list_responses, instance_responses, proposal, expected)
         else:
             assert response.status in (200, 202)
             assert not reads
