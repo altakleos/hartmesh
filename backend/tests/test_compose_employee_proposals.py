@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -71,12 +72,18 @@ def settings(compose, manager, instance, proposal, action, *, stale=False):
             expect(row.get_by_text("Ask for a fresh proposal", exact=False)).to_be_visible()
             expect(row.get_by_role("button", name="Adopt change")).to_have_count(0)
         page.screenshot(path=Path(required("EVIDENCE")) / f"manager-proposal-{proposal['id']}.png")
-        with page.expect_response(lambda r: r.request.method == "POST" and urlsplit(r.url).path == endpoint, timeout=120000) as observed:
+
+        def is_decision(request):
+            return request.method == "POST" and urlsplit(request.url).path == endpoint
+
+        writes = []
+        page.on("request", lambda request: writes.append(request) if is_decision(request) else None)
+        started = time.monotonic()
+        with page.expect_request(is_decision, timeout=30000) as issuance:
             row.get_by_role("button", name="Adopt change" if action == "adopt" else "Decline", exact=True).click()
-        response = observed.value
-        assert response.ok
+        request = issuance.value
         body = {key: proposal[key] for key in ("base_revision", "base_generation", "candidate_digest")} if action == "adopt" else {}
-        assert response.request.post_data_json == body
+        assert request.post_data_json == body
         expected = "adopted" if action == "adopt" else "declined"
         url = endpoint.rsplit("/", 1)[0]
 
@@ -85,12 +92,31 @@ def settings(compose, manager, instance, proposal, action, *, stale=False):
             return detail if detail["status"] == expected else None
 
         detail = eventually(confirmed, timeout=120, interval=1)
-        assert detail["decided_by"] == manager.user["id"]
-        page.reload()
+        assert detail["id"] == proposal["id"] and detail["decided_by"] == manager.user["id"]
         persisted = panel.locator("article").filter(has=page.get_by_text(expected.capitalize(), exact=True)).filter(has=page.get_by_text("Proposed setting · " + proposed, exact=True))
-        expect(persisted.get_by_text(proposal["base_revision"], exact=True)).to_be_visible(timeout=60000)
+        terminal = persisted.get_by_text(proposal["base_revision"], exact=True)
+        # Native fencing can outlast the browser write timeout. Follow the
+        # manager's read-only status recovery without issuing a second write.
+        refresh = panel.get_by_role("alert").get_by_role("button", name="Refresh", exact=True)
+        expect(terminal.or_(refresh).first).to_be_visible(timeout=60000)
+        if refresh.is_visible():
+            refresh.click()
+        expect(terminal).to_be_visible(timeout=60000)
+        response = request.response()
+        if response is None:
+            assert action == "adopt" and request.failure == "net::ERR_ABORTED", request.failure
+        else:
+            assert response.status in (200, 202)
+        page.screenshot(path=Path(required("EVIDENCE")) / f"manager-{expected}-{proposal['id']}.png")
+        page.reload()
+        expect(terminal).to_be_visible(timeout=60000)
+        assert len(writes) == 1
         assert manager.request("GET", url).json() == detail
-        return detail
+        if action == "adopt":
+            history = manager.request("GET", f"{INSTANCES}/{instance['id']}/lifecycle").json()["operations"]
+            (committed,) = [entry for entry in history if entry["operation_id"] == detail["operation_id"]]
+            assert committed["action"] == "adopt" and committed["complete"] and not committed["abandoned"]
+        return {**detail, "browser_write": response.status if response else request.failure, "confirmed_seconds": round(time.monotonic() - started, 2)}
 
 
 def open_proposal(manager, url):

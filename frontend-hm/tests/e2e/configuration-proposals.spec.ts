@@ -1,12 +1,10 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { workInstance } from "../fixtures/agent-work";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
 
-test("manager can inspect, adopt, and reload an employee proposal", async ({
-  page,
-}) => {
+async function reviewProposal(page: Page, lostReceipt: boolean) {
   const instance = { ...workInstance(), custody: "company", permissions: 7 };
   const base = "/api/agent-instances/" + instance.id;
   const id = "a".repeat(32);
@@ -88,7 +86,9 @@ test("manager can inspect, adopt, and reload an employee proposal", async ({
   await page.route("**" + base + "/proposals/" + id + "/adopt", (route) => {
     writes.push(route.request().postDataJSON());
     adopted = true;
-    return route.fulfill({ json: proposal() });
+    return lostReceipt
+      ? route.abort("aborted")
+      : route.fulfill({ json: proposal() });
   });
   await page.goto(
     "/workspace/instances?instance=" + instance.id + "&tab=settings",
@@ -100,6 +100,11 @@ test("manager can inspect, adopt, and reload an employee proposal", async ({
   await expect(panel).toContainText("Customer orders");
   expect(writes).toHaveLength(0);
   await panel.getByRole("button", { name: "Adopt change" }).click();
+  if (lostReceipt) {
+    const alert = panel.getByRole("alert");
+    await expect(alert).toContainText("Check the proposal again");
+    await alert.getByRole("button", { name: "Refresh" }).click();
+  }
   await expect(panel.getByText("Adopted", { exact: true })).toBeVisible();
   await page.reload();
   await expect(panel.getByText("Adopted", { exact: true })).toBeVisible();
@@ -116,4 +121,15 @@ test("manager can inspect, adopt, and reload an employee proposal", async ({
       candidate_digest: candidate,
     },
   ]);
+}
+test("manager can inspect, adopt, and reload an employee proposal", async ({
+  page,
+}) => {
+  await reviewProposal(page, false);
+});
+
+test("manager can recover a committed proposal after the write response is lost", async ({
+  page,
+}) => {
+  await reviewProposal(page, true);
 });
