@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In My files and Company shared, **Open containing folder** shows the matching file alongside its siblings. Back returns to your search. Use **Locations** to leave an agent Home even while its listing is busy or unavailable.
 - Publishing and removing a shared conversation each use one retry budget of up to a minute when Shared is busy, beginning with the first storage check. Each retry checks current access.
 - If a shared conversation's manifest is damaged or unreadable, its page can show up to 50 current entries from its published folder. Opening an entry checks access and the exact publication again. The share dialog explains file and path limits and shows where to export a transcript for someone outside the company.
+- Starting an employee run no longer briefly makes its Home unavailable while the Gateway saves the run’s assembly record.
+
+### Telegram
+
+- When HartMesh detects a duplicate Telegram poller, it waits for an in-flight polling status write to finish before saving the pause. Polling stays paused after a Gateway restart.
 
 ### Schema changes
 

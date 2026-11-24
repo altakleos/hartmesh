@@ -19,6 +19,7 @@ from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, Agent
 from deerflow.persistence.spaces.files import SpaceBackingRow
 from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceMountRow, StorageHostReplacementRow
 from deerflow.persistence.spaces.model import SpaceRow
+from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
 from deerflow.sandbox.lease import run_sync_lifecycle_operation
 from deerflow.spaces.attachments import AttachmentPending, ResourceMount
 from deerflow.spaces.chat_paths import ChatStoragePaths
@@ -472,36 +473,77 @@ class ResidentRuntime:
         if len({row["run_id"] for row in rows}) != len(rows):
             raise ValueError("Ambiguous durable run inventory")
 
+    @staticmethod
+    def _run_mismatch(local, row):
+        if local is None:
+            return "local-missing"
+        if local.task is None:
+            return "task-missing"
+        if local.task.done():
+            return "task-done"
+        if local.ownership_lost:
+            return "ownership-lost"
+        if row.get("owner_worker_id") != local.owner_worker_id:
+            return "worker"
+        if row.get("thread_id") != local.thread_id:
+            return "thread"
+        if row.get("user_id") != local.user_id:
+            return "user"
+        if local.metadata != row.get("metadata", {}):
+            return "metadata"
+        return None
+
     async def inventory_runs(self):
         """Read all durable inflight rows; a census grants no lease takeover."""
+        manager = self.registry.run_manager
+        refreshed = {}
         try:
-            rows = await self.app.state.run_store.list_inflight()
+            store = self.app.state.run_store
+            rows = await store.list_inflight()
             self._validate_run_snapshot(rows)
+            for index, row in enumerate(rows):
+                local = manager._runs.get(row["run_id"])
+                if self._run_mismatch(local, row) != "metadata":
+                    continue
+                durable = row.get("metadata", {})
+                current = local.metadata
+                if not isinstance(current, dict) or (EVIDENCE_KEY in current) == (EVIDENCE_KEY in durable):
+                    continue
+                if {k: v for k, v in current.items() if k != EVIDENCE_KEY} != {k: v for k, v in durable.items() if k != EVIDENCE_KEY}:
+                    continue
+                # The census can straddle the immutable assembly publication.
+                # Only the publisher's store and gate can disambiguate it.
+                task, captured_metadata = local.task, dict(current)
+                fresh = await manager.read_published_snapshot(row["run_id"], store=store)
+                refreshed[index] = local, task, captured_metadata, fresh
+            if manager is not self.registry.run_manager or store is not self.app.state.run_store:
+                raise ValueError("Resident run inventory changed owners during the census")
         except Exception as exc:
             self.invalidate_accounting("run-inventory-error")
             raise StorageRuntimeUnavailable("The complete durable inflight run inventory is unavailable") from exc
-        manager = self.registry.run_manager
+
         foreign = set()
         mismatches = set()
-        for row in rows:
+        # Compare every local holder in one event-loop turn after all durable I/O.
+        for index, row in enumerate(rows):
             local = manager._runs.get(row["run_id"])
-            mismatch = None
-            if local is None:
-                mismatch = "local-missing"
-            elif local.task is None:
-                mismatch = "task-missing"
-            elif local.task.done():
-                mismatch = "task-done"
-            elif local.ownership_lost:
-                mismatch = "ownership-lost"
-            elif local.metadata != row.get("metadata", {}):
-                mismatch = "metadata"
-            elif row.get("owner_worker_id") != local.owner_worker_id:
-                mismatch = "worker"
-            elif row.get("thread_id") != local.thread_id:
-                mismatch = "thread"
-            elif row.get("user_id") != local.user_id:
-                mismatch = "user"
+            if index in refreshed:
+                original, task, captured_metadata, fresh = refreshed[index]
+                if (
+                    local is not original
+                    or local.task is not task
+                    or not isinstance(fresh, dict)
+                    or fresh.get("status") not in ("pending", "running")
+                    or fresh.get("metadata") not in (row.get("metadata", {}), captured_metadata)
+                    or any(fresh.get(key) != row.get(key) for key in ("run_id", "thread_id", "user_id", "owner_worker_id"))
+                ):
+                    mismatch = "snapshot-changed"
+                else:
+                    mismatch = self._run_mismatch(local, fresh)
+                    if mismatch is None:
+                        rows[index] = fresh
+            else:
+                mismatch = self._run_mismatch(local, row)
             if mismatch is not None:
                 foreign.add(row["run_id"])
                 mismatches.add(mismatch)
