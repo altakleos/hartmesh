@@ -194,6 +194,30 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
 - **Environment validation** uses `@t3-oss/env-nextjs` with Zod schemas (`src/env.js`). Skip with `SKIP_ENV_VALIDATION=1`
 - **Subtask step history and runtime metadata** (`core/tasks/`) — the subtask card shows a subagent's full step timeline (#3779): its assistant reasoning turns interleaved with the tools it ran. The task tool's model-visible `description` is an optional progress label; `MessageList` uses the required `prompt` (then the localized generic subtask label) when a provider omits it, so a valid task call never renders a blank card title. `Subtask.steps[]` is accumulated live from `task_running` events (appended via `mergeSteps`, not overwritten) and backfilled on expand for historical runs by `fetchSubtaskSteps`, which pages the events endpoint scoped to one task (GET `/runs/{runId}/events?event_types=subagent.step&task_id=…&after_seq=…`) until a short page, so the run-wide limit can't truncate the timeline. `task_started` carries the effective `model_name`; `task_running` carries a cumulative usage snapshot after each completed LLM call. `core/tasks/lifecycle.ts` normalizes these additive events, and `computeNextSubtask` keeps the largest cumulative total so replayed or late SSE frames cannot double-count or roll the folded card backward. Terminal ToolMessage metadata (`subagent_model_name` / `subagent_token_usage`) restores the same values from normal history after reload; no per-card event fetch is needed. `core/tasks/steps.ts` is the pure step model: `messageToStep` (live), `eventsToSteps` (reload), `mergeSteps` (dedup by `message_index`), and `stepsForDisplay` (what the card renders — keeps tool steps + AI steps with text, drops the trailing final-answer AI step when completed since it's shown as `result`). `core/tasks/context.tsx`'s `useUpdateSubtask` applies updates against a `tasksRef` mirroring the latest state (not a closure snapshot), so a late-resolving `fetchSubtaskSteps` backfill merges into current state instead of clobbering SSE steps or sibling subtasks that arrived meanwhile. The owning `run_id` is carried onto history content messages in `buildVisibleHistoryMessages` so the card can resolve the events endpoint.
 
+### Employee Settings and Work
+
+Employee configuration proposals use the installed feature flag and current Inspect + Manage.
+Show the captured diff beside the current revision. Adopt sends the reviewed digest and
+generation. After a lost response, read the submitted proposal once under the same
+action scope. An uncertain decision can be refreshed manually.
+
+Work controls separate delegation, explicit activation and review. Use+Inspect delegates with adopted
+policy defaults; Manage+Inspect changes assignments and reviews exact statements.
+Retain uncertain mutation bodies/IDs, retire actions on account/permission changes,
+and capture revisions for drafts and acknowledgements. Source projections carry
+read-only availability metadata: strip it from command DTOs and require explicit
+consent before replacing unavailable references. Definition policy settings do not
+change an existing instance until deliberate adoption. Activation requires current
+Use+Inspect plus run/agent ceilings. Preserve conversation creation and activation
+identities across unknown replies; receipt recovery never changes the bound thread.
+Unresolved attempts prohibit replacement. Polling preserves captured draft/review
+bases. Candidate reports are separate from submitted outcomes; a response starts no
+run. Work Stop captures its attempt/revisions; guarded retries never stop a replacement.
+Stopping/uncertain recovery stays collapsed under Advanced and requires exact
+completed containment receipts and current Home ADMIN. Work and Attention use
+Space content URLs with exact paths. Current grants determine recipients. Requests and
+replies remain available during execution holds and never start work.
+
 ### Interaction Ownership
 
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
