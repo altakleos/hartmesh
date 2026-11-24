@@ -857,19 +857,26 @@ class BotLinkRepository:
             async with reader_session(self.session_factory) as session:
                 row = await session.get(TelegramBotLinkRow, link_id)
                 return _snapshot(row) if row is not None and row.token_revision == token_revision else None
-        try:
-            owner = await self._owner_of(link_id)
-        except ValueError:
-            return None
-        async with self._owner_writer(owner) as session:
-            row = await session.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link_id, TelegramBotLinkRow.owner_user_id == owner).with_for_update())
-            if row is None or row.token_revision != token_revision:
+        from deerflow.utils.file_io import await_drained
+
+        # A cancelled native SELECT inside the SQLite writer can retain its lock
+        # past rollback. Finish this captured token's status transaction first.
+        async def write():
+            try:
+                owner = await self._owner_of(link_id)
+            except ValueError:
                 return None
-            for key, value in facts.items():
-                setattr(row, key, value)
-            row.updated_at = _now()
-            await session.flush()
-            return _snapshot(row)
+            async with self._owner_writer(owner) as session:
+                row = await session.scalar(select(TelegramBotLinkRow).where(TelegramBotLinkRow.id == link_id, TelegramBotLinkRow.owner_user_id == owner).with_for_update())
+                if row is None or row.token_revision != token_revision:
+                    return None
+                for key, value in facts.items():
+                    setattr(row, key, value)
+                row.updated_at = _now()
+                await session.flush()
+                return _snapshot(row)
+
+        return await await_drained(write())
 
     async def _end_codes(self, session: AsyncSession, link_id: str, owner: str) -> None:
         self._borrow(session, owner)

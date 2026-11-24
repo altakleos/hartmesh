@@ -5,7 +5,9 @@ operations, and retain an audit backup. Downgrade retains a used table after con
 Historical Work and adopted definition documents keep their original bytes.
 
 Revision `0057_run_cancel_actor_kind` adds the nullable first-accepted
-conversation Stop role. Older rows keep an unspecified role.
+conversation Stop role. Older rows keep an unspecified role. Legacy metadata
+bootstrap can create this column before Alembic reaches 0057. The guarded
+upgrade preserves an existing column and its values.
 
 Revision `0056_upstream_adoption` joins HartMesh's published
 `0053_work_operation_indexes` and upstream `0055_thread_shares` without DDL.

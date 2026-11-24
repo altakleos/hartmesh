@@ -19,7 +19,8 @@ REVISION = "0057_run_cancel_actor_kind"
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-async def test_upgrade_and_downgrade_keep_historical_run_and_cancel_action(tmp_path, backend):
+@pytest.mark.parametrize("preexisting", [False, True], ids=["new-column", "preexisting-column"])
+async def test_upgrade_and_downgrade_keep_historical_run_and_cancel_action(tmp_path, backend, preexisting):
     schema = None
     if backend == "sqlite":
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'upgrade.db'}")
@@ -48,10 +49,14 @@ async def test_upgrade_and_downgrade_keep_historical_run_and_cancel_action(tmp_p
                     lead_agent_tokens,subagent_tokens,middleware_tokens,created_at,updated_at
                 ) VALUES ('old','thread','alice','interrupted','reject','{}','{}','interrupt',CURRENT_TIMESTAMP,0,0,0,0,0,0,0,0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)""")
             )
+            if preexisting:
+                await conn.execute(text("ALTER TABLE runs ADD COLUMN cancel_actor_kind VARCHAR(16)"))
+                await conn.execute(text("UPDATE runs SET cancel_actor_kind='requester' WHERE run_id='old'"))
         await asyncio.to_thread(command.upgrade, config, REVISION)
         async with engine.begin() as conn:
             assert "cancel_actor_kind" in await conn.run_sync(run_columns)
-            assert (await conn.execute(text("SELECT cancel_action,cancel_actor_kind FROM runs WHERE run_id='old'"))).one() == ("interrupt", None)
+            expected_role = "requester" if preexisting else None
+            assert (await conn.execute(text("SELECT cancel_action,cancel_actor_kind FROM runs WHERE run_id='old'"))).one() == ("interrupt", expected_role)
             await conn.execute(text("UPDATE runs SET cancel_actor_kind='manager' WHERE run_id='old'"))
         await asyncio.to_thread(command.downgrade, config, PREVIOUS)
         async with engine.connect() as conn:

@@ -1906,6 +1906,36 @@ DROP TABLE IF EXISTS hm_message_search_threads;
 DROP FUNCTION IF EXISTS hm_message_search_forget_coverage();
 ```
 
+### Preview measurements for v2.2.0+hartmesh.79
+
+Office previews are opt-in. The signed-image run took place on 2026-11-24.
+The signed-image measurement exceeded the 10% latency allowance for file listing.
+Each row shows the median of five signed-in requests on hosted Linux.
+
+| Operation | Baseline | During preview work | Change |
+| --- | ---: | ---: | ---: |
+| Chat turn | 321.910 ms | 351.523 ms | 9.20% |
+| File listing | 8.433 ms | 10.874 ms | 28.94% |
+
+The workbook, document and slide deck projected in 358, 399 and 393 ms.
+All three original downloads matched their source hashes. Of 12
+overlapping previews, 3 completed and 9 returned the busy response.
+Browser Retry succeeded. Gateway memory peaked at 303.36 MiB before previews and
+329.39 MiB after the burst, a 26.03 MiB increase against a 288 MiB allowance.
+The Gateway ran with 2 CPUs, 1088 MiB of memory,
+0 MiB of swap and a 2048-process limit. The worker
+deadline returned HTTP 503 after 10.05 seconds while readiness
+returned HTTP 200. Container-wide memory exhaustion and adversarial documents or
+projectors remain outside the measured cases.
+
+Both running images came from source `c9b1506ad7d603ad78708b66dd71da6638398802`.
+The backend digest was `sha256:d78468efdc7b67aa612765654b3b6fc8c2fdf59b69ffd4216c630787dfc72bf5`.
+The frontend digest was `sha256:95f91a914e99bf1d1b40d59d16b2b92bda9ce62b582009df0184143c4fb1b55a`.
+The measurement archive SHA-256 was
+`9d54d24d7c86a3677d99e0f3df8cd115a15e7881da9857d2497842241ec463ec`.
+[Candidate build](https://github.com/altakleos/hartmesh/actions/runs/45302134786) ·
+[Preview measurement, attempt 1](https://github.com/altakleos/hartmesh/actions/runs/45303897739/attempts/1)
+
 ### Preview measurements for v2.2.0+hartmesh.78
 
 Office previews are opt-in. The signed-image measurement exceeded the 10% latency
