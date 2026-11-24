@@ -4,7 +4,7 @@
 resident exact-replay probes too. An existing runless promise may still launch;
 its original consent must pass the final borrowed Work transaction.
 
-Storage and operator CLI: [guide](../../../docs/STORAGE_SPACES.md).
+[Storage and CLI](../../../docs/STORAGE_SPACES.md), [snapshot reads](../../../docs/STORAGE_SPACES.md#workspace-files).
 Startup and periodic storage maintenance may repair a bound Home directory
 under lifecycle exclusion. Keep operator inspection read-only. Resident
 confirmation and idle accounting are covered in [the registry guide](../../docs/RESIDENT_REGISTRY.md).
@@ -226,5 +226,3 @@ remain unregistered. Project memory requires explicit enablement; its legacy SQL
 API passes `hm.projects` storage admission and returns 501 for plugin-owned
 projects until their memory adapter exists. A from-chat Goal refreshes Manage
 before model disclosure and after synthesis, before its checkpoint CAS.
-
-On a snapshot detail read, a live host manifest with unreadable bytes or an unknown format may list up to 50 current names in its Shared folder. Resolve it from the exact publication record under ordinary Shared read admission. All snapshot operations require a verified manifest.
