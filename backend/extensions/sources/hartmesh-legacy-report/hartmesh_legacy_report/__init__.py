@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from deerflow_extension_api import AgentScope, ArtifactPresentation, BrowserAssets, MiddlewarePlacement, Placement, PluginContribution, extension
+from deerflow_extension_api import AgentScope, ArtifactPresentation, BrowserAssets, MiddlewarePlacement, Placement, PluginContribution, WebChatMiddlewareRegistry, extension
 
 from .projection import project_report
 
@@ -19,6 +19,8 @@ def install(registry, config):
     enabled = config.get("enabled", True)
     if type(enabled) is not bool or set(config) - {"enabled"}:
         raise ValueError("Configure only a boolean enabled value")
+    if enabled and (not isinstance(registry, WebChatMiddlewareRegistry) or registry.web_chat_middlewares(_FreshnessContributor()) is not True):
+        raise RuntimeError("Report source notices require web chat middleware support")
     accepted = registry.plugin(
         PluginContribution(
             namespace="hartmesh.legacy-report",
@@ -42,5 +44,3 @@ def install(registry, config):
     )
     if accepted is not True:
         raise RuntimeError("Historical report presentation requires the artifact plugin host")
-    if enabled and registry.web_chat_middlewares(_FreshnessContributor()) is not True:
-        raise RuntimeError("Report source notices require web chat middleware support")
