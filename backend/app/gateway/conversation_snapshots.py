@@ -3,7 +3,6 @@
 import os
 from collections import OrderedDict
 from dataclasses import replace
-from pathlib import PurePosixPath
 from threading import Lock
 from typing import Literal
 
@@ -18,11 +17,13 @@ from app.gateway.routers._file_http import acting_user_id
 from app.gateway.routers.agent_instances import _actor, _require_ready, _service
 from app.gateway.snapshot_manifest import MANIFEST_LIMIT, MANIFEST_SOURCE, SnapshotAgent, SnapshotManifest, SnapshotMember, SnapshotMessage, SnapshotModel, digest_of_bytes, member_record, parse_manifest
 from app.gateway.storage_features import current_feature_service, storage_feature
+from app.gateway.transcript import transcript_stem
 from deerflow.agent_instances.contract import AgentDenied, AgentPermission, ExecutionUnavailable
 from deerflow.config.paths import get_paths
 from deerflow.features.paths import FeaturePaths
 from deerflow.files import resolve_shared_file
-from deerflow.files.store import StoreError, open_regular_source
+from deerflow.files.folders import read_folder
+from deerflow.files.store import SafeFileAccessUnavailable, StoreError, open_regular_source
 from deerflow.persistence.shared_publications.model import SharedPublicationRow
 from deerflow.spaces.contract import Permission
 from deerflow.spaces.filesystem import UnsafeSpacePath
@@ -34,6 +35,13 @@ class SnapshotSummary(SnapshotModel):
     title: str
     publisher: str | None
     published_at: str
+
+
+class SnapshotFolder(SnapshotModel):
+    publication_id: str
+    folder: str
+    entries: list[str]
+    truncated: bool
 
 
 class SharedMember(SnapshotMember):
@@ -120,11 +128,21 @@ _cache_lock = Lock()
 _manifest_cache: OrderedDict[tuple, SnapshotManifest] = OrderedDict()
 
 
-def _manifest_document(row):
-    if row.get("from_path") != MANIFEST_SOURCE or not row.get("from_thread_id") or not 0 < row["size"] <= MANIFEST_LIMIT:
+def _manifest_folder(row):
+    if row.get("from_path") != MANIFEST_SOURCE or not row.get("from_thread_id"):
         return None
-    parts = PurePosixPath(row["path"]).parts
-    if len(parts) != 3 or parts[0] != "Conversations" or parts[2] != "conversation.json" or not parts[1].endswith(" · " + row["sha256"][:8]):
+    parts = row["path"].split("/")
+    if len(parts) != 3 or parts[0] != "Conversations" or parts[2] != "conversation.json":
+        return None
+    suffix = " · " + row["sha256"][:8]
+    stem, separator, tail = parts[1].rpartition(suffix)
+    if not separator or tail or len(stem) > 80 or stem != transcript_stem(stem):
+        return None
+    return "/".join(parts[:2])
+
+
+def _manifest_document(row):
+    if not _manifest_folder(row) or not 0 < row["size"] <= MANIFEST_LIMIT:
         return None
     try:
         with os.fdopen(_open_shared(row["path"]), "rb") as f:
@@ -163,12 +181,12 @@ def _member_bytes_match(row):
         return False
 
 
-async def _reader(request, publication_id):
-    from app.gateway.routers.shared import _publisher_names
+async def _reader(request, publication_id, *, allow_folder):
+    from app.gateway.routers.shared import _publisher_names, _shared_mutation
 
     repo = get_shared_publications_repo(request)
     row = await repo.publication(publication_id)
-    if row is None or row.get("from_path") != MANIFEST_SOURCE or not row.get("from_thread_id"):
+    if not row or not (folder := _manifest_folder(row)):
         raise _not_found()
     names = await _publisher_names([row])
     publisher = names.get(row["published_by"])
@@ -179,6 +197,16 @@ async def _reader(request, publication_id):
         raise _not_found()
     doc = await run_file_io(_manifest_document, row)
     if not doc:
+        if allow_folder:
+            async with _shared_mutation(repo):
+                try:
+                    page = await run_file_io(read_folder, None, folder, 50)
+                except (FileNotFoundError, SafeFileAccessUnavailable):
+                    raise _not_found() from None
+                current = await repo.live_publication(row["path"])
+                if current and current["publication_id"] == publication_id:
+                    names = [file.name for file in page.files] + [path.rsplit("/", 1)[-1] + "/" for path in page.folders]
+                    return SnapshotFolder(publication_id=publication_id, folder=folder, entries=sorted(names), truncated=page.truncated)
         raise _not_found()
     prefix = row["path"].rsplit("/", 1)[0] + "/"
     records = await repo.live_publications(paths=[prefix + item.path for item in (doc.transcript, *doc.files)])
@@ -216,8 +244,8 @@ async def _reader(request, publication_id):
 
 @require_permission("threads", "read")
 @storage_feature("hm.shared")
-async def read_snapshot(request: Request, publication_id: str):
-    return await _reader(request, publication_id)
+async def read_snapshot(request: Request, publication_id: str, *, allow_folder: bool = False):
+    return await _reader(request, publication_id, allow_folder=allow_folder)
 
 
 @require_permission("threads", "read")

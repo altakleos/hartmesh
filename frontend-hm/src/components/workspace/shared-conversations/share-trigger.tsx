@@ -42,11 +42,13 @@ interface ShareAgent {
 export function ShareConversationTrigger({
   thread,
   company,
+  canExport,
   agent,
 }: {
   agent?: ShareAgent;
   thread: string;
   company: string | null;
+  canExport: boolean;
 }) {
   const access = useSharing();
   const w = useSnapshotCopy();
@@ -91,6 +93,7 @@ export function ShareConversationTrigger({
       agent={agent}
       thread={thread}
       company={company}
+      canExport={canExport}
       scope={access.scope}
       canUndo={access.canUndo}
     />
@@ -99,6 +102,7 @@ export function ShareConversationTrigger({
 function ShareDialog({
   thread,
   company,
+  canExport,
   scope,
   canUndo,
   agent,
@@ -106,6 +110,7 @@ function ShareDialog({
   agent?: ShareAgent;
   thread: string;
   company: string | null;
+  canExport: boolean;
   scope: string;
   canUndo: boolean;
 }) {
@@ -219,6 +224,7 @@ function ShareDialog({
           </DialogDescription>
         </DialogHeader>
         <p>{w.freeze}</p>
+        {canExport && <p>{w.outside}</p>}
         {draft.isFetching ? (
           <p role="status">{w.loading}</p>
         ) : draft.isError ? (

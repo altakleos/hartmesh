@@ -1,5 +1,6 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
+import { browserFolder } from "@/core/file-areas/browser";
 
 import type {
   ContinueResult,
@@ -39,6 +40,39 @@ export class SnapshotError extends Error {
     );
   }
 }
+export function snapshotRecoveryFolder(error: unknown, publication: string) {
+  if (!(error instanceof SnapshotError) || error.status !== 404) return null;
+  const detail = error.detail;
+  if (
+    !detail ||
+    typeof detail !== "object" ||
+    !("code" in detail) ||
+    detail.code !== "snapshot-folder-available" ||
+    !("publication_id" in detail) ||
+    detail.publication_id !== publication ||
+    !("folder" in detail) ||
+    typeof detail.folder !== "string" ||
+    !("entries" in detail) ||
+    !Array.isArray(detail.entries) ||
+    detail.entries.length > 50 ||
+    !detail.entries.every(
+      (name: unknown): name is string =>
+        typeof name === "string" && /^[^/]+\/?$/u.test(name),
+    ) ||
+    !("truncated" in detail) ||
+    typeof detail.truncated !== "boolean" ||
+    !/^Conversations\/[^/]+ · [a-f0-9]{8}$/u.test(detail.folder)
+  )
+    return null;
+  return browserFolder(detail.folder) === detail.folder
+    ? {
+        path: detail.folder,
+        entries: detail.entries,
+        truncated: detail.truncated,
+      }
+    : null;
+}
+
 async function json<T>(
   path: string,
   signal: AbortSignal,

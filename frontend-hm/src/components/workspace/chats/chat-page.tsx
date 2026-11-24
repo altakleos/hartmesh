@@ -12,7 +12,10 @@ import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { BrowserTrigger } from "@/components/workspace/browser-view";
 import { ContextUsageBadge } from "@/components/workspace/context-usage-badge";
 import { ConversationExtensionActions } from "@/components/workspace/conversation-extension-actions";
-import { ExportTrigger } from "@/components/workspace/export-trigger";
+import {
+  canExportTranscript,
+  ExportTrigger,
+} from "@/components/workspace/export-trigger";
 import { GoalStatus } from "@/components/workspace/goal-status";
 import {
   InputBox,
@@ -638,6 +641,7 @@ export default function ChatPage() {
                       hasCeiling(user.permissions, "threads:write")) ||
                       !!binding) && (
                       <ShareConversationTrigger
+                        canExport={canExportTranscript(thread.messages.length)}
                         thread={threadId}
                         company={branding.companyName}
                         agent={

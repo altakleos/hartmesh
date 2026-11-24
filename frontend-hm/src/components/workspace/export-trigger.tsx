@@ -22,6 +22,10 @@ import {
 import { useThread } from "./messages/context";
 import { Tooltip } from "./tooltip";
 
+export function canExportTranscript(messageCount: number) {
+  return messageCount > 0 && !isStaticWebsiteOnly();
+}
+
 export function ExportTrigger({ threadId }: { threadId: string }) {
   const { t } = useI18n();
   const { thread } = useThread();
@@ -49,7 +53,7 @@ export function ExportTrigger({ threadId }: { threadId: string }) {
   );
 
   // The Gateway writes the transcript; a static demo has none to ask.
-  if (messages.length === 0 || isStaticWebsiteOnly()) {
+  if (!canExportTranscript(messages.length)) {
     return null;
   }
 

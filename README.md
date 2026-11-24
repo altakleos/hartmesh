@@ -335,9 +335,11 @@ selects the monthly-review starter, and tenant starter overrides still take prio
 
 Workspace Files and an agent’s Files tab use the same file browser on phones, tablets and
 desktops. **Locations** opens My files, Company shared, and the agent homes
-you can inspect. Open a folder or search the loaded files; **More actions**
-shows the full path, current audience, and available actions. The address and
-Back button preserve your location. Agent searches filter the current folder.
+you can inspect. If the current Home listing is busy or unavailable, use Locations
+to leave it. In search results, **Open containing folder** shows the file alongside
+its siblings. Back restores the search and focuses the result's folder button.
+**More actions** shows the full path, current audience, and available actions.
+The address preserves your folder. Agent searches filter the current folder.
 On supported Gateways, opening My files or Company shared loads the current
 folder, including groups that contain a visible file. Entering a search loads the available files across that location. Folder
 listings and search results each indicate when they reach their own limit.
@@ -4773,7 +4775,9 @@ and the [request contract](backend/docs/API.md#referencing-a-previous-conversati
 
 Open the conversation and select **Share with everyone**. For a conversation with an AI assistant or AI employee, you need both **Can manage** and **Can see all work**. The confirmation lists the participants HartMesh can identify and which files the agent handed back in that conversation. Review their current names and sizes before confirming. A file in the agent’s Home can change after the message that first presented it.
 
-Anyone with access to Company shared can read the published messages and download those files. Open and Download use the exact publication shown in the shared conversation. If someone removes or replaces the transcript or a file, its link reports that it is no longer available. Later messages and edits stay in the original conversation. You can remove the published copy from Company shared.
+Anyone with access to Company shared can read the published messages and download those files. Open and Download use the exact publication shown in the shared conversation. If someone removes or replaces the transcript or a file, its link reports that it is no longer available. Later messages and edits stay in the original conversation. You can remove the published copy from Company shared. If another operation is changing Shared, publishing and removal retry from the first storage check and share one wait budget of up to a minute.
+
+If the published conversation cannot be read, its page lists the current contents of its Shared folder. Open **View current folder files** to browse the folder. For a recipient outside the company, use **Export** in the conversation header to download the transcript.
 
 ### Continue a shared conversation
 

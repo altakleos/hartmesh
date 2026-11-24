@@ -2,11 +2,11 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import Field
 
 from app.gateway.authz import require_permission
-from app.gateway.conversation_snapshots import SharedSnapshot, read_collection, read_snapshot
+from app.gateway.conversation_snapshots import SharedSnapshot, SnapshotFolder, read_collection, read_snapshot
 from app.gateway.snapshot_file_response import SnapshotMemberResponse
 from app.gateway.snapshot_manifest import Digest, SnapshotModel
 from app.gateway.snapshot_publication import ShareRequest, draft, publish_snapshot, remove_snapshot
@@ -48,7 +48,10 @@ async def snapshots(request: Request, response: Response, limit: int = Query(100
 @router.get("/{publication_id}", response_model=SharedSnapshot)
 async def snapshot(publication_id: str, request: Request, response: Response):
     response.headers["Cache-Control"] = "private, no-store"
-    return await read_snapshot(request=request, publication_id=publication_id)
+    detail = await read_snapshot(request=request, publication_id=publication_id, allow_folder=True)
+    if isinstance(detail, SnapshotFolder):
+        raise HTTPException(404, {"code": "snapshot-folder-available", **detail.model_dump()}, headers={"Cache-Control": "private, no-store"})
+    return detail
 
 
 @router.get("/{publication_id}/members/{member_id}", response_class=Response)

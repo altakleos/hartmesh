@@ -8,6 +8,16 @@ export function useSnapshotCopy() {
   return {
     locale,
     product,
+    damaged: zh
+      ? "无法读取此对话的快照。你可以查看共享文件夹中当前的文件。"
+      : "The shared conversation could not be read. These are the current contents of its Shared folder.",
+    moreFolderFiles: zh
+      ? "此处仅显示部分文件夹内容。"
+      : "Only part of the folder is shown here.",
+    folderFiles: zh ? "查看文件夹中的当前文件" : "View current folder files",
+    outside: zh
+      ? "如需发送给公司外部的人员，请使用对话标题栏中的“导出”下载对话记录。"
+      : "For someone outside the company, use Export in the conversation header to download the transcript.",
     group: zh ? "对话" : "Conversations",
     share: zh ? "与所有人分享" : "Share with everyone",
     shareConversation: zh
@@ -208,7 +218,41 @@ export function useSnapshotCopy() {
                 ? "此对话尚无可分享的消息。"
                 : "This conversation has no messages to share.";
             case "snapshot-file-count":
+              return zh
+                ? "每份共享副本最多包含 64 个文件。"
+                : "A shared copy can include up to 64 files.";
             case "snapshot-path-limit":
+              return zh
+                ? "共享目标文件夹路径超过 1,024 个字符。请缩短嵌套文件夹名称。"
+                : "The destination folder path exceeds 1,024 characters. Shorten the nested folder names.";
+            case "snapshot-path-depth":
+              return zh
+                ? "共享文件路径最多包含 16 段（包括文件名）。请减少嵌套文件夹。"
+                : "A Shared file path can have up to 16 parts, including its name. Use fewer nested folders.";
+            case "snapshot-source-path-limit":
+              return zh
+                ? "源文件路径超过 4,096 个字符。请缩短文件或文件夹名称。"
+                : "A source file path exceeds 4,096 characters. Shorten its file or folder names.";
+            case "snapshot-message-count":
+              return zh
+                ? "每份共享副本最多包含 10,000 条消息。"
+                : "A shared copy can include up to 10,000 messages.";
+            case "snapshot-manifest-limit":
+              return zh
+                ? "包含消息和文件清单的快照数据超过 10 MiB。"
+                : "The snapshot manifest, including messages and file details, exceeds 10 MiB.";
+            case "snapshot-transcript-limit":
+              return zh
+                ? "Markdown 对话记录超过 10 MiB。"
+                : "The Markdown transcript exceeds 10 MiB.";
+            case "snapshot-file-limit":
+              return zh
+                ? "单个共享文件不能超过 20 MiB。"
+                : "An individual shared file exceeds 20 MiB.";
+            case "snapshot-total-limit":
+              return zh
+                ? "要共享的文件总大小超过 100 MiB。"
+                : "The files to share exceed 100 MiB in total.";
             case "snapshot-limit":
               return zh
                 ? "此对话超出单次分享的限制。"
