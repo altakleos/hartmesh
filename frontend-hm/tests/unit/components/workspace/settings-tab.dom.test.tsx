@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -12,6 +13,8 @@ import {
 rs.mock("next/navigation", () => ({ useRouter: () => ({ push: state.push }) }));
 const state = rs.hoisted(() => ({
   held: false,
+  proposals: false,
+  readOnly: false,
   push: rs.fn(),
   refresh: rs.fn(),
 }));
@@ -20,13 +23,16 @@ rs.mock("@/core/auth/AuthProvider", () => ({
     user: {
       id: "reader",
       system_role: "admin",
-      permissions: ["agents:read", "agents:write"],
+      permissions: state.readOnly
+        ? ["agents:read"]
+        : ["agents:read", "agents:write"],
     },
   }),
 }));
 rs.mock("@/core/features", () => ({
   useAgentInstances: () => ({
     known: true,
+    configurationProposals: state.proposals,
     enabled: true,
     execution: state.held ? "unavailable" : "ready",
     reason: state.held ? "operator-hold" : null,
@@ -86,6 +92,12 @@ rs.mock("@/core/agent-instances/api", () => {
   };
 });
 
+rs.mock("@/core/agent-instances/proposals", () => ({
+  listProposals: rs.fn(),
+  getProposal: rs.fn(),
+  decideProposal: rs.fn(),
+}));
+
 rs.mock("@/core/agents/api", () => {
   const actual = rs.requireActual<typeof definitions>("@/core/agents/api");
   return {
@@ -103,6 +115,7 @@ import {
 } from "@/components/workspace/instances/lifecycle-actions";
 import { SettingsTab } from "@/components/workspace/instances/settings-tab";
 import * as api from "@/core/agent-instances/api";
+import * as proposals from "@/core/agent-instances/proposals";
 import * as definitions from "@/core/agents/api";
 import type { Agent as definitionsAgent } from "@/core/agents/types";
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
@@ -159,6 +172,8 @@ function show(
 }
 beforeEach(() => {
   state.held = false;
+  state.readOnly = false;
+  state.proposals = false;
   rs.mocked(definitions.getAgent)
     .mockReset()
     .mockResolvedValue({ name: "researcher" } as definitionsAgent);
@@ -498,4 +513,323 @@ test("a successful retry of Pause closes that exact confirmation", async () => {
   expect(rs.mocked(api.changeInstanceLifecycle).mock.calls[1]![1]).toEqual(
     rs.mocked(api.changeInstanceLifecycle).mock.calls[0]![1],
   );
+});
+
+const proposal = {
+  id: "proposal",
+  instance_id: agent.id,
+  employee_name: agent.name,
+  field: "work_policy.enabled",
+  proposed_value: true,
+  base_value: false,
+  current_value: false,
+  base_generation: 1,
+  current_generation: 1,
+  base_revision: "original-revision",
+  current_revision: "original-revision",
+  candidate_digest: "candidate",
+  created_at: "2026-09-01T09:00:00Z",
+  decided_at: null,
+  decided_by: null,
+  resolved_by: null,
+  operation_id: null,
+  status: "open",
+  stale: false,
+  adopt_blocked_reason: null,
+  effective_work_policy: {
+    enabled: true,
+    default_priority: "normal",
+    review_required: true,
+    allow_derived: false,
+    max_derived_per_activation: 0,
+    responsibilities: [],
+  },
+} as const;
+
+test("a company manager reviews the proposed Work policy and adopts only the displayed revision", async () => {
+  state.proposals = true;
+  const row = {
+    ...proposal,
+    effective_work_policy: {
+      ...proposal.effective_work_policy,
+      responsibilities: [],
+    },
+  };
+  rs.mocked(proposals.listProposals)
+    .mockReset()
+    .mockResolvedValue({ proposals: [row], next_cursor: null });
+  rs.mocked(proposals.decideProposal)
+    .mockReset()
+    .mockResolvedValue({ ...row, status: "applying" });
+  show(7, "active", { custody: "company" });
+  const panel = await screen.findByRole("region", {
+    name: "Configuration proposals",
+  });
+  await within(panel).findByText("original-revision", { exact: false });
+  expect(
+    within(panel).getByText("At proposal time · Off", { exact: false }),
+  ).toBeDefined();
+  expect(proposals.decideProposal).not.toHaveBeenCalled();
+  fireEvent.click(within(panel).getByRole("button", { name: "Adopt change" }));
+  await waitFor(() =>
+    expect(proposals.decideProposal).toHaveBeenCalledWith(
+      agent.id,
+      "proposal",
+      "adopt",
+      {
+        base_generation: 1,
+        base_revision: "original-revision",
+        candidate_digest: "candidate",
+      },
+      expect.any(AbortSignal),
+    ),
+  );
+  await within(panel).findByText("Applying", { exact: true });
+});
+
+test("a stale proposal allows decline and does not offer adoption", async () => {
+  state.proposals = true;
+  const row = {
+    ...proposal,
+    stale: true,
+    adopt_blocked_reason: "stale" as const,
+    current_revision: "new-revision",
+    effective_work_policy: {
+      ...proposal.effective_work_policy,
+      responsibilities: [],
+    },
+  };
+  rs.mocked(proposals.listProposals)
+    .mockReset()
+    .mockResolvedValue({ proposals: [row], next_cursor: null });
+  rs.mocked(proposals.decideProposal)
+    .mockReset()
+    .mockResolvedValue({ ...row, status: "declined" });
+  show(7, "active", { custody: "company" });
+  const panel = await screen.findByRole("region", {
+    name: "Configuration proposals",
+  });
+  await within(panel).findByText("new-revision", { exact: false });
+  expect(
+    within(panel).queryByRole("button", { name: "Adopt change" }),
+  ).toBeNull();
+  fireEvent.click(within(panel).getByRole("button", { name: "Decline" }));
+  await waitFor(() =>
+    expect(proposals.decideProposal).toHaveBeenCalledWith(
+      agent.id,
+      "proposal",
+      "decline",
+      {},
+      expect.any(AbortSignal),
+    ),
+  );
+  await within(panel).findByText("Declined", { exact: true });
+});
+
+test.each([
+  [false, 7, "company"],
+  [true, 7, "personal"],
+  [true, 2, "company"],
+] as const)(
+  "proposal list stays scoped to the installed company management surface",
+  async (enabled, permissions, custody) => {
+    state.proposals = enabled;
+    rs.mocked(proposals.listProposals).mockReset();
+    show(permissions, "active", { custody });
+    expect(
+      screen.queryByRole("region", { name: "Configuration proposals" }),
+    ).toBeNull();
+    expect(proposals.listProposals).not.toHaveBeenCalled();
+  },
+);
+
+test("a review-only session can page through proposals without submitting a decision", async () => {
+  state.proposals = true;
+  state.readOnly = true;
+  const row = {
+    ...proposal,
+    effective_work_policy: {
+      ...proposal.effective_work_policy,
+      responsibilities: [],
+    },
+  };
+  const list = rs
+    .mocked(proposals.listProposals)
+    .mockReset()
+    .mockResolvedValueOnce({ proposals: [row], next_cursor: "next" })
+    .mockResolvedValueOnce({
+      proposals: [{ ...row, id: "other", status: "declined" }],
+      next_cursor: null,
+    });
+  show(7, "active", { custody: "company" });
+  const panel = await screen.findByRole("region", {
+    name: "Configuration proposals",
+  });
+  const more = await within(panel).findByRole("button");
+  expect(
+    within(panel).queryByRole("button", { name: "Adopt change" }),
+  ).toBeNull();
+  expect(within(panel).queryByRole("button", { name: "Decline" })).toBeNull();
+  fireEvent.click(more);
+  await within(panel).findByText("Declined", { exact: true });
+  expect(list).toHaveBeenLastCalledWith(
+    agent.id,
+    "next",
+    expect.any(AbortSignal),
+  );
+});
+
+test.each([
+  ["applying", "Applying", new Error("Lost response")],
+  ["declined", "Declined", new Error("Lost response")],
+  ["adopted", "Adopted", new api.InstanceApiError(408, "Request timeout")],
+] as const)(
+  "a lost decision shows the current %s proposal without another click",
+  async (status, label, failure) => {
+    state.proposals = true;
+    const row = {
+      ...proposal,
+      effective_work_policy: {
+        ...proposal.effective_work_policy,
+        responsibilities: [],
+      },
+    };
+    rs.mocked(proposals.listProposals)
+      .mockReset()
+      .mockResolvedValue({ proposals: [row], next_cursor: null });
+    const decide = rs
+      .mocked(proposals.decideProposal)
+      .mockReset()
+      .mockRejectedValue(failure);
+    const read = rs
+      .mocked(proposals.getProposal)
+      .mockReset()
+      .mockResolvedValue({
+        ...row,
+        status,
+        decided_by: "colleague",
+        decided_at: proposal.created_at,
+      });
+    show(7, "active", { custody: "company" });
+    const panel = await screen.findByRole("region", {
+      name: "Configuration proposals",
+    });
+    fireEvent.click(
+      await within(panel).findByRole("button", { name: "Adopt change" }),
+    );
+    await within(panel).findByText(label);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(decide).toHaveBeenCalledTimes(1);
+    expect(
+      within(panel).queryByRole("button", { name: "Adopt change" }),
+    ).toBeNull();
+  },
+);
+
+test.each(["open", "unreadable", "wrong revision", "wrong phase"] as const)(
+  "a %s adoption receipt is reconciled by reading and never resubmitted automatically",
+  async (result) => {
+    state.proposals = true;
+    const row = {
+      ...proposal,
+      effective_work_policy: {
+        ...proposal.effective_work_policy,
+        responsibilities: [],
+      },
+    };
+    rs.mocked(proposals.listProposals)
+      .mockReset()
+      .mockResolvedValueOnce({ proposals: [row], next_cursor: null })
+      .mockResolvedValue({
+        proposals: [{ ...row, status: "adopted", current_value: true }],
+        next_cursor: null,
+      });
+    const decide = rs.mocked(proposals.decideProposal).mockReset();
+    const read = rs.mocked(proposals.getProposal).mockReset();
+    if (result === "wrong phase") decide.mockResolvedValue(row);
+    else {
+      decide.mockRejectedValue(new Error("connection lost"));
+      if (result === "unreadable")
+        read.mockRejectedValue(new api.InstanceApiError(403, "Grant changed"));
+      else if (result === "wrong revision")
+        read.mockResolvedValue({
+          ...row,
+          status: "adopted",
+          base_revision: "other",
+        });
+      else read.mockResolvedValue(row);
+    }
+    show(7, "active", { custody: "company" });
+    const panel = await screen.findByRole("region", {
+      name: "Configuration proposals",
+    });
+    fireEvent.click(
+      await within(panel).findByRole("button", { name: "Adopt change" }),
+    );
+    const alert = await within(panel).findByRole("alert");
+    expect(read).toHaveBeenCalledTimes(result === "wrong phase" ? 0 : 1);
+    if (result !== "wrong phase")
+      expect(read).toHaveBeenCalledWith(
+        agent.id,
+        row.id,
+        expect.any(AbortSignal),
+      );
+    expect(
+      within(panel).queryByRole("button", { name: "Adopt change" }),
+    ).toBeNull();
+    fireEvent.click(within(alert).getByRole("button"));
+    await within(panel).findByText("Adopted");
+    expect(decide).toHaveBeenCalledTimes(1);
+  },
+);
+
+test("a list read started before adoption cannot replace the applying receipt", async () => {
+  state.proposals = true;
+  const row = {
+    ...proposal,
+    effective_work_policy: {
+      ...proposal.effective_work_policy,
+      responsibilities: [],
+    },
+  };
+  const page = { proposals: [row], next_cursor: null };
+  let resolveList!: (value: typeof page) => void;
+  const pending = new Promise<typeof page>((resolve) => {
+    resolveList = resolve;
+  });
+  const list = rs
+    .mocked(proposals.listProposals)
+    .mockReset()
+    .mockResolvedValueOnce(page)
+    .mockReturnValueOnce(pending)
+    .mockResolvedValue({
+      ...page,
+      proposals: [{ ...row, status: "applying" }],
+    });
+  rs.mocked(proposals.decideProposal)
+    .mockReset()
+    .mockResolvedValue({ ...row, status: "applying" });
+  const { client } = show(7, "active", { custody: "company" });
+  const panel = await screen.findByRole("region", {
+    name: "Configuration proposals",
+  });
+  const adopt = await within(panel).findByRole("button", {
+    name: "Adopt change",
+  });
+  const staleRead = client.refetchQueries({
+    queryKey: ["employee-configuration-proposals"],
+  });
+  await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+  fireEvent.click(adopt);
+  await within(panel).findByText("Applying", { exact: true });
+  await act(async () => {
+    resolveList(page);
+    await staleRead;
+  });
+  await waitFor(() =>
+    expect(
+      within(panel).queryByRole("button", { name: "Adopt change" }),
+    ).toBeNull(),
+  );
+  expect(within(panel).getByText("Applying", { exact: true })).toBeDefined();
 });

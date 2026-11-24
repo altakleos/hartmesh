@@ -709,13 +709,14 @@ class SpaceAttachments:
 
         return await await_drained(perform())
 
-    async def retire(self, *, actor, space_id, expected_generation, reason, operation_id=None, attachment_ids=None, admission=None):
+    async def retire(self, *, actor, space_id, expected_generation, reason, operation_id=None, attachment_ids=None, admission=None, admission_guard=None):
         """ADMIN authorizes containment, including RO handles, on this resource.
 
         Removing the entire environment also closes its other resource handles.
         It changes no membership or custody. Never erase attachment records.
         A host-only admission callback adds domain conditions/intent in the first
-        qualified ADMIN transaction, before any containment effect.
+        qualified ADMIN transaction, before any containment effect. Its optional
+        host guard serializes admission until that transaction has committed.
         """
         if not isinstance(reason, str) or reason not in HUMAN_FENCE_REASONS:
             raise ValueError("Human retirement requires a human closure reason")
@@ -747,7 +748,9 @@ class SpaceAttachments:
                 # ADMIN on one root closes the entire native environment; it
                 # does not require new grants on its other captured roots.
                 space_ids = sorted({space_id} | {fact[0] for facts in scope.values() for fact in facts})
-                async with AsyncExitStack() as stack:
+                async with AsyncExitStack() as stack, AsyncExitStack() as guarded:
+                    if admission_guard is not None:
+                        await guarded.enter_async_context(admission_guard)
                     native, parent_ids = await self._containment(stack, scope, space_ids)
                     async with self.registry.host_locked(parent_ids) as (session, parents):
                         if set(parents) != set(parent_ids):
@@ -775,6 +778,7 @@ class SpaceAttachments:
                                 continue
                             self._record_closure(record, kind="human", subject_id=actor.subject_id, reason=reason)
                             record.phase = "fence_pending"
+                    await guarded.aclose()
                     confirmed = []
                     async with self.registry.host_locked(parent_ids) as (session, parents):
                         if set(parents) != set(parent_ids):

@@ -90,6 +90,7 @@ export interface FeaturesResponse {
   };
   accounts?: { seats?: { allowed?: unknown; in_use?: unknown } };
   agent_instances?: {
+    configuration_proposals?: unknown;
     connections?: unknown;
     enabled?: unknown;
     execution?: unknown;
@@ -253,6 +254,7 @@ export const EXECUTION_REASONS = [
 ] as const;
 export type ExecutionReason = (typeof EXECUTION_REASONS)[number];
 export interface AgentInstancesFeature {
+  configurationProposals?: boolean;
   connections?: boolean;
   known: boolean;
   enabled: boolean;
@@ -289,6 +291,9 @@ export function selectAgentInstances(
   return {
     known: true,
     enabled: agents.enabled,
+    ...(agents.enabled && agents.configuration_proposals === true
+      ? { configurationProposals: true }
+      : {}),
     ...(agents.enabled && agents.connections === true
       ? { connections: true }
       : {}),

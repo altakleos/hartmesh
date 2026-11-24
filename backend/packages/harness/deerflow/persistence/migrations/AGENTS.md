@@ -1,9 +1,15 @@
-Current head `0057_run_cancel_actor_kind` appends a nullable run column for
-first-accepted conversation Stop attribution. Old rows keep an unspecified role.
-Legacy metadata bootstrap can create this column before Alembic reaches 0057.
-The guarded upgrade preserves an existing column and its values.
+Current head `0058_agent_proposals` follows `0057_run_cancel_actor_kind`.
+It adds one instance-owned proposal table. Before rollback disable new
+proposals and decisions, reconcile or explicitly abandon linked lifecycle
+operations, and retain an audit backup. Downgrade retains a used table after confirming its linked intents are terminal.
+Historical Work and adopted definition documents keep their original bytes.
 
-`0056_upstream_adoption` joins HartMesh's published
+Revision `0057_run_cancel_actor_kind` adds the nullable first-accepted
+conversation Stop role. Older rows keep an unspecified role. Legacy metadata
+bootstrap can create this column before Alembic reaches 0057. The guarded
+upgrade preserves an existing column and its values.
+
+Revision `0056_upstream_adoption` joins HartMesh's published
 `0053_work_operation_indexes` and upstream `0055_thread_shares` without DDL.
 Upstream0053 approvals,0054 project memory and0055 share tables retain their
 original ancestry; schema availability does not enable deferred runtime/routes.

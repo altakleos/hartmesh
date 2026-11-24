@@ -129,6 +129,15 @@ class ExtensionRegistry(ExtensionRegistryContract, WebChatMiddlewareRegistry):
     def plugin(self, contribution: PluginContribution) -> bool:
         if not isinstance(contribution, PluginContribution) or type(contribution.api_version) is not int or contribution.api_version not in (1, 2, 3, 4, 5):
             raise ValueError("Unsupported plugin contract")
+        if contribution.proposal_api_version is not None or contribution.proposal_tool is not None:
+            if contribution.api_version != 5 or type(contribution.proposal_api_version) is not int or contribution.proposal_api_version != 1:
+                raise ValueError("Employee proposals require plugin contract v5 and proposal API v1")
+            if contribution.proposal_tool is not None:
+                if contribution.proposal_tool.purpose != "business":
+                    raise ValueError("A resident proposal tool cannot manage a deployment")
+                schema = {"type": "object", "properties": {"enabled": {"type": "boolean"}}, "required": ["enabled"], "additionalProperties": False}
+                if contribution.proposal_tool.input_schema != schema:
+                    raise ValueError("Proposal API v1 requires the single Boolean enabled field")
         if contribution.human_input_api_version is not None:
             if contribution.api_version != 5 or type(contribution.human_input_api_version) is not int or contribution.human_input_api_version != 1:
                 raise ValueError("Human input actions require plugin contract v5 and human input API v1")
@@ -148,13 +157,13 @@ class ExtensionRegistry(ExtensionRegistryContract, WebChatMiddlewareRegistry):
 
             if not isinstance(contribution.storage_controller, StorageController) or contribution.storage_api_version != 1:
                 raise ValueError("A storage controller requires a typed resource contract")
-        if not contribution.frontend and not contribution.backend and not contribution.tools and not contribution.artifacts:
+        if not contribution.frontend and not contribution.backend and not contribution.tools and not contribution.artifacts and contribution.proposal_tool is None:
             raise ValueError("A plugin must contribute a browser module, backend action or tool")
         self._validate_artifact_presentations(contribution)
         from deerflow.extensions.plugin_tools import validate_schema
 
         tool_names = set()
-        for tool in contribution.tools:
+        for tool in (*contribution.tools, *((contribution.proposal_tool,) if contribution.proposal_tool is not None else ())):
             if not isinstance(tool.purpose, str) or tool.purpose not in {"business", "management"}:
                 raise ValueError("Unsupported model tool purpose")
             if tool.purpose == "management" and contribution.api_version not in (3, 4, 5):

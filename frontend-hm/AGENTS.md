@@ -27,22 +27,7 @@ Viewer-scoped `/api/search` is cancellable; demos filter locally. Agent files us
 Conversation attachments stay local to chat. The account workspace owns Home uploads and rechecks grants, incarnation and receipts across routes. Pickers send destination references. Browse inspectable agents on demand. Confirm Home copies, omit source titles, reconcile by ID; verify receipt, Home and execution.
 Binding discovery hides ordinary artifacts and preserves selection. Confirmed bindings retire the panel. Verify breadcrumb custody. Inspect opens produced files. Browser, sidecar and scheduling are personal. Use instance memory APIs. Agent batch controls come from the Gateway. Startup notices stay outside history.
 Company targets start empty; transfer data explicitly through admitted APIs.
-Work controls separate delegation, explicit activation and review. Use+Inspect delegates with adopted
-policy defaults; Manage+Inspect changes assignments and reviews exact statements.
-Retain uncertain mutation bodies/IDs, retire actions on account/permission changes,
-and capture revisions for drafts and acknowledgements. Source projections carry
-read-only availability metadata: strip it from command DTOs and require explicit
-consent before replacing unavailable references. Definition policy settings do not
-change an existing instance until deliberate adoption. Activation requires current
-Use+Inspect plus run/agent ceilings. Preserve conversation creation and activation
-identities across unknown replies; receipt recovery never changes the bound thread.
-Unresolved attempts prohibit replacement. Polling preserves captured draft/review
-bases. Candidate reports are separate from submitted outcomes; a response starts no
-run. Work Stop captures its attempt/revisions; guarded retries never stop a replacement.
-Stopping/uncertain recovery stays collapsed under Advanced and requires exact
-completed containment receipts and current Home ADMIN. Work and Attention use
-Space content URLs with exact paths. Current grants determine recipients. Requests and
-replies remain available during execution holds and never start work.
+Employee Settings and Work follow the [source guidance](src/AGENTS.md#employee-settings-and-work).
 
 `/workspace/spaces` uses account-scoped queries and host grants. Send captured
 generation/SHA for edits and attachment IDs for retirement; preserve conflict

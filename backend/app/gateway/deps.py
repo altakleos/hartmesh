@@ -40,7 +40,7 @@ from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVER
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.capture_io import CaptureIOCleanupError
 from deerflow.runtime.runs.store.base import RunStore
-from deerflow.utils.file_io import await_drained
+from deerflow.utils.file_io import await_drained, run_file_io
 
 logger = logging.getLogger(__name__)
 
@@ -1578,7 +1578,7 @@ async def get_current_user_from_request(request: Request):
     return await resolve_session_cookie(request)
 
 
-async def resolve_session_cookie(request: Request):
+async def resolve_session_cookie(request: Request, *, session=None):
     """Resolve the original cookie against the current account and token version."""
     from app.gateway.auth import decode_token
     from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError, token_error_to_code
@@ -1597,8 +1597,11 @@ async def resolve_session_cookie(request: Request):
             detail=AuthErrorResponse(code=token_error_to_code(payload), message=f"Token error: {payload.value}").model_dump(),
         )
 
-    provider = get_local_provider()
-    user = await provider.get_user(payload.sub)
+    if session is None:
+        user = await get_local_provider().get_user(payload.sub)
+    else:
+        repository = get_user_repo()
+        user = await repository.get_user_by_id(payload.sub, session=session) if repository is not None else None
     if user is None:
         raise HTTPException(
             status_code=401,
@@ -1609,7 +1612,7 @@ async def resolve_session_cookie(request: Request):
     # both verdicts of the shared post-lookup validator: the password and
     # PAT paths reject at their own surfaces; OAuth provisioning rejects at
     # resolve time.
-    error = validate_resolved_session_user(user, payload)
+    error = await run_file_io(validate_resolved_session_user, user, payload)
     if error is not None:
         raise HTTPException(
             status_code=401,
@@ -1624,7 +1627,7 @@ async def resolve_session_cookie(request: Request):
     # until it expires. An account the deployer turned off is refused the
     # same way, and one whose setup is pending reaches only the routes that
     # complete it.
-    require_live_account(user, completing_setup=get_request_route_path(request).rstrip("/") in SETUP_ROUTES)
+    await run_file_io(require_live_account, user, completing_setup=get_request_route_path(request).rstrip("/") in SETUP_ROUTES)
 
     return user
 
