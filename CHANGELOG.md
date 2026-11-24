@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.81] - 2026-11-24
+
+### Employee jobs and connections
+
+- Submitting a large job tells the requester that the conversation will be busy. The progress panel and the employee's final reply can identify checks that reached their deadline. When a person stops a job, the panel distinguishes a requester stop from a manager stop when that role was recorded.
+- Settings explains which configured connections are available to personal chats, custom agents and schedules. It also explains which company connections a manager can grant to an AI assistant or employee, including for a final reply while the requester is away.
+
+### Telegram and operator diagnostics
+
+- Confirming a Work decision in Telegram updates the original request with the decision and its time. Protected capacity notices let the recipient choose whether to show details. Starting a new employee chat explains that files, memory and assignments carry over.
+- The Gateway journal records the operator's emergency-hold reason when it detects the hold, including when a later containment step needs another attempt. Operator guidance covers current Telegram counts and actions, when Undo is available for a published file, native storage test coverage and measured Office preview startup costs.
+
+### Schema changes
+
+Since v2.2.0+hartmesh.80, revision `0057_run_cancel_actor_kind` adds the nullable `runs.cancel_actor_kind` column. Existing runs retain their stored cancellation action and have no recorded role. The Gateway applies the migration during startup. Downgrading the schema drops recorded role attribution and preserves the cancellation action.
+
 ## [2.2.0+hartmesh.80] - 2026-11-24
 
 ### Workspace files and shared conversations
