@@ -214,9 +214,13 @@ def test_employee_submission_requires_an_authorized_human_decision(compose, sess
         with signed_in_browser(compose, session) as page:
             requests = []
             page.on("request", lambda r: requests.append(urlsplit(r.url).path))
-            page.goto(f"{compose.url}/workspace/instances?instance={instance['id']}&tab=settings")
-            expect(page.get_by_text("Instructions", exact=True).first).to_be_visible(timeout=60000)
-            expect(page.get_by_role("region", name="Configuration proposals")).to_have_count(0)
+            with page.expect_response(lambda response: response.request.method == "GET" and urlsplit(response.url).path == "/api/features", timeout=60000) as discovery:
+                page.goto(f"{compose.url}/workspace/instances?instance={instance['id']}&tab=settings")
+            assert discovery.value.ok and discovery.value.json()["agent_instances"]["configuration_proposals"] is False
+            settings_tab = page.get_by_role("tabpanel", name="Settings", exact=True)
+            expect(settings_tab.get_by_role("textbox", name="Name", exact=True)).to_have_value("Assignment reviewer updated", timeout=60000)
+            expect(settings_tab.get_by_role("textbox", name="Brief", exact=True)).to_have_value("Review tracked assignments with the manager.", timeout=60000)
+            expect(settings_tab.get_by_role("region", name="Configuration proposals")).to_have_count(0)
             assert url + "/proposals" not in requests
         turn(compose, member, url, "package-off")
         evidence["package_off"] = True
