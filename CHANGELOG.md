@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No database schema changes since v2.2.0+hartmesh.78.
 
+### Office preview measurements
+
+Office previews are opt-in. On the signed release images, median chat latency rose 9.20% and median file-listing latency rose 28.94%. File listing exceeded the 10% allowance. All three Office previews rendered and their original downloads matched the source files.
+
 ## [2.2.0+hartmesh.78] - 2026-11-23
 
 ### Workbook previews
