@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.80] - 2026-11-24
+
+### Workspace files and shared conversations
+
+- In My files and Company shared, **Open containing folder** shows the matching file alongside its siblings. Back returns to your search. Use **Locations** to leave an agent Home even while its listing is busy or unavailable.
+- Publishing and removing a shared conversation each use one retry budget of up to a minute when Shared is busy, beginning with the first storage check. Each retry checks current access.
+- If a shared conversation's manifest is damaged or unreadable, its page can show up to 50 current entries from its published folder. Opening an entry checks access and the exact publication again. The share dialog explains file and path limits and shows where to export a transcript for someone outside the company.
+- Starting an employee run no longer briefly makes its Home unavailable while the Gateway saves the run’s assembly record.
+
+### Telegram
+
+- When HartMesh detects a duplicate Telegram poller, it waits for an in-flight polling status write to finish before saving the pause. Polling stays paused after a Gateway restart.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.79.
+
+## [2.2.0+hartmesh.79] - 2026-11-24
+
+### Monthly reports
+
+- When a live input in My files or Shared changes, the next conversation reply names it and offers to rebuild the report. The existing draft keeps its original data. Uploads and imported copies keep the source data captured in the conversation.
+- Ask for a weekly or monthly revenue trend by technician or provider. The chart and table show up to six people by revenue and group the rest. The report also shows which saved choices applied to that draft.
+- Rebuilding an ordinary chat report can reuse parsed inputs. Each build reads and hashes the authorized file first. A change to the data, selected sheet, profile or parser invalidates the cached result.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.78.
+
+### Office preview measurements
+
+Office previews are opt-in. On the signed release images, median chat latency rose 9.20% and median file-listing latency rose 28.94%. File listing exceeded the 10% allowance. All three Office previews rendered and their original downloads matched the source files.
+
 ## [2.2.0+hartmesh.78] - 2026-11-23
 
 ### Workbook previews

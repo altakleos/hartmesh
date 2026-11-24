@@ -672,6 +672,18 @@ container/network IDs and names are absent before accepting slot reuse. Unknown
 containment still preserves the binding. This CI gate is separate from tenant
 qualification on the consumer's host.
 
+### Workspace files
+
+A file search and its containing folder have distinct history entries even when
+both use the same URL. Keep Locations reachable if agent Home discovery or its
+file listing is busy or unavailable.
+
+On a shared conversation detail read, a live host manifest with unreadable bytes
+or an unknown format may show up to 50 current names in the publication's Shared
+folder. Resolve the folder from the exact publication record under ordinary Shared
+read admission. Link to the Shared folder browser only when the authorized reader's
+publication ID matches. Snapshot actions require a verified manifest.
+
 ## Resource API
 
 Trusted host integrations may use `registry.host_create` to allocate without a

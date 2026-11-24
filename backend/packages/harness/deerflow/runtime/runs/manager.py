@@ -2399,6 +2399,13 @@ class RunManager:
         except Exception:
             logger.warning("Failed to persist model_name update for run %s", run_id, exc_info=True)
 
+    async def read_published_snapshot(self, run_id: str, *, store: RunStore) -> dict[str, Any] | None:
+        """Read the census store after this run's metadata publication has settled."""
+        async with self._snapshot_locks.hold(run_id):
+            if store is not self._store:
+                return None
+            return await store.get(run_id, user_id=None)
+
     async def record_assembly_evidence(self, run_id: str, evidence: dict) -> None:
         """Publish only host assembly evidence, once, before execution."""
         from deerflow.runtime.assembly_evidence import EVIDENCE_KEY

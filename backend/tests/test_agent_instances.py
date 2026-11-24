@@ -741,35 +741,33 @@ async def test_identical_concurrent_creation_reuses_home_after_last_slot_is_cons
     service, files, _, catalog = instances
     slot = sorted(catalog.volumes)[0]
     catalog.volumes = {slot: catalog.volumes[slot]}
+    leader_arrived = asyncio.Event()
     follower_arrived, leader_done = asyncio.Event(), asyncio.Event()
     original = files.provisioning
-    calls = 0
 
     @asynccontextmanager
     async def paused(**kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            await follower_arrived.wait()
+        if not leader_arrived.is_set():
+            leader_arrived.set()
+            await asyncio.wait_for(follower_arrived.wait(), timeout=30)
         else:
             follower_arrived.set()
-            await leader_done.wait()
+            await asyncio.wait_for(leader_done.wait(), timeout=30)
         async with original(**kwargs) as result:
             yield result
 
     monkeypatch.setattr(files, "provisioning", paused)
     key = operation()
-    leader = asyncio.create_task(create(service, creation_id=key))
-    follower = asyncio.create_task(create(service, creation_id=key))
-    try:
+    async with asyncio.TaskGroup() as attempts:
+        leader = attempts.create_task(create(service, creation_id=key))
+        # Reach the provisioning barrier before launching the same creation.
+        # Task submission order alone cannot order the preceding database reads.
+        await asyncio.wait_for(leader_arrived.wait(), timeout=30)
+        follower = attempts.create_task(create(service, creation_id=key))
         ready = await leader
         leader_done.set()
         recovered = await follower
-        assert recovered.status == "active" and recovered.id == ready.id and recovered.home_id == ready.home_id
-    finally:
-        follower_arrived.set()
-        leader_done.set()
-        await asyncio.gather(leader, follower, return_exceptions=True)
+    assert recovered.status == "active" and recovered.id == ready.id and recovered.home_id == ready.home_id
 
 
 @pytest.mark.parametrize("boundary", ["home-binding", "grant-admission"])

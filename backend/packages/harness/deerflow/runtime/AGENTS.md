@@ -551,7 +551,8 @@ checkpoint writes keep their original release resource and never enter this
 ledger. An uncertain admission is never a completed operation. Refresh the new
 run's lease after admission and cleanup waits. Assembly evidence writes update
 metadata only under a live owner lease; a full snapshot must not revive a peer's
-reclaimed row.
+reclaimed row. A resident census rereads an assembly-only discrepancy under the
+same snapshot gate.
 
 HartMesh keeps the specialized `artifact_delivery_incomplete` stream verdict and
 durable stop reason. A terminal delivery-receipt persistence failure emits the
