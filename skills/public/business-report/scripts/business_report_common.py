@@ -354,6 +354,7 @@ class BuildOptions:
     currency: str | None = None
     draft: int | None = None
     name: str | None = None
+    trend_by_person: bool = False
 
 
 @dataclass

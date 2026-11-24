@@ -76,3 +76,14 @@ HTML/PDF carry needs full presentation equality; DOCX needs tenant/palette
 compatibility; XLSX carries unchanged facts. Keep previews neutral and actual
 export lists truthful. Existing schemas, source fences and publication uncertainty
 remain. See [the full contract](../../../docs/OFFLINE_REPORT_PRESENTATION.md).
+
+An ordinary chat owns its parsed-input cache under workspace/.cache/. Every
+build reads the authorized source before reuse. Key on source bytes, parser
+code and library versions, suffix, sheet and profile. Verification parses the
+source independently. Employee Home aliases bypass caching. Ten 8 MiB slots
+hold a full ten-input report. One locked 8 MiB temporary brings peak payload
+storage to 88 MiB, plus a 32-byte workspace key. Signed typed records trust the local
+sandbox account. Cache failures fall back to parsing.
+
+The optional person trend uses the existing period buckets after exclusions.
+Keep the canonical table, retained line series and all exports in agreement.
