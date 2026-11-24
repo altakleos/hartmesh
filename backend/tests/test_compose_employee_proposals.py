@@ -57,7 +57,8 @@ def turn(compose, person, instance_url, mode):
 
 
 def settings(compose, manager, instance, proposal, action, *, stale=False):
-    endpoint = f"{INSTANCES}/{instance['id']}/proposals/{proposal['id']}/{action}"
+    url = f"{INSTANCES}/{instance['id']}/proposals/{proposal['id']}"
+    endpoint = f"{url}/{action}"
     with signed_in_browser(compose, manager) as page:
         page.goto(f"{compose.url}/workspace/instances?instance={instance['id']}&tab=settings")
         panel = page.get_by_role("region", name="Configuration proposals")
@@ -76,8 +77,15 @@ def settings(compose, manager, instance, proposal, action, *, stale=False):
         def is_decision(request):
             return request.method == "POST" and urlsplit(request.url).path == endpoint
 
-        writes = []
-        page.on("request", lambda request: writes.append(request) if is_decision(request) else None)
+        writes, reads = [], []
+
+        def record_request(request):
+            if is_decision(request):
+                writes.append(request)
+            elif request.method == "GET" and urlsplit(request.url).path == url:
+                reads.append(request)
+
+        page.on("request", record_request)
         started = time.monotonic()
         with page.expect_request(is_decision, timeout=30000) as issuance:
             row.get_by_role("button", name="Adopt change" if action == "adopt" else "Decline", exact=True).click()
@@ -85,28 +93,29 @@ def settings(compose, manager, instance, proposal, action, *, stale=False):
         body = {key: proposal[key] for key in ("base_revision", "base_generation", "candidate_digest")} if action == "adopt" else {}
         assert request.post_data_json == body
         expected = "adopted" if action == "adopt" else "declined"
-        url = endpoint.rsplit("/", 1)[0]
-
-        def confirmed():
-            detail = manager.request("GET", url).json()
-            return detail if detail["status"] == expected else None
-
-        detail = eventually(confirmed, timeout=120, interval=1)
-        assert detail["id"] == proposal["id"] and detail["decided_by"] == manager.user["id"]
         persisted = panel.locator("article").filter(has=page.get_by_text(expected.capitalize(), exact=True)).filter(has=page.get_by_text("Proposed setting · " + proposed, exact=True))
         terminal = persisted.get_by_text(proposal["base_revision"], exact=True)
-        # Native fencing can outlast the browser write timeout. Follow the
-        # manager's read-only status recovery without issuing a second write.
-        refresh = panel.get_by_role("alert").get_by_role("button", name="Refresh", exact=True)
-        expect(terminal.or_(refresh).first).to_be_visible(timeout=60000)
-        if refresh.is_visible():
-            refresh.click()
+        # Native fencing can outlast the browser write timeout. The installed
+        # Settings must show the durable decision without another manager click.
         expect(terminal).to_be_visible(timeout=60000)
+        confirmed_seconds = round(time.monotonic() - started, 2)
         response = request.response()
+        browser_read = None
         if response is None:
             assert action == "adopt" and request.failure == "net::ERR_ABORTED", request.failure
+        if response is None or response.status == 408 or response.status >= 500:
+            (read,) = reads
+            read_response = read.response()
+            assert read_response is not None and read_response.status == 200
+            card = read_response.json()
+            assert all(card[key] == proposal[key] for key in ("id", "instance_id", "base_revision", "base_generation", "candidate_digest"))
+            assert card["status"] in ({"applying", "adopted"} if action == "adopt" else {"declined"})
+            browser_read = {"path": url, "http_status": read_response.status, "proposal_status": card["status"]}
         else:
             assert response.status in (200, 202)
+            assert not reads
+        detail = manager.request("GET", url).json()
+        assert detail["id"] == proposal["id"] and detail["decided_by"] == manager.user["id"] and detail["status"] == expected
         page.screenshot(path=Path(required("EVIDENCE")) / f"manager-{expected}-{proposal['id']}.png")
         page.reload()
         expect(terminal).to_be_visible(timeout=60000)
@@ -116,7 +125,13 @@ def settings(compose, manager, instance, proposal, action, *, stale=False):
             history = manager.request("GET", f"{INSTANCES}/{instance['id']}/lifecycle").json()["operations"]
             (committed,) = [entry for entry in history if entry["operation_id"] == detail["operation_id"]]
             assert committed["action"] == "adopt" and committed["complete"] and not committed["abandoned"]
-        return {**detail, "browser_write": response.status if response else request.failure, "confirmed_seconds": round(time.monotonic() - started, 2)}
+        return {
+            **detail,
+            "browser_write": response.status if response else request.failure,
+            "browser_read": browser_read,
+            "automatic_confirmation": True,
+            "confirmed_seconds": confirmed_seconds,
+        }
 
 
 def open_proposal(manager, url):

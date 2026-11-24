@@ -29,7 +29,8 @@ Binding discovery hides ordinary artifacts and preserves selection. Confirmed bi
 Company targets start empty; transfer data explicitly through admitted APIs.
 Employee configuration proposals use the installed feature flag and current Inspect + Manage.
 Show the captured diff beside the current revision. Adopt sends the reviewed digest and
-generation, and uncertain decisions refresh their receipt.
+generation. After a lost response, read the submitted proposal once under the same
+action scope. An uncertain decision can be refreshed manually.
 Work controls separate delegation, explicit activation and review. Use+Inspect delegates with adopted
 policy defaults; Manage+Inspect changes assignments and reviews exact statements.
 Retain uncertain mutation bodies/IDs, retire actions on account/permission changes,

@@ -4,7 +4,10 @@ import { workInstance } from "../fixtures/agent-work";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
 
-async function reviewProposal(page: Page, lostReceipt: boolean) {
+async function reviewProposal(
+  page: Page,
+  outcome: "receipt" | "lost" | "revoked",
+) {
   const instance = { ...workInstance(), custody: "company", permissions: 7 };
   const base = "/api/agent-instances/" + instance.id;
   const id = "a".repeat(32);
@@ -13,6 +16,18 @@ async function reviewProposal(page: Page, lostReceipt: boolean) {
   const generation = instance.generation;
   const writes: unknown[] = [];
   let adopted = false;
+  let permissions = 7;
+  const detailPath = base + "/proposals/" + id;
+  let detailReads = 0;
+  let retiredRead = false;
+  page.on("requestfailed", (request) => {
+    if (new URL(request.url()).pathname === detailPath)
+      retiredRead = request.failure()?.errorText === "net::ERR_ABORTED";
+  });
+  let releaseDetail!: () => void;
+  const paused = new Promise<void>((resolve) => {
+    releaseDetail = resolve;
+  });
   const proposal = () => ({
     id,
     instance_id: instance.id,
@@ -61,6 +76,7 @@ async function reviewProposal(page: Page, lostReceipt: boolean) {
       route.fulfill({
         json: {
           ...instance,
+          permissions,
           generation: generation + Number(adopted),
           definition_revision: adopted ? candidate : current,
         },
@@ -83,10 +99,18 @@ async function reviewProposal(page: Page, lostReceipt: boolean) {
     (route) =>
       route.fulfill({ json: { proposals: [proposal()], next_cursor: null } }),
   );
+  await page.route("**" + detailPath, async (route) => {
+    detailReads++;
+    if (outcome === "revoked") {
+      await paused;
+      return route.fulfill({ json: { ...proposal(), status: "adopted" } });
+    }
+    await route.fulfill({ json: proposal() });
+  });
   await page.route("**" + base + "/proposals/" + id + "/adopt", (route) => {
     writes.push(route.request().postDataJSON());
-    adopted = true;
-    return lostReceipt
+    adopted = outcome !== "revoked";
+    return outcome !== "receipt"
       ? route.abort("aborted")
       : route.fulfill({ json: proposal() });
   });
@@ -100,10 +124,16 @@ async function reviewProposal(page: Page, lostReceipt: boolean) {
   await expect(panel).toContainText("Customer orders");
   expect(writes).toHaveLength(0);
   await panel.getByRole("button", { name: "Adopt change" }).click();
-  if (lostReceipt) {
-    const alert = panel.getByRole("alert");
-    await expect(alert).toContainText("Check the proposal again");
-    await alert.getByRole("button", { name: "Refresh" }).click();
+  if (outcome !== "receipt") await expect.poll(() => detailReads).toBe(1);
+  if (outcome === "revoked") {
+    // Instance details poll current grants even while the recovery GET is in flight.
+    permissions = 1;
+    await expect(panel).toHaveCount(0, { timeout: 20_000 });
+    releaseDetail();
+    await expect.poll(() => retiredRead).toBe(true);
+    expect(writes).toHaveLength(1);
+    expect(detailReads).toBe(1);
+    return;
   }
   await expect(panel.getByText("Adopted", { exact: true })).toBeVisible();
   await page.reload();
@@ -125,11 +155,17 @@ async function reviewProposal(page: Page, lostReceipt: boolean) {
 test("manager can inspect, adopt, and reload an employee proposal", async ({
   page,
 }) => {
-  await reviewProposal(page, false);
+  await reviewProposal(page, "receipt");
 });
 
 test("manager can recover a committed proposal after the write response is lost", async ({
   page,
 }) => {
-  await reviewProposal(page, true);
+  await reviewProposal(page, "lost");
+});
+
+test("losing the employee grant retires an in-flight proposal status read", async ({
+  page,
+}) => {
+  await reviewProposal(page, "revoked");
 });

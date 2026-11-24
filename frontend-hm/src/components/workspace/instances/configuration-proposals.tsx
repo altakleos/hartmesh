@@ -17,6 +17,7 @@ import {
 } from "@/core/agent-instances/presentation";
 import {
   decideProposal,
+  getProposal,
   listProposals,
   type ConfigurationProposal,
   type ProposalPage,
@@ -62,6 +63,7 @@ function ProposalList({ scope }: { scope: string }) {
   const key = ["employee-configuration-proposals", scope] as const;
   const signalForAction = useSpaceActionSignal(scope);
   const [sending, setSending] = useState(false);
+  const [checkingDecision, setCheckingDecision] = useState(false);
   const submission = useRef(false);
   const [uncertain, setUncertain] = useState(false);
   const [error, setError] = useState<string>();
@@ -111,6 +113,7 @@ function ProposalList({ scope }: { scope: string }) {
     setError(undefined);
     const owner = signalForAction();
     try {
+      let readBack = false;
       const receipt = await decideProposal(
         instance.id,
         row.id,
@@ -123,15 +126,32 @@ function ProposalList({ scope }: { scope: string }) {
             }
           : {},
         owner,
-      );
+      ).catch((failure: unknown) => {
+        owner.throwIfAborted();
+        if (
+          failure instanceof InstanceApiError &&
+          failure.status < 500 &&
+          failure.status !== 408
+        )
+          throw failure;
+        // A timeout can follow a committed withdrawal. Read the exact proposal
+        // once under the same owner; the ordinary request deadline bounds it.
+        readBack = true;
+        setCheckingDecision(true);
+        return getProposal(instance.id, row.id, owner);
+      });
       owner.throwIfAborted();
       if (
         receipt.id !== row.id ||
         receipt.instance_id !== instance.id ||
+        receipt.base_revision !== row.base_revision ||
+        receipt.base_generation !== row.base_generation ||
         receipt.candidate_digest !== row.candidate_digest ||
-        (action === "decline"
-          ? receipt.status !== "declined"
-          : !["applying", "adopted", "abandoned"].includes(receipt.status))
+        !["applying", "adopted", "abandoned", "declined"].includes(
+          receipt.status,
+        ) ||
+        (!readBack &&
+          (action === "decline") !== (receipt.status === "declined"))
       )
         throw new Error("Unexpected proposal receipt");
       await client.cancelQueries({ queryKey: key, exact: true });
@@ -167,6 +187,7 @@ function ProposalList({ scope }: { scope: string }) {
       if (!owner.aborted) {
         submission.current = false;
         setSending(false);
+        setCheckingDecision(false);
       }
     }
   }
@@ -184,6 +205,13 @@ function ProposalList({ scope }: { scope: string }) {
         {zh ? "配置提议" : "Configuration proposals"}
       </h3>
       {query.isPending && <p role="status">{t.common.loading}</p>}
+      {checkingDecision && (
+        <p role="status">
+          {zh
+            ? "正在确认提议的处理状态…"
+            : "Checking the proposal’s current status…"}
+        </p>
+      )}
       {(query.isError || uncertain) && (
         <div role="alert">
           <p>

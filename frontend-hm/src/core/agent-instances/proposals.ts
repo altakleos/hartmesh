@@ -54,6 +54,14 @@ export function listProposals(
   );
 }
 
+function proposalURL(instance: string, id: string) {
+  return instanceBaseURL(instance) + "/proposals/" + encodeURIComponent(id);
+}
+
+export function getProposal(instance: string, id: string, signal: AbortSignal) {
+  return request<ConfigurationProposal>(proposalURL(instance, id), { signal });
+}
+
 export function decideProposal(
   instance: string,
   id: string,
@@ -62,11 +70,7 @@ export function decideProposal(
   signal: AbortSignal,
 ) {
   return write<ConfigurationProposal>(
-    instanceBaseURL(instance) +
-      "/proposals/" +
-      encodeURIComponent(id) +
-      "/" +
-      action,
+    proposalURL(instance, id) + "/" + action,
     "POST",
     body,
     signal,

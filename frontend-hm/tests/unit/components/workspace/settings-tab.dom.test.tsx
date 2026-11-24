@@ -94,6 +94,7 @@ rs.mock("@/core/agent-instances/api", () => {
 
 rs.mock("@/core/agent-instances/proposals", () => ({
   listProposals: rs.fn(),
+  getProposal: rs.fn(),
   decideProposal: rs.fn(),
 }));
 
@@ -678,7 +679,54 @@ test("a review-only session can page through proposals without submitting a deci
   );
 });
 
-test.each(["lost", "wrong phase"] as const)(
+test.each([
+  ["applying", "Applying", new Error("Lost response")],
+  ["declined", "Declined", new Error("Lost response")],
+  ["adopted", "Adopted", new api.InstanceApiError(408, "Request timeout")],
+] as const)(
+  "a lost decision shows the current %s proposal without another click",
+  async (status, label, failure) => {
+    state.proposals = true;
+    const row = {
+      ...proposal,
+      effective_work_policy: {
+        ...proposal.effective_work_policy,
+        responsibilities: [],
+      },
+    };
+    rs.mocked(proposals.listProposals)
+      .mockReset()
+      .mockResolvedValue({ proposals: [row], next_cursor: null });
+    const decide = rs
+      .mocked(proposals.decideProposal)
+      .mockReset()
+      .mockRejectedValue(failure);
+    const read = rs
+      .mocked(proposals.getProposal)
+      .mockReset()
+      .mockResolvedValue({
+        ...row,
+        status,
+        decided_by: "colleague",
+        decided_at: proposal.created_at,
+      });
+    show(7, "active", { custody: "company" });
+    const panel = await screen.findByRole("region", {
+      name: "Configuration proposals",
+    });
+    fireEvent.click(
+      await within(panel).findByRole("button", { name: "Adopt change" }),
+    );
+    await within(panel).findByText(label);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(decide).toHaveBeenCalledTimes(1);
+    expect(
+      within(panel).queryByRole("button", { name: "Adopt change" }),
+    ).toBeNull();
+  },
+);
+
+test.each(["open", "unreadable", "wrong revision", "wrong phase"] as const)(
   "a %s adoption receipt is reconciled by reading and never resubmitted automatically",
   async (result) => {
     state.proposals = true;
@@ -697,9 +745,20 @@ test.each(["lost", "wrong phase"] as const)(
         next_cursor: null,
       });
     const decide = rs.mocked(proposals.decideProposal).mockReset();
-    if (result === "lost")
+    const read = rs.mocked(proposals.getProposal).mockReset();
+    if (result === "wrong phase") decide.mockResolvedValue(row);
+    else {
       decide.mockRejectedValue(new Error("connection lost"));
-    else decide.mockResolvedValue(row);
+      if (result === "unreadable")
+        read.mockRejectedValue(new api.InstanceApiError(403, "Grant changed"));
+      else if (result === "wrong revision")
+        read.mockResolvedValue({
+          ...row,
+          status: "adopted",
+          base_revision: "other",
+        });
+      else read.mockResolvedValue(row);
+    }
     show(7, "active", { custody: "company" });
     const panel = await screen.findByRole("region", {
       name: "Configuration proposals",
@@ -708,6 +767,13 @@ test.each(["lost", "wrong phase"] as const)(
       await within(panel).findByRole("button", { name: "Adopt change" }),
     );
     const alert = await within(panel).findByRole("alert");
+    expect(read).toHaveBeenCalledTimes(result === "wrong phase" ? 0 : 1);
+    if (result !== "wrong phase")
+      expect(read).toHaveBeenCalledWith(
+        agent.id,
+        row.id,
+        expect.any(AbortSignal),
+      );
     expect(
       within(panel).queryByRole("button", { name: "Adopt change" }),
     ).toBeNull();
