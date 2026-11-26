@@ -46,13 +46,9 @@ export function useFeatures<T>(
 }
 
 /**
- * Whose workspace this is. A named company replaces the product's name in the
- * sidebar header, the tab title and About, and takes the product's own links
- * out of the menu. Until the deployment has answered -- still loading, or the
- * fetch failed and will be retried on the next mount or focus -- `isLoading`
- * is true and neither name is shown: deployment-authored copy waits for the
- * answer (the rule `welcome.tsx` applies), because a tenant's header flashing
- * the product's name on every load is the wrong first thing to see.
+ * Authenticated tenant presentation for workspace content and provider support.
+ * Strict mode uses the document's admitted snapshot. Legacy consumers wait for
+ * feature discovery before displaying deployment-authored content.
  */
 export function useBranding() {
   const { data } = useFeatures(selectBranding);

@@ -23,7 +23,6 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { useBranding } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
@@ -57,8 +56,6 @@ export function WorkspaceNavMenu() {
   const { open, isMobile } = useSidebar();
   const isSidebarOpen = open || isMobile;
   const { t } = useI18n();
-  // Legacy company wording stays compatible; strict About identifies the product.
-  const { companyName, strict } = useBranding();
 
   useEffect(() => {
     setMounted(true);
@@ -108,9 +105,7 @@ export function WorkspaceNavMenu() {
                   }}
                 >
                   <InfoIcon />
-                  {companyName === null || strict
-                    ? t.workspace.about
-                    : t.workspace.aboutCompany(companyName)}
+                  {t.workspace.about}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>

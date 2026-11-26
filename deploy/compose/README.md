@@ -999,8 +999,7 @@ workspace says about the company it serves. Two readers, one directory, no
 copy: every sandbox mounts it read-only at `/mnt/tenant` (a `sandbox.mounts`
 entry in `config.yaml`), which is where the `business-report` skill picks up
 the company name, logo and colours by itself, and the Gateway reads the same
-path (`tenant_bundle.path`) for the workspace header, the About page and
-Home's starter grid, agent roles and provider support text. A person sees the company after signing in; the login
+path (`tenant_bundle.path`) for legacy About content, Home's starter grid, agent roles and provider support text. A person sees the company after signing in; the login
 page stays the product's own.
 
 The layout is the skill's contract, and every file is optional:

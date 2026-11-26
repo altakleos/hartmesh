@@ -65,8 +65,10 @@ it("keeps About in the menu and provider support off the sidebar", async () => {
   branding.providerName = "Hosting";
   branding.supportURL = "https://help.example.test/";
   await openMenu();
-  expect(screen.getByRole("menuitem", { name: "About Customer" })).toBeTruthy();
-  expect(screen.queryByRole("menuitem", { name: /support/i })).toBeNull();
+  expect(screen.getByRole("menuitem", { name: "About HartMesh" })).toBeTruthy();
+  expect(
+    screen.queryByRole("menuitem", { name: /customer|support/i }),
+  ).toBeNull();
 });
 
 describe("provider support in About", () => {

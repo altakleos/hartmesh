@@ -5685,8 +5685,7 @@ a browser icon and support link to the same application build. See the
 compatibility, restart behavior and explicit unavailable states. Tenant material
 remains authenticated.
 
-The sidebar keeps the product logo at the top and shows the authenticated customer
-name as plain text. Open **Settings and more → About** for provider support.
+The sidebar shows only the product’s branding. Its logo stays at the top. Open **Settings and more → About** for provider support.
 Strict tenant presentation binds metadata and sanitized pixels
 to one product-compatible snapshot per document, including across warm-cache
 reloads after activation. The tolerant legacy mode remains the default. See the
