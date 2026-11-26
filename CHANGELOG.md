@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.83] - 2026-11-26
+
+### Workspace sidebar
+
+The workspace sidebar uses only the product logo and name for branding. Open **Settings and more → About** to find the configured support link.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.82.
+
 ## [2.2.0+hartmesh.82] - 2026-11-24
 
 ### Employee configuration proposals
