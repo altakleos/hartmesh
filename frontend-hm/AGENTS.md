@@ -329,8 +329,8 @@ complete authenticated name/logo snapshot inside the account-owned workspace
 subtree. Validate its bounded schema/content/product binding. Retain it across
 focus, client navigation and server refreshes; retire/cancel with the account.
 Fresh failures show unavailable. `useBranding` ignores live tenant fields in
-strict mode while other features keep refreshing. The header shows a separately
-named Workspace context with fixed readable colors, including collapsed names.
+strict mode while other features keep refreshing. Show the customer name as themed sidebar text with a localized workspace label.
+Keep customer and provider logos out of the sidebar.
 Static/legacy paths stay compatible. See [the contract](../docs/TENANT_PRESENTATION.md).
 Keep session recovery and the index's pure route control outside private admission.
 Uncertain SSR auth keeps the provider path; new SSR scope conflicts retire it
@@ -429,7 +429,7 @@ tokens. Stop captures its attempt and blocks new sends. A failed cancellation
 remains uncertain. Propagate text/file admission errors to PromptInput. Clear
 drafts/references and release captured browser Files only on confirmed admission.
 
-Collapsed provider support keeps its named logo link. Browser-mocked Playwright suites use
+About owns the support link for configured and legacy providers. Browser-mocked Playwright suites use
 `tests/fixtures/product-gateway.mjs` for product identity and explicit legacy selection (other routes 503);
 retain real-service outage checks. See the
 [runtime contract](../docs/RUNTIME_PRODUCT_IDENTITY.md).

@@ -71,7 +71,7 @@ export function RuntimeProductProvider({
   );
 }
 
-/** Generic provider placement: entry/setup, sidebar and product information. */
+/** Full provider attribution on entry, setup and product information. */
 export function ProviderIdentity() {
   const identity = useProductIdentity();
   if (identity?.mode !== "configured") return null;
@@ -83,16 +83,16 @@ export function ProviderIdentity() {
       rel="noopener noreferrer"
       referrerPolicy="no-referrer"
       aria-label={`${provider.name} support`}
-      className="flex max-w-full items-center gap-2 rounded bg-white p-2 text-sm text-black underline group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:p-1"
+      className="flex max-w-full items-center gap-2 rounded bg-white p-2 text-sm text-black underline"
     >
       <img
         src={provider.logo}
         alt=""
         width={24}
         height={24}
-        className="size-6 object-contain group-data-[collapsible=icon]:size-5"
+        className="size-6 object-contain"
       />
-      <span className="min-w-0 wrap-anywhere group-data-[collapsible=icon]:hidden">
+      <span className="min-w-0 wrap-anywhere">
         Service and support: <bdi>{provider.name}</bdi>
       </span>
     </a>

@@ -4,7 +4,6 @@ import {
   ChevronsUpDown,
   DownloadIcon,
   InfoIcon,
-  LifeBuoyIcon,
   Settings2Icon,
   SettingsIcon,
 } from "lucide-react";
@@ -55,10 +54,11 @@ export function WorkspaceNavMenu() {
   const { openSettings } = useSettingsDialog();
   const [mounted, setMounted] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
-  const { open: isSidebarOpen } = useSidebar();
+  const { open, isMobile } = useSidebar();
+  const isSidebarOpen = open || isMobile;
   const { t } = useI18n();
   // Legacy company wording stays compatible; strict About identifies the product.
-  const { companyName, providerName, supportURL, strict } = useBranding();
+  const { companyName, strict } = useBranding();
 
   useEffect(() => {
     setMounted(true);
@@ -73,6 +73,7 @@ export function WorkspaceNavMenu() {
               <DropdownMenuTrigger asChild>
                 <SidebarMenuButton
                   size="lg"
+                  aria-label={t.workspace.settingsAndMore}
                   className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
                 >
                   <NavMenuButtonContent isSidebarOpen={isSidebarOpen} t={t} />
@@ -101,21 +102,6 @@ export function WorkspaceNavMenu() {
                   )}
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
-                {supportURL && (
-                  <DropdownMenuItem asChild>
-                    <a
-                      href={supportURL}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      referrerPolicy="no-referrer"
-                    >
-                      <LifeBuoyIcon />
-                      {providerName
-                        ? t.workspace.providerSupport(providerName)
-                        : t.workspace.contactSupport}
-                    </a>
-                  </DropdownMenuItem>
-                )}
                 <DropdownMenuItem
                   onClick={() => {
                     openSettings("about");

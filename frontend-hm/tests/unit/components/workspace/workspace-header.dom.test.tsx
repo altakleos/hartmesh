@@ -10,13 +10,15 @@ const branding: {
   logo?: string | null;
   snapshotId?: string | null;
 } = { companyName: null, hasLogo: false, isLoading: false };
-const sidebar: { state: "expanded" | "collapsed" } = { state: "expanded" };
+const sidebar: { state: "expanded" | "collapsed"; isMobile: boolean } = {
+  state: "expanded",
+  isMobile: false,
+};
 
 rs.mock("next/navigation", () => ({ usePathname: () => "/workspace" }));
 rs.mock("@/env", () => ({ env: {} }));
 rs.mock("@/core/features", () => ({
   useBranding: () => branding,
-  logoURL: () => "/api/branding/logo",
 }));
 rs.mock("@/components/ui/sidebar", () => ({
   useSidebar: () => sidebar,
@@ -58,6 +60,7 @@ afterEach(() => {
   branding.logo = null;
   branding.snapshotId = null;
   sidebar.state = "expanded";
+  sidebar.isMobile = false;
 });
 
 /**
@@ -79,8 +82,9 @@ describe("WorkspaceHeader", () => {
       expect(
         screen.getByRole("group", { name: "Workspace: Example Tenant One" }),
       ).toBeTruthy();
-      expect(screen.getByTestId("tenant-logo").getAttribute("src")).toBe(
-        branding.logo,
+      expect(document.querySelector("img")).toBeNull();
+      expect(screen.getByTestId("tenant-context").textContent).toBe(
+        "Example Tenant One",
       );
       expect(
         screen.getByTestId("tenant-context").getAttribute("data-snapshot-id"),
@@ -90,7 +94,20 @@ describe("WorkspaceHeader", () => {
       cleanup();
     }
   });
-  it("shows the company the deployment named, with its logo", () => {
+  it("shows the full name in the phone drawer even if the desktop rail was collapsed", () => {
+    sidebar.state = "collapsed";
+    sidebar.isMobile = true;
+    branding.strict = true;
+    branding.companyName = "Example Tenant";
+    branding.logo = "data:image/png;base64,AAAA";
+    renderHeader(createEnUS("Example Product"));
+    expect(screen.getByText("Example Product")).toBeTruthy();
+    expect(screen.getByText("Example Tenant")).toBeTruthy();
+    expect(document.querySelector("img")).toBeNull();
+    expect(screen.queryByRole("link", { name: /support/i })).toBeNull();
+  });
+
+  it("shows the legacy customer name without fetching its logo", () => {
     branding.companyName = "Example Services Co.";
     branding.hasLogo = true;
 
@@ -98,9 +115,7 @@ describe("WorkspaceHeader", () => {
 
     expect(screen.getByText("Example Services Co.")).toBeTruthy();
     expect(screen.queryByText("HartMesh")).toBeNull();
-    expect(screen.getByTestId("tenant-logo").getAttribute("src")).toBe(
-      "/api/branding/logo",
-    );
+    expect(document.querySelector("img")).toBeNull();
   });
 
   it("shows the company without a picture when the bundle has none", () => {
@@ -134,13 +149,13 @@ describe("WorkspaceHeader", () => {
     expect(screen.getByText(enUS.sidebar.newChat)).toBeTruthy();
   });
 
-  it("collapses to the logo, else the company's mark, else the product's", () => {
+  it("keeps the legacy text fallback in the rail without rendering a customer image", () => {
     sidebar.state = "collapsed";
     branding.companyName = "Example Services Co.";
     branding.hasLogo = true;
     renderHeader();
-    expect(screen.getByTestId("tenant-logo")).toBeTruthy();
-    expect(screen.queryByText("ES")).toBeNull();
+    expect(document.querySelector("img")).toBeNull();
+    expect(screen.getByText("ES")).toBeTruthy();
     cleanup();
 
     branding.hasLogo = false;

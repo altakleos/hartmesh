@@ -5,6 +5,8 @@ import { resolve } from "node:path";
 
 import { expect, test, type Page } from "@playwright/test";
 
+import { contrastRatio } from "../fixtures/contrast-ratio";
+
 const enabled = process.env.HARTMESH_LIVE_TENANT_PRESENTATION === "1";
 test.use({ actionTimeout: 15_000 });
 const directory = process.env.HARTMESH_TENANT_TEST_DIR ?? "";
@@ -67,30 +69,9 @@ async function admitted(page: Page, expected: string) {
   });
   await expect(group).toBeVisible();
   await expect(group).toHaveAttribute("data-snapshot-id", body.snapshot_id);
-  await expect(group.locator("img")).toHaveAttribute("src", body.tenant.logo);
-  await expect
-    .poll(() =>
-      group
-        .locator("img")
-        .evaluate(
-          (image: HTMLImageElement) => image.complete && image.naturalWidth > 0,
-        ),
-    )
-    .toBe(true);
-  expect(
-    await group.evaluate(
-      (element) => element.scrollWidth <= element.clientWidth + 1,
-    ),
-  ).toBe(true);
-  const colors = await group.locator("span").evaluate((element) => ({
-    color: getComputedStyle(element).color,
-    background: getComputedStyle(element.parentElement!).backgroundColor,
-  }));
-  // The affected text uses the existing fixed black/white palette: 21:1.
-  expect(colors).toEqual({
-    color: "rgb(0, 0, 0)",
-    background: "rgb(255, 255, 255)",
-  });
+  await expect(group).toHaveText(expected);
+  await expect(group.locator("img")).toHaveCount(0);
+  expect(await contrastRatio(group)).toBeGreaterThanOrEqual(4.5);
   return body;
 }
 
@@ -137,8 +118,8 @@ test("one build admits complete tenant snapshots through authenticated activatio
       page.getByText("Example Product", { exact: true }).first(),
     ).toBeVisible();
     await expect(
-      page.getByRole("link", { name: "Example Provider support" }).first(),
-    ).toHaveAttribute("href", product.provider.support_url);
+      page.getByRole("link", { name: "Example Provider support" }),
+    ).toHaveCount(0);
     expect(
       await page.locator('link[rel="icon"]').last().getAttribute("href"),
     ).toBe(product.product.browser_icon);
@@ -150,6 +131,9 @@ test("one build admits complete tenant snapshots through authenticated activatio
       page.getByRole("heading", { name: "Example Product", exact: true }),
     ).toBeVisible();
     await expect(page.getByText(/HartMesh component version/)).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Example Provider support" }),
+    ).toHaveAttribute("href", product.provider.support_url);
     await page.getByRole("button", { name: "Close", exact: true }).click();
 
     // Preserve a real resource and user-visible draft across operator activation.
@@ -206,15 +190,14 @@ test("one build admits complete tenant snapshots through authenticated activatio
       "data-snapshot-id",
       first.snapshot_id,
     );
-    await expect(page.getByTestId("tenant-logo")).toHaveAttribute(
-      "src",
-      first.tenant.logo,
+    await expect(page.getByTestId("tenant-context")).toHaveText(
+      first.tenant.name,
     );
     activate("B");
     await page.getByRole("link", { name: "Files", exact: true }).click();
     await expect(page).toHaveURL(/\/workspace\/files/);
     await expect(
-      page.getByRole("heading", { name: "Files", exact: true }),
+      page.getByRole("heading", { name: "My files", level: 1, exact: true }),
     ).toBeVisible();
     await expect(page.getByTestId("tenant-context")).toHaveAttribute(
       "data-snapshot-id",
@@ -250,9 +233,8 @@ test("one build admits complete tenant snapshots through authenticated activatio
       "data-snapshot-id",
       first.snapshot_id,
     );
-    await expect(page.getByTestId("tenant-logo")).toHaveAttribute(
-      "src",
-      first.tenant.logo,
+    await expect(page.getByTestId("tenant-context")).toHaveText(
+      first.tenant.name,
     );
     await expect(page.getByPlaceholder(/how can i assist you/i)).toHaveValue(
       "Keep this unsent draft",
@@ -270,14 +252,16 @@ test("one build admits complete tenant snapshots through authenticated activatio
       await admitted(page, revised);
     }
     await page.locator('[data-sidebar="rail"]').click();
-    await expect(
-      page.getByRole("group", { name: `Workspace: ${revised}`, exact: true }),
-    ).toBeVisible();
-    expect(
-      await page
-        .getByTestId("tenant-logo")
-        .evaluate((element) => element.getBoundingClientRect().width),
-    ).toBeLessThanOrEqual(32);
+    const collapsedContext = page.getByRole("group", {
+      name: `Workspace: ${revised}`,
+      exact: true,
+    });
+    await expect
+      .poll(async () => (await collapsedContext.boundingBox())?.width)
+      .toBe(1);
+    await expect(page.getByTestId("tenant-context").locator("img")).toHaveCount(
+      0,
+    );
     await page.locator('[data-sidebar="rail"]').click();
 
     // An admitted document survives a strict reader outage; fresh documents refuse.

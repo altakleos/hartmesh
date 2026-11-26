@@ -12,7 +12,7 @@ The generic layout is:
 * ``brand.json`` -- ``company_name``, ``logo`` (a PNG or JPEG next to it),
   ``colors.primary`` and ``colors.secondary`` as ``#rrggbb``;
 * ``provider.json`` -- optional service provider ``display_name`` and HTTPS
-  ``support_url`` for the workspace menu, separate from the customer brand;
+  ``support_url`` for provider support, separate from the customer brand;
 * ``starters.json`` -- Home's starter list, the same shape ``ui.starters``
   takes in ``config.yaml`` and validated by the same rules, because it is the
   same list arriving from a different file;

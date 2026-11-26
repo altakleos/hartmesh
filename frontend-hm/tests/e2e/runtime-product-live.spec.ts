@@ -5,42 +5,9 @@
  * disposable SQLite/home/config, normal local authentication and no integrations.
  * Run default, Example Product One, Example Product Two against the same build.
  */
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
-async function contrastRatio(locator: Locator) {
-  return locator.evaluate((element) => {
-    const canvas = document.createElement("canvas");
-    canvas.width = canvas.height = 1;
-    const ctx = canvas.getContext("2d")!;
-    const rgba = (color: string) => {
-      ctx.clearRect(0, 0, 1, 1);
-      ctx.fillStyle = color;
-      ctx.fillRect(0, 0, 1, 1);
-      return Array.from(ctx.getImageData(0, 0, 1, 1).data);
-    };
-    const luminance = (values: number[]) =>
-      values
-        .slice(0, 3)
-        .map((v) => {
-          const c = v / 255;
-          return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-        })
-        .reduce((n, c, i) => n + c * [0.2126, 0.7152, 0.0722][i]!, 0);
-    const fg = luminance(rgba(getComputedStyle(element).color));
-    let parent: Element | null = element;
-    let bg = [255, 255, 255, 255];
-    while (parent) {
-      const value = rgba(getComputedStyle(parent).backgroundColor);
-      if (value[3] === 255) {
-        bg = value;
-        break;
-      }
-      parent = parent.parentElement;
-    }
-    const b = luminance(bg);
-    return (Math.max(fg, b) + 0.05) / (Math.min(fg, b) + 0.05);
-  });
-}
+import { contrastRatio } from "../fixtures/contrast-ratio";
 
 const enabled = process.env.HARTMESH_LIVE_PRODUCT_IDENTITY === "1";
 const product = process.env.HARTMESH_TEST_PRODUCT_NAME ?? "HartMesh";
@@ -144,22 +111,19 @@ test("runtime identity across public entry and authenticated product information
     expect(
       await contrastRatio(page.getByText(product, { exact: true })),
     ).toBeGreaterThanOrEqual(4.5);
-    await expect(
-      page.getByRole("link", { name: `${provider} support` }).first(),
-    ).toBeVisible();
-  }
-  if (provider) {
-    const support = page
-      .getByRole("link", { name: `${provider} support` })
-      .first();
-    const toggle = page.locator('[data-sidebar="rail"]');
-    await toggle.click();
-    await expect
-      .poll(async () => (await support.boundingBox())?.height ?? Infinity)
-      .toBeLessThanOrEqual(48);
-    await expect(support).toHaveAccessibleName(`${provider} support`);
-    await expect(support).toHaveAttribute("href", body.provider.support_url);
-    await toggle.click();
+    const sidebar = page.locator('[data-sidebar="sidebar"]');
+    const logo = sidebar.locator("img").first();
+    await expect(logo).toHaveAttribute("src", body.product.logo);
+    await expect(sidebar.getByRole("link", { name: /support/i })).toHaveCount(
+      0,
+    );
+    const rail = page.locator('[data-sidebar="rail"]');
+    await rail.click();
+    await expect(logo).toHaveAttribute("src", body.product.logo);
+    await expect(sidebar.getByRole("link", { name: /support/i })).toHaveCount(
+      0,
+    );
+    await rail.click();
   }
   await page.getByRole("button", { name: /settings and more/i }).click();
   await page.getByRole("menuitem", { name: /About/ }).click();
@@ -168,6 +132,9 @@ test("runtime identity across public entry and authenticated product information
       page.getByRole("heading", { name: product, exact: true }),
     ).toBeVisible();
     await expect(page.getByText(/HartMesh component version/)).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: `${provider} support` }),
+    ).toHaveAttribute("href", body.provider.support_url);
     expect(
       await contrastRatio(page.getByText(/HartMesh component version/)),
     ).toBeGreaterThanOrEqual(4.5);
