@@ -999,8 +999,7 @@ workspace says about the company it serves. Two readers, one directory, no
 copy: every sandbox mounts it read-only at `/mnt/tenant` (a `sandbox.mounts`
 entry in `config.yaml`), which is where the `business-report` skill picks up
 the company name, logo and colours by itself, and the Gateway reads the same
-path (`tenant_bundle.path`) for the workspace header, the About page and
-Home's starter grid, agent roles and provider support text. A person sees the company after signing in; the login
+path (`tenant_bundle.path`) for legacy About content, Home's starter grid, agent roles and provider support text. A person sees the company after signing in; the login
 page stays the product's own.
 
 The layout is the skill's contract, and every file is optional:
@@ -1024,7 +1023,7 @@ The layout is the skill's contract, and every file is optional:
                         the built-in one)
 ```
 
-`provider.json` configures the workspace menu's **Contact support** action.
+`provider.json` configures the **Contact support** link in **Settings and more → About**.
 `display_name` is an optional plain line of at most 80 characters; it names the
 service provider without changing the customer brand or product name.
 `support_url` must be an absolute HTTPS URL of at most 2048 characters, without
@@ -3738,13 +3737,13 @@ install -o 1000 -g 1000 -m 0640 roles.json /srv/hartmesh/operator/tenant/roles.j
 
 A role is used once, when the agent is added: the instructions become that agent's own and are edited in its Settings afterwards. Changing or removing a role changes no existing agent.
 
-**The provider's name.** Several sentences tell a person to ask the provider: when storage is unavailable, when files are full, when no seat is free, when the number of AI employees allowed is reached, when a workspace does not start. They take the name and the link from `provider.json` in the tenant bundle, the same file that already names the provider in the workspace menu (§ "Tenant bundle"):
+**The provider's name.** Several sentences tell a person to ask the provider: when storage is unavailable, when files are full, when no seat is free, when the number of AI employees allowed is reached, when a workspace does not start. They take the name and the link from `provider.json` in the tenant bundle, the same file that already names the provider in About (§ "Tenant bundle"):
 
 ```json
 {"display_name": "Example Hosting", "support_url": "https://support.example.com/help"}
 ```
 
-With a name, the sentences read "ask Example Hosting"; without one, "ask your service provider". With a link, the sentence is followed by the menu's own "Contact Example Hosting support"; without one, the sentence stands alone. There is no `.env` key for either.
+With a name, the sentences read "ask Example Hosting"; without one, "ask your service provider". With a link, the sentence is followed by “Contact Example Hosting support”; without one, the sentence stands alone. There is no `.env` key for either.
 
 ### What has been verified
 

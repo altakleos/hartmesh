@@ -2,9 +2,8 @@
 
 One directory on the deployment's own disk, written by the operator and read
 by independent consumers: sandboxes can mount it read-only for skills,
-and the Gateway reads its generic branding and starter files so the
-workspace header, the About page and Home's starter grid show the same
-company. There is no second place a brand is written and nothing that copies
+and the Gateway reads its generic branding and starters for legacy About
+content and Home's starter grid. There is no second place a brand is written and nothing that copies
 one into the other; the config carries one optional path and nothing else.
 
 The generic layout is:
@@ -12,7 +11,7 @@ The generic layout is:
 * ``brand.json`` -- ``company_name``, ``logo`` (a PNG or JPEG next to it),
   ``colors.primary`` and ``colors.secondary`` as ``#rrggbb``;
 * ``provider.json`` -- optional service provider ``display_name`` and HTTPS
-  ``support_url`` for the workspace menu, separate from the customer brand;
+  ``support_url`` for provider support, separate from the customer brand;
 * ``starters.json`` -- Home's starter list, the same shape ``ui.starters``
   takes in ``config.yaml`` and validated by the same rules, because it is the
   same list arriving from a different file;

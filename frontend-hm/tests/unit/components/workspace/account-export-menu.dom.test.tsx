@@ -18,6 +18,7 @@ rs.mock("@/components/workspace/account-export-dialog", () => ({
 }));
 
 import { SidebarProvider } from "@/components/ui/sidebar";
+import { AboutSettingsPage } from "@/components/workspace/settings/about-settings-page";
 import { WorkspaceNavMenu } from "@/components/workspace/workspace-nav-menu";
 import { I18nProvider } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales";
@@ -59,33 +60,44 @@ describe("the menu's Download all my data", () => {
   });
 });
 
-describe("the configured support entry", () => {
-  it("names the provider without replacing the customer's About entry", async () => {
-    branding.companyName = "Customer";
-    branding.providerName = "Hosting";
-    branding.supportURL = "https://help.example.test/";
-    await openMenu();
-    const link = screen.getByRole("menuitem", {
-      name: "Contact Hosting support",
-    });
-    expect(link.getAttribute("href")).toBe("https://help.example.test/");
-    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
-    expect(link.getAttribute("referrerpolicy")).toBe("no-referrer");
-    expect(link.getAttribute("target")).toBe("_blank");
-    expect(
-      screen.getByRole("menuitem", { name: "About Customer" }),
-    ).toBeTruthy();
-  });
-  it("uses a generic label if only a destination is set", async () => {
-    branding.supportURL = "https://help.example.test/";
-    await openMenu();
-    expect(
-      screen.getByRole("menuitem", { name: "Contact support" }),
-    ).toBeTruthy();
-  });
-  it("offers no dead link while the destination is absent", async () => {
-    branding.providerName = "Hosting";
-    await openMenu();
-    expect(screen.queryByRole("menuitem", { name: /Contact/ })).toBeNull();
+it("keeps About in the menu and provider support off the sidebar", async () => {
+  branding.companyName = "Customer";
+  branding.providerName = "Hosting";
+  branding.supportURL = "https://help.example.test/";
+  await openMenu();
+  expect(screen.getByRole("menuitem", { name: "About HartMesh" })).toBeTruthy();
+  expect(
+    screen.queryByRole("menuitem", { name: /customer|support/i }),
+  ).toBeNull();
+});
+
+describe("provider support in About", () => {
+  it.each([
+    ["Hosting", "Contact Hosting support"],
+    [null, "Contact support"],
+  ] as const)(
+    "opens the configured destination with provider name %s",
+    (provider, name) => {
+      branding.providerName = provider;
+      branding.supportURL = "https://help.example.test/";
+      render(
+        <I18nProvider initialLocale="en-US">
+          <AboutSettingsPage />
+        </I18nProvider>,
+      );
+      const link = screen.getByRole("link", { name });
+      expect(link.getAttribute("href")).toBe(branding.supportURL);
+      expect(link.getAttribute("target")).toBe("_blank");
+      expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+      expect(link.getAttribute("referrerpolicy")).toBe("no-referrer");
+    },
+  );
+  it("omits the link when no destination is configured", () => {
+    render(
+      <I18nProvider initialLocale="en-US">
+        <AboutSettingsPage />
+      </I18nProvider>,
+    );
+    expect(screen.queryByRole("link")).toBeNull();
   });
 });

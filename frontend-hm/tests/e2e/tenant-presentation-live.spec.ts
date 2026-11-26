@@ -54,44 +54,74 @@ async function signIn(page: Page) {
   await page.getByRole("button", { name: "Sign In", exact: true }).click();
   await expect(page).toHaveURL(/\/workspace/);
 }
-async function admitted(page: Page, expected: string) {
+async function presentation(page: Page) {
   const result = await page.request.get("/api/branding/presentation");
   expect(result.status()).toBe(200);
   expect(result.headers()["cache-control"]).toBe("private, no-store");
   expect(result.headers().vary).toMatch(/Cookie/);
-  const body = await result.json();
+  return result.json();
+}
+async function productSidebar(
+  page: Page,
+  productName: string,
+  {
+    collapsedLogo,
+    tenantLogo,
+  }: { collapsedLogo?: string; tenantLogo?: string } = {},
+) {
+  const sidebar = page.locator('[data-sidebar="sidebar"]');
+  await expect(sidebar).toBeVisible();
+  if (collapsedLogo) {
+    await expect(sidebar.locator("img").first()).toHaveAttribute(
+      "src",
+      collapsedLogo,
+    );
+  } else {
+    await expect(sidebar.getByText(productName, { exact: true })).toBeVisible();
+  }
+  const customers = /Example (?:Legacy )?Tenant/i;
+  const initials = /^(?:ET|EL)$/i;
+  await expect(sidebar).not.toContainText(customers);
+  await expect(sidebar.getByText(initials)).toHaveCount(0);
+  const markup = await sidebar.evaluate((element) => element.outerHTML);
+  expect(markup).not.toMatch(customers);
+  expect(markup).not.toMatch(
+    /tenant-context|data-snapshot-id|\/api\/branding\/logo/,
+  );
+  expect(markup).not.toMatch(/(?:alt|title|aria-label)="(?:ET|EL)"/i);
+  if (tenantLogo) expect(markup).not.toContain(tenantLogo);
+  const accessible = await sidebar.ariaSnapshot();
+  expect(accessible).not.toMatch(customers);
+  expect(accessible).not.toMatch(/\b(?:ET|EL)\b/i);
+}
+async function admitted(page: Page, expected: string) {
+  const body = await presentation(page);
+  expect(body.mode).toBe("tenant");
   expect(body.tenant.name).toBe(expected);
-  const group = page.getByRole("group", {
-    name: `Workspace: ${expected}`,
-    exact: true,
-  });
-  await expect(group).toBeVisible();
-  await expect(group).toHaveAttribute("data-snapshot-id", body.snapshot_id);
-  await expect(group.locator("img")).toHaveAttribute("src", body.tenant.logo);
-  await expect
-    .poll(() =>
-      group
-        .locator("img")
-        .evaluate(
-          (image: HTMLImageElement) => image.complete && image.naturalWidth > 0,
-        ),
-    )
-    .toBe(true);
-  expect(
-    await group.evaluate(
-      (element) => element.scrollWidth <= element.clientWidth + 1,
-    ),
-  ).toBe(true);
-  const colors = await group.locator("span").evaluate((element) => ({
-    color: getComputedStyle(element).color,
-    background: getComputedStyle(element.parentElement!).backgroundColor,
-  }));
-  // The affected text uses the existing fixed black/white palette: 21:1.
-  expect(colors).toEqual({
-    color: "rgb(0, 0, 0)",
-    background: "rgb(255, 255, 255)",
+  await productSidebar(page, "Example Product", {
+    tenantLogo: body.tenant.logo,
   });
   return body;
+}
+
+const shareAudience = (company: string) =>
+  `Everyone at ${company} and their assistants can read this copy and its files.`;
+
+async function openSharePreview(page: Page, company: string) {
+  await page
+    .getByRole("button", {
+      name: "Share conversation with everyone",
+      exact: true,
+    })
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: "Share with everyone",
+    exact: true,
+  });
+  await expect(
+    dialog.getByText(shareAudience(company), { exact: true }),
+  ).toBeVisible();
+  return dialog;
 }
 
 test("one build admits complete tenant snapshots through authenticated activation and restoration", async ({
@@ -134,11 +164,11 @@ test("one build admits complete tenant snapshots through authenticated activatio
       await page.request.get("/api/v1/auth/product-identity")
     ).json();
     await expect(
-      page.getByText("Example Product", { exact: true }).first(),
-    ).toBeVisible();
+      page.locator('[data-sidebar="sidebar"] img').first(),
+    ).toHaveAttribute("src", product.product.logo);
     await expect(
-      page.getByRole("link", { name: "Example Provider support" }).first(),
-    ).toHaveAttribute("href", product.provider.support_url);
+      page.getByRole("link", { name: "Example Provider support" }),
+    ).toHaveCount(0);
     expect(
       await page.locator('link[rel="icon"]').last().getAttribute("href"),
     ).toBe(product.product.browser_icon);
@@ -150,6 +180,9 @@ test("one build admits complete tenant snapshots through authenticated activatio
       page.getByRole("heading", { name: "Example Product", exact: true }),
     ).toBeVisible();
     await expect(page.getByText(/HartMesh component version/)).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Example Provider support" }),
+    ).toHaveAttribute("href", product.provider.support_url);
     await page.getByRole("button", { name: "Close", exact: true }).click();
 
     // Preserve a real resource and user-visible draft across operator activation.
@@ -160,6 +193,7 @@ test("one build admits complete tenant snapshots through authenticated activatio
       (cookie) => cookie.name === "csrf_token",
     )!.value;
     const threadId = crypto.randomUUID();
+    const threadPage = `/workspace/chats/${threadId}`;
     expect(
       (
         await page.request.post("/api/langgraph/threads", {
@@ -202,24 +236,18 @@ test("one build admits complete tenant snapshots through authenticated activatio
         /Service identity reader unavailable\. Retaining the verified identity/,
       ),
     ).toBeVisible();
-    await expect(page.getByTestId("tenant-context")).toHaveAttribute(
-      "data-snapshot-id",
-      first.snapshot_id,
-    );
-    await expect(page.getByTestId("tenant-logo")).toHaveAttribute(
-      "src",
-      first.tenant.logo,
-    );
+    await productSidebar(page, "Example Product", {
+      tenantLogo: first.tenant.logo,
+    });
     activate("B");
     await page.getByRole("link", { name: "Files", exact: true }).click();
     await expect(page).toHaveURL(/\/workspace\/files/);
     await expect(
-      page.getByRole("heading", { name: "Files", exact: true }),
+      page.getByRole("heading", { name: "My files", level: 1, exact: true }),
     ).toBeVisible();
-    await expect(page.getByTestId("tenant-context")).toHaveAttribute(
-      "data-snapshot-id",
-      first.snapshot_id,
-    );
+    await productSidebar(page, "Example Product", {
+      tenantLogo: first.tenant.logo,
+    });
     await page.getByRole("link", { name: "New chat", exact: true }).click();
     await expect(page).toHaveURL(/\/workspace\/chats\/new/);
     await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
@@ -229,10 +257,7 @@ test("one build admits complete tenant snapshots through authenticated activatio
     await expect(
       page.getByText("Revised starter", { exact: true }),
     ).toBeVisible();
-    await expect(page.getByTestId("tenant-context")).toHaveAttribute(
-      "data-snapshot-id",
-      first.snapshot_id,
-    );
+    await productSidebar(page, "Example Product");
 
     // The actual Next App Router requests a new server tree without a full load.
     const refreshed = page.waitForResponse(
@@ -246,21 +271,32 @@ test("one build admits complete tenant snapshots through authenticated activatio
       ).next.router.refresh(),
     );
     await refreshed;
-    await expect(page.getByTestId("tenant-context")).toHaveAttribute(
-      "data-snapshot-id",
-      first.snapshot_id,
-    );
-    await expect(page.getByTestId("tenant-logo")).toHaveAttribute(
-      "src",
-      first.tenant.logo,
-    );
+    await productSidebar(page, "Example Product");
     await expect(page.getByPlaceholder(/how can i assist you/i)).toHaveValue(
       "Keep this unsent draft",
     );
+
+    // The read-only Share preview names the audience from this document's selection.
+    await page.evaluate(
+      (path) =>
+        (
+          window as unknown as {
+            next: { router: { push: (path: string) => void } };
+          }
+        ).next.router.push(path),
+      threadPage,
+    );
+    await expect(page).toHaveURL(new URL(threadPage, page.url()).href);
+    const oldShare = await openSharePreview(page, first.tenant.name);
+    await oldShare.getByRole("button", { name: "Cancel", exact: true }).click();
     await page.reload();
     const second = await admitted(page, revised);
     expect(second.snapshot_id).not.toBe(first.snapshot_id);
     expect(second.tenant.logo).not.toBe(first.tenant.logo);
+    const newShare = await openSharePreview(page, revised);
+    await newShare.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.getByRole("link", { name: "New chat", exact: true }).click();
+    await expect(page).toHaveURL(/\/workspace\/chats\/new/);
     expect(
       (await page.request.get(`/api/langgraph/threads/${threadId}`)).ok(),
     ).toBe(true);
@@ -271,14 +307,15 @@ test("one build admits complete tenant snapshots through authenticated activatio
     }
     await page.locator('[data-sidebar="rail"]').click();
     await expect(
-      page.getByRole("group", { name: `Workspace: ${revised}`, exact: true }),
-    ).toBeVisible();
-    expect(
-      await page
-        .getByTestId("tenant-logo")
-        .evaluate((element) => element.getBoundingClientRect().width),
-    ).toBeLessThanOrEqual(32);
+      page.locator('[data-slot="sidebar"][data-state]'),
+    ).toHaveAttribute("data-state", "collapsed");
+    await productSidebar(page, "Example Product", {
+      collapsedLogo: product.product.logo,
+      tenantLogo: second.tenant.logo,
+    });
     await page.locator('[data-sidebar="rail"]').click();
+    const retainedDraft = "Keep editing while strict admission is unavailable";
+    await page.getByPlaceholder(/how can i assist you/i).fill(retainedDraft);
 
     // An admitted document survives a strict reader outage; fresh documents refuse.
     for (const failure of [
@@ -290,16 +327,18 @@ test("one build admits complete tenant snapshots through authenticated activatio
       "Unsupported",
     ]) {
       activate(failure);
-      await expect(page.getByTestId("tenant-context")).toHaveAttribute(
-        "data-snapshot-id",
-        second.snapshot_id,
+      await productSidebar(page, "Example Product", {
+        tenantLogo: second.tenant.logo,
+      });
+      await expect(page.getByPlaceholder(/how can i assist you/i)).toHaveValue(
+        retainedDraft,
       );
       const fresh = await page.context().newPage();
       await fresh.goto("/workspace/chats/new");
       await expect(fresh.getByRole("status")).toHaveText(
         "Workspace identity unavailable",
       );
-      expect(await fresh.getByTestId("tenant-context").count()).toBe(0);
+      await expect(fresh.locator('[data-sidebar="sidebar"]')).toHaveCount(0);
       const refused = await fresh.request.get("/api/branding/presentation");
       expect(refused.status()).toBe(503);
       expect(refused.headers()["cache-control"]).toBe("private, no-store");
@@ -322,6 +361,7 @@ test("one build admits complete tenant snapshots through authenticated activatio
     const delayed = await page.context().newPage();
     let release: () => void = () => undefined;
     let captured = false;
+    let settled = false;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
@@ -331,33 +371,38 @@ test("one build admits complete tenant snapshots through authenticated activatio
       delayNext = false;
       const actual = await route.fetch();
       expect(actual.status()).toBe(200);
+      expect(await actual.json()).toEqual(first);
       captured = true;
       await gate;
       await route.fulfill({ response: actual }).catch(() => undefined);
+      settled = true;
     });
     try {
-      await delayed.goto("/workspace/chats/new");
+      await delayed.goto(threadPage);
       await expect.poll(() => captured, { timeout: 15_000 }).toBe(true);
       activate("B");
       await delayed.reload();
       await admitted(delayed, revised);
+      const share = await openSharePreview(delayed, revised);
       release();
+      await expect.poll(() => settled).toBe(true);
+      await expect(
+        share.getByText(shareAudience(revised), { exact: true }),
+      ).toBeVisible();
+      await share.getByRole("button", { name: "Cancel", exact: true }).click();
       await admitted(delayed, revised);
     } finally {
       release();
       await delayed.close();
     }
 
-    activate("Only");
+    const productOnly = activate("Only");
     await page.reload();
-    await expect(
-      page.getByText("Example Product", { exact: true }).first(),
-    ).toBeVisible();
-    expect(await page.getByTestId("tenant-context").count()).toBe(0);
-    expect(
-      (await (await page.request.get("/api/branding/presentation")).json())
-        .mode,
-    ).toBe("product-only");
+    await productSidebar(page, "Example Product");
+    const selected = await presentation(page);
+    expect(selected).toEqual(productOnly);
+    expect(selected.mode).toBe("product-only");
+    expect(selected.tenant).toBeNull();
     await expect(
       page.getByText("Revised starter", { exact: true }),
     ).toBeVisible();
@@ -392,18 +437,17 @@ test("one build admits complete tenant snapshots through authenticated activatio
     }
     activate("Legacy");
     await page.reload();
-    await expect(
-      page.getByText("Example Legacy Tenant", { exact: true }).first(),
-    ).toBeVisible();
-    expect(
-      (await (await page.request.get("/api/branding/presentation")).json())
-        .mode,
-    ).toBe("legacy");
+    expect((await presentation(page)).mode).toBe("legacy");
+    const legacyFeatures = await page.request.get("/api/features");
+    expect(legacyFeatures.status()).toBe(200);
+    expect((await legacyFeatures.json()).branding.company_name).toBe(
+      "Example Legacy Tenant",
+    );
+    await productSidebar(page, "HartMesh");
     activate("Default");
     await page.reload();
-    await expect(
-      page.getByText("HartMesh", { exact: true }).first(),
-    ).toBeVisible();
+    expect((await presentation(page)).mode).toBe("legacy");
+    await productSidebar(page, "HartMesh");
 
     // Session loss retires protected state before another account can see it.
     activate("A");
@@ -504,7 +548,7 @@ test("one build admits complete tenant snapshots through authenticated activatio
     await page.getByRole("button", { name: "Account", exact: true }).click();
     await page.getByRole("button", { name: "Sign Out", exact: true }).click();
     await expect(page).toHaveURL(/\/login/);
-    expect(await page.getByTestId("tenant-context").count()).toBe(0);
+    await expect(page.locator('[data-sidebar="sidebar"]')).toHaveCount(0);
     expect((await request.get("/api/branding/presentation")).status()).toBe(
       401,
     );

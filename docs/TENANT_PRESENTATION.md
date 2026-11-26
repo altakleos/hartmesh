@@ -4,14 +4,10 @@ Tenant presentation identifies the workspace after sign-in. It never chooses a
 tenant, grants access, renames a conversation, changes stored resources, or
 replaces the shared product/provider. Browser title/icon, sign-in/setup, product
 information, component version and support retain their product-owned roles.
-The strict UI shows a separate **Workspace** name/logo, including a meaningful
-name in collapsed navigation. It uses the existing text/background palette;
-tenant-controlled CSS, colors and themes are not supported.
+The sidebar uses the product identity in expanded, collapsed and mobile navigation.
+Tenant names and logos remain available through the authenticated presentation API. Provider support is available in **Settings and more → About**.
 
-![Synthetic product, provider and tenant roles in the authenticated workspace](images/product/tenant-workspace.png)
-
-This production-build example uses synthetic names and raster marks. Product
-and support stay separate from the tenant's Workspace context.
+![Product logo above the workspace navigation](images/product/tenant-workspace.png)
 
 ## Compatibility and ownership
 
@@ -168,8 +164,8 @@ stopping/restarting and recovery. Arbitrary live edits are unsupported.
    immutable while workers capture them.
 4. Through ordinary verified authentication, check the **actual serving**
    `/api/branding/presentation` on every worker against the selected complete
-   snapshot, then inspect a fresh authenticated page's readable name/logo and
-   shared product/provider/version. A separate validation subprocess or generic
+   snapshot, then inspect the product mark in a fresh signed-in sidebar and the
+   provider and component version in About. A separate validation subprocess or generic
    health endpoint cannot establish what another worker admitted. Do not report
    readiness or reopen admission while any worker is mixed, failed or uncertain.
 5. Existing browser documents may keep their admitted presentation. New full

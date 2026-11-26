@@ -319,7 +319,7 @@ failure; fresh failures show unavailable. See [contract](../docs/RUNTIME_PRODUCT
 
 Legacy tenant branding (`useBranding`) selects the authenticated features response's
 company name, colors, logo availability and optional provider support. It can
-replace default product naming in the sidebar/title/About; loading or failed
+replace default product naming in the document title and About content; loading or failed
 initial reads show neither name. Colors are metadata, not applied web CSS.
 Configured product mode preserves product slots. Sign-in/setup never show tenant
 material. Support uses validated HTTPS with no referrer or added context.
@@ -329,8 +329,7 @@ complete authenticated name/logo snapshot inside the account-owned workspace
 subtree. Validate its bounded schema/content/product binding. Retain it across
 focus, client navigation and server refreshes; retire/cancel with the account.
 Fresh failures show unavailable. `useBranding` ignores live tenant fields in
-strict mode while other features keep refreshing. The header shows a separately
-named Workspace context with fixed readable colors, including collapsed names.
+strict mode while other features keep refreshing. Sidebar names, logos, initials and menu labels use the public product identity only.
 Static/legacy paths stay compatible. See [the contract](../docs/TENANT_PRESENTATION.md).
 Keep session recovery and the index's pure route control outside private admission.
 Uncertain SSR auth keeps the provider path; new SSR scope conflicts retire it
@@ -429,7 +428,7 @@ tokens. Stop captures its attempt and blocks new sends. A failed cancellation
 remains uncertain. Propagate text/file admission errors to PromptInput. Clear
 drafts/references and release captured browser Files only on confirmed admission.
 
-Collapsed provider support keeps its named logo link. Browser-mocked Playwright suites use
+About owns the support link for configured and legacy providers. Browser-mocked Playwright suites use
 `tests/fixtures/product-gateway.mjs` for product identity and explicit legacy selection (other routes 503);
 retain real-service outage checks. See the
 [runtime contract](../docs/RUNTIME_PRODUCT_IDENTITY.md).

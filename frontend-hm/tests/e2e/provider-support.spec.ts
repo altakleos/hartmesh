@@ -32,14 +32,17 @@ for (const width of [1280, 390]) {
     await page.goto("/workspace/chats/new");
     if (width < 768)
       await page.locator("[data-sidebar='trigger']:visible").first().click();
+    const sidebar = page.locator('[data-sidebar="sidebar"]');
+    await expect(sidebar).not.toContainText("Customer Co.");
     await page.getByRole("button", { name: "Settings and more" }).click();
-    const support = page.getByRole("menuitem", {
+    await expect(page.getByRole("menuitem", { name: /support/i })).toHaveCount(
+      0,
+    );
+    await page.getByRole("menuitem", { name: "About HartMesh" }).click();
+    const support = page.getByRole("dialog").getByRole("link", {
       name: "Contact Example Hosting support",
     });
     await expect(support).toBeVisible();
-    await expect(
-      page.getByRole("menuitem", { name: "About Customer Co." }),
-    ).toBeVisible();
     await page.screenshot({
       path: test.info().outputPath(`support-${width}.png`),
     });

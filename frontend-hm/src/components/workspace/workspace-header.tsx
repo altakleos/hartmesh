@@ -11,16 +11,15 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { logoURL, useBranding } from "@/core/features";
 import { useProductName } from "@/core/i18n/context";
 import { useI18n } from "@/core/i18n/hooks";
-import { ProviderIdentity, useProductIdentity } from "@/core/product/context";
+import { useProductIdentity } from "@/core/product/context";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 /** The first letters of the first two words: what a collapsed sidebar shows without a logo. */
-export function companyMark(companyName: string): string {
-  return companyName
+export function productInitials(name: string): string {
+  return name
     .split(/\s+/)
     .filter((word) => word.length > 0)
     .slice(0, 2)
@@ -30,35 +29,18 @@ export function companyMark(companyName: string): string {
 
 export function WorkspaceHeader({ className }: { className?: string }) {
   const { t } = useI18n();
-  const { state } = useSidebar();
+  const { state, isMobile } = useSidebar();
   const pathname = usePathname();
-  const branding = useBranding();
   const identity = useProductIdentity();
-  const configured = identity?.mode === "configured";
-  const productName = useProductName();
-  // Nothing until the deployment has answered: the wrong name is worse than
-  // a beat with none.
-  const name =
-    configured || branding.strict
-      ? (identity?.name ?? productName)
-      : branding.isLoading
-        ? ""
-        : (branding.companyName ?? productName);
-  const mark = name ? companyMark(name) : "";
-  const logo = configured ? (
-    <img
-      src={identity.product.logo}
-      alt=""
-      className="size-6 shrink-0 rounded bg-white object-contain"
-    />
-  ) : !branding.strict && branding.hasLogo ? (
-    <img
-      src={logoURL()}
-      alt=""
-      className="size-6 shrink-0 object-contain"
-      data-testid="tenant-logo"
-    />
-  ) : null;
+  const name = useProductName();
+  const logo =
+    identity?.mode === "configured" ? (
+      <img
+        src={identity.product.logo}
+        alt=""
+        className="size-6 shrink-0 rounded bg-white object-contain"
+      />
+    ) : null;
   return (
     <>
       <div
@@ -67,10 +49,14 @@ export function WorkspaceHeader({ className }: { className?: string }) {
           className,
         )}
       >
-        {state === "collapsed" ? (
+        {state === "collapsed" && !isMobile ? (
           <div className="group-has-data-[collapsible=icon]/sidebar-wrapper:-translate-y flex w-full cursor-pointer items-center justify-center">
-            <div className="text-primary block pt-1 font-serif group-hover/workspace-header:hidden">
-              {logo ?? mark}
+            <div
+              title={name}
+              className="text-primary block pt-1 font-serif group-hover/workspace-header:hidden"
+            >
+              {logo && <span className="sr-only">{name}</span>}
+              {logo ?? productInitials(name)}
             </div>
             <SidebarTrigger className="hidden pl-2 group-hover/workspace-header:block" />
           </div>
@@ -94,29 +80,6 @@ export function WorkspaceHeader({ className }: { className?: string }) {
           </div>
         )}
       </div>
-      <ProviderIdentity />
-      {branding.strict && branding.companyName && (
-        <div
-          role="group"
-          aria-label={`Workspace: ${branding.companyName}`}
-          title={`Workspace: ${branding.companyName}`}
-          data-testid="tenant-context"
-          data-snapshot-id={branding.snapshotId}
-          className="mx-1 flex min-w-0 items-center gap-2 rounded bg-white p-2 text-sm text-black group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:p-1"
-        >
-          <img
-            src={branding.logo ?? undefined}
-            alt=""
-            width={32}
-            height={32}
-            className="size-8 shrink-0 object-contain group-data-[collapsible=icon]:size-5"
-            data-testid="tenant-logo"
-          />
-          <span className="min-w-0 wrap-anywhere group-data-[collapsible=icon]:hidden">
-            Workspace: <bdi>{branding.companyName}</bdi>
-          </span>
-        </div>
-      )}
       <SidebarMenu>
         <SidebarMenuItem>
           <SidebarMenuButton
