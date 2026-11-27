@@ -1548,10 +1548,8 @@ suggestions:
 # limits a person is their `system_role`. `business` tells administrators from
 # everyone else, so it has no effect when authentication is disabled.
 #
-# starters are what Home offers before anyone types. Choosing one fills the
-# message box; nothing is sent, so the person adds their files and their own
-# words first. At most 6. Unset takes the profile's default (`business` opens
-# on a small built-in set, `developer` on none); an empty list shows no grid.
+# starters are prompt data served to compatible clients. At most 6.
+# Unset takes the profile's default. An empty list clears the prompt data.
 #
 # product_name is what the product is called wherever a person sees it: the
 # sign-in and setup pages, the browser tab, the workspace when the tenant
@@ -1593,9 +1591,9 @@ ui:
 # ============================================================================
 # One directory the operator writes: brand.json (company_name, logo, colors),
 # an optional PNG or JPEG logo next to it, starters.json (the same shape and
-# rules as ui.starters; present, it is the grid) and optional provider.json.
-# The Gateway reads it for authenticated workspace content, About and Home's
-# starters. Mount the same directory read-only at /mnt/tenant
+# rules as ui.starters) and optional provider.json.
+# The Gateway reads it for authenticated workspace content and About.
+# Mount the same directory read-only at /mnt/tenant
 # through sandbox.mounts so skills read the same branding files. Skills own
 # additional resources such as report-profiles/; the Gateway does not enumerate them.
 tenant_bundle:

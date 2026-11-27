@@ -12,12 +12,6 @@ describe("core copy loading", () => {
       loadTranslations("en-US", "Acme Assist"),
       loadTranslations("zh-CN", "Acme Assist"),
     ]);
-    expect(english.inputBox.disclaimer).toBe(
-      "Acme Assist is AI and can make mistakes",
-    );
-    expect(chinese.inputBox.disclaimer).toBe(
-      "内容由AI生成，重要信息请务必核查",
-    );
     expect(english.channels.descriptions.buzz).toBe(
       "Buzz channels and direct messages through your Acme Assist agent.",
     );
@@ -31,9 +25,6 @@ describe("core copy loading", () => {
   it("names the product HartMesh when the deployment names nothing", () => {
     expect(enUS.pages.appName).toBe("HartMesh");
     expect(zhCN.pages.appName).toBe("HartMesh");
-    expect(enUS.inputBox.disclaimer).toBe(
-      "HartMesh is AI and can make mistakes",
-    );
   });
 
   it("never names the framework the product is built on", () => {

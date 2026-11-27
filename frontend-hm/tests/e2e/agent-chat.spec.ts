@@ -32,7 +32,7 @@ test.describe("Agent chat", () => {
     });
   });
 
-  test("agent chat page loads with input box and AI disclaimer", async ({
+  test("agent chat page loads without the composer footer", async ({
     page,
   }) => {
     mockLangGraphAPI(page, { agents: MOCK_AGENTS });
@@ -44,7 +44,7 @@ test.describe("Agent chat", () => {
     await expect(textarea).toBeVisible({ timeout: 15_000 });
     await expect(
       page.getByText("HartMesh is AI and can make mistakes", { exact: true }),
-    ).toBeVisible();
+    ).toHaveCount(0);
   });
 
   test("mobile agent welcome keeps the sidebar trigger clickable", async ({

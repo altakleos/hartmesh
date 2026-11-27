@@ -338,9 +338,7 @@ same `plugins:` entry and a restart to retain historical cards.
 The report skill now publishes a passive view with explicitly generated downloads
 inside each immutable draft. Its existing Python formatters own the displayed
 values and checks. Oversized views explain omissions; failed views retain ordinary
-formats. The report model schema ships with the skill. Generic business starters
-cover documents and spreadsheets; the report-enabled Compose provider explicitly
-selects the monthly-review starter, and tenant starter overrides still take priority.
+formats. The report model schema ships with the skill.
 
 Workspace Files and an agent’s Files tab use the same file browser on phones, tablets and
 desktops. **Locations** opens My files, Company shared, and the agent homes
@@ -3840,8 +3838,8 @@ After picking an inline reference, typing continues immediately after it. Moving
 
 The Web UI composer also supports browser-based voice dictation when the browser exposes the Web Speech API. The microphone button transcribes speech into the local draft only; DeerFlow receives only the transcribed text, while audio handling is delegated to the browser or operating system speech-recognition service according to that environment's policy. Users can review or edit the text before sending. Dictation keeps words separated when browsers trim transcript segments, preserves Chinese and Japanese joins, and attaches leading punctuation and percent signs without adding spaces.
 
-The Web UI displays a localized AI-generated-content disclaimer below the composer in both standard and custom-agent conversations, reminding users to verify important
-information.
+New business chats open directly on the composer. Developer workspaces also
+show a short product description.
 
 Interrupted first-turn runs still persist a fallback conversation title, so stopping a streaming response does not leave the thread as "Untitled" after refresh.
 

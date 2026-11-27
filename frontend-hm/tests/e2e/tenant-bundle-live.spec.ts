@@ -72,9 +72,7 @@ test("one tolerant bundle supplies private company content while page titles and
   );
   expect((await page.request.get(removedPath)).status()).toBe(404);
   await expect(page).toHaveTitle(`New chat - ${product}`);
-  await expect(
-    page.getByText("This is AI and can make mistakes.", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByText(/is AI and can make mistakes/)).toHaveCount(0);
 
   const sidebar = page.locator('[data-sidebar="sidebar"]');
   const header = sidebar.locator('[data-sidebar="header"]');

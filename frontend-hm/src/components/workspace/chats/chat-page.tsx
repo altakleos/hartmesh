@@ -917,9 +917,7 @@ export default function ChatPage() {
                           extraHeader={
                             isWelcomeMode &&
                             !hasGoal &&
-                            !hasTodos && (
-                              <Welcome mode={settings.context.mode} />
-                            )
+                            !hasTodos && <Welcome />
                           }
                           extraFooter={
                             isWelcomeMode &&

@@ -107,16 +107,19 @@ test.describe("Chat workspace", () => {
     await expect(page.getByRole("button", { name: /load more/i })).toBeHidden();
   });
 
-  test("shows the localized AI disclaimer", async ({ page }) => {
+  test("omits the composer footer in the Chinese locale", async ({ page }) => {
     await page.goto("/workspace/chats/new");
     await page.evaluate(() => {
       document.cookie = "locale=zh-CN; path=/; SameSite=Lax";
     });
     await page.reload();
 
+    await expect(page.getByPlaceholder("今天我能为你做些什么？")).toBeVisible({
+      timeout: 15_000,
+    });
     await expect(
       page.getByText("内容由AI生成，重要信息请务必核查", { exact: true }),
-    ).toBeVisible({ timeout: 15_000 });
+    ).toHaveCount(0);
   });
 
   test("can type a message in the input box", async ({ page }) => {
@@ -883,8 +886,7 @@ test.describe("Chat workspace", () => {
     const textarea = page.getByPlaceholder(/how can i assist you/i);
     await expect(textarea).toBeVisible({ timeout: 15_000 });
 
-    await page.getByRole("button", { name: /research/i }).click();
-    await expect(textarea).toHaveValue(
+    await textarea.fill(
       "Conduct a deep dive research on [topic], and summarize the findings.",
     );
 

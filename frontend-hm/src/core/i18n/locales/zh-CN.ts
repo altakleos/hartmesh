@@ -1,14 +1,3 @@
-import {
-  CompassIcon,
-  GraduationCapIcon,
-  ImageIcon,
-  MicroscopeIcon,
-  PenLineIcon,
-  ShapesIcon,
-  SparklesIcon,
-  VideoIcon,
-} from "lucide-react";
-
 import { DEFAULT_PRODUCT_NAME } from "@/core/product";
 
 import type { Translations } from "./types";
@@ -1077,11 +1066,7 @@ export function createZhCN(product: string): Translations {
 
     // Welcome
     welcome: {
-      greeting: "你好，欢迎回来！",
       description: `欢迎使用 ${product}。通过内置和自定义的 Skills，\n${product} 可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n图片、视频、播客及网页等，几乎可以做任何事情。`,
-      startersLabel: "可以从这些开始",
-      startersHint: "选择一个即可填入输入框——在你准备好之前不会发送。",
-
       createYourOwnSkill: "创建你自己的 Agent SKill",
       createYourOwnSkillDescription: `创建你的 Agent Skill 来释放 ${product} 的潜力。通过自定义技能，${product}\n可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n网页等作品，几乎可以做任何事情。`,
     },
@@ -1236,8 +1221,6 @@ export function createZhCN(product: string): Translations {
         tooLarge: (file, max) => `${file} 超过单个文件的大小上限 ${max}。`,
       },
       placeholder: "今天我能为你做些什么？",
-      disclaimer: "内容由AI生成，重要信息请务必核查",
-      assistantDisclaimer: "这是 AI，可能会出错。",
       createSkillPrompt:
         "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
       addAttachments: "添加附件",
@@ -1285,8 +1268,6 @@ export function createZhCN(product: string): Translations {
       modelsLoadFailed: "模型加载失败。请重试，草稿会保留。",
       modelsRetry: "重新加载模型",
       searchModels: "搜索模型...",
-      surpriseMe: "小惊喜",
-      surpriseMePrompt: "给我一个小惊喜吧",
       followupLoading: "正在生成可能的后续问题...",
       followupConfirmTitle: "发送建议问题？",
       followupConfirmDescription: "当前输入框已有内容，选择发送方式。",
@@ -1310,54 +1291,6 @@ export function createZhCN(product: string): Translations {
         "已压缩早期上下文。完整聊天记录仍保留，后续模型将基于摘要和最近消息继续。",
       compactSkipped: "当前上下文还不需要压缩。",
       compactFailed: "上下文压缩失败。",
-      suggestions: [
-        {
-          suggestion: "写作",
-          prompt: "撰写一篇关于[主题]的博客文章",
-          icon: PenLineIcon,
-        },
-        {
-          suggestion: "研究",
-          prompt: "深入浅出的研究一下[主题]，并总结发现。",
-          icon: MicroscopeIcon,
-        },
-        {
-          suggestion: "收集",
-          prompt: "从[来源]收集数据并创建报告。",
-          icon: ShapesIcon,
-        },
-        {
-          suggestion: "学习",
-          prompt: "学习关于[主题]并创建教程。",
-          icon: GraduationCapIcon,
-        },
-      ],
-      suggestionsCreate: [
-        {
-          suggestion: "网页",
-          prompt: "生成一个关于[主题]的网页",
-          icon: CompassIcon,
-        },
-        {
-          suggestion: "图片",
-          prompt: "生成一个关于[主题]的图片",
-          icon: ImageIcon,
-        },
-        {
-          suggestion: "视频",
-          prompt: "生成一个关于[主题]的视频",
-          icon: VideoIcon,
-        },
-        {
-          type: "separator",
-        },
-        {
-          suggestion: "技能",
-          prompt:
-            "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
-          icon: SparklesIcon,
-        },
-      ],
       pleaseWaitStreaming: "请等待当前响应完成。",
       runInputMode: "运行中发送方式",
       queueMode: "排队执行",

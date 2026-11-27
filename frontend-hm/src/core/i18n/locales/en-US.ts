@@ -1,14 +1,3 @@
-import {
-  CompassIcon,
-  GraduationCapIcon,
-  ImageIcon,
-  MicroscopeIcon,
-  PenLineIcon,
-  ShapesIcon,
-  SparklesIcon,
-  VideoIcon,
-} from "lucide-react";
-
 import { DEFAULT_PRODUCT_NAME } from "@/core/product";
 
 import type { Translations } from "./types";
@@ -1148,12 +1137,8 @@ export function createEnUS(product: string): Translations {
 
     // Welcome
     welcome: {
-      greeting: "Hello, again!",
       description: `Welcome to ${product}. With built-in and custom skills, ${product} helps you search on the web, analyze data, and generate artifacts like slides, web pages and do almost anything.`,
 
-      startersLabel: "Things you can start with",
-      startersHint:
-        "Pick one to fill the message box — nothing is sent until you are ready.",
       createYourOwnSkill: "Create Your Own Skill",
       createYourOwnSkillDescription: `Create your own skill to release the power of ${product}. With customized skills,\n${product} can help you search on the web, analyze data, and generate\n artifacts like slides, web pages and do almost anything.`,
     },
@@ -1323,8 +1308,6 @@ export function createEnUS(product: string): Translations {
           `${file} is larger than ${max}, the most one file can be.`,
       },
       placeholder: "How can I assist you today?",
-      disclaimer: `${product} is AI and can make mistakes`,
-      assistantDisclaimer: "This is AI and can make mistakes.",
       createSkillPrompt:
         "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
       addAttachments: "Add attachments",
@@ -1380,8 +1363,6 @@ export function createEnUS(product: string): Translations {
       modelsLoadFailed: "Models could not be loaded. Retry to send your draft.",
       modelsRetry: "Reload models",
       searchModels: "Search models...",
-      surpriseMe: "Surprise",
-      surpriseMePrompt: "Surprise me",
       followupLoading: "Generating follow-up questions...",
       followupConfirmTitle: "Send suggestion?",
       followupConfirmDescription:
@@ -1408,55 +1389,6 @@ export function createEnUS(product: string): Translations {
         "Earlier context compacted. The full chat remains visible; future model calls will use the summary and recent messages.",
       compactSkipped: "The current context does not need compaction yet.",
       compactFailed: "Context compaction failed.",
-      suggestions: [
-        {
-          suggestion: "Write",
-          prompt: "Write a blog post about the latest trends on [topic]",
-          icon: PenLineIcon,
-        },
-        {
-          suggestion: "Research",
-          prompt:
-            "Conduct a deep dive research on [topic], and summarize the findings.",
-          icon: MicroscopeIcon,
-        },
-        {
-          suggestion: "Collect",
-          prompt: "Collect data from [source] and create a report.",
-          icon: ShapesIcon,
-        },
-        {
-          suggestion: "Learn",
-          prompt: "Learn about [topic] and create a tutorial.",
-          icon: GraduationCapIcon,
-        },
-      ],
-      suggestionsCreate: [
-        {
-          suggestion: "Webpage",
-          prompt: "Create a webpage about [topic]",
-          icon: CompassIcon,
-        },
-        {
-          suggestion: "Image",
-          prompt: "Create an image about [topic]",
-          icon: ImageIcon,
-        },
-        {
-          suggestion: "Video",
-          prompt: "Create a video about [topic]",
-          icon: VideoIcon,
-        },
-        {
-          type: "separator",
-        },
-        {
-          suggestion: "Skill",
-          prompt:
-            "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
-          icon: SparklesIcon,
-        },
-      ],
       pleaseWaitStreaming: "Please wait for the current response to finish.",
       runInputMode: "Send while working",
       queueMode: "Queue",

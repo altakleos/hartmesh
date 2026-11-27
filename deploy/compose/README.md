@@ -999,7 +999,7 @@ workspace says about the company it serves. Two readers, one directory, no
 copy: every sandbox mounts it read-only at `/mnt/tenant` (a `sandbox.mounts`
 entry in `config.yaml`), which is where the `business-report` skill picks up
 the company name, logo and colours by itself, and the Gateway reads the same
-path (`tenant_bundle.path`) for legacy About content, Home's starter grid, agent roles and provider support text. A person sees the company after signing in; the login
+path (`tenant_bundle.path`) for legacy About content, agent roles and provider support text. A person sees the company after signing in; the login
 page stays the product's own.
 
 The layout is the skill's contract, and every file is optional:
@@ -1015,9 +1015,8 @@ The layout is the skill's contract, and every file is optional:
 ├── provider.json       {"display_name": "Example Hosting",
 │                        "support_url": "https://support.example.com/help"}
 ├── starters.json       [{"id": "business-review", "title": "...", "prompt": "..."}]
+│                       -- optional compatibility data for `ui.starters`
 ├── roles.json          optional role briefs (§ "Roles and the provider’s name")
-│                       -- the same shape and rules as `ui.starters`: at most
-│                       six, distinct ids, plain text; present, it *is* the grid
 └── report-profiles/    <name>.json, loaded by the skill by name ahead of its
                         own `profiles/` (a `services-generic.json` here replaces
                         the built-in one)
@@ -1075,10 +1074,8 @@ employee to propose turning tracked assignments on or off. Its manager reviews
 the proposal in the employee’s Settings. Set the `work-proposals` entry’s
 `enabled` field to `false` and restart the Gateway to disable the form and review
 surface. Existing proposals and past decisions stay in the database.
-It also explicitly selects the existing monthly review, document summary and
-spreadsheet starters in `ui.starters`. Generic business defaults contain only the
-two document/spreadsheet tasks. Tenant `starters.json` takes precedence, including
-an intentionally empty list.
+The template supplies `ui.starters` for client compatibility. Tenant
+`starters.json` takes precedence, including an intentionally empty list.
 
 With the business profile, the screens for building the deployment -- skills, tools,
 subagents, integrations, and the scheduled-task recipes -- are offered to

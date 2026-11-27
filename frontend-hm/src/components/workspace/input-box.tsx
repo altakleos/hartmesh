@@ -11,7 +11,6 @@ import {
   Loader2Icon,
   MicIcon,
   PaperclipIcon,
-  PlusIcon,
   RocketIcon,
   SparklesIcon,
   SquareIcon,
@@ -20,7 +19,6 @@ import {
   XIcon,
   ZapIcon,
 } from "lucide-react";
-import { useSearchParams } from "next/navigation";
 import {
   useCallback,
   useEffect,
@@ -55,7 +53,6 @@ import {
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
-import { ConfettiButton } from "@/components/ui/confetti-button";
 import {
   Dialog,
   DialogContent,
@@ -67,19 +64,13 @@ import {
 import {
   DropdownMenuGroup,
   DropdownMenuLabel,
-  DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { RetryContinuedFiles } from "@/components/workspace/shared-conversations/retry-files";
 import { hasCeiling } from "@/core/agent-instances/presentation";
 import { fetch } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
-import {
-  useFeatures,
-  selectConversationReferenceLimit,
-  useBranding,
-  useWorkspacePresentation,
-} from "@/core/features";
+import { useFeatures, selectConversationReferenceLimit } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
 import {
@@ -165,7 +156,6 @@ import {
 
 import { ConversationFilePicker } from "./chats/conversation-file-picker";
 import { FilesStateNotice } from "./chats/files-state-notice";
-import { ComposerFocusProvider } from "./composer-focus";
 import {
   abortGoalRequest,
   beginGoalRequest,
@@ -413,9 +403,7 @@ export function InputBox({
   const runInputInFlight = useRef(false);
   const canSendBusyInput = !!onBusySubmit;
   useEffect(() => setRunInputMode("queue"), [threadId]);
-  const { companyName } = useBranding();
   const queryClient = useQueryClient();
-  const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const {
     models,
@@ -2430,32 +2418,6 @@ export function InputBox({
     threadId,
   ]);
 
-  const focusComposer = useCallback(() => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    // Synchronously, still inside the click: iOS Safari only opens the
-    // keyboard for a focus that is part of the user gesture.
-    textarea.focus();
-    // The filled text arrives on the next render, so the caret waits for it —
-    // otherwise the next thing typed lands in front of the prompt.
-    requestAnimationFrame(() => {
-      const end = textarea.value.length;
-      textarea.setSelectionRange(end, end);
-    });
-  }, []);
-
-  const onSelectPlaceholder = useCallback((newText: string) => {
-    const placeholder = findSuggestionTemplatePlaceholder(newText);
-    if (placeholder) {
-      requestAnimationFrame(() => {
-        const textarea = textareaRef.current;
-        if (!textarea) return;
-        textarea.focus();
-        textarea.setSelectionRange(placeholder.start, placeholder.end);
-      });
-    }
-  }, []);
-
   return (
     <div
       ref={promptRootRef}
@@ -2612,9 +2574,7 @@ export function InputBox({
         {extraHeader && (
           <div className="absolute top-0 right-0 left-0 z-10">
             <div className="absolute right-0 bottom-0 left-0 flex items-center justify-center">
-              <ComposerFocusProvider value={focusComposer}>
-                {extraHeader}
-              </ComposerFocusProvider>
+              {extraHeader}
             </div>
           </div>
         )}
@@ -3348,26 +3308,6 @@ export function InputBox({
         <div className="bg-background absolute right-0 -bottom-[17px] left-0 z-0 h-4"></div>
       )}
 
-      {isWelcomeMode &&
-        searchParams.get("mode") !== "skill" &&
-        !selectedSlashSkill &&
-        !showSkillSuggestions && (
-          <div className="flex items-center justify-center pt-2">
-            <SuggestionList onSelectPlaceholder={onSelectPlaceholder} />
-          </div>
-        )}
-
-      <p
-        className={cn(
-          "text-muted-foreground/67 z-10 px-4 text-center text-xs leading-4",
-          !isWelcomeMode && "absolute top-full right-0 left-0",
-        )}
-      >
-        {companyName === null
-          ? t.inputBox.disclaimer
-          : t.inputBox.assistantDisclaimer}
-      </p>
-
       {extraFooter && (
         <div className="absolute top-full right-0 left-0 flex justify-center [@media(max-height:515px)]:hidden">
           {extraFooter}
@@ -3440,76 +3380,6 @@ function VoiceInputButton({
         )}
       </PromptInputButton>
     </Tooltip>
-  );
-}
-
-function SuggestionList({
-  onSelectPlaceholder,
-}: {
-  onSelectPlaceholder: (newText: string) => void;
-}) {
-  const { t } = useI18n();
-  const { textInput } = usePromptInputController();
-  // A deployment that named its own starters has said what Home offers; this
-  // row is the default it replaced, not a second one to sit beside it. The
-  // hook belongs here and not on `InputBox`: `InputBox` also mounts on
-  // static demo threads, which have no deployment to ask. `SuggestionList`
-  // mounts only in welcome mode, which a demo thread never reaches.
-  const { starters, isLoading } = useWorkspacePresentation();
-  const handleSuggestionClick = useCallback(
-    (prompt: string | undefined) => {
-      if (!prompt) return;
-      textInput.setInput(prompt);
-      onSelectPlaceholder(prompt);
-    },
-    [textInput, onSelectPlaceholder],
-  );
-  if (isLoading || starters?.length) {
-    return null;
-  }
-  return (
-    <Suggestions className="min-h-16 w-full max-w-full justify-center px-4 sm:w-fit sm:px-0">
-      <ConfettiButton
-        className="text-muted-foreground cursor-pointer rounded-full px-4 text-xs font-normal"
-        variant="outline"
-        size="sm"
-        onClick={() => handleSuggestionClick(t.inputBox.surpriseMePrompt)}
-      >
-        <SparklesIcon className="size-4" /> {t.inputBox.surpriseMe}
-      </ConfettiButton>
-      {t.inputBox.suggestions.map((suggestion) => (
-        <Suggestion
-          key={suggestion.suggestion}
-          icon={suggestion.icon}
-          suggestion={suggestion.suggestion}
-          onClick={() => handleSuggestionClick(suggestion.prompt)}
-        />
-      ))}
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Suggestion icon={PlusIcon} suggestion={t.common.create} />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          <DropdownMenuGroup>
-            {t.inputBox.suggestionsCreate.map((suggestion, index) =>
-              "type" in suggestion && suggestion.type === "separator" ? (
-                <DropdownMenuSeparator key={index} />
-              ) : (
-                !("type" in suggestion) && (
-                  <DropdownMenuItem
-                    key={suggestion.suggestion}
-                    onClick={() => handleSuggestionClick(suggestion.prompt)}
-                  >
-                    {suggestion.icon && <suggestion.icon className="size-4" />}
-                    {suggestion.suggestion}
-                  </DropdownMenuItem>
-                )
-              ),
-            )}
-          </DropdownMenuGroup>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </Suggestions>
   );
 }
 
