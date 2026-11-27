@@ -25,7 +25,7 @@ export function ThreadTitle({
 
   const page = thread.isThreadLoading
     ? "Loading..."
-    : (title || (isNewThread ? t.pages.newChat : t.pages.untitled));
+    : title || (isNewThread ? t.pages.newChat : t.pages.untitled);
   useDocumentTitle(page, t.pages.appName);
 
   if (!title) {

@@ -40,6 +40,8 @@ async function open(page: Page, enabled: boolean, allow: boolean) {
       : route.fulfill({ status: 404, json: { detail: "Thread not found" } });
   });
   await page.goto("/workspace/chats/" + MOCK_THREAD_ID);
+  // The hydrated thread confirms the account refresh listener is ready.
+  await expect(page.getByText("Start here", { exact: true })).toBeVisible();
   await refreshAccount(page);
   const box = page.locator('textarea[name="message"]');
   await expect(box).toBeEnabled();
