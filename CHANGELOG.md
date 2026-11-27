@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.85] - 2026-11-28
+
+### Chat workspace
+
+New business chats open directly on the composer. The welcome greeting and emoji,
+starter hint and prompt buttons, fallback suggestions, and composer AI notice
+have been removed. Developer workspaces still show the product description.
+The Gateway's existing starter configuration remains available to older clients.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.84.
+
 ## [2.2.0+hartmesh.84] - 2026-11-27
 
 ### About
