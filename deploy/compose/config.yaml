@@ -181,8 +181,8 @@ skills:
   container_path: /mnt/skills
 
 # Someone who is not an administrator is not offered the developer screens
-# (skills, tools, subagents, integrations, the scheduled-task recipes) and
-# Home shows a starter grid. Presentation only; `system_role` limits a person.
+# (skills, tools, subagents, integrations, the scheduled-task recipes).
+# The `system_role` controls authorization.
 ui:
   roles:
     - id: reporting-analyst

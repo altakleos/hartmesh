@@ -16,13 +16,13 @@ tenant_bundle:
 | --- | --- |
 | `brand.json` | `company_name` is a plain line of up to 80 characters. `logo` is the name of a PNG or JPEG file in the directory. `colors.primary` and `colors.secondary` are hex colors such as `#123456` and `#abcdef`. |
 | `provider.json` | Optional legacy support metadata for installations without a configured product identity. `display_name` is an optional plain line of up to 80 characters. `support_url` is an absolute HTTPS URL without credentials, whitespace or backslashes, at most 2048 characters. The link appears in About. With a configured product identity, set support in its public provider payload. |
-| `starters.json` | A list using the same rules as `ui.starters`. An empty list clears the starter grid. |
+| `starters.json` | A list using the same rules as `ui.starters`. The Gateway still serves this field for client compatibility. |
 | `roles.json` | A list using the same rules as `ui.roles`. |
 
 The files are optional. The Gateway names the field and rule for malformed
 inputs and degrades each field independently. For example, a missing logo still
 allows a valid company name, and an unusable starter list falls back to the
-configured grid. The Gateway reads changes on subsequent requests. In Compose,
+configured prompts. The Gateway reads changes on subsequent requests. In Compose,
 `gateway/render_config.py --check` reports which resources it can read and
 lists any input problems. See the [Compose guide](../deploy/compose/README.md#tenant-bundle)
 for file permissions and mounts.

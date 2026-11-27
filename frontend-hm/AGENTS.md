@@ -297,11 +297,10 @@ publication. Null explicitly identifies an operator-placed file. Only older
 Gateways omit the field; that compatibility path retains server-side locking and
 authorization but cannot fence an action against its earlier displayed identity.
 
-The deployment owns two presentation settings, both read from
-`GET /api/features` (`core/features`): `ui.starters` is Home's starter grid —
-choosing one fills the composer through the prompt-input controller, focuses it
-and sends nothing, because the first moment is "pick the thing, drop the file,
-say the month" — and `ui.profile` decides who is offered the developer screens.
+The frontend reads the deployment's presentation profile from
+`GET /api/features` (`core/features`): `ui.profile` decides who is offered
+the developer screens and whether Home shows the product description.
+The Gateway still exposes `ui.starters` for clients that use that field.
 Under `business`, someone who is not an administrator is offered Skills only
 when private management is effectively delegated. Tools, subagents, integrations
 and scheduled-task recipe chips remain hidden, and Home
@@ -336,16 +335,10 @@ Files tabs derive from `useSearchParams`, including same-page/history navigation
 Keep the original handle for interrupted Home writes and check by GET. A clean
 retry keeps the chip and takes a new handle.
 
-One rule governs what happens while the answer is unknown: a control someone
-might need stays offered, and copy the deployment authors waits. So the screens
-stay (a Gateway reporting no `ui` block reads as `developer`, and an upgrade
-never takes one away), while the blurb and the grid render only once the
-deployment has answered. Starters default to the profile — `business` opens on
-a small built-in set, `developer` on none — so an untouched deployment gains
-nothing it did not ask for, and when a grid exists the legacy suggestion row
-under the composer steps aside rather than sitting beside it. `InputBox` also
-mounts on static demo threads, so that gate lives inside `SuggestionList`,
-which a demo thread never reaches.
+While discovery is pending, developer controls remain available and Home
+waits to render the developer profile's product description. An older Gateway
+that returns no `ui` block resolves to `developer`. The skill-creation route
+displays its own instructions.
 
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)

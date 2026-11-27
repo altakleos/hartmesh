@@ -106,7 +106,7 @@ test.describe("Sidebar navigation", () => {
 
     await expectInsideViewport(page.getByText(/欢迎使用 HartMesh/).first());
     await expectInsideViewport(page.getByRole("textbox").first());
-    await expectInsideViewport(page.locator("[data-slot='suggestions-list']"));
+    await expect(page.locator("[data-slot='suggestions-list']")).toHaveCount(0);
 
     const mobileSidebarTrigger = page
       .locator("[data-sidebar='trigger']:visible")

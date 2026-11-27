@@ -13,6 +13,11 @@ const STARTERS = [
     title: "Summarize a document",
     prompt: "Read the document I attach and summarize it.",
   },
+  {
+    id: "spreadsheet-questions",
+    title: "Ask about a spreadsheet",
+    prompt: "Help me interpret the spreadsheet I attach.",
+  },
 ];
 
 async function mockWorkspace(
@@ -41,50 +46,55 @@ async function mockWorkspace(
   );
 }
 
-test.describe("a business workspace", () => {
-  test("opens on what the person can do, and puts a starter in the box", async ({
-    page,
-  }) => {
+test.describe("workspace home", () => {
+  test("opens business chat directly on the composer", async ({ page }) => {
     await mockWorkspace(page, { profile: "business" });
-    await page.goto("/workspace/chats/new");
+    await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/features" && response.ok(),
+      ),
+      page.goto("/workspace/chats/new"),
+    ]);
 
-    const starters = page.getByTestId("welcome-starters");
-    await expect(starters).toBeVisible({ timeout: 15_000 });
+    const composer = page.getByPlaceholder(/how can i assist you/i);
+    await expect(composer).toBeVisible({ timeout: 15_000 });
+    for (const starter of STARTERS) {
+      await expect(
+        page.getByRole("button", { name: starter.title }),
+      ).toHaveCount(0);
+    }
     await expect(
-      starters.getByRole("button", { name: "Monthly business review" }),
-    ).toBeVisible();
-    // The product blurb names agents, skills and artifacts; this workspace
-    // opens on the work instead.
+      page.getByText("Pick one to fill the message box", { exact: false }),
+    ).toHaveCount(0);
     await expect(
       page.getByText("Welcome to HartMesh.", { exact: false }),
     ).toHaveCount(0);
-    // And the row this one replaced steps aside rather than sitting under it.
-    await expect(page.getByRole("button", { name: "Surprise" })).toHaveCount(0);
-
-    await starters
-      .getByRole("button", { name: "Monthly business review" })
-      .click();
-
-    // Filled, not sent: the person adds their file and their own words.
-    await expect(page.getByRole("textbox")).toHaveValue(STARTERS[0]!.prompt);
-    await expect(page.getByTestId("message-list-item")).toHaveCount(0);
+    await expect(page.getByText("Hello, again!", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect(page.getByText("👋", { exact: true })).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Surprise", exact: true }),
+    ).toHaveCount(0);
+    await expect(page.getByText(/is AI and can make mistakes/)).toHaveCount(0);
+    await composer.fill("Help me plan the month.");
+    await expect(composer).toHaveValue("Help me plan the month.");
   });
 
-  test("leaves a deployment that configured nothing exactly as it was", async ({
+  test("keeps the developer blurb without a row of suggested prompts", async ({
     page,
   }) => {
-    // The upgrade-safety rule in both directions: no grid appears, the blurb
-    // stays, and the suggestion row this feature can replace is untouched.
     await mockWorkspace(page, { profile: "developer", starters: [] });
     await page.goto("/workspace/chats/new");
 
-    await expect(page.getByRole("button", { name: "Surprise" })).toBeVisible({
-      timeout: 15_000,
-    });
-    await expect(page.getByTestId("welcome-starters")).toHaveCount(0);
     await expect(
       page.getByText("Welcome to HartMesh.", { exact: false }),
-    ).toBeVisible();
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(
+      page.getByRole("button", { name: "Surprise", exact: true }),
+    ).toHaveCount(0);
+    await expect(page.getByText(/is AI and can make mistakes/)).toHaveCount(0);
   });
 });
 

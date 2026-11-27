@@ -528,7 +528,9 @@ export async function setupAgents(
 export async function detail(page: Page, tab: string) {
   await page.goto(`/workspace/instances?instance=${AGENT_ID}&tab=${tab}`);
   await expect(
-    page.getByRole("heading", { name: "Researcher", exact: true }),
+    page
+      .locator("header")
+      .getByRole("heading", { name: "Researcher", exact: true }),
   ).toBeVisible();
 }
 export async function addBrief(page: Page, kind: "personal" | "company") {

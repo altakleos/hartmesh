@@ -21,11 +21,6 @@ const CONNECT = {
   expires_at: "2099-01-01T00:00:00Z",
 };
 // The three a Compose tenant starts with: two rows at laptop width.
-const STARTERS = [
-  { id: "review", title: "Monthly business review", prompt: "Build a review." },
-  { id: "summary", title: "Summarize a document", prompt: "Summarize it." },
-  { id: "sheet", title: "Ask about a spreadsheet", prompt: "Look at it." },
-];
 
 function bot(overrides: Record<string, unknown> = {}) {
   return {
@@ -808,7 +803,7 @@ test.describe("Telegram bots", () => {
         json: {
           agents_api: { enabled: true },
           telegram: READY,
-          ui: { profile: "business", starters: STARTERS },
+          ui: { profile: "business" },
           // Without it the page draws a files notice a Compose tenant never sees.
           storage_spaces: { enabled: true, state: "ready", own: "ready" },
         },
@@ -817,16 +812,11 @@ test.describe("Telegram bots", () => {
     await page.goto("/workspace/chats/new");
     const card = page.getByTestId("telegram-welcome-card");
     await expect(card).toBeVisible();
-    // Its other copy is for screen readers and has no size.
-    await expect(page.getByText(enUS.welcome.greeting).last()).toBeInViewport();
-    const starters = page.getByTestId("welcome-starters");
-    for (const starter of STARTERS) {
-      // A click fails if anything lies over the tile, as the page's header once did.
-      await starters.getByRole("button", { name: starter.title }).click();
-      await expect(page.getByRole("textbox").first()).toHaveValue(
-        starter.prompt,
-      );
-    }
+    const composer = page.getByPlaceholder(enUS.inputBox.placeholder);
+    await expect(composer).toBeInViewport();
+    await composer.click();
+    await composer.fill("Draft a message");
+    await expect(composer).toHaveValue("Draft a message");
     await card.getByRole("button", { name: strings.offer.later }).click();
     await expect(card).toHaveCount(0);
   });

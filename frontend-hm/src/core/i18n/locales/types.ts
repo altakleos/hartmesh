@@ -1,5 +1,3 @@
-import type { LucideIcon } from "lucide-react";
-
 export interface StorageUnavailableTranslations {
   serverNotReady: string;
   serverCheckFailed: string;
@@ -908,10 +906,7 @@ export interface Translations {
 
   // Welcome
   welcome: {
-    greeting: string;
     description: string;
-    startersLabel: string;
-    startersHint: string;
     createYourOwnSkill: string;
     createYourOwnSkillDescription: string;
   };
@@ -1054,9 +1049,6 @@ export interface Translations {
       tooLarge: (file: string, max: string) => string;
     };
     placeholder: string;
-    disclaimer: string;
-    /** The same line in a company's workspace, which is not the product's to sign. */
-    assistantDisclaimer: string;
     createSkillPrompt: string;
     addAttachments: string;
     inputPolish: string;
@@ -1100,8 +1092,6 @@ export interface Translations {
     modelsLoadFailed: string;
     modelsRetry: string;
     searchModels: string;
-    surpriseMe: string;
-    surpriseMePrompt: string;
     followupLoading: string;
     followupConfirmTitle: string;
     followupConfirmDescription: string;
@@ -1123,21 +1113,6 @@ export interface Translations {
     compactSuccess: string;
     compactSkipped: string;
     compactFailed: string;
-    suggestions: {
-      suggestion: string;
-      prompt: string;
-      icon: LucideIcon;
-    }[];
-    suggestionsCreate: (
-      | {
-          suggestion: string;
-          prompt: string;
-          icon: LucideIcon;
-        }
-      | {
-          type: "separator";
-        }
-    )[];
     pleaseWaitStreaming: string;
     runInputMode: string;
     queueMode: string;
