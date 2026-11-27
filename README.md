@@ -5685,7 +5685,10 @@ a browser icon and support link to the same application build. See the
 compatibility, restart behavior and explicit unavailable states. Tenant material
 remains authenticated.
 
-The sidebar shows only the product’s branding. Its logo stays at the top. Open **Settings and more → About** for provider support.
+The sidebar shows only the product’s branding. Its logo stays at the top.
+The default **Settings and more → About** panel includes provider support.
+Operators can [replace the About content](docs/RUNTIME_PRODUCT_IDENTITY.md#operator-authored-about)
+with their own Markdown.
 The browser tab uses the product name. Authenticated workspace content reads the
 customer name and other optional fields from the [tenant bundle](docs/TENANT_PRESENTATION.md).
 

@@ -1,8 +1,8 @@
 """What the workspace shows before anyone has asked for anything.
 
-Three presentation settings the deployment owns: the product's name, which
-starters Home offers, and whether the developer-facing screens are offered to
-people who are not administrators. `profile` hides those screens and changes no route. The
+The deployment owns the product name, the About content, the starters Home
+offers, and whether the developer screens are offered to people who are not
+administrators. `profile` hides those screens and changes no route. The
 endpoints behind them allow exactly what they allowed before: `authorization`
 has no permission covering these APIs, so it is not the lever that closes them.
 What limits a person there is their `system_role`, which the API already checks.
@@ -23,6 +23,7 @@ from deerflow.config.work_policy import WorkPolicy
 #: How many starters Home will offer. Past this a grid stops being a choice.
 MAX_STARTERS = 6
 MAX_ROLES = 8
+MAX_ABOUT_MARKDOWN_CHARS = 16_384
 
 #: The product a deployment that names none is.
 DEFAULT_PRODUCT_NAME = "HartMesh"
@@ -139,6 +140,12 @@ class UiConfig(BaseModel):
         default=DEFAULT_PRODUCT_NAME,
         max_length=MAX_PRODUCT_NAME_CHARS,
         description=("What the product is called wherever a person sees it: the sign-in page, the browser tab, the workspace when no company name is set, the assistant's own name, and chat-app replies. One line."),
+    )
+    about_markdown: str | None = Field(
+        default=None,
+        strict=True,
+        max_length=MAX_ABOUT_MARKDOWN_CHARS,
+        description="Literal Markdown that replaces the About panel. Omit or use null for the built-in panel. An empty string provides an empty panel.",
     )
     profile: Literal["business", "developer"] = Field(
         default="developer",

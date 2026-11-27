@@ -676,3 +676,13 @@ def test_message_search_feature_uses_the_same_caller_and_ready_provider_as_searc
 async def test_features_expose_operator_agent_connection_switch(startup):
     assert (await _managed_features(startup, agent_connections_enabled=True))["agent_instances"]["connections"] is True
     assert (await _managed_features(startup, agents_api_enabled=False, agent_connections_enabled=True))["agent_instances"]["connections"] is False
+
+
+@pytest.mark.parametrize("markdown", ["", "# Example Product\n\nVersion 1.4.8"])
+def test_features_serves_about_markdown_when_configured(markdown):
+    with TestClient(_app_with_config(agents_api_enabled=False, ui=UiConfig(about_markdown=markdown))) as client:
+        response = client.get("/api/features")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.json()["ui"]["about_markdown"] == markdown

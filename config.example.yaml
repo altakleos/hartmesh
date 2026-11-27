@@ -1559,16 +1559,26 @@ suggestions:
 # title. One line, at most 40 characters. Unset, HartMesh. It is served
 # before sign-in (GET /api/v1/auth/product), so it is public.
 #
-# These strings are served verbatim (the starters to every signed-in person,
-# the product name to anyone), so keep secrets out of them - a value beginning
-# with `$` is replaced from the environment before this block is validated. A
-# malformed `ui:` block makes the Gateway return 503 on every route until it
-# is fixed.
+# about_markdown optionally replaces the entire Settings → About panel with
+# operator-authored Markdown after sign-in. Omit it or set it to null for the
+# built-in panel. Use "" for an empty panel. About is literal display text.
+#
+# Starters and About content are visible after sign-in. The product name is
+# public. Keep secrets out of all three. An environment reference beginning
+# with `$` is expanded in product_name and starters before validation.
+# About content is always literal. A malformed `ui:` block makes the Gateway
+# return 503 on every route until it is fixed.
 
 ui:
   # Optional deployment-owned role briefs; no roles are enabled by default.
   roles: []
   # product_name: HartMesh
+  # about_markdown: |
+  #   # Example Product
+  #
+  #   Release 3.4.0
+  #
+  #   [Contact support](https://support.example.com/)
   profile: developer
   # starters:
   #   - id: business-review

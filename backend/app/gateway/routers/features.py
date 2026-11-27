@@ -27,7 +27,7 @@ from app.gateway.search_corpus import available_message_search_provider
 from app.telegram_bots.router import telegram_feature
 from deerflow.config.app_config import AppConfig
 from deerflow.config.tenant_bundle import MAX_COMPANY_NAME_CHARS, MAX_SUPPORT_URL_CHARS, TenantBundle, configured_tenant_bundle
-from deerflow.config.ui_config import MAX_STARTER_PROMPT_CHARS, MAX_STARTER_TITLE_CHARS, MAX_STARTERS, UiConfig
+from deerflow.config.ui_config import MAX_ABOUT_MARKDOWN_CHARS, MAX_STARTER_PROMPT_CHARS, MAX_STARTER_TITLE_CHARS, MAX_STARTERS, UiConfig
 from deerflow.features.resources import StorageFeatureLinkRow
 from deerflow.files.store import supports_descriptor_reads
 from deerflow.knowledge.providers import get_knowledge_capabilities
@@ -157,6 +157,12 @@ class UiFeature(BaseModel):
 
     profile: Literal["business", "developer"] = Field(..., description="'business' keeps the developer screens for administrators; 'developer' offers them to everyone")
     starters: list[UiStarter] = Field(..., max_length=MAX_STARTERS, description="Home's starter grid, in the order it is shown")
+    about_markdown: str | None = Field(
+        default=None,
+        max_length=MAX_ABOUT_MARKDOWN_CHARS,
+        exclude_if=lambda value: value is None,
+        description="Operator-authored replacement for About. Absent uses the built-in panel. An empty string replaces it with no content.",
+    )
 
 
 class BrandColors(BaseModel):
@@ -431,6 +437,7 @@ def _ui_feature(ui: UiConfig, bundle: TenantBundle) -> UiFeature:
     starters = ui.starters if bundle.starters is None else bundle.starters
     return UiFeature(
         profile=ui.profile,
+        about_markdown=ui.about_markdown,
         starters=[UiStarter(id=starter.id, title=starter.title, prompt=starter.prompt) for starter in starters],
     )
 
