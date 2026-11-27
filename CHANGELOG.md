@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.84] - 2026-11-27
+
+### About
+
+Operators can replace the content of **Settings → About** with `ui.about_markdown`. The panel can show a product release, component versions, and support links of the operator's choosing. Omitting the setting keeps the built-in panel. See the [operator example](docs/RUNTIME_PRODUCT_IDENTITY.md#operator-authored-about).
+
 ### Upgrade notes
 
 Workspace branding and new report captures use the tenant bundle. Browser
@@ -18,6 +24,10 @@ and both tenant selector variables, `HARTMESH_REPORT_TENANT_PRESENTATION` and
 the tenant bundle, then restart every Gateway worker. Keep the offline product
 envelope and its selector pair if configured. Saved reports retain their original
 downloads and presentation records. No database migration is required.
+
+### Schema changes
+
+No database schema changes since v2.2.0+hartmesh.83.
 
 ## [2.2.0+hartmesh.83] - 2026-11-26
 

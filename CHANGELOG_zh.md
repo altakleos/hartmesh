@@ -9,18 +9,6 @@
 
 ## [未发布]
 
-### 升级说明
-
-工作区品牌信息和新报告均从租户目录读取配置。浏览器标题使用产品名称。
-**请同时升级网关和前端。** 使用旧版固定呈现模式的部署应移除
-`tenant_bundle.presentation` 和 `tenant_bundle.presentation_sha256`，
-卸载报告使用的租户呈现文件，并取消
-`HARTMESH_REPORT_TENANT_PRESENTATION` 和 `HARTMESH_REPORT_TENANT_SHA256`。
-在租户目录中提供 `brand.json` 和 PNG 或 JPEG 标志，然后重启所有网关进程。
-已配置的离线产品标识及其两个环境变量可以继续使用。已保存报告的文件和呈现记录
-保持原样。此次升级无需数据库迁移。
-
-
 本节累积面向 **2.3.0** 里程碑（[2.3.0](https://github.com/bytedance/deer-flow/milestone/4)）的工作。
 
 
@@ -161,6 +149,30 @@
   此前 `build_context_usage` 直接内联调用该访问器，而 `get_app_config()` 每次调用都会重新校验
   ——它先对整个 `config.yaml` 取摘要，再对 `extensions_config.json` 做同样的事——所以在有人打开
   会话视图前刚好改了配置，就会让运行、消息流与其他线程共用的网关事件循环整段停顿。响应内容不变。([#7727])
+
+## [2.2.0+hartmesh.84] - 2026-11-27
+
+### 关于
+
+运营方可通过 `ui.about_markdown` 替换**设置 → 关于**面板的全部内容，自行显示产品版本、
+组件版本和支持链接。省略此设置时继续显示内置面板。
+请参阅[配置示例](docs/RUNTIME_PRODUCT_IDENTITY.md#operator-authored-about)。
+
+### 升级说明
+
+工作区品牌信息和新报告均从租户目录读取配置。浏览器标题使用产品名称。
+**请同时升级网关和前端。** 使用旧版固定呈现模式的部署应移除
+`tenant_bundle.presentation` 和 `tenant_bundle.presentation_sha256`，
+卸载报告使用的租户呈现文件，并取消
+`HARTMESH_REPORT_TENANT_PRESENTATION` 和 `HARTMESH_REPORT_TENANT_SHA256`。
+在租户目录中提供 `brand.json` 和 PNG 或 JPEG 标志，然后重启所有网关进程。
+已配置的离线产品标识及其两个环境变量可以继续使用。已保存报告的文件和呈现记录
+保持原样。此次升级无需数据库迁移。
+
+
+### 数据库架构变更
+
+相较于 v2.2.0+hartmesh.83，数据库架构没有变更。
 
 ## [2.2.0+hartmesh.83] - 2026-11-26
 
