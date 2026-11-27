@@ -197,3 +197,31 @@ def test_product_name_follows_the_live_config() -> None:
     assert product_name(SimpleNamespace(ui=UiConfig())) == "HartMesh"
     assert product_name(None) == "HartMesh"
     assert product_name(SimpleNamespace(sandbox=None)) == "HartMesh"
+
+
+def test_about_markdown_defaults_to_builtin_content():
+    assert UiConfig().about_markdown is None
+
+
+@pytest.mark.parametrize("content", ["", "# Example Product\n\n| Component | Version |\n| --- | --- |\n| Engine | 2.0 |"])
+def test_about_markdown_preserves_operator_content(content):
+    assert UiConfig(about_markdown=content).about_markdown == content
+
+
+@pytest.mark.parametrize("content", [False, ["version"], "a" * 16_385])
+def test_about_markdown_refuses_invalid_config(content):
+    with pytest.raises(ValidationError, match="about_markdown"):
+        UiConfig(about_markdown=content)
+
+
+def test_about_markdown_is_literal_while_other_ui_fields_expand(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABOUT_LITERAL_TEST", "not the configured content")
+    monkeypatch.setenv("ABOUT_PRODUCT_TEST", "Example Product")
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        'sandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\nui:\n  product_name: "$ABOUT_PRODUCT_TEST"\n  about_markdown: "$ABOUT_LITERAL_TEST"\n',
+        encoding="utf-8",
+    )
+    ui = AppConfig.from_file(str(path)).ui
+    assert ui.about_markdown == "$ABOUT_LITERAL_TEST"
+    assert ui.product_name == "Example Product"

@@ -88,3 +88,19 @@ def test_the_key_is_the_only_owner(render_config: ModuleType) -> None:
 def test_the_key_is_documented_where_the_operator_looks() -> None:
     assert f"#{KEY}=" in ENV_EXAMPLE.read_text(encoding="utf-8"), "optional, so shown commented out"
     assert KEY in README.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("markdown", ["", "# Example Product\n\nVersion 2.9", "$Literal"])
+def test_compose_about_content_is_literal(render_config, markdown):
+    document = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    document["ui"]["about_markdown"] = markdown
+    rendered_ui = _render(render_config, _environ(), yaml.safe_dump(document))["ui"]
+    assert UiConfig.model_validate(rendered_ui).about_markdown == markdown
+
+
+def test_compose_refuses_invalid_about_content(render_config):
+    document = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    document["ui"]["about_markdown"] = ["fixture-value"]
+    with pytest.raises(render_config.RenderError, match="ui.about_markdown") as refused:
+        _render(render_config, _environ(), yaml.safe_dump(document))
+    assert "fixture-value" not in str(refused.value)

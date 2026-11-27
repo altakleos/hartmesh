@@ -10,7 +10,10 @@ const branding = rs.hoisted(() => ({
   providerName: null as string | null,
   supportURL: null as string | null,
 }));
-rs.mock("@/core/features", () => ({ useBranding: () => branding }));
+rs.mock("@/core/features", () => ({
+  useBranding: () => branding,
+  useFeatures: () => ({ data: null }),
+}));
 // The dialog has its own tests; here only whether the menu opens it.
 rs.mock("@/components/workspace/account-export-dialog", () => ({
   AccountExportDialog: ({ open }: { open: boolean }) =>

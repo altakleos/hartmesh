@@ -1053,6 +1053,15 @@ def render(
     name = select_product_name(environ)
     if name is not None:
         ui["product_name"] = name
+    if "about_markdown" in ui:
+        from pydantic import ValidationError
+
+        from deerflow.config.ui_config import MAX_ABOUT_MARKDOWN_CHARS, UiConfig
+
+        try:
+            UiConfig.model_validate({"about_markdown": ui["about_markdown"]})
+        except ValidationError:
+            raise RenderError(f"template `ui.about_markdown` must be null or a Markdown string of at most {MAX_ABOUT_MARKDOWN_CHARS} characters") from None
     document["ui"] = ui
     batch_mode = environ.get("HARTMESH_BATCHES", "off")
     if batch_mode not in {"on", "off"}:
@@ -1078,7 +1087,8 @@ def render(
         )
 
     referenced: set[str] = set()
-    _references(document, referenced)
+    # About is literal text even if its Markdown begins with a dollar sign.
+    _references({**document, "ui": {key: value for key, value in ui.items() if key != "about_markdown"}}, referenced)
     missing = sorted(name for name in referenced if not _present(environ, name))
     if missing:
         raise RenderError(f"rendered config references unset environment variables: {missing}")

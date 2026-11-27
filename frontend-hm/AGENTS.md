@@ -317,6 +317,10 @@ and provider slots never use tenant fields. Default mode retains `ui.product_nam
 and the legacy name API. Keep strict and legacy name validation separate. Retain admitted identity on
 failure; fresh failures show unavailable. See [contract](../docs/RUNTIME_PRODUCT_IDENTITY.md).
 
+About waits for authenticated feature discovery, then displays the operator’s
+Markdown when present. A deliberately empty override stays empty. The built-in
+panel is the fallback when the response omits the override.
+
 Tenant branding (`useBranding`) selects the authenticated features response's
 company name, colors, logo availability and optional provider support. Workspace
 copy and About in default product mode may show the company. Colors stay metadata.

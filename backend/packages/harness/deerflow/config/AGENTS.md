@@ -302,6 +302,9 @@ reads it for authenticated branding, starters and roles. Configuration accepts
 the legacy alias and names retired fields before environment expansion.
 See [the tenant bundle](../../../../../docs/TENANT_PRESENTATION.md).
 
+`ui.about_markdown` is literal display content. Keep it outside environment
+expansion and the public product identity. Project it only to authenticated features.
+
 Runtime `product_name` uses the already admitted process snapshot without tenant
 filesystem access or copying assets. AppConfig admission and the synchronous
 public API readers retain ownership/conflict checks.

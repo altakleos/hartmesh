@@ -109,9 +109,10 @@ return HTTP 503. The frontend validates one bounded response (2 MiB maximum,
 auth-request deadline) per server request.
 
 Sign-in/setup show the product and an explicitly public provider support control.
-The authenticated sidebar shows the product mark and name. **Settings and more → About**
-identifies the product, shows the provider support link, and gives the
-**HartMesh component version**. Page titles and icons use the product.
+The authenticated sidebar shows the product mark and name. The default
+**Settings and more → About** panel identifies the product, shows the
+provider support link, and gives the **HartMesh component version**.
+Page titles and icons use the product.
 Configured product slots cannot be replaced by tenant fields. Tenant information
 may still appear in tenant-owned content and authenticated APIs.
 
@@ -123,6 +124,35 @@ same explicit unavailable state. Reload obtains the current Gateway snapshot.
 Static-demo builds retain their built-in HartMesh identity and do not read the
 Gateway. This requires matching Gateway/frontend versions; an older Gateway
 without the full reader produces the explicit unavailable page.
+
+
+## Operator-authored About
+
+Set `ui.about_markdown` in the Gateway configuration to replace the entire
+**Settings → About** panel. Include any names, versions, component lists and
+support links you want it to show. The panel renders your Markdown without
+adding the default product logo, support link, or version line.
+
+```yaml
+ui:
+  about_markdown: |
+    # Example Product
+
+    Release 3.4.0
+
+    | Component | Version |
+    | --- | --- |
+    | Document reader | 4.2 |
+    | Search service | 3.1 |
+
+    [Contact support](https://support.example.com/)
+```
+
+Omit the field or set it to `null` to keep the built-in panel. An empty string
+makes the panel blank. Markdown is limited to 16,384 characters. It is
+rendered without raw HTML or environment-variable expansion. Signed-in
+users receive the content through private feature discovery. About content
+is separate from the public product identity and the tenant bundle.
 
 ## Verification
 

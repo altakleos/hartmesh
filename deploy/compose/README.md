@@ -983,6 +983,15 @@ the daemon from uid 1000.
 The profile also has a privileged one-shot, `storage-init`, which runs as root
 with no network and exits before the Gateway starts (§ "Storage and agents").
 
+### About panel content
+
+Set `ui.about_markdown` in the operator's Gateway configuration template to
+supply the entire content of **Settings → About**. The template's Markdown
+can name your product, list component versions, or link to support.
+Omit the field or set it to `null` to keep the built-in panel. Restart the
+Gateway after changing the template so it renders the new configuration.
+See the [About configuration example](../../docs/RUNTIME_PRODUCT_IDENTITY.md#operator-authored-about).
+
 ### Tenant bundle
 
 `/srv/hartmesh/operator/tenant/` is where the operator writes what the

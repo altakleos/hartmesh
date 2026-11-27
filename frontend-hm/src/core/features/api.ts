@@ -120,6 +120,7 @@ export interface FeaturesResponse {
     max_running?: number;
   };
   ui?: {
+    about_markdown?: unknown;
     profile?: string;
     starters?: { id?: unknown; title?: unknown; prompt?: unknown }[];
   };
@@ -486,6 +487,11 @@ const MAX_STARTERS = 6;
  */
 export async function fetchWorkspacePresentation(): Promise<WorkspacePresentation> {
   return selectWorkspacePresentation(await fetchFeatures());
+}
+
+export function selectAboutMarkdown(features: FeaturesResponse): string | null {
+  const markdown = features.ui?.about_markdown;
+  return typeof markdown === "string" ? markdown : null;
 }
 
 export function selectWorkspacePresentation(

@@ -574,7 +574,13 @@ class AppConfig(BaseModel):
 
         # Check retired tenant settings before expanding their values.
         check_tenant_bundle_compatibility(config_data.get("tenant_bundle"))
+        # About is literal display content. Never expand environment secrets into it.
+        raw_ui = config_data.get("ui")
+        if isinstance(raw_ui, dict) and "about_markdown" in raw_ui:
+            config_data["ui"] = {key: value for key, value in raw_ui.items() if key != "about_markdown"}
         config_data = cls.resolve_env_variables(config_data)
+        if isinstance(raw_ui, dict) and "about_markdown" in raw_ui:
+            config_data["ui"]["about_markdown"] = raw_ui["about_markdown"]
         cls._apply_database_defaults(config_data)
 
         # Load circuit_breaker config if present
