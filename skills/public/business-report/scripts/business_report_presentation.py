@@ -1,6 +1,6 @@
 """One offline presentation selection, independent of report facts and live paths.
 
-Strict input is the existing Gateway projection, never another tenant schema.
+New reports use the tenant bundle. Historical records retain their original mode.
 Retained records and assets are ordinary integrity-checked bundle members.
 """
 
@@ -11,14 +11,13 @@ import hashlib
 import io
 import json
 import os
-import re
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PIL import Image
 
-from business_report_common import DEFAULT_BRAND, _one_plain_line, is_color, load_brand
+from business_report_common import DEFAULT_BRAND, InputError, _one_plain_line, is_color, load_brand
 from business_report_product import (
     MAX_ASSET,
     ProductIdentity,
@@ -33,7 +32,6 @@ from business_report_product import (
 
 MEMBER = "presentation.json"
 LOGO = "presentation/tenant.png"
-MAX_RESPONSE = 384 * 1024
 MAX_RECORD = 16 * 1024
 UNAVAILABLE = "Report presentation is unavailable, incompatible or invalid; no new output was published."
 _UNSET = object()
@@ -98,8 +96,6 @@ def _legacy_logo(path):
 @dataclass(frozen=True)
 class Presentation:
     product_identity: ProductIdentity | None
-    mode: str
-    source_id: str | None
     tenant_name: str
     logo: bytes | None
     primary: str = DEFAULT_BRAND["primary"]
@@ -125,7 +121,7 @@ class Presentation:
                 brand.get("primary", self.primary),
                 brand.get("secondary", self.secondary),
             )
-            _palette(primary, secondary, strict=self.mode != "legacy")
+            _palette(primary, secondary, strict=False)
         except (ValueError, TypeError, SettingsError):
             raise ValueError(
                 "Unsupported or conflicting report palette/preferences"
@@ -142,8 +138,8 @@ class Presentation:
             }
         value = {
             "schema_version": 1,
-            "mode": self.mode,
-            "source_id": self.source_id,
+            "mode": "legacy",
+            "source_id": None,
             "product_sha256": self.product_identity.digest
             if self.product_identity is not None
             else None,
@@ -167,66 +163,22 @@ class Presentation:
             (directory / LOGO).write_bytes(self.logo)
 
 
+def check_tenant_selectors():
+    retired = ("HARTMESH_REPORT_TENANT_PRESENTATION", "HARTMESH_REPORT_TENANT_SHA256")
+    if any(key in os.environ for key in retired):
+        raise InputError(
+            f"Unset {' and '.join(retired)}. Reports read tenant branding "
+            "from --tenant or /mnt/tenant/brand.json."
+        )
+
+
 def capture_presentation(tenant_dir, *, product_identity=_UNSET):
-    product = (
-        load_product_identity() if product_identity is _UNSET else product_identity
+    check_tenant_selectors()
+    product = load_product_identity() if product_identity is _UNSET else product_identity
+    brand = load_brand(tenant_dir)
+    return Presentation(
+        product, brand["company"], _legacy_logo(brand["logo"]), brand["primary"], brand["secondary"]
     )
-    selected = os.environ.get("HARTMESH_REPORT_TENANT_PRESENTATION")
-    expected = os.environ.get("HARTMESH_REPORT_TENANT_SHA256")
-    if selected is None and expected is None:
-        brand = load_brand(tenant_dir)
-        return Presentation(
-            product,
-            "legacy",
-            None,
-            brand["company"],
-            _legacy_logo(brand["logo"]),
-            brand["primary"],
-            brand["secondary"],
-        )
-    try:
-        if (
-            not selected
-            or not isinstance(expected, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", expected)
-            or product is None
-        ):
-            raise ValueError("explicit selection and product binding required")
-        value = _object(
-            json.loads(
-                _read(selected, MAX_RESPONSE).decode("utf-8"), object_pairs_hook=_unique
-            ),
-            {"schema_version", "mode", "product_sha256", "tenant", "snapshot_id"},
-        )
-        source_id = value.pop("snapshot_id")
-        if (
-            type(value["schema_version"]) is not int
-            or value["schema_version"] != 1
-            or value["mode"] not in {"tenant", "product-only"}
-            or value["product_sha256"] != product.digest
-            or _digest(value) != source_id
-            or source_id != expected
-        ):
-            raise ValueError("projection binding/version")
-        name, logo = "", None
-        if value["mode"] == "tenant":
-            tenant = _object(value["tenant"], {"name", "logo"})
-            _name(tenant["name"])
-            name, logo = tenant["name"], _image(tenant["logo"])[0]
-        elif value["tenant"] is not None:
-            raise ValueError("product-only must have no tenant")
-        return Presentation(product, value["mode"], source_id, name, logo)
-    except (
-        OSError,
-        ValueError,
-        TypeError,
-        KeyError,
-        SyntaxError,
-        Image.DecompressionBombError,
-        RecursionError,
-        OverflowError,
-    ):
-        raise ValueError(UNAVAILABLE) from None
 
 
 def validate_retained(directory, members):

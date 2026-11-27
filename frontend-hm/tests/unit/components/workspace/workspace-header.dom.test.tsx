@@ -6,9 +6,6 @@ const branding: {
   companyName: string | null;
   hasLogo: boolean;
   isLoading: boolean;
-  strict?: boolean;
-  logo?: string | null;
-  snapshotId?: string | null;
 } = { companyName: null, hasLogo: false, isLoading: false };
 const sidebar: { state: "expanded" | "collapsed"; isMobile: boolean } = {
   state: "expanded",
@@ -56,31 +53,20 @@ afterEach(() => {
   branding.companyName = null;
   branding.hasLogo = false;
   branding.isLoading = false;
-  branding.strict = false;
-  branding.logo = null;
-  branding.snapshotId = null;
   sidebar.state = "expanded";
   sidebar.isMobile = false;
 });
 
 describe("WorkspaceHeader", () => {
-  it.each([false, true])(
-    "shows only the product when customer branding is configured (strict %s)",
-    (strict) => {
-      branding.strict = strict;
-      branding.companyName = "Customer Example";
-      branding.hasLogo = true;
-      branding.logo = "data:image/png;base64,AAAA";
-      branding.snapshotId = "a".repeat(64);
-      const view = renderHeader(createEnUS("Example Product"));
-      expect(screen.getByText("Example Product")).toBeTruthy();
-      expect(view.container.innerHTML).not.toContain(branding.companyName);
-      expect(
-        view.container.querySelector("img, [data-snapshot-id]"),
-      ).toBeNull();
-      expect(screen.getByText(enUS.sidebar.newChat)).toBeTruthy();
-    },
-  );
+  it("shows only the product when customer branding is configured", () => {
+    branding.companyName = "Customer Example";
+    branding.hasLogo = true;
+    const view = renderHeader(createEnUS("Example Product"));
+    expect(screen.getByText("Example Product")).toBeTruthy();
+    expect(view.container.innerHTML).not.toContain(branding.companyName);
+    expect(view.container.querySelector("img")).toBeNull();
+    expect(screen.getByText(enUS.sidebar.newChat)).toBeTruthy();
+  });
 
   it("uses product initials in the collapsed rail", () => {
     sidebar.state = "collapsed";

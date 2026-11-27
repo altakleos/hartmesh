@@ -59,7 +59,7 @@ from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_
 from deerflow.config.suggestions_config import SuggestionsConfig
 from deerflow.config.summarization_config import SummarizationConfig, load_summarization_config_from_dict
 from deerflow.config.task_continuity_config import TaskContinuityConfig
-from deerflow.config.tenant_bundle import TenantBundleConfig
+from deerflow.config.tenant_bundle import TenantBundleConfig, check_tenant_bundle_compatibility
 from deerflow.config.title_config import TitleConfig, load_title_config_from_dict
 from deerflow.config.token_budget_config import TokenBudgetConfig
 from deerflow.config.token_usage_config import TokenUsageConfig
@@ -572,6 +572,8 @@ class AppConfig(BaseModel):
         # Check config version before processing
         cls._check_config_version(config_data, resolved_path)
 
+        # Check retired tenant settings before expanding their values.
+        check_tenant_bundle_compatibility(config_data.get("tenant_bundle"))
         config_data = cls.resolve_env_variables(config_data)
         cls._apply_database_defaults(config_data)
 

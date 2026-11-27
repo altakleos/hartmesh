@@ -76,11 +76,7 @@ rs.mock("sonner", () => ({ Toaster: () => null, toast: { dismiss: rs.fn() } }));
 
 import WorkspaceLayout from "@/app/workspace/layout";
 import { WorkspaceContent } from "@/app/workspace/workspace-content";
-import { AuthProvider, useAuth } from "@/core/auth/AuthProvider";
-import {
-  presentationDigest,
-  useTenantPresentation,
-} from "@/core/features/tenant-presentation";
+import { AuthProvider, useAuth, type User } from "@/core/auth/AuthProvider";
 import { useFileActionLifetime } from "@/core/file-areas/file-action-lifetime";
 import { DEFAULT_IDENTITY } from "@/core/product/identity";
 
@@ -111,7 +107,7 @@ async function resolvedLayout(children: ReactNode) {
   return cloneElement(outer, {}, cloneElement(auth, {}, workspace));
 }
 
-test("actual workspace composition recovers auth before tenant admission and retires account snapshots", async () => {
+test("workspace composition waits for auth recovery and retires account-owned state on switch and logout", async () => {
   const one = {
     id: "one",
     email: "one@example.com",
@@ -119,47 +115,30 @@ test("actual workspace composition recovers auth before tenant admission and ret
     needs_setup: false,
   };
   const two = { ...one, id: "two", email: "two@example.com" };
-  const bodies = await Promise.all(
-    ["One", "Two"].map(async (label) => {
-      const body = {
-        schema_version: 1,
-        mode: "tenant",
-        product_sha256: await presentationDigest(DEFAULT_IDENTITY),
-        tenant: {
-          name: `Example Tenant ${label}`,
-          logo: "data:image/png;base64,iVBORw0KGgo=",
-        },
-      };
-      return { ...body, snapshot_id: await presentationDigest(body) };
-    }),
-  );
-  let selected = 0;
   let lifetime: ReturnType<typeof useFileActionLifetime> | undefined;
+  let releaseAuth: (response: Response) => void = () => undefined;
   let releaseLogout: (response: Response) => void = () => undefined;
   const fetch = rs
     .spyOn(globalThis, "fetch")
     .mockImplementation(async (input) => {
-      if (requestURL(input).endsWith("/auth/me")) return Response.json(one);
+      if (requestURL(input).endsWith("/auth/me"))
+        return new Promise<Response>((resolve) => {
+          releaseAuth = resolve;
+        });
       if (requestURL(input).endsWith("/auth/logout"))
         return new Promise<Response>((resolve) => {
           releaseLogout = resolve;
         });
-      if (requestURL(input).endsWith("/branding/presentation"))
-        return Response.json(bodies[selected]);
       throw new Error("Unexpected transport");
     });
   function Probe() {
     lifetime = useFileActionLifetime();
     const auth = useAuth();
-    const snapshot = useTenantPresentation();
     return (
       <>
-        <p>
-          {snapshot?.mode === "tenant" ? snapshot.tenant?.name : "no tenant"}
-        </p>
+        <p>Account {auth.user?.id}</p>
         <button
           onClick={() => {
-            selected = 1;
             auth.applyUser(two);
           }}
         >
@@ -174,14 +153,15 @@ test("actual workspace composition recovers auth before tenant admission and ret
     children: <Probe />,
   });
   const app = render(<AuthProvider initialUser={null}>{tree}</AuthProvider>);
-  await screen.findByText("Example Tenant One");
+  expect(screen.queryByText("Private workspace chrome")).toBeNull();
+  await act(async () => releaseAuth(Response.json(one)));
+  await screen.findByText("Account one");
   const firstLifetime = lifetime!;
   const firstSignal = firstLifetime.signal;
   firstLifetime.toasts.add("pending-file-notice");
   expect(
     fetch.mock.calls.filter(([url]) => requestURL(url).endsWith("/auth/me")),
   ).toHaveLength(1);
-  selected = 1;
   routing.pathname = "/workspace";
   const index = await WorkspaceContent({
     gatewayUnavailable: true,
@@ -194,30 +174,23 @@ test("actual workspace composition recovers auth before tenant admission and ret
   expect(firstLifetime.toasts.has("pending-file-notice")).toBe(true);
   routing.pathname = "/workspace/chats/new";
   app.rerender(<AuthProvider initialUser={null}>{tree}</AuthProvider>);
-  await screen.findByText("Example Tenant One");
+  await screen.findByText("Account one");
   expect(lifetime).toBe(firstLifetime);
-  expect(
-    fetch.mock.calls.filter(([url]) =>
-      requestURL(url).endsWith("/branding/presentation"),
-    ),
-  ).toHaveLength(1);
   fireEvent.click(screen.getByRole("button", { name: "Switch account" }));
-  await screen.findByText("Example Tenant Two");
+  await screen.findByText("Account two");
   expect(firstSignal.aborted).toBe(true);
   expect(firstLifetime.toasts.size).toBe(0);
-  expect(screen.queryByText("Example Tenant One")).toBeNull();
+  expect(screen.queryByText("Account one")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
-  await waitFor(() =>
-    expect(screen.queryByText("Example Tenant Two")).toBeNull(),
-  );
+  await waitFor(() => expect(screen.queryByText("Account two")).toBeNull());
   releaseLogout(Response.json({}));
 });
 
 test("unverified workspace entry can run pure route control while private UI stays closed", async () => {
   routing.pathname = "/workspace";
-  const fetch = rs
-    .spyOn(globalThis, "fetch")
-    .mockResolvedValue(Response.json({}, { status: 503 }));
+  rs.spyOn(globalThis, "fetch").mockResolvedValue(
+    Response.json({}, { status: 503 }),
+  );
   const tree = await WorkspaceContent({
     gatewayUnavailable: true,
     children: <p>Index route control</p>,
@@ -225,11 +198,6 @@ test("unverified workspace entry can run pure route control while private UI sta
   render(<AuthProvider initialUser={null}>{tree}</AuthProvider>);
   await screen.findByText("Index route control");
   expect(screen.queryByText("Private workspace chrome")).toBeNull();
-  expect(
-    fetch.mock.calls.filter(([url]) =>
-      requestURL(url).endsWith("/branding/presentation"),
-    ),
-  ).toHaveLength(0);
 });
 
 test.each(["account", "role", "permissions"])(
@@ -242,59 +210,28 @@ test.each(["account", "role", "permissions"])(
       needs_setup: false,
     };
     const two = { ...one, id: "two", email: "two@example.com" };
-    const bodies = await Promise.all(
-      ["One", "Two"].map(async (label) => {
-        const body = {
-          schema_version: 1,
-          mode: "tenant",
-          product_sha256: await presentationDigest(DEFAULT_IDENTITY),
-          tenant: {
-            name: `Example Tenant ${label}`,
-            logo: "data:image/png;base64,iVBORw0KGgo=",
-          },
-        };
-        return { ...body, snapshot_id: await presentationDigest(body) };
-      }),
-    );
-    let selected = 0;
     let lifetime: ReturnType<typeof useFileActionLifetime> | undefined;
-    const fetch = rs
-      .spyOn(globalThis, "fetch")
-      .mockImplementation(async (input) =>
-        requestURL(input).endsWith("/auth/me")
-          ? Response.json(one)
-          : Response.json(bodies[selected]),
-      );
+    rs.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(one));
     const reload = rs
       .spyOn(window.location, "reload")
       .mockImplementation(() => undefined);
     function Probe() {
       lifetime = useFileActionLifetime();
-      const snapshot = useTenantPresentation();
-      return (
-        <p>
-          {snapshot?.mode === "tenant" ? snapshot.tenant?.name : "no tenant"}
-        </p>
-      );
+      const { user } = useAuth();
+      return <p>Account {user?.id}</p>;
     }
     server.result = { tag: "authenticated", user: one };
     const app = render(await resolvedLayout(<Probe />));
-    await screen.findByText("Example Tenant One");
+    await screen.findByText("Account one");
     const original = lifetime!;
-    selected = 1;
     server.result = { tag: "gateway_unavailable" };
     app.rerender(await resolvedLayout(<Probe />));
-    await screen.findByText("Example Tenant One");
+    await screen.findByText("Account one");
     expect(original.signal.aborted).toBe(false);
     expect(lifetime).toBe(original);
     server.result = { tag: "authenticated", user: { ...one } };
     app.rerender(await resolvedLayout(<Probe />));
-    await screen.findByText("Example Tenant One");
-    expect(
-      fetch.mock.calls.filter(([url]) =>
-        requestURL(url).endsWith("/branding/presentation"),
-      ),
-    ).toHaveLength(1);
+    await screen.findByText("Account one");
     const changed =
       change === "account"
         ? two
@@ -303,9 +240,7 @@ test.each(["account", "role", "permissions"])(
           : { ...one, permissions: ["threads:read"] };
     server.result = { tag: "authenticated", user: changed };
     app.rerender(await resolvedLayout(<Probe />));
-    await waitFor(() =>
-      expect(screen.queryByText("Example Tenant One")).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByText("Account one")).toBeNull());
     expect(original.signal.aborted).toBe(true);
     expect(reload).toHaveBeenCalledTimes(1);
     for (const result of [
@@ -314,13 +249,8 @@ test.each(["account", "role", "permissions"])(
     ]) {
       server.result = result;
       app.rerender(await resolvedLayout(<Probe />));
-      expect(screen.queryByText("Example Tenant One")).toBeNull();
+      expect(screen.queryByText("Account one")).toBeNull();
       expect(screen.queryByText("Private workspace chrome")).toBeNull();
-      expect(
-        fetch.mock.calls.filter(([url]) =>
-          requestURL(url).endsWith("/branding/presentation"),
-        ),
-      ).toHaveLength(1);
       expect(reload).toHaveBeenCalledTimes(1);
     }
   },
@@ -341,37 +271,23 @@ test.each(["account", "role", "permissions"])(
         : change === "role"
           ? { ...one, system_role: "user" as const }
           : { ...one, permissions: ["threads:read"] };
-    const bodies = await Promise.all(
-      ["One", "Two"].map(async (label) => {
-        const body = {
-          schema_version: 1,
-          mode: "tenant",
-          product_sha256: await presentationDigest(DEFAULT_IDENTITY),
-          tenant: {
-            name: `Example Tenant ${label}`,
-            logo: "data:image/png;base64,iVBORw0KGgo=",
-          },
-        };
-        return { ...body, snapshot_id: await presentationDigest(body) };
-      }),
-    );
-    let selected = 0;
+    function access(user: User | null) {
+      return (
+        user &&
+        [user.id, user.system_role, ...(user.permissions ?? [])].join(" ")
+      );
+    }
     let lifetime: ReturnType<typeof useFileActionLifetime> | undefined;
-    rs.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
-      requestURL(input).endsWith("/auth/me")
-        ? Response.json(next)
-        : Response.json(bodies[selected]),
-    );
+    rs.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(next));
     const reload = rs
       .spyOn(window.location, "reload")
       .mockImplementation(() => undefined);
     function Probe() {
       const auth = useAuth();
       lifetime = useFileActionLifetime();
-      const snapshot = useTenantPresentation();
       return (
         <>
-          <p>{snapshot?.mode === "tenant" ? snapshot.tenant?.name : null}</p>
+          <p>{access(auth.user)}</p>
           <button onClick={() => void auth.refreshUser()}>
             Refresh account
           </button>
@@ -380,22 +296,21 @@ test.each(["account", "role", "permissions"])(
     }
     server.result = { tag: "authenticated", user: one };
     const app = render(await resolvedLayout(<Probe />));
-    await screen.findByText("Example Tenant One");
+    await screen.findByText(access(one)!);
     const original = lifetime!;
-    selected = 1;
     fireEvent.click(screen.getByRole("button", { name: "Refresh account" }));
-    await screen.findByText("Example Tenant Two");
+    await screen.findByText(access(next)!);
     expect(original.signal.aborted).toBe(true);
     expect(reload).not.toHaveBeenCalled();
     // A subsequent consistent SSR result preserves the new account. A newly
     // delivered conflicting result must still retire it before fresh checks.
     server.result = { tag: "authenticated", user: { ...next } };
     app.rerender(await resolvedLayout(<Probe />));
-    expect(screen.queryByText("Example Tenant Two")).not.toBeNull();
+    expect(screen.queryByText(access(next)!)).not.toBeNull();
     expect(reload).not.toHaveBeenCalled();
     server.result = { tag: "authenticated", user: { ...one } };
     app.rerender(await resolvedLayout(<Probe />));
-    expect(screen.queryByText("Example Tenant Two")).toBeNull();
+    expect(screen.queryByText(access(next)!)).toBeNull();
     expect(reload).toHaveBeenCalledTimes(1);
   },
 );
@@ -414,7 +329,7 @@ test("a batched client refresh cannot swallow newly delivered conflicting SSR ev
       ? new Promise<Response>((resolve) => {
           release = resolve;
         })
-      : Response.json({ schema_version: 1, mode: "legacy" }),
+      : Promise.reject(new Error("Unexpected request")),
   );
   const reload = rs
     .spyOn(window.location, "reload")
@@ -466,7 +381,7 @@ test("logout retires the layout monitor before delayed verified SSR props arrive
       ? new Promise<Response>((resolve) => {
           releaseLogout = resolve;
         })
-      : Response.json({ schema_version: 1, mode: "legacy" }),
+      : Promise.reject(new Error("Unexpected request")),
   );
   function Probe() {
     const auth = useAuth();

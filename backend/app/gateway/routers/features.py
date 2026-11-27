@@ -293,16 +293,10 @@ async def list_features(request: Request, response: Response, config: AppConfig 
     except ValueError:
         raise HTTPException(503, "Service identity unavailable") from None
     public_provider = identity["provider"]
-    from app.gateway.routers.branding import PRIVATE_HEADERS, presentation_reader
-
-    response.headers.update(PRIVATE_HEADERS)
-    reader = await presentation_reader(request, config)
-    strict = reader.settings.presentation == "strict-v1"
+    response.headers.update({"Cache-Control": "private, no-store", "Vary": "Cookie, Authorization", "X-Content-Type-Options": "nosniff"})
     bundle = await run_file_io(configured_tenant_bundle, config.tenant_bundle.path)
     if public_provider:
         support = ProviderSupport(display_name=public_provider["name"], support_url=public_provider["support_url"])
-    elif strict:
-        support = ProviderSupport()
     else:
         support = ProviderSupport(display_name=bundle.provider_name, support_url=bundle.support_url)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
@@ -360,9 +354,9 @@ async def list_features(request: Request, response: Response, config: AppConfig 
         # read from disk the same way, so an operator's edit there does too.
         ui=_ui_feature(config.ui, bundle),
         branding=BrandingFeature(
-            company_name=None if strict else bundle.company_name,
-            colors=BrandColors(primary=None if strict else bundle.primary, secondary=None if strict else bundle.secondary),
-            has_logo=False if strict else bundle.logo is not None,
+            company_name=bundle.company_name,
+            colors=BrandColors(primary=bundle.primary, secondary=bundle.secondary),
+            has_logo=bundle.logo is not None,
             provider=support,
         ),
     )

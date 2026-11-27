@@ -284,5 +284,5 @@ def test_default_offline_fixture_is_an_actual_explicit_gateway_export():
 
     from deerflow.config.product_identity_export import offline_product_identity
 
-    fixture = Path(__file__).parent / "skills/business_report/fixtures/tenant-presentation/default-product.json"
+    fixture = Path(__file__).parent / "skills/business_report/fixtures/product-identity/default.json"
     assert offline_product_identity(config(product_name="Example Default Product"), include_default=True) == json.loads(fixture.read_text(encoding="utf-8"))

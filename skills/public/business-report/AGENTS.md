@@ -60,12 +60,13 @@ The pure `urllib.parse.urlsplit` parser is allowed; it performs no I/O. Shipped
 Pillow validates/decodes projected PNGs. See the
 [input/activation contract](../../../docs/OFFLINE_REPORT_PRODUCT_IDENTITY.md).
 
-`business_report_presentation.py` captures the existing strict tenant projection
-and product binding once; default product envelopes bind without adding provider
-attribution. Legacy capture sanitizes bytes once with the existing name policy.
-Keep current Workspace context separate from authored/legacy company labels.
-Retain exact effective palette and relative asset as hashed supporting members;
-verify semantic binding before publication/reuse, not only outer member hashes.
+`business_report_presentation.py` freezes the tolerant tenant bundle and
+sanitized logo bytes once per operation. New presentation records use `legacy`
+mode. Refuse the retired report tenant selector variables even when empty.
+Keep validating historical `tenant` and `product-only` records, including their
+original product digest, name, relative asset, palette and snapshot binding.
+Downloads retain the original bundle bytes. Regeneration selects the current
+tenant bundle and keeps authored company and historical labels as report content.
 
 `business_report_charts.py` owns bounded retained draw values. Reuse pixels only
 with compatible validated data/primary; redraw changed primary from those values,

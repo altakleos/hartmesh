@@ -26,8 +26,8 @@ uv run --no-sync --project backend python -m deerflow.config.product_identity_ex
 Use a new staging directory, outside active mounts. The exporter applies the
 [runtime product contract](RUNTIME_PRODUCT_IDENTITY.md), including fixed-field
 conflicts. Ordinary export refuses unconfigured mode. Explicit `--include-default` may
-export the exact admitted default identity with null assets/provider for strict
-tenant binding; it does not invent provider attribution. The output is public data only: strict UTF-8 JSON with exactly `schema_version: 1`,
+export the exact admitted default identity with null assets and provider. It
+carries no provider attribution. The output is public data only: UTF-8 JSON with exactly `schema_version: 1`,
 `identity` (the entire configured public API response, including all three inline
 sanitized PNGs when configured), and `sha256`. The digest is lowercase SHA-256 over the identity
 encoded as JSON with sorted keys, comma/colon separators, ASCII escapes and no

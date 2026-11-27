@@ -56,10 +56,9 @@ no customer-facing storage notice exposes byte capacities or pool terminology.
    optional capabilities stay disabled, developer screens stay available, and
    Agents API keeps its last-known fallback. Do not split the transport cache
    by selected field or introduce a module-global feature cache.
-   Strict tenant branding is the complete account/document snapshot held by
-   `TenantPresentationProvider`, independently of those background refreshes.
-   Keep its no-store authenticated capture, product/content binding and account
-   retirement fences; live feature data must never replace individual fields.
+   Workspace company copy and optional tenant support use the branding fields
+   of this authenticated response. The document title suffix uses the public
+   product name after feature discovery has answered.
    Successful key save/removal invalidates models while the workspace is active,
    even after Settings closes. Test key never persists credentials; draft/editor
    changes retire probes, and unmount retires probes, status/history and UI

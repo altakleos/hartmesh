@@ -1584,17 +1584,12 @@ ui:
 # One directory the operator writes: brand.json (company_name, logo, colors),
 # an optional PNG or JPEG logo next to it, starters.json (the same shape and
 # rules as ui.starters; present, it is the grid) and optional provider.json.
-# The Gateway reads it for the workspace header, the About page and Home's
-# starters, after sign-in. Mount the same directory read-only at /mnt/tenant
+# The Gateway reads it for authenticated workspace content, About and Home's
+# starters. Mount the same directory read-only at /mnt/tenant
 # through sandbox.mounts so skills read the same branding files. Skills own
 # additional resources such as report-profiles/; the Gateway does not enumerate them.
-# Legacy mode keeps optional, tolerant branding. strict-v1 requires a complete
-# pinned presentation.json, even for explicit product-only mode, and all Gateway
-# readers must restart for activation. Independent starters/roles remain live-read.
 tenant_bundle:
   # path: /srv/hartmesh/operator/tenant
-  presentation: legacy  # strict-v1 requires presentation.json; see docs/TENANT_PRESENTATION.md
-  presentation_sha256: null  # canonical manifest digest; strict activation requires all Gateway workers to restart
 
 
 # ============================================================================

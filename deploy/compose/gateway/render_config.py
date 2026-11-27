@@ -944,6 +944,17 @@ def render(
     """Return the rendered document and the fragments it included."""
 
     document: dict[str, Any] = dict(template)
+    if "tenant_bundle" in document:
+        from deerflow.config.tenant_bundle import (
+            TenantBundleCompatibilityError,
+            check_tenant_bundle_compatibility,
+        )
+
+        try:
+            check_tenant_bundle_compatibility(document["tenant_bundle"])
+        except TenantBundleCompatibilityError as exc:
+            raise RenderError(str(exc)) from None
+
 
     template_models = document.get("models") or []
     if not isinstance(template_models, list):

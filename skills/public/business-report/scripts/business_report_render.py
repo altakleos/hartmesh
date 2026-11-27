@@ -34,7 +34,6 @@ from business_report_common import (
     picture_inside,
 )
 from business_report_presentation import capture_presentation
-from business_report_product import load_product_identity
 from PIL import Image
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches
@@ -372,14 +371,9 @@ _UNSET = object()
 
 
 def render(report: dict, report_path: Path, target: str, out_path: Path | None, tenant_dir: str | None, *, product_identity=_UNSET, presentation=_UNSET) -> Path:
-    if product_identity is _UNSET:
-        try:
-            product_identity = load_product_identity()
-        except ValueError as error:
-            raise InputError(str(error)) from None
     try:
         if presentation is _UNSET:
-            presentation = capture_presentation(tenant_dir, product_identity=product_identity)
+            presentation = capture_presentation(tenant_dir) if product_identity is _UNSET else capture_presentation(tenant_dir, product_identity=product_identity)
         product_identity = presentation.product_identity
         brand = presentation.brand()
     except ValueError as error:

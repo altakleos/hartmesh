@@ -273,11 +273,9 @@ allowlisted `/api/v1/auth/product-identity`; legacy `/product` retains `{name}`.
 Only explicitly public sanitized payload fields/assets are projected. Protected
 tenant branding routes keep their existing authorization.
 
-`branding/presentation` delivers one complete protected snapshot with private
-no-store headers. Strict mode additionally requires session provenance; failures
-return fixed 503 detail and never partial tenant fields. Lifespan installs the
-startup-selected reader; features retain live unrelated settings but suppress
-loose strict branding. Never reintroduce live logo reads for strict consumers.
+Authenticated `/api/features` includes tenant branding with private no-store
+headers. The live tenant logo keeps its own private five-minute cache. Both
+resolve the configured bundle through the shared off-loop reader.
 
 Managed-model `/discover` and `/import` require administrator access before
 reading credentials or making outbound requests. Discovery is read-only and

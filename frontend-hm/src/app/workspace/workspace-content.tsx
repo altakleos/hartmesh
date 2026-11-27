@@ -8,7 +8,7 @@ import { GatewayOfflineBanner } from "@/components/workspace/gateway-offline-ban
 import { ModelLoadErrorBanner } from "@/components/workspace/model-load-error-banner";
 import { SettingsDialogHost } from "@/components/workspace/settings";
 import { TelegramSetupHost } from "@/components/workspace/telegram/setup-host";
-import { WorkspacePresentationBoundary } from "@/components/workspace/workspace-presentation-boundary";
+import { WorkspaceSessionGate } from "@/components/workspace/workspace-session-gate";
 import { WorkspaceSettingsDeepLink } from "@/components/workspace/workspace-settings-deep-link";
 import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
 import { HomeFileTransferProvider } from "@/core/agent-instances/home-transfers";
@@ -38,7 +38,7 @@ export async function WorkspaceContent({
   return (
     <QueryClientProvider>
       <GatewayOfflineBanner gatewayUnavailable={gatewayUnavailable} />
-      <WorkspacePresentationBoundary route={children}>
+      <WorkspaceSessionGate route={children}>
         <FileActionLifetimeProvider>
           <HomeFileTransferProvider>
             <ExtensionPageBootstrap />
@@ -59,7 +59,7 @@ export async function WorkspaceContent({
             <Toaster position="top-center" />
           </HomeFileTransferProvider>
         </FileActionLifetimeProvider>
-      </WorkspacePresentationBoundary>
+      </WorkspaceSessionGate>
     </QueryClientProvider>
   );
 }

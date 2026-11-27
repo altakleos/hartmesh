@@ -326,8 +326,8 @@ telegram_bots:
 # under /srv/hartmesh/operator/tenant, the operator's own directory on the
 # tenant data disk. Skills read their own report-profiles/ there.
 # Sandboxes mount the same directory
-# read-only at /mnt/tenant (sandbox.mounts above), so the workspace header
-# and the report carry the one name the operator wrote. Every file is
+# read-only at /mnt/tenant (sandbox.mounts above) so authenticated workspace
+# content and new reports read the same customer name. Every file is
 # optional; a malformed one degrades its own field and is named in the log
 # and by `render_config.py --check` (README: "Tenant bundle").
 tenant_bundle:
