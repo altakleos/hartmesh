@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import importlib.util
 import json
 import sys
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 
 for _library in ("pandas", "docx", "pypdf", "jinja2", "matplotlib", "weasyprint"):
     pytest.importorskip(_library)
 
-from .test_presentation import SCRIPTS, canonical, png, selected  # noqa: E402
+from docx import Document  # noqa: E402
+from pypdf import PdfReader  # noqa: E402
+
+from .test_presentation import PRODUCT, SCRIPTS, canonical, png  # noqa: E402
 from .test_presentation import modules as modules  # noqa: E402
 from .test_publication import public_bytes  # noqa: E402
 
@@ -38,13 +43,64 @@ def build(report, root, *extra):
     return current(root)
 
 
-def test_current_partial_render_drops_incompatible_formats_and_preserves_old_bytes(report, tmp_path, monkeypatch):
-    selected(tmp_path, monkeypatch)
+@pytest.fixture
+def activate(report, tmp_path, monkeypatch):
+    tenant = tmp_path / "tenant"
+    tenant.mkdir()
+    monkeypatch.setattr(report, "DEFAULT_TENANT_DIR", str(tenant))
+    product = tmp_path / "product.json"
+    product.write_bytes(PRODUCT.read_bytes())
+    monkeypatch.setenv("HARTMESH_REPORT_PRODUCT_IDENTITY", str(product))
+    monkeypatch.setenv("HARTMESH_REPORT_PRODUCT_SHA256", json.loads(product.read_bytes())["sha256"])
+
+    def write(name="Example Tenant One", color="red"):
+        (tenant / "brand.json").write_text(json.dumps({"company_name": name, "logo": "logo.png"}), encoding="utf-8")
+        (tenant / "logo.png").write_bytes(png(color))
+        return tenant
+
+    return write
+
+
+def test_tolerant_brand_and_figures_agree_across_build_prose_and_render(report, tmp_path, activate):
+    tenant = activate()
+    root = tmp_path / "out"
+    path = build(report, root, "--render", "html,pdf,docx")
+    baseline = json.loads(path.read_bytes())
+    revenue = next(item for item in baseline["kpis"] if item["id"] == "revenue")
+    amount = report.format_value(revenue["value"], revenue["format"], baseline["meta"]["currency"]["code"])
+
+    for command, name, color in (("build", "Example Tenant One", "red"), ("prose", "Example Tenant Two", "teal"), ("render", "Example Tenant Three", "blue")):
+        if command != "build":
+            activate(name, color)
+            args = ["--summary", "Review the figures.", "--render"] if command == "prose" else ["--to"]
+            assert report.main([command, str(path), *args, "html,pdf,docx", "--bundle-id", command]) == 0
+            path = current(root)
+        record = json.loads((path.parent / "presentation.json").read_bytes())
+        assert record["mode"] == "legacy" and record["source_id"] is None and record["tenant"]["name"] == name
+        assert json.loads(path.read_bytes())["kpis"] == baseline["kpis"]
+        logo = (tenant / "logo.png").read_bytes()
+        assert logo == (path.parent / "presentation/tenant.png").read_bytes()
+        html = (path.parent / "out.html").read_text(encoding="utf-8")
+        assert "data:image/png;base64," + base64.b64encode(logo).decode("ascii") in html
+        pdf = PdfReader(path.parent / "out.pdf")
+        pdf_text = " ".join(page.extract_text() for page in pdf.pages)
+        docx = Document(path.parent / "out.docx")
+        docx_text = " ".join([p.text for p in docx.paragraphs] + [cell.text for cell in docx.tables[0].rows[1].cells])
+        with ZipFile(path.parent / "out.docx") as archive:
+            assert any(archive.read(member) == logo for member in archive.namelist() if member.startswith("word/media/"))
+        for text in (html, pdf_text, docx_text):
+            assert name in text and "Example Report Subject" in text and amount in text
+        assert "Example Provider One" in html and "Example Provider One" in pdf_text
+        assert "Example Provider One" not in docx_text
+
+
+def test_current_partial_render_drops_incompatible_formats_and_preserves_old_bytes(report, tmp_path, activate):
+    activate()
     root = tmp_path / "out"
     old = build(report, root, "--render", "html,pdf,docx,xlsx")
     retained = public_bytes(old.parent)
     facts = json.loads(old.read_text())
-    selected(tmp_path, monkeypatch, name="Example Tenant Revised", raw=png("blue"))
+    activate("Example Tenant Revised", "blue")
     assert report.main(["render", str(old), "--to", "html", "--bundle-id", "b"]) == 0
     new = current(root)
     assert json.loads(new.read_text()) == facts
@@ -62,8 +118,8 @@ def test_current_partial_render_drops_incompatible_formats_and_preserves_old_byt
 
 
 @pytest.mark.parametrize("command", ["render", "prose", "export"])
-def test_one_capture_survives_input_removal_between_real_formats(report, tmp_path, monkeypatch, command):
-    projection, _ = selected(tmp_path, monkeypatch)
+def test_one_capture_survives_input_removal_between_real_formats(report, tmp_path, monkeypatch, activate, command):
+    tenant_bundle = activate()
     root = tmp_path / "out"
     old = build(report, root)
     original = report.render
@@ -71,7 +127,7 @@ def test_one_capture_survives_input_removal_between_real_formats(report, tmp_pat
 
     def removing(document, path, target, out_path, tenant, **kwargs):
         observed.append(kwargs["presentation"])
-        projection.unlink(missing_ok=True)
+        (tenant_bundle / "logo.png").unlink(missing_ok=True)
         (tmp_path / "product.json").unlink(missing_ok=True)
         return original(document, path, target, out_path, tenant, **kwargs)
 
@@ -91,8 +147,8 @@ def test_one_capture_survives_input_removal_between_real_formats(report, tmp_pat
     assert report.main(["render", str(current(root)), "--to", "html"]) == 1
 
 
-def test_regeneration_uses_verified_historical_preferences_without_current_profile_reads(report, tmp_path, monkeypatch):
-    selected(tmp_path, monkeypatch)
+def test_regeneration_uses_verified_historical_preferences_without_current_profile_reads(report, tmp_path, monkeypatch, activate):
+    activate()
     preferences = tmp_path / "preferences.json"
     preferences.write_bytes(b'{"version":1, "brand":{"primary":"#0a6b3d"}, "currency":"USD"}\n')
     root = tmp_path / "out"
@@ -100,7 +156,7 @@ def test_regeneration_uses_verified_historical_preferences_without_current_profi
     recorded = (old.parent / "preferences-used.json").read_bytes()
     preferences.write_bytes(b'{"version":1,"brand":{"primary":"#ffffff"},"currency":"EUR"}\n')
     current_preferences = preferences.read_bytes()
-    selected(tmp_path, monkeypatch, name="Example Tenant Revised", raw=png("blue"))
+    activate("Example Tenant Revised", "blue")
 
     def never_analyse(*args, **kwargs):
         raise AssertionError("Branding-only operation must not reanalyse or reload the profile")
@@ -143,8 +199,8 @@ def test_legacy_palette_change_redraws_retained_chart_values_without_reanalysis(
     assert json.loads((new.parent / "renders.json").read_text())["files"] == ["out.html", "out.xlsx"]
 
 
-def test_legacy_ambiguous_labels_remain_content_separate_from_current_tenant(report, tmp_path, monkeypatch):
-    selected(tmp_path, monkeypatch)
+def test_legacy_ambiguous_labels_remain_content_separate_from_current_tenant(report, tmp_path, activate):
+    activate()
     built = build(report, tmp_path / "original")
     legacy = copy.deepcopy(json.loads(built.read_text()))
     legacy["meta"]["brand"]["company"] = "Example Saved Label"
@@ -156,7 +212,7 @@ def test_legacy_ambiguous_labels_remain_content_separate_from_current_tenant(rep
     source = legacy_root / "legacy.report.json"
     source.write_bytes(canonical(legacy))
     before = source.read_bytes()
-    selected(tmp_path, monkeypatch, name="Example Tenant Revised")
+    activate("Example Tenant Revised")
     assert report.main(["render", str(source), "--to", "html,pdf", "--bundle-id", "b"]) == 0
     new = current(legacy_root)
     assert source.read_bytes() == before
@@ -168,12 +224,12 @@ def test_legacy_ambiguous_labels_remain_content_separate_from_current_tenant(rep
 
 
 @pytest.mark.parametrize("interrupted", [False, True])
-def test_second_format_failure_preserves_previous_current_and_retained_members(report, tmp_path, monkeypatch, interrupted):
-    selected(tmp_path, monkeypatch)
+def test_second_format_failure_preserves_previous_current_and_retained_members(report, tmp_path, monkeypatch, activate, interrupted):
+    activate()
     root = tmp_path / "out"
     old = build(report, root, "--render", "html,pdf")
     before = public_bytes(old.parent)
-    selected(tmp_path, monkeypatch, name="Example Tenant Revised")
+    activate("Example Tenant Revised")
     original = report.render
 
     def fail(document, path, target, out_path, tenant, **kwargs):
@@ -190,7 +246,6 @@ def test_second_format_failure_preserves_previous_current_and_retained_members(r
 
 
 def test_unaffected_explicit_xlsx_export_does_not_require_legacy_chart_pixels(report, tmp_path, monkeypatch):
-    selected(tmp_path, monkeypatch)
     old = build(report, tmp_path / "original")
     legacy = tmp_path / "legacy"
     legacy.mkdir()
@@ -203,12 +258,10 @@ def test_unaffected_explicit_xlsx_export_does_not_require_legacy_chart_pixels(re
 
 
 @pytest.mark.parametrize("command", ["build", "prose", "render", "export"])
-def test_invalid_current_tenant_projection_preserves_old_current_and_exports(report, tmp_path, monkeypatch, command):
-    projection, _ = selected(tmp_path, monkeypatch)
+def test_retired_selectors_refuse_new_output_without_touching_retained_files(report, tmp_path, monkeypatch, capsys, command):
     root = tmp_path / "out"
     old = build(report, root, "--render", "html")
     before = public_bytes(old.parent)
-    projection.write_bytes(b'{"schema_version":2}')
     destination = tmp_path / "existing.html"
     destination.write_bytes(b"keep previous export")
     if command == "build":
@@ -217,27 +270,39 @@ def test_invalid_current_tenant_projection_preserves_old_current_and_exports(rep
         args = ["prose", str(old), "--summary", "Review the facts.", "--render", "html", "--bundle-id", "b"]
     else:
         args = ["render", str(old), "--to", "html", *(["--out", str(destination)] if command == "export" else ["--bundle-id", "b"])]
-    assert report.main(args) == 1
-    assert current(root) == old and public_bytes(old.parent) == before
-    assert destination.read_bytes() == b"keep previous export"
-    assert not (root / "drafts/b").exists()
+    capsys.readouterr()
+    selectors = ("HARTMESH_REPORT_TENANT_PRESENTATION", "HARTMESH_REPORT_TENANT_SHA256")
+    for active in ([selectors[0]], [selectors[1]], selectors):
+        for value in ("", "private-selector-value"):
+            with monkeypatch.context() as changes:
+                for key in active:
+                    changes.setenv(key, value)
+                assert report.main(args) == 1
+            output = capsys.readouterr()
+            assert output.out == ""
+            assert all(key in output.err for key in active)
+            assert "unset" in output.err.lower()
+            assert "private-selector-value" not in output.err and "Traceback" not in output.err
+            assert current(root) == old and public_bytes(old.parent) == before
+            assert destination.read_bytes() == b"keep previous export"
+            assert not (root / "drafts/b").exists()
 
 
-def test_strict_unreadable_primary_preferences_refuse_before_publishing(report, tmp_path, monkeypatch):
-    selected(tmp_path, monkeypatch)
-    root = tmp_path / "out"
-    old = build(report, root, "--render", "html")
-    before = public_bytes(old.parent)
-    prefs = tmp_path / "preferences.json"
-    raw = b'{"version":1,"brand":{"primary":"#ffffff"}}\n'
-    prefs.write_bytes(raw)
-    assert report.main(["build", str(FIXTURE), "--period", "2026-08", "--prefs", str(prefs), "--out", str(root), "--bundle-id", "b", "--render", "html"]) == 1
-    assert current(root) == old and public_bytes(old.parent) == before
-    assert prefs.read_bytes() == raw and not (root / "drafts/b").exists()
+@pytest.mark.parametrize("command", ["inspect", "show", "checks", "preferences"])
+def test_retired_selectors_refuse_non_rendering_commands_before_read_or_write(report, tmp_path, monkeypatch, capsys, command):
+    missing = tmp_path / "private-input"
+    args = [command, str(missing)] if command != "preferences" else ["preferences", "read", str(missing)]
+    for key in ("HARTMESH_REPORT_TENANT_PRESENTATION", "HARTMESH_REPORT_TENANT_SHA256"):
+        with monkeypatch.context() as changes:
+            changes.setenv(key, "")
+            assert report.main(args) == 1
+        output = capsys.readouterr()
+        assert key in output.err and "unset" in output.err.lower()
+        assert not output.out and "private-input" not in output.err and "Traceback" not in output.err
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_legacy_missing_draw_values_refuses_affected_regeneration_truthfully(report, tmp_path, monkeypatch):
-    selected(tmp_path, monkeypatch)
     old = build(report, tmp_path / "original")
     legacy = tmp_path / "legacy"
     legacy.mkdir()
@@ -249,7 +314,6 @@ def test_legacy_missing_draw_values_refuses_affected_regeneration_truthfully(rep
 
 
 def test_verified_old_spreadsheet_is_not_carried_when_report_content_changes(report, tmp_path, monkeypatch):
-    selected(tmp_path, monkeypatch)
     root = tmp_path / "out"
     old = build(report, root, "--render", "xlsx")
     before = public_bytes(old.parent)

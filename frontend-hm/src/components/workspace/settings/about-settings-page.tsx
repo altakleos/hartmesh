@@ -14,12 +14,11 @@ import { APP_VERSION } from "@/version";
 import { aboutMarkdown } from "./about-content";
 
 export function AboutSettingsPage() {
-  const { companyName, isLoading, strict, providerName, supportURL } =
-    useBranding();
+  const { companyName, isLoading, providerName, supportURL } = useBranding();
   const { t } = useI18n();
   const productName = useProductName();
   const identity = useProductIdentity();
-  if (identity?.mode === "configured" || strict) {
+  if (identity?.mode === "configured") {
     return (
       <section className="space-y-4">
         <ProductLogo />

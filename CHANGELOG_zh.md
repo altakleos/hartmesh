@@ -9,6 +9,18 @@
 
 ## [未发布]
 
+### 升级说明
+
+工作区品牌信息和新报告均从租户目录读取配置。浏览器标题使用产品名称。
+**请同时升级网关和前端。** 使用旧版固定呈现模式的部署应移除
+`tenant_bundle.presentation` 和 `tenant_bundle.presentation_sha256`，
+卸载报告使用的租户呈现文件，并取消
+`HARTMESH_REPORT_TENANT_PRESENTATION` 和 `HARTMESH_REPORT_TENANT_SHA256`。
+在租户目录中提供 `brand.json` 和 PNG 或 JPEG 标志，然后重启所有网关进程。
+已配置的离线产品标识及其两个环境变量可以继续使用。已保存报告的文件和呈现记录
+保持原样。此次升级无需数据库迁移。
+
+
 本节累积面向 **2.3.0** 里程碑（[2.3.0](https://github.com/bytedance/deer-flow/milestone/4)）的工作。
 
 

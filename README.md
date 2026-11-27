@@ -425,8 +425,8 @@ lifecycle; the original report and downloads remain usable.
 Business-report regeneration now captures one complete current product/tenant
 presentation for all formats. New bundles retain its metadata, sanitized logo and
 original chart draw values, preserve historical preferences and report facts, and
-omit incompatible old formats. Old downloads keep their bytes. Operators expose
-strict projections read-only and verify recreated sandbox readers; see the
+omit incompatible old formats. Old downloads keep their bytes. Operators mount
+the tenant bundle read-only for new captures. See the
 [offline presentation contract](docs/OFFLINE_REPORT_PRESENTATION.md).
 
 Each business-report draft publishes as a complete directory under
@@ -5686,11 +5686,8 @@ compatibility, restart behavior and explicit unavailable states. Tenant material
 remains authenticated.
 
 The sidebar shows only the product’s branding. Its logo stays at the top. Open **Settings and more → About** for provider support.
-Strict tenant presentation binds metadata and sanitized pixels
-to one product-compatible snapshot per document, including across warm-cache
-reloads after activation. The tolerant legacy mode remains the default. See the
-[tenant presentation contract](docs/TENANT_PRESENTATION.md) for strict inputs,
-failure behavior, compatibility and the bounded operator restart procedure.
+The browser tab uses the product name. Authenticated workspace content reads the
+customer name and other optional fields from the [tenant bundle](docs/TENANT_PRESENTATION.md).
 
 Business-report HTML and derived PDF can use a complete read-only offline
 projection of that same shared identity, with separate product/provider

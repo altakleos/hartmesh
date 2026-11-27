@@ -21,7 +21,6 @@ import {
   type TelegramFeature,
   selectWorkspacePresentation,
 } from "./api";
-import { useTenantPresentation } from "./tenant-presentation";
 
 /** All feature observers share transport, retries and the identity's cache. */
 export function useFeatures<T>(
@@ -45,29 +44,11 @@ export function useFeatures<T>(
   });
 }
 
-/**
- * Authenticated tenant presentation for workspace content and provider support.
- * Strict mode uses the document's admitted snapshot. Legacy consumers wait for
- * feature discovery before displaying deployment-authored content.
- */
+/** Authenticated deployment branding and support details for workspace content. */
 export function useBranding() {
   const { data } = useFeatures(selectBranding);
-  const snapshot = useTenantPresentation();
   const identity = useProductIdentity();
   const provider = identity?.mode === "configured" ? identity.provider : null;
-  if (snapshot && snapshot.mode !== "legacy")
-    return {
-      companyName: snapshot.tenant?.name ?? null,
-      primary: null,
-      secondary: null,
-      hasLogo: snapshot.tenant !== null,
-      logo: snapshot.tenant?.logo ?? null,
-      snapshotId: snapshot.snapshot_id,
-      strict: true,
-      providerName: provider?.name ?? null,
-      supportURL: provider?.support_url ?? null,
-      isLoading: false,
-    };
   return {
     companyName: data?.companyName ?? null,
     primary: data?.primary ?? null,
@@ -76,26 +57,30 @@ export function useBranding() {
     providerName: provider?.name ?? data?.providerName ?? null,
     supportURL: provider?.support_url ?? data?.supportURL ?? null,
     isLoading: data === undefined,
-    logo: null,
-    snapshotId: null,
-    strict: false,
   };
 }
 
-/**
- * The name the tab carries after the page's own: the company's, else the
- * product's, else nothing while the deployment has not answered.
- */
+/** Append the product name after the deployment answers feature discovery. */
 export function useDocumentTitle(page: string, productName: string) {
-  const { companyName, isLoading, strict } = useBranding();
-  const identity = useProductIdentity();
-  const configured = identity?.mode === "configured";
+  const { isLoading } = useBranding();
   useEffect(() => {
-    document.title =
-      isLoading && !configured
-        ? page
-        : `${page} - ${configured ? identity.name : strict ? productName : (companyName ?? productName)}`;
-  }, [companyName, isLoading, page, productName, configured, identity, strict]);
+    const title = isLoading ? page : `${page} - ${productName}`;
+    // App Router can stream a new head title after this client page mounts.
+    // Compare the raw text because document.title normalizes whitespace.
+    const update = () => {
+      if (document.head.querySelector("title")?.textContent !== title) {
+        document.title = title;
+      }
+    };
+    update();
+    const observer = new MutationObserver(update);
+    observer.observe(document.head, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    return () => observer.disconnect();
+  }, [isLoading, page, productName]);
 }
 
 /**

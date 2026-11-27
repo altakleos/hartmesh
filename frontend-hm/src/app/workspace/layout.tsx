@@ -51,8 +51,8 @@ export default async function WorkspaceLayout({
       content = <RedirectToLogin />;
       break;
     case "gateway_unavailable":
-      // Keep the same provider path as authenticated refreshes. Uncertain auth
-      // must not retire an already admitted account/document presentation.
+      // Keep the provider path stable so a health interruption preserves the
+      // last verified account subtree.
       content = (
         <WorkspaceAuthProvider>
           <WorkspaceContent gatewayUnavailable>{children}</WorkspaceContent>

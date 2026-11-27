@@ -1,7 +1,7 @@
 import type { BaseStream } from "@langchain/langgraph-sdk";
 import { afterEach, expect, rs, test } from "@rstest/core";
 import { cleanup, render } from "@testing-library/react";
-import { useEffect, type ReactNode } from "react";
+import { type ReactNode } from "react";
 
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import type { AgentThreadState } from "@/core/threads";
@@ -10,7 +10,7 @@ rs.mock("@/core/i18n/hooks", () => ({
   useI18n: () => ({
     t: {
       pages: {
-        appName: "DeerFlow",
+        appName: "Example Product",
         newChat: "New chat",
         untitled: "Untitled",
       },
@@ -18,23 +18,14 @@ rs.mock("@/core/i18n/hooks", () => ({
   }),
 }));
 
-const branding: { companyName: string | null; isLoading: boolean } = {
-  companyName: null,
-  isLoading: false,
-};
-rs.mock("@/core/features", () => ({
-  useBranding: () => branding,
-  useDocumentTitle: (page: string, productName: string) => {
-    useEffect(() => {
-      document.title = branding.isLoading
-        ? page
-        : `${page} - ${branding.companyName ?? productName}`;
-    }, [page, productName]);
-  },
+rs.mock("@tanstack/react-query", () => ({
+  useQuery: () => ({ data: { companyName: "Example Customer" } }),
 }));
+rs.mock("@/core/auth/AuthProvider", () => ({ useAuth: () => ({}) }));
 
+const chat = rs.hoisted(() => ({ isNewThread: false }));
 rs.mock("@/components/workspace/chats", () => ({
-  useThreadChat: () => ({ isNewThread: false }),
+  useThreadChat: () => chat,
 }));
 
 rs.mock("@/components/workspace/flip-display", () => ({
@@ -50,6 +41,7 @@ function makeThread(title: string): BaseStream<AgentThreadState> {
 
 afterEach(() => {
   cleanup();
+  chat.isNewThread = false;
   document.title = "";
 });
 
@@ -63,7 +55,7 @@ test("prefers the canonical metadata title over a stale stream title", () => {
   );
 
   expect(container.textContent).toBe("Renamed title");
-  expect(document.title).toBe("Renamed title - DeerFlow");
+  expect(document.title).toBe("Renamed title - Example Product");
 });
 
 test("falls back to the stream title when metadata is unavailable", () => {
@@ -72,7 +64,7 @@ test("falls back to the stream title when metadata is unavailable", () => {
   );
 
   expect(container.textContent).toBe("Stream title");
-  expect(document.title).toBe("Stream title - DeerFlow");
+  expect(document.title).toBe("Stream title - Example Product");
 });
 
 test("falls back to the stream title when metadata title is empty", () => {
@@ -85,5 +77,17 @@ test("falls back to the stream title when metadata title is empty", () => {
   );
 
   expect(container.textContent).toBe("Stream title");
-  expect(document.title).toBe("Stream title - DeerFlow");
+  expect(document.title).toBe("Stream title - Example Product");
 });
+
+test.each([
+  [true, "New chat"],
+  [false, "Untitled"],
+] as const)(
+  "uses the page label for an empty stream title (new %s)",
+  (isNewThread, label) => {
+    chat.isNewThread = isNewThread;
+    render(<ThreadTitle threadId="thread-1" thread={makeThread("")} />);
+    expect(document.title).toBe(`${label} - Example Product`);
+  },
+);

@@ -88,8 +88,8 @@ try:
         utc_now,
         vocab,
     )
-    from business_report_product import _read as read_snapshot, _unique, load_product_identity
-    from business_report_presentation import MEMBER as PRESENTATION_MEMBER, capture_presentation
+    from business_report_product import _read as read_snapshot, _unique
+    from business_report_presentation import MEMBER as PRESENTATION_MEMBER, capture_presentation, check_tenant_selectors
     from business_report_charts import stage_charts as stage_retained_charts, write_data as write_chart_data
     from business_report_publish import STATE_DIR, bundle_manifest, current_identity, current_report, publication_lock, publication_root, publish_bundle, require_current, retained_presentation, sync_directory, write_json
     from business_report_render import chart_path as chart_path, draw_charts, fetch_inline_only, render
@@ -1509,13 +1509,6 @@ def command_inspect(args) -> int:
     return EXIT_OK
 
 
-def operation_product_identity():
-    try:
-        return load_product_identity()
-    except ValueError as error:
-        raise InputError(str(error)) from None
-
-
 def command_build(args) -> int:
     tenant_dir = resolve_tenant_dir(args.tenant)
     presentation = operation_presentation(tenant_dir)
@@ -1537,14 +1530,8 @@ def command_build(args) -> int:
         # Fields and collections replace saved choices for this build only.
         effective = {**(snapshot["preferences"] if snapshot else {"version": 1}), **override["preferences"]}
         options, applied = apply_preferences(BuildOptions(brand=presentation.brand()), effective)
-    try:
-        presentation = presentation.with_preferences(effective)
-    except ValueError as error:
-        raise InputError(str(error)) from None
+    presentation = presentation_with_preferences(presentation, effective)
     options.brand = presentation.brand()
-    if presentation.mode != "legacy":
-        # A strict workspace name is presentation, never an inferred issuer.
-        options.brand["company"] = ""
     renderer = partial(render, product_identity=product_identity, presentation=presentation)
     for text in args.exclude or []:
         exclusion = normalize_exclusion(text)
@@ -1621,16 +1608,16 @@ def command_show(args) -> int:
     return EXIT_OK
 
 
-def capture_operation(*, tenant_dir, product_identity, preferences=None):
+def operation_presentation(tenant_dir):
     try:
-        return capture_presentation(tenant_dir, product_identity=product_identity).with_preferences(preferences)
+        return capture_presentation(tenant_dir)
     except ValueError as error:
         raise InputError(str(error)) from None
 
 
-def operation_presentation(tenant_dir, preferences=None):
+def presentation_with_preferences(presentation, preferences):
     try:
-        return capture_presentation(tenant_dir, product_identity=operation_product_identity()).with_preferences(preferences)
+        return presentation.with_preferences(preferences)
     except ValueError as error:
         raise InputError(str(error)) from None
 
@@ -1677,7 +1664,9 @@ def _source_report(path: Path):
 
 
 def command_prose(args) -> int:
-    product_identity = operation_product_identity()
+    tenant_dir = resolve_tenant_dir(args.tenant)
+    presentation = operation_presentation(tenant_dir)
+    product_identity = presentation.product_identity
     report_path = Path(args.report)
     summary: list[str] | None = None
     actions: list[str] | None = None
@@ -1696,10 +1685,10 @@ def command_prose(args) -> int:
     targets = parse_targets(args.render, "--render")
     report, root, base, expected = _source_report(report_path)
     saved_preferences, effective_preferences = _retained_preferences(report_path)
-    presentation = capture_operation(tenant_dir=resolve_tenant_dir(args.tenant), product_identity=product_identity, preferences=effective_preferences)
+    presentation = presentation_with_preferences(presentation, effective_preferences)
     renderer = partial(render, product_identity=product_identity, presentation=presentation)
     updated, removed, notes = apply_prose(report, summary, actions)
-    published = publish_bundle(root, base, updated, targets, resolve_tenant_dir(args.tenant), renderer, lambda stage: _stage_report_charts(updated, report_path, stage, presentation, saved_preferences), bundle_id=args.bundle_id, expected_current=expected, product_identity=product_identity, presentation=presentation)
+    published = publish_bundle(root, base, updated, targets, tenant_dir, renderer, lambda stage: _stage_report_charts(updated, report_path, stage, presentation, saved_preferences), bundle_id=args.bundle_id, expected_current=expected, product_identity=product_identity, presentation=presentation)
     print(f"Draft {updated['meta']['draft']}: {published}")
     if removed:
         print(f"Removed {len(removed)} {plural(len(removed), 'number')} not in the report: {', '.join(removed)}. Sentences with them were dropped; say so to the user.")
@@ -1719,17 +1708,18 @@ def command_prose(args) -> int:
 
 
 def command_render(args) -> int:
-    product_identity = operation_product_identity()
+    tenant_dir = resolve_tenant_dir(args.tenant)
+    presentation = operation_presentation(tenant_dir)
+    product_identity = presentation.product_identity
     targets = parse_targets(args.to, "--to")
     if not targets:
         raise InputError("--to must name at least one format: pdf, docx, xlsx or html.")
     if args.out and (len(targets) != 1 or args.bundle_id):
         raise InputError("--out names one export; use one --to target without --bundle-id.")
     report_path = Path(args.report)
-    tenant_dir = resolve_tenant_dir(args.tenant)
     report, root, base, expected = _source_report(report_path)
     saved_preferences, effective_preferences = _retained_preferences(report_path)
-    presentation = capture_operation(tenant_dir=tenant_dir, product_identity=product_identity, preferences=effective_preferences)
+    presentation = presentation_with_preferences(presentation, effective_preferences)
     renderer = partial(render, product_identity=product_identity, presentation=presentation)
     if args.out:
         # A chosen export is one atomically replaced file, outside bundle ownership.
@@ -1937,6 +1927,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
     args = build_parser().parse_args(argv)
     try:
+        check_tenant_selectors()
         return args.handler(args)
     except DecisionNeeded as decision:
         sys.stderr.write(f"Decision needed: {decision.question}\n{json.dumps(decision.details, indent=2, ensure_ascii=False)}\n")

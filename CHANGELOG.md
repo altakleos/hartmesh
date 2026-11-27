@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+Workspace branding and new report captures use the tenant bundle. Browser
+titles use the product name. **Upgrade the Gateway and frontend together.**
+For deployments using `strict-v1`, remove `tenant_bundle.presentation` and
+`tenant_bundle.presentation_sha256`. Remove the report tenant projection mounts
+and both tenant selector variables, `HARTMESH_REPORT_TENANT_PRESENTATION` and
+`HARTMESH_REPORT_TENANT_SHA256`. Supply `brand.json` and a PNG or JPEG logo in
+the tenant bundle, then restart every Gateway worker. Keep the offline product
+envelope and its selector pair if configured. Saved reports retain their original
+downloads and presentation records. No database migration is required.
+
 ## [2.2.0+hartmesh.83] - 2026-11-26
 
 ### Workspace sidebar
@@ -801,12 +813,11 @@ database migration.
 
 ### Workspace and report presentation snapshots
 
-- Authenticated workspaces can opt into `tenant_bundle.presentation: strict-v1`
+- Authenticated workspaces could opt into a strict tenant presentation
   with a pinned tenant manifest. A complete Workspace name/logo stays separate
   from the shared product/provider, and document navigation retains one coherent
   admitted presentation. The default `legacy` mode preserves existing tolerant
-  branding. Upgrade Gateway and frontend together, then follow the activation and
-  restoration steps in [tenant presentation](docs/TENANT_PRESENTATION.md).
+  branding. Upgrade Gateway and frontend together, to use the workspace behavior from this release.
 - Each report build or regeneration captures its current tenant, product and
   report palette once. Regeneration preserves report facts and saved preferences,
   redraws retained charts when needed, and publishes a separate immutable bundle.
@@ -814,12 +825,10 @@ database migration.
   palette styling, while XLSX preserves the report data. Historical bundles keep
   their bytes. Legacy reports without the chart data needed for redraw refuse
   affected exports with an actionable error.
-- Strict report presentation uses the existing product and tenant exports,
-  including explicit default-product and product-only selections. Configure both
-  selector pairs and immutable read-only inputs. Restart affected Gateway readers,
-  reload browser documents and recreate affected sandboxes when activating or
-  restoring a selection; replacing a host file alone does not refresh an existing
-  file bind mount. See [offline report presentation](docs/OFFLINE_REPORT_PRESENTATION.md).
+- Strict report presentation used the existing product and tenant exports,
+  including explicit default-product and product-only selections with pinned
+  read-only inputs. Saved bundles from those modes remain readable. See the
+  [retained report record](docs/OFFLINE_REPORT_PRESENTATION.md#retained-report-record).
 
 ### Storage lifecycle
 

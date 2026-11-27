@@ -297,12 +297,10 @@ ownership; `product_name` and Gateway readers use that complete snapshot. Never
 merge tenant material into it. Changes require all Gateway workers to restart;
 see [contract](../../../../../docs/RUNTIME_PRODUCT_IDENTITY.md).
 
-`tenant_presentation.py` captures strict versioned workspace inputs and sanitized
-PNG bytes together, bound to the admitted product identity and operator-pinned
-manifest digest. Gateway lifespan owns its reader; no live asset reopen or
-cross-field fallback. Legacy branding and independent starters/roles remain
-separate. Activation requires all Gateway readers to restart and actual serving
-snapshot verification; see [contract](../../../../../docs/TENANT_PRESENTATION.md).
+The tenant bundle reader keeps each optional field independent. The Gateway
+reads it for authenticated branding, starters and roles. Configuration accepts
+the legacy alias and names retired fields before environment expansion.
+See [the tenant bundle](../../../../../docs/TENANT_PRESENTATION.md).
 
 Runtime `product_name` uses the already admitted process snapshot without tenant
 filesystem access or copying assets. AppConfig admission and the synchronous

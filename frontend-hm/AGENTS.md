@@ -317,20 +317,14 @@ and provider slots never use tenant fields. Default mode retains `ui.product_nam
 and the legacy name API. Keep strict and legacy name validation separate. Retain admitted identity on
 failure; fresh failures show unavailable. See [contract](../docs/RUNTIME_PRODUCT_IDENTITY.md).
 
-Legacy tenant branding (`useBranding`) selects the authenticated features response's
-company name, colors, logo availability and optional provider support. It can
-replace default product naming in the document title and About content; loading or failed
-initial reads show neither name. Colors are metadata, not applied web CSS.
-Configured product mode preserves product slots. Sign-in/setup never show tenant
-material. Support uses validated HTTPS with no referrer or added context.
-
-Strict tenant presentation (`core/features/tenant-presentation.tsx`) captures one
-complete authenticated name/logo snapshot inside the account-owned workspace
-subtree. Validate its bounded schema/content/product binding. Retain it across
-focus, client navigation and server refreshes; retire/cancel with the account.
-Fresh failures show unavailable. `useBranding` ignores live tenant fields in
-strict mode while other features keep refreshing. Sidebar names, logos, initials and menu labels use the public product identity only.
-Static/legacy paths stay compatible. See [the contract](../docs/TENANT_PRESENTATION.md).
+Tenant branding (`useBranding`) selects the authenticated features response's
+company name, colors, logo availability and optional provider support. Workspace
+copy and About in default product mode may show the company. Colors stay metadata.
+Configured product mode preserves product and provider identity in About.
+Sign-in and setup show the public product identity. Support links use validated
+HTTPS with no referrer. Sidebar names, logos, initials and menu labels use only
+the product identity. Client document titles show the page name until feature
+discovery answers, then append the deployment's product name.
 Keep session recovery and the index's pure route control outside private admission.
 Uncertain SSR auth keeps the provider path; new SSR scope conflicts retire it
 until a full reload, including when later SSR responses become uncertain again.

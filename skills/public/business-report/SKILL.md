@@ -197,21 +197,17 @@ Configured shared product/provider attribution remains a separate HTML/PDF block
 DOCX/XLSX do not gain that block. A passive preview uses neutral styling and lists
 only the actual exports in its new bundle.
 
-Strict deployments supply the existing product envelope and tenant projection
-through operator-controlled read-only mounts and paired expected digests. The
-projection explicitly selects tenant or product-only mode and binds to the
-selected product, including an explicitly exported default product identity.
-Missing/invalid strict input refuses the operation. Do not edit inputs or change
-selectors to repair it; report the error. No live Gateway, remote fetch, package
-installation or additional shell call is needed by the report command.
+Use `--tenant DIR` for an explicit tenant bundle. The default is `/mnt/tenant`
+when mounted. The command reads `brand.json` once, admits the name and colors
+field by field, and freezes sanitized PNG/JPEG logo bytes. Invalid or missing
+fields use the report defaults. `--company` overrides the report company for
+this build. A saved brand label that differs from the report company appears as **Saved
+label**. The current tenant name appears as **Workspace**.
 
-Without strict tenant selectors, `--tenant DIR` or `/mnt/tenant/brand.json` keeps
-its tolerant legacy name/logo/color admission. The complete admitted values and
-sanitized PNG/JPEG bytes are frozen together. Saved `meta.company` and
-`meta.brand.company` are preserved report/legacy labels, not current tenant
-authority; a differing legacy label stays visible as **Saved label**. Strict
-new builds never infer an issuer from the tenant. Current tenant presentation
-appears separately as **Workspace**, never as a guessed tenant assignment.
+Operators can configure a separate offline product envelope for HTML/PDF
+attribution. If the command reports a retired tenant selector, ask the operator
+to unset it. Keep historical tenant and product-only downloads available at
+their original paths. Regenerating a report uses the current tenant bundle.
 
 Each bundle retains a bounded `presentation.json` and relative asset under its
 existing member hashes, alongside the shared identity and original chart draw
@@ -224,9 +220,7 @@ XLSX-only export remains available without chart pictures. Historical fragments
 are not an alternate selection, and old outputs never regenerate on download.
 
 Read the [complete input, compatibility and activation contract](../../../docs/OFFLINE_REPORT_PRESENTATION.md)
-for bounds, supported palette ownership, read-only exposure and actual sandbox
-recreation/admission checks. Operator activation/restoration stays outside the
-report command; source changes do not prove that an old sandbox acquired them.
+for asset bounds and regeneration rules.
 
 ## What the checks mean
 

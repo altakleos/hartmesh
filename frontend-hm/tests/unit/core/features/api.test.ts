@@ -163,6 +163,30 @@ describe("branding", () => {
     });
   });
 
+  it("retains usable fields when a bundle has partial metadata", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({
+        branding: {
+          company_name: "  Example Company  ",
+          colors: { primary: "#123456", secondary: "missing" },
+          provider: {
+            display_name: 42,
+            support_url: "https://support.example.test/",
+          },
+        },
+      }),
+    );
+
+    await expect(fetchBranding()).resolves.toEqual({
+      companyName: "Example Company",
+      primary: "#123456",
+      secondary: null,
+      hasLogo: false,
+      providerName: null,
+      supportURL: "https://support.example.test/",
+    });
+  });
+
   it("takes nothing it cannot show", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse({
