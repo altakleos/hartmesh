@@ -1218,25 +1218,17 @@ kernel prefers the on-link route. The range therefore has to clear everything
 the guest must still reach, and that is a property of the surroundings, not of
 this profile.
 
-The profile shipped `172.30.10.0/24` until 2026-09-09. On the operator whose
-tenants run this profile, its Kubernetes cluster allocates pod addresses from `172.30.0.0/16`
-and service addresses from `172.31.0.0/16`, and on that date a production
-control-plane node's assigned pod subnet was exactly `172.30.10.0/24`. Public
-ingress to the tenant kept working throughout, which proves nothing: the
-Kubernetes worker source-NATs the request onto its own `10.17.72.0/24` leg, so
-the reply never needed the tenant's view of `172.30.10.0/24` to be correct.
-The overlap was real regardless, and would have surfaced the first time
-anything in the guest addressed a pod directly.
+An overlap can go unnoticed: public ingress keeps working when a NAT hop in
+front of the guest rewrites the source address, so the reply never depends on
+the guest's view of the overlapping range. It surfaces the first time anything
+in the guest addresses that range directly. Check the address space, not
+reachability.
 
-The default is now `10.201.26.0/24`, chosen to clear:
+The default is `10.201.26.0/24`, chosen to clear:
 
 | Range | What it is |
 | --- | --- |
-| `172.30.0.0/16`, `172.31.0.0/16` | the operator's Kubernetes pods and services |
-| `10.17.0.0/16`, `10.18.10.0/24`, `10.199.199.248/29` | the operator's own networks |
-| `172.16.220.0/22`, `172.16.224.0/24` | the operator's own networks |
-| `192.168.1.0/24`, `192.168.200.0/24` | the operator's own networks |
-| `100.64.0.0/10` | carrier-grade NAT, also the overlay range |
+| `100.64.0.0/10` | shared address space for carrier-grade NAT and overlay networks |
 | `172.17.0.0/16` | the `docker0` bridge inside the guest |
 | `172.17.0.0/12` in `/16`s, `192.168.0.0/16` in `/20`s | Docker's built-in default address pools |
 
@@ -1246,10 +1238,11 @@ allocated from those pools: the per-sandbox internal and egress bridges under
 means it can never collide with a sandbox network, and never costs the daemon a
 whole `/16` of pool it would otherwise skip as overlapping.
 
-But it also means the pools themselves still reach `172.30.0.0/16` and
-`172.31.0.0/16`, on a guest that has allocated enough networks to get there.
-The profile cannot pin those subnets -- the backend and the daemon allocate
-them -- so this is the golden image's job, in `/etc/docker/daemon.json`:
+But the pools themselves can still reach networks your site uses, such as a
+VPN, VPC or Kubernetes range inside `172.16.0.0/12` or `192.168.0.0/16`, on a guest
+that has allocated enough networks to get there. The profile cannot pin those
+subnets -- the backend and the daemon allocate them -- so this is the golden
+image's job, in `/etc/docker/daemon.json`:
 
 ```json
 { "default-address-pool": [ { "base": "10.202.0.0/16", "size": 24 } ] }
@@ -1259,8 +1252,10 @@ with a `base` chosen the same way as `app`'s. `backend/tests/test_compose_profil
 pins the shipped default against every range in the table above; nothing in the
 profile can check the daemon's pools, so that setting is verified by looking.
 
-**No private range is universally free.** Before onboarding a tenant, check the
-guest's own view rather than trusting this default:
+**No private range is universally free.** The default cannot know your site's
+networks. Before onboarding a tenant, check the guest's own view rather than
+trusting this default, and set `HARTMESH_APP_SUBNET` to a free range if it
+collides:
 
 ```bash
 # 1. Everything the guest already routes. An `app` range that appears here,

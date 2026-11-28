@@ -24,7 +24,7 @@ from types import ModuleType
 
 import pytest
 import yaml
-from _compose_network_ranges import DOCKER_DEFAULT_POOLS, EXTERNAL_RANGES
+from _compose_network_ranges import DOCKER_DEFAULT_POOLS, RESERVED_RANGES
 
 # Two tests here load the tenant profile with ``AppConfig.from_file``, which
 # writes process-wide singletons ``reset_app_config()`` does not restore.
@@ -212,7 +212,7 @@ def _open_runsc_environ() -> dict[str, str]:
 
 def test_open_runsc_uses_the_validated_host_resolver_read_only(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     resolver = tmp_path / "resolv.conf"
-    resolver.write_text("nameserver 10.17.72.1\nsearch corp.example\n")
+    resolver.write_text("nameserver 10.0.0.53\nsearch corp.example\n")
     monkeypatch.setattr(render_config, "HOST_RESOLVER_VIEW", resolver, raising=False)
     template = yaml.safe_load(TEMPLATE.read_text())
     original = {"host_path": "/srv/example", "container_path": "/mnt/example", "read_only": True}
@@ -242,7 +242,7 @@ def test_open_runsc_uses_the_validated_host_resolver_read_only(render_config: Mo
         "nameserver 255.255.255.255\n",
         "nameserver ::1\n",
         "nameserver fe80::1\n",
-        "nameserver 10.17.72.1\nnameserver 127.0.0.11\n",
+        "nameserver 10.0.0.53\nnameserver 127.0.0.11\n",
     ],
 )
 def test_open_runsc_refuses_unusable_resolvers(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contents: str) -> None:
@@ -258,7 +258,7 @@ def test_open_runsc_refuses_missing_resolver_or_conflicting_mount(render_config:
     monkeypatch.setattr(render_config, "HOST_RESOLVER_VIEW", resolver, raising=False)
     with pytest.raises(render_config.RenderError, match="resolver"):
         render_config.render_text(TEMPLATE.read_text(), (), _open_runsc_environ())
-    resolver.write_text("nameserver 10.17.72.1\n")
+    resolver.write_text("nameserver 10.0.0.53\n")
     template = yaml.safe_load(TEMPLATE.read_text())
     template["sandbox"]["mounts"] = [{"host_path": "/another", "container_path": "/etc/resolv.conf", "read_only": False}]
     with pytest.raises(render_config.RenderError, match="resolver"):
@@ -699,18 +699,18 @@ def _app_subnet_defaults() -> list[str]:
     return _APP_SUBNET.findall(COMPOSE.read_text(encoding="utf-8"))
 
 
-def test_the_app_subnet_default_clears_every_recorded_external_range() -> None:
-    """The defect this pins: until 2026-09-08 the app bridge was 172.30.10.0/24,
-    which is inside the operator's Kubernetes pod range, and a bridge is a
-    connected route in the guest. A public GET still working does not disprove
-    the overlap -- the Kubernetes worker was SNAT'ing the request onto another
-    leg -- so the check has to be on the address space, not on reachability."""
+def test_the_app_subnet_default_clears_reserved_ranges_and_docker_pools() -> None:
+    """A bridge is a connected route in the guest, so the default must not
+    overlap address space the guest commonly routes or Docker allocates. A
+    public request still working does not disprove an overlap -- a NAT hop can
+    hide it -- so the check has to be on the address space, not on
+    reachability. Site-specific networks are checked by the operator."""
     defaults = set(_app_subnet_defaults())
     assert len(defaults) == 1, defaults
     subnet = ip_network(defaults.pop())
     assert subnet.version == 4 and subnet.is_private
     assert subnet.num_addresses >= 16, "the five services plus the bridge address must fit"
-    for entry in EXTERNAL_RANGES:
+    for entry in RESERVED_RANGES:
         assert not subnet.overlaps(ip_network(entry)), f"the app bridge would swallow the route to {entry}"
     for entry in DOCKER_DEFAULT_POOLS:
         assert not subnet.overlaps(ip_network(entry)), f"pinning inside {entry} collides with, or spends, the pool the sandbox networks draw from"
@@ -755,8 +755,8 @@ def test_the_login_path_honours_a_forwarded_address_only_from_the_app_network(mo
 
     assert _get_client_ip(_request(proxy)) == client, "nginx sits on the app network; its forwarded address is the one the spray guard counts"
     assert _get_client_ip(_request(outsider)) == outsider, "a peer off the app network cannot name its own source"
-    # And the old subnet is no longer trusted, which is what makes the move real.
-    assert _get_client_ip(_request("172.30.10.5")) == "172.30.10.5"
+    # A peer in another private range is not trusted either.
+    assert _get_client_ip(_request("172.20.0.5")) == "172.20.0.5"
 
 
 def test_datastores_run_as_the_data_directory_owner_with_relaxed_durability(compose: dict) -> None:
