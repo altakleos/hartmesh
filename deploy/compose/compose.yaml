@@ -432,8 +432,9 @@ networks:
   # The six services. Pinned so AUTH_TRUSTED_PROXIES above is stable, and
   # pinned *here* rather than left to Docker because a bridge is a connected
   # route inside the guest: every address in this range stops being reachable
-  # through the VM's real default gateway. The default therefore has to clear
-  # the operator's own networks and Docker's default address pools (README:
+  # through the VM's real default gateway. The default clears reserved shared
+  # address space and Docker's default address pools; it cannot know a site's
+  # own networks, which the operator checks (README:
   # "Network model", which also gives the two commands an operator runs to
   # check its own). HARTMESH_APP_SUBNET is the escape hatch when it does not,
   # and is optional: an existing tenant .env that never heard of it renders
